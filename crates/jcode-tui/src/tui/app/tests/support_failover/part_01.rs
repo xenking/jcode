@@ -453,11 +453,6 @@ impl EnvRestoreGuard {
         )
     }
 
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let guard = Self::capture([key]);
-        crate::env::set_var(key, value);
-        guard
-    }
 }
 
 impl Drop for EnvRestoreGuard {

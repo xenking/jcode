@@ -525,9 +525,11 @@ fn reload_recovery_delayed_history_after_dispatch_does_not_send_again() {
     // It arrives after the local queue and retry slot have both been consumed.
     let directive = ReloadContext::recovery_directive(Some(&ctx), true, "", None).unwrap();
     app.handle_server_event(reload_replay_history(&session_id, directive), &mut remote);
+    assert_eq!(app.remote_context_meter_request, Some(after_first_send));
     assert!(app.hidden_queued_system_messages.is_empty());
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert_eq!(remote.next_request_id_for_test(), after_first_send);
+    assert_eq!(remote.next_request_id_for_test(), after_first_send + 1);
+    assert!(app.current_message_id.is_none());
 }
 
 #[test]
@@ -562,9 +564,11 @@ fn reload_recovery_delayed_history_after_completion_does_not_restart_turn() {
     );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
     app.handle_server_event(history, &mut remote);
+    assert_eq!(app.remote_context_meter_request, Some(after_first_send));
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert_eq!(remote.next_request_id_for_test(), after_first_send);
+    assert_eq!(remote.next_request_id_for_test(), after_first_send + 1);
+    assert!(app.current_message_id.is_none());
 }
 
 #[test]

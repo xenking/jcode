@@ -551,7 +551,9 @@ fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     assert!(remote.has_loaded_history());
     assert_eq!(app.remote_session_id.as_deref(), Some("startup-session"));
     assert!(!app.is_processing);
-    assert_eq!(remote.next_request_id_for_test(), next_request_id);
+    assert_eq!(app.remote_context_meter_request, Some(next_request_id));
+    let startup_request_id = next_request_id + 1;
+    assert_eq!(remote.next_request_id_for_test(), startup_request_id);
 
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(!app.submit_input_on_startup);
@@ -560,7 +562,7 @@ fn process_remote_followups_waits_for_history_before_sending_startup_image() {
     assert!(app.is_processing);
     assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
     let startup_id = app.current_message_id.expect("startup request was sent");
-    assert_eq!(startup_id, next_request_id);
+    assert_eq!(startup_id, startup_request_id);
     let sent = app
         .rate_limit_pending_message
         .as_ref()

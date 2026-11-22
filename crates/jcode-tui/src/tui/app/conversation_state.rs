@@ -953,7 +953,8 @@ mod tests {
             .map(|(_, detail)| detail)
             .unwrap_or_default();
         assert!(detail.contains("trigger: reactive"), "{detail}");
-        assert!(detail.contains("messages summarized: 100"), "{detail}");
+        assert!(detail.contains("messages archived: 100"), "{detail}");
+        assert!(detail.contains("messages kept verbatim: 10"), "{detail}");
 
         // A running divider exists for the same compaction and is then replaced.
         let mut app = create_test_app();
