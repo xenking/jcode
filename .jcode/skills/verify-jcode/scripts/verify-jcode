@@ -1003,14 +1003,25 @@ class Harness:
                     requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
                     replies = [m for m in requests[-1]["messages"] if m.get("role") == "tool"][-2:]
                     require([m.get("tool_call_id") for m in replies] == ["call_left", "call_right"], "Wrong result order")
-                    spans = []
                     for name, row in zip(("left", "right"), replies):
-                        text = str(row["content"])
-                        require(name in text and "220001" in text, "Missing requested file line")
-                        timing = re.search(r"tool timing: start=(\S+) finish=(\S+)", text)
-                        require(timing, "Missing registry execution timing")
-                        spans.append(timing.groups())
-                    require(max(s[0] for s in spans) < min(s[1] for s in spans), f"Reads did not overlap: {spans}")
+                        body = str(row["content"])
+                        require(name in body and "220001" in body, "Missing requested file line")
+                    sid = self.observe("state")["remote_session_id"]
+                    events = []
+                    for log in sorted((self.root / "data/logs").glob("jcode-*.log")):
+                        for entry in log.read_text(errors="replace").splitlines():
+                            if "event=tool_lifecycle" not in entry.lower() or f"session_id={sid}" not in entry:
+                                continue
+                            phase = re.search(r"\bphase=(start|done)\b", entry)
+                            call = re.search(r"\btool_call_id=call_(left|right)\b", entry)
+                            if phase and call:
+                                events.append((phase[1], call[1]))
+                    current = events[-4:]
+                    dump(self.evidence / f"{label}-tool-lifecycle.json", current)
+                    require(len(current) == 4 and {k for k, _ in current[:2]} == {"start"} and
+                            {v for _, v in current[:2]} == {"left", "right"} and
+                            {k for k, _ in current[2:]} == {"done"} and {v for _, v in current[2:]} == {"left", "right"},
+                            f"Reads did not overlap in registry lifecycle events: {current}")
                     dump(self.evidence / f"{label}-tool-results.json", replies)
                 elif feature == "line-anchors":
                     requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]

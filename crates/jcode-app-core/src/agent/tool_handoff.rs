@@ -98,18 +98,18 @@ pub(crate) async fn execute_with_background_budget(
     let bash_handoff = BashHandoff::for_tool(&name);
     let bash_handoff_for_tool = bash_handoff.clone();
     let shutdown = ctx.graceful_shutdown_signal.clone();
-    let handoff_input = input.clone();
+    let handoff = handoff_budget(&name, &input, budget);
+    let display_name = handoff_display_name(&input);
     let work = crate::runtime_activity::spawn_session(&session_id, async move {
         run_tool(registry, tool_name, input, ctx, bash_handoff_for_tool).await
     })
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     wait_for_started_tool(
         name,
-        handoff_input,
+        display_name,
         session_id,
         shutdown,
-        budget,
-        Duration::ZERO,
+        handoff,
         bash_handoff,
         work,
     )
@@ -132,13 +132,14 @@ pub(in crate::agent) async fn wait_for_started_read(
         }
     }
     let mut guard = AbortOnDrop(Some(work.abort_handle()));
+    let handoff = handoff_budget(&name, &input, foreground_budget())
+        .map(|budget| budget.saturating_sub(started.elapsed()));
     let result = wait_for_started_tool(
         name,
-        input,
+        handoff_display_name(&input),
         ctx.session_id,
         ctx.graceful_shutdown_signal,
-        foreground_budget(),
-        started.elapsed(),
+        handoff,
         None,
         work,
     )
@@ -149,17 +150,13 @@ pub(in crate::agent) async fn wait_for_started_read(
 
 async fn wait_for_started_tool(
     name: String,
-    input: serde_json::Value,
+    display_name: Option<String>,
     session_id: String,
     mut shutdown: Option<InterruptSignal>,
-    budget: Duration,
-    elapsed: Duration,
+    handoff: Option<Duration>,
     bash_handoff: Option<BashHandoff>,
     mut work: tokio::task::JoinHandle<Result<crate::tool::ToolOutput>>,
 ) -> Result<crate::tool::ToolOutput> {
-    let handoff =
-        handoff_budget(&name, &input, budget).map(|budget| budget.saturating_sub(elapsed));
-    let display_name = handoff_display_name(&input);
     let shutdown_requested = async {
         match shutdown.as_mut() {
             Some(signal) => signal.notified().await,
