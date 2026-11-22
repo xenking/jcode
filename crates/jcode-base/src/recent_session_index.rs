@@ -284,7 +284,20 @@ fn upsert_with_resume(
              resume_short_name = excluded.resume_short_name,
              resume_fingerprint = excluded.resume_fingerprint,
              resume_updated_at = excluded.resume_updated_at,
-             catalog_context = COALESCE(excluded.catalog_context, recent_sessions.catalog_context)",
+             catalog_context = COALESCE(excluded.catalog_context, recent_sessions.catalog_context)
+         WHERE (recent_sessions.working_dir, recent_sessions.generated_title,
+                recent_sessions.custom_title, recent_sessions.todo_title,
+                recent_sessions.saved, recent_sessions.updated_at_ms,
+                recent_sessions.last_active_at_ms, recent_sessions.save_label,
+                recent_sessions.resume_short_name, recent_sessions.resume_fingerprint,
+                recent_sessions.resume_updated_at, recent_sessions.catalog_context)
+             IS NOT (excluded.working_dir, excluded.generated_title,
+                     excluded.custom_title, excluded.todo_title,
+                     excluded.saved, excluded.updated_at_ms,
+                     excluded.last_active_at_ms, excluded.save_label,
+                     excluded.resume_short_name, excluded.resume_fingerprint,
+                     excluded.resume_updated_at,
+                     COALESCE(excluded.catalog_context, recent_sessions.catalog_context))",
         params![
             entry.session_id,
             entry.working_dir,
@@ -384,7 +397,9 @@ pub(crate) fn invalidate_resume_entries(ids: &[&str]) -> Result<()> {
         {
             let mut statement = transaction.prepare(
                 "UPDATE recent_sessions SET resume_fingerprint = NULL,
-                    resume_short_name = NULL, resume_updated_at = NULL WHERE session_id = ?1",
+                    resume_short_name = NULL, resume_updated_at = NULL WHERE session_id = ?1
+                    AND (resume_fingerprint, resume_short_name, resume_updated_at)
+                        IS NOT (NULL, NULL, NULL)",
             )?;
             for id in ids {
                 statement.execute([id])?;
@@ -430,7 +445,8 @@ fn refresh_todo_title_with(connection: &Connection, session_id: &str) -> Result<
         .is_some();
     if exists {
         connection.execute(
-            "UPDATE recent_sessions SET todo_title = ?2 WHERE session_id = ?1",
+            "UPDATE recent_sessions SET todo_title = ?2 WHERE session_id = ?1
+             AND todo_title IS NOT ?2",
             params![session_id, crate::todo::load_session_title(session_id)],
         )?;
     }
@@ -443,6 +459,59 @@ mod resume_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_amp_identical_upsert_does_not_change_the_row_or_wal() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let path = home.path().join("index.sqlite3");
+        let wal = home.path().join("index.sqlite3-wal");
+        let connection = open_at(&path)?;
+        let mut entry = RecentSessionMetadata {
+            session_id: "session_write_amp".into(),
+            working_dir: None,
+            generated_title: Some("Title".into()),
+            custom_title: None,
+            todo_title: None,
+            saved: false,
+            save_label: None,
+            updated_at_ms: 1,
+            last_active_at_ms: None,
+        };
+        upsert_with_resume(
+            &connection,
+            &entry,
+            None,
+            Some("fingerprint"),
+            None,
+            Some("{}"),
+        )?;
+        let before = std::fs::metadata(&wal)?.len();
+        let changes = connection.total_changes();
+        for _ in 0..20 {
+            upsert_with_resume(
+                &connection,
+                &entry,
+                None,
+                Some("fingerprint"),
+                None,
+                Some("{}"),
+            )?;
+        }
+        assert_eq!(connection.total_changes(), changes);
+        assert_eq!(std::fs::metadata(&wal)?.len(), before);
+        entry.generated_title = None;
+        upsert_with_resume(
+            &connection,
+            &entry,
+            None,
+            Some("fingerprint"),
+            None,
+            Some("{}"),
+        )?;
+        assert_eq!(recent_with(&connection, 1)?, vec![entry]);
+        assert!(std::fs::metadata(&wal)?.len() > before);
+        Ok(())
+    }
 
     #[test]
     fn display_title_prefers_generated_over_todo_lane_labels() {

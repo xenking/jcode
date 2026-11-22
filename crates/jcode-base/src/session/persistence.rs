@@ -748,7 +748,6 @@ impl Session {
             crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
             return Ok(());
         }
-        self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         // Last gate: a test build must never persist into the developer's real
         // home, however the path was computed.
@@ -791,7 +790,7 @@ impl Session {
         let start = std::time::Instant::now();
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);
-        let current_meta = self.journal_meta();
+        let mut current_meta = self.journal_meta();
         // Every journal entry carries the full metadata and replay (and the
         // startup stub) applies it, so a metadata change only needs a snapshot
         // to keep small files self-contained. For large transcripts the full
@@ -828,6 +827,25 @@ impl Session {
             .replay_events
             .len()
             .saturating_sub(self.persist_state.replay_events_len);
+        if !vectors_need_snapshot
+            && snapshot_bytes_before > 0
+            && delta_messages == 0
+            && delta_env_snapshots == 0
+            && delta_memory_injections == 0
+            && delta_replay_events == 0
+            && let Some(previous) = &self.persist_state.last_meta
+        {
+            // Timestamp the change, not the request to save. Otherwise a no-op
+            // save appends a journal entry, invalidates the resume fingerprint
+            // and updates the SQLite activity index.
+            current_meta.updated_at = previous.updated_at;
+            if &current_meta == previous {
+                self.updated_at = previous.updated_at;
+                return Ok(());
+            }
+        }
+        self.updated_at = Utc::now();
+        current_meta.updated_at = self.updated_at;
         let (
             result,
             save_mode,

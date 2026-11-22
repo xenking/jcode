@@ -21,6 +21,34 @@ impl Drop for HomeGuard {
 }
 
 #[test]
+fn write_amp_unchanged_saves_leave_journal_and_recency_alone() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = HomeGuard::set(home.path());
+    let mut session = Session::create_with_id("session_write_amp".into(), None, None);
+    session.title = Some("Keep me".into());
+    session.save_prepared()?;
+    let snapshot = crate::session::session_path(&session.id)?;
+    let journal = crate::session::session_journal_path_from_snapshot(&snapshot);
+    let updated_at = session.updated_at;
+    let wal = home.path().join("session-metadata-v1.sqlite3-wal");
+    let wal_before = std::fs::metadata(&wal)?.len();
+    for _ in 0..20 {
+        session.save()?;
+    }
+    assert!(!journal.exists(), "no-op saves appended a journal");
+    assert_eq!(session.updated_at, updated_at);
+    assert_eq!(std::fs::metadata(&wal)?.len(), wal_before);
+    session.last_provider_request_at = Some(Utc::now());
+    session.save()?;
+    assert_eq!(
+        Session::load(&session.id)?.last_provider_request_at,
+        session.last_provider_request_at
+    );
+    Ok(())
+}
+
+#[test]
 fn test_crashed_sessions_info_struct() {
     let info = CrashedSessionsInfo {
         session_ids: vec!["session_test_1".to_string(), "session_test_2".to_string()],
