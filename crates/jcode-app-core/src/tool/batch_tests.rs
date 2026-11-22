@@ -47,6 +47,140 @@ async fn registry_with_batch_and_echo() -> Registry {
     registry
 }
 
+struct RecordInput(&'static str, Value);
+
+#[async_trait::async_trait]
+impl Tool for RecordInput {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "Return child route and exact input"
+    }
+    fn parameters_schema(&self) -> Value {
+        self.1.clone()
+    }
+
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::new(
+            json!({"route": self.0, "child": input}).to_string(),
+        ))
+    }
+}
+
+fn recorded_input(output: &ToolOutput) -> Value {
+    let record = output
+        .output
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .unwrap_or_else(|| panic!("batch child response missing: {}", output.output));
+    serde_json::from_str(record).unwrap()
+}
+
+#[tokio::test]
+async fn batch_dispatch_preserves_mcp_wrapper_route_and_native_fields() {
+    let registry = registry_with_batch_and_echo().await;
+    for (name, schema) in [
+        (
+            "mcp_call",
+            json!({"properties": {"tool": {}, "server": {}, "arguments": {}}}),
+        ),
+        (
+            "inspect",
+            json!({"properties": {"name": {}, "args": {}, "input": {}}}),
+        ),
+    ] {
+        registry
+            .register(name.into(), Arc::new(RecordInput(name, schema)))
+            .await;
+    }
+    let args = json!({"id": 42, "name": "raw name"});
+    let legacy =
+        json!({"name":"mcp_call", "tool":"raw_inspect", "server":"fixture", "arguments":args});
+    let canonical = json!({"tool":"mcp_call", "parameters":{"tool":"raw_inspect", "server":"fixture", "arguments":args}});
+    for call in [legacy, canonical] {
+        let output = registry
+            .execute("batch", json!({"tool_calls": [call]}), test_context())
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded_input(&output),
+            json!({"route":"mcp_call", "child":{"tool":"raw_inspect", "server":"fixture", "arguments":args}})
+        );
+    }
+    let flat = json!({"tool":"inspect", "name":"echo", "args":[1], "input":{"x":2}});
+    let output = registry
+        .execute("batch", json!({"tool_calls": [flat]}), test_context())
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_input(&output),
+        json!({"route":"inspect", "child":{"name":"echo", "args":[1], "input":{"x":2}}})
+    );
+}
+
+#[tokio::test]
+async fn batch_dispatch_keeps_fields_in_conditional_and_unknown_schemas() {
+    let registry = registry_with_batch_and_echo().await;
+    for (name, schema, field, value) in [
+        (
+            "conditional",
+            json!({"dependentSchemas": {"input": {"$ref":"#/$defs/native"}}, "$defs": {"native": {"properties": {"input": {}}}}}),
+            "input",
+            json!({"field": 1}),
+        ),
+        (
+            "pattern",
+            json!({"patternProperties": {"^args$": {}}}),
+            "args",
+            json!({"field": 2}),
+        ),
+        ("cyclic", json!({"$ref":"#"}), "name", json!("echo")),
+    ] {
+        registry
+            .register(name.into(), Arc::new(RecordInput(name, schema)))
+            .await;
+        let output = registry
+            .execute(
+                "batch",
+                json!({"tool_calls": [{"tool":name, (field):value}]}),
+                test_context(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded_input(&output),
+            json!({"route":name, "child":{(field):value}})
+        );
+    }
+}
+
+#[tokio::test]
+async fn batch_dispatch_rejects_conflicting_routes_and_accepts_equivalent_aliases() {
+    let registry = registry_with_batch_and_echo().await;
+    registry
+        .register(
+            "other".into(),
+            Arc::new(RecordInput("other", json!({"properties": {}}))),
+        )
+        .await;
+    let error = registry
+        .execute(
+            "batch",
+            json!({"tool_calls": [{"tool":"echo", "name":"other", "text":"never"}]}),
+            test_context(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Ambiguous batch tool/name selectors")
+    );
+    let output = registry.execute("batch", json!({"tool_calls": [{"tool":"functions.echo", "name":"echo", "parameters":{"text":"one route"}}]}), test_context()).await.unwrap();
+    assert!(output.output.contains("one route"));
+}
+
 #[tokio::test]
 async fn registry_tool_map_drops_after_external_owners_are_dropped() {
     let registry = Registry::empty();
@@ -123,9 +257,10 @@ async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
 }
 
 #[test]
-fn description_is_compact_and_explains_flat_parallel_calls() {
+fn description_is_compact_and_explains_nested_and_flat_calls() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
-    assert!(BATCH_DESCRIPTION.contains("sibling fields"));
+    assert!(BATCH_DESCRIPTION.contains("parameters for child input"));
+    assert!(BATCH_DESCRIPTION.contains("Flat calls still work"));
     assert!(BATCH_DESCRIPTION.contains("tool, intent"));
     assert!(BATCH_DESCRIPTION.contains("Do not batch dependent calls or nest batch"));
     // `batch` is where a model lands when it wants several calls in one turn,
@@ -254,7 +389,7 @@ fn test_normalize_arguments_aliases_to_parameters() {
 }
 
 #[test]
-fn test_schema_only_requires_tool() {
+fn test_schema_exposes_optional_child_parameters() {
     let registry = Registry {
         mcp_policy: Arc::default(),
         tools: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -283,7 +418,9 @@ fn test_schema_only_requires_tool() {
         json!("Tool name.")
     );
     assert!(schema["properties"]["tool_calls"]["items"]["properties"]["intent"].is_object());
-    assert!(schema["properties"]["tool_calls"]["items"]["properties"]["parameters"].is_null());
+    let parameters = &schema["properties"]["tool_calls"]["items"]["properties"]["parameters"];
+    assert_eq!(parameters["type"], "object");
+    assert_eq!(parameters["additionalProperties"], true);
 }
 
 #[test]
@@ -296,7 +433,7 @@ fn test_schema_keeps_flat_generic_subcall_shape() {
         schema["properties"]["tool_calls"]["items"]["properties"]
             .as_object()
             .map(|props| props.len()),
-        Some(2)
+        Some(3)
     );
     assert!(schema["properties"]["tool_calls"]["items"]["oneOf"].is_null());
 }

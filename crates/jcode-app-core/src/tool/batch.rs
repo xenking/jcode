@@ -3,13 +3,18 @@ use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+#[path = "batch_input.rs"]
+mod input;
+use input::BatchInput;
+#[cfg(test)]
+use input::normalize_batch_input;
+
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Do not batch dependent calls or nest batch. For dependent chains, loops over results, or 10+ calls use `codemode`.";
+const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Use tool, intent, and parameters for child input. Flat calls still work. Do not batch dependent calls or nest batch. For dependent chains, loops over results, or 10+ calls use `codemode`.";
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
@@ -27,7 +32,12 @@ pub(crate) fn generic_batch_schema() -> Value {
                             "type": "string",
                             "description": "Tool name."
                         },
-                        "intent": super::intent_schema_property()
+                        "intent": super::intent_schema_property(),
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "description": r#"Complete child input. Example: {"tool":"mcp","intent":"Inspect","parameters":{"action":"call","server":"s","tool":"raw","arguments":{}}}"#
+                        }
                     },
                     "additionalProperties": true
                 },
@@ -82,104 +92,6 @@ impl BatchTool {
     }
 }
 
-#[derive(Deserialize)]
-struct BatchInput {
-    tool_calls: Vec<ToolCallInput>,
-}
-
-#[derive(Deserialize, Clone)]
-struct ToolCallInput {
-    #[serde(alias = "name")]
-    tool: String,
-    #[serde(default)]
-    parameters: Option<Value>,
-}
-
-impl ToolCallInput {
-    fn resolved_parameters(self) -> (String, Value) {
-        if let Some(params) = self.parameters {
-            return (self.tool, params);
-        }
-        (self.tool, Value::Object(Default::default()))
-    }
-}
-
-/// Try to fix common LLM mistakes in batch tool_calls:
-/// - Parameters placed at the same level as "tool" instead of nested under "parameters"
-/// - "name" used instead of "tool" for the tool name key
-/// - "arguments", "args", or "input" used instead of "parameters"
-fn normalize_batch_input(mut input: Value) -> Value {
-    if let Some(calls) = input.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
-        for call in calls.iter_mut() {
-            if let Some(obj) = call.as_object_mut() {
-                // Normalize "name" -> "tool" if the model used the wrong key
-                if !obj.contains_key("tool")
-                    && let Some(name_val) = obj.remove("name")
-                {
-                    obj.insert("tool".to_string(), name_val);
-                }
-
-                if !obj.contains_key("parameters") {
-                    for alias in ["arguments", "args", "input"] {
-                        if let Some(alias_val) = obj.remove(alias) {
-                            obj.insert("parameters".to_string(), alias_val);
-                            break;
-                        }
-                    }
-                }
-
-                // Canonical batch calls may keep the display intent beside
-                // `parameters`. Forward it into the effective tool input so
-                // live progress events and the nested tool execution retain it.
-                let top_level_intent = obj
-                    .get("intent")
-                    .and_then(|value| value.as_str())
-                    .map(str::trim)
-                    .filter(|intent| !intent.is_empty())
-                    .map(ToString::to_string);
-                if let Some(intent) = top_level_intent
-                    && let Some(params) = obj.get_mut("parameters").and_then(Value::as_object_mut)
-                {
-                    params.insert("intent".to_string(), Value::String(intent));
-                }
-
-                // Same forwarding for the oversized-output opt-in. The context
-                // guard runs per sub-call inside registry.execute(), so a flag
-                // left beside `parameters` would be silently dropped and the
-                // sub-call withheld again. Models place it at either level.
-                let top_level_accept = obj
-                    .get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
-                    .filter(|value| !value.is_null())
-                    .cloned();
-                if let Some(accept) = top_level_accept
-                    && let Some(params) = obj.get_mut("parameters").and_then(Value::as_object_mut)
-                    && !params.contains_key(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
-                {
-                    params.insert(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY.to_string(), accept);
-                }
-
-                if !obj.contains_key("parameters") && obj.contains_key("tool") {
-                    let tool_name = obj.get("tool").cloned();
-                    let mut params = serde_json::Map::new();
-                    let keys: Vec<String> = obj.keys().filter(|k| *k != "tool").cloned().collect();
-                    for key in keys {
-                        if let Some(val) = obj.remove(&key) {
-                            params.insert(key, val);
-                        }
-                    }
-                    if !params.is_empty() {
-                        obj.insert("parameters".to_string(), Value::Object(params));
-                    }
-                    if let Some(name) = tool_name {
-                        obj.insert("tool".to_string(), name);
-                    }
-                }
-            }
-        }
-    }
-    input
-}
-
 #[async_trait]
 impl Tool for BatchTool {
     fn name(&self) -> &str {
@@ -199,28 +111,16 @@ impl Tool for BatchTool {
             .registry
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
-        let input = normalize_batch_input(input);
         // A batch-level opt-in covers the calls it contains. Without this, a model
         // that accepted the cost once was still refused by every sub-call, and
         // only a flag typed inside an individual entry (or a repeat after a
         // refusal) had any effect.
         let batch_opt_in = accepts_large_output(&input);
-        let params: BatchInput = serde_json::from_value(input)?;
-
-        if params.tool_calls.is_empty() {
-            return Err(anyhow::anyhow!("No tool calls provided"));
-        }
-
-        if params.tool_calls.len() > MAX_PARALLEL {
-            return Err(anyhow::anyhow!(
-                "Maximum {} parallel tool calls allowed",
-                MAX_PARALLEL
-            ));
-        }
+        let params = BatchInput::for_session(input, &registry, &ctx.session_id).await?;
 
         // Check for disallowed tools
         for tc in &params.tool_calls {
-            if Registry::resolve_tool_name(&tc.tool) == "batch" {
+            if Registry::resolve_tool_name_for_session(&ctx.session_id, &tc.tool) == "batch" {
                 return Err(anyhow::anyhow!("Cannot batch the 'batch' tool"));
             }
         }
