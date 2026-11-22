@@ -4,6 +4,7 @@ mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod ask;
+mod line_anchor;
 pub(crate) use ask::{ask_client, ask_for_real_answer};
 mod bash;
 pub(crate) use bash::{BASH_HANDOFF, BashHandoff};

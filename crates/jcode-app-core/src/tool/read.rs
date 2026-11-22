@@ -393,6 +393,19 @@ Image #{ordinal}"
         } else if !more_unscanned && range.offset == 0 && end == total_lines {
             output.push_str("\n(Complete file)\n");
         }
+        if super::line_anchor::direct(&ctx) {
+            let mut tags = String::new();
+            super::line_anchor::append(
+                &mut tags,
+                &path,
+                &ctx,
+                output.lines().filter_map(|row| {
+                    let (number, text) = row.split_once('\t')?;
+                    Some((number.trim().parse().ok()?, text))
+                }),
+            );
+            output.push_str(&tags);
+        }
         Ok(ToolOutput::new(output))
     }
 }

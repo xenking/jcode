@@ -73,6 +73,22 @@ class H(BaseHTTPRequestHandler):
                         "intent": "Read the isolated seat environment through real Bash",
                         "command": "echo \"$FOO_SEAT\"",
                     })}}]
+        elif CONTROL and "[e2e:line-anchors]" in prompt:
+            replies = {m.get("tool_call_id"): text_of(m) for m in msgs[last_user + 1:] if m.get("role") == "tool"}
+            def call(key, name, **args):
+                return [{"id": key, "type": "function", "function": {"name": name,
+                    "arguments": json.dumps(dict(args, intent="Verify anchored file edit"))}}]
+            if "call_find" not in replies:
+                tool_calls = call("call_find", "agentgrep", mode="grep", path="verify-anchor.txt", query="repeat")
+            elif (match := re.search(r"\[edit anchor (L2-[a-f0-9]+)\] repeat", replies["call_find"])):
+                if "call_apply" not in replies:
+                    tool_calls = call("call_apply", "edit", file_path="verify-anchor.txt", anchor=match[1],
+                                      edits=[{"old_string": "repeat", "new_string": "selected"}])
+                elif "call_stale" not in replies:
+                    tool_calls = call("call_stale", "edit", file_path="verify-anchor.txt", anchor=match[1],
+                                      edits=[{"old_string": "selected", "new_string": "unexpected"}])
+                elif "call_reread" not in replies:
+                    tool_calls = call("call_reread", "read", file_path="verify-anchor.txt")
         elif CONTROL and "[e2e:read-window]" in prompt and not has_tool_result:
             tool_calls = [{"id": "call_window", "type": "function", "function": {
                 "name": "read", "arguments": json.dumps({"file_path": "verify-large.txt", "start_line": 1,

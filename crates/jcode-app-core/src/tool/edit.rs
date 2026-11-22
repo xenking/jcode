@@ -24,6 +24,8 @@ struct EditInput {
     intent: Option<String>,
     file_path: String,
     #[serde(default)]
+    anchor: Option<String>,
+    #[serde(default)]
     edits: Option<Vec<EditOperation>>,
     #[serde(default)]
     old_string: Option<String>,
@@ -161,7 +163,7 @@ impl Tool for EditTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "required": ["file_path", "edits"],
             "properties": {
@@ -185,7 +187,11 @@ impl Tool for EditTool {
                     }
                 }
             }
-        })
+        });
+        if super::line_anchor::enabled() {
+            schema["properties"]["anchor"] = json!({"type":"string", "description":"Optional edit anchor from a direct read or single-file grep. Supply one edit, using the whole shown row as old_string. Stale anchors never write."});
+        }
+        schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
@@ -199,7 +205,34 @@ impl Tool for EditTool {
 
         let _lock = super::file_lock::lock(&path).await;
         let content = tokio::fs::read_to_string(&path).await?;
-        let (new_content, applied) = apply_edits(&content, &edits, &params.file_path)?;
+        let (new_content, applied) = if let Some(anchor) = params.anchor.as_deref() {
+            anyhow::ensure!(
+                super::line_anchor::direct(&ctx),
+                "Line anchors are disabled or unavailable for nested calls"
+            );
+            let [op] = edits.as_slice() else {
+                anyhow::bail!("An anchored edit requires one replacement");
+            };
+            let (line, span) =
+                super::line_anchor::resolve(&path, &ctx.session_id, &content, anchor)?;
+            anyhow::ensure!(
+                !op.replace_all
+                    && content[span.clone()] == op.old_string
+                    && op.old_string != op.new_string,
+                "Anchored edit must replace exactly the shown row"
+            );
+            let mut changed = content.clone();
+            changed.replace_range(span, &op.new_string);
+            (
+                changed,
+                vec![AppliedEdit {
+                    start_line: line,
+                    occurrences: 1,
+                }],
+            )
+        } else {
+            apply_edits(&content, &edits, &params.file_path)?
+        };
 
         tokio::fs::write(&path, &new_content).await?;
         super::edit_stats::record(&ctx, &content, &new_content, false).await;

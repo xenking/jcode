@@ -965,6 +965,9 @@ class Harness:
                     (self.root / "workspace/verify-tool.txt").unlink(missing_ok=True)
                     self.event(action="fixture-reset", path="verify-tool.txt")
                     prompt += " [e2e:verify-write]"
+                elif feature == "line-anchors":
+                    (self.root / "workspace/verify-anchor.txt").write_bytes(b"repeat\r\nrepeat\r\n")
+                    prompt += " [e2e:line-anchors]"
                 elif feature == "file-tools":
                     (self.root / "workspace/verify-window.txt").write_text("initial\n")
                     prompt += " [e2e:file-tools]"
@@ -992,6 +995,14 @@ class Harness:
                     require("Activated skill: verify-probe" in self.pane(), "Skill activation not rendered")
                     require(any("VERIFY_PROBE_SKILL_BODY" in json.dumps(r["messages"])
                                 for r in self.records()[start:]), "Skill body not delivered to provider")
+                elif feature == "line-anchors":
+                    requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
+                    replies = {m.get("tool_call_id"): str(m.get("content", "")) for m in requests[-1]["messages"] if m.get("role") == "tool"}
+                    require("[edit anchor L2-" in replies.get("call_find", ""), "Search did not expose second matching row")
+                    require("stale" in replies.get("call_stale", "").lower(), "Old search anchor was not rejected")
+                    require("[edit anchor L2-" in replies.get("call_reread", ""), "Direct read did not issue fresh anchors")
+                    require((self.root / "workspace/verify-anchor.txt").read_bytes() == b"repeat\r\nselected\r\n", "Wrong duplicate edited or CRLF changed")
+                    dump(self.evidence / f"{label}-tool-results.json", replies)
                 elif feature == "file-tools":
                     requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
                     replies = [m for m in requests[-1]["messages"] if m.get("role") == "tool"][-4:]
@@ -1157,6 +1168,9 @@ def launch(args, *, prepare_workspace=None):
                 f'[agents]\nswarm_model = "openai-compatible:{model}"\n'
                 f'spawn_allowed_models = ["openai-compatible:{model}"]\n'
                 f'swarm_effort = "xhigh"\nswarm_effort_caps = {{ "{model}" = "high" }}\n')
+        if getattr(args, "line_anchors", False):
+            with (root / "data/config.toml").open("a") as config:
+                config.write("\n[tools]\nline_anchors = true\n")
         harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
         harness.save()
         (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
@@ -1276,6 +1290,7 @@ def main():
     start.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
     start.add_argument("--cols", type=int, default=160)
     start.add_argument("--rows", type=int, default=48)
+    start.add_argument("--line-anchors", action="store_true", help="Enable experimental version-checked file anchors")
     start.add_argument("--premium-spawn", action="store_true", help="Expose a synthetic Astra model at loopback")
     start.add_argument("--loopback-exec-worker", action="store_true",
                        help="Route Bash through the staged executable's execution worker, with no SSH")
@@ -1291,7 +1306,7 @@ def main():
         command.add_argument("--evidence", required=True)
         if name == "drive":
             command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
-                                                     "side-panel", "file-tools", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
+                                                     "side-panel", "file-tools", "line-anchors", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")

@@ -874,6 +874,8 @@ pub struct ToolConfig {
     /// JavaScript in an embedded QuickJS sandbox able to call every other
     /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
+    /// Offer version-checked line anchors in direct file reads and searches.
+    pub line_anchors: bool,
 }
 
 impl Default for ToolConfig {
@@ -888,6 +890,7 @@ impl Default for ToolConfig {
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
             codemode: true,
+            line_anchors: false,
         }
     }
 }

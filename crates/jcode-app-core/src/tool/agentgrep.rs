@@ -527,10 +527,22 @@ fn execute_linked_agentgrep(
             // header still reports the true total, so the caller sees that more
             // matches exist and can raise the cap deliberately.
             let max_regions = params.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS));
-            Ok(
-                ToolOutput::new(render_grep_output(&result, &args, max_regions))
-                    .with_title("agentgrep grep"),
-            )
+            let mut output = render_grep_output(&result, &args, max_regions);
+            if exact_file.is_some()
+                && !params.paths_only.unwrap_or(false)
+                && let (Some(file), Some(path)) = (result.files.first(), params.path.as_deref())
+            {
+                super::line_anchor::append(
+                    &mut output,
+                    &resolve_path_arg(ctx, path),
+                    ctx,
+                    file.matches
+                        .iter()
+                        .take(max_regions.unwrap_or(0))
+                        .map(|row| (row.line_number, row.line_text.as_str())),
+                );
+            }
+            Ok(ToolOutput::new(output).with_title("agentgrep grep"))
         }
         "find" => {
             let args = build_find_args(params, ctx)?;
