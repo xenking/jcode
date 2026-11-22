@@ -37,7 +37,7 @@ impl Provider for TestProvider {
 }
 
 #[tokio::test]
-async fn server_run_refuses_to_replace_live_socket() {
+async fn server_run_refuses_live_socket_with_pid_and_remedies() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -52,10 +52,22 @@ async fn server_run_refuses_to_replace_live_socket() {
         .run()
         .await
         .expect_err("should refuse live socket takeover");
+    let detail = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("Refusing to replace active server socket"),
+        detail.contains("server reload"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        detail.contains("server stop --force"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        detail.contains("serve --replace"),
+        "unexpected error: {error:#}"
+    );
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    assert!(
+        detail.contains(&format!("pid {}", std::process::id())),
         "unexpected error: {error:#}"
     );
 
@@ -64,6 +76,94 @@ async fn server_run_refuses_to_replace_live_socket() {
     } else {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "subprocess fixture for serve replacement"]
+fn serve_replacement_listener_subprocess() {
+    let path = std::env::var_os("JCODE_FIXTURE_SERVE_SOCKET").expect("fixture socket");
+    let _listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn serve_replacement_stops_only_the_registered_socket_owner() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command, Stdio};
+
+    struct Fixture(Child);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("jcode.sock");
+    let debug = temp.path().join("jcode-debug.sock");
+    let mut child = Fixture(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "server::startup_tests::serve_replacement_listener_subprocess",
+            ])
+            .env("JCODE_FIXTURE_SERVE_SOCKET", &socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_existing_server(&socket, Duration::from_secs(5)).await);
+    let pid = child.0.id();
+    let mut registry = crate::registry::ServerRegistry::default();
+    let mut record = crate::registry::ServerInfo {
+        id: "test_server".into(),
+        name: "test".into(),
+        icon: String::new(),
+        socket: socket.clone(),
+        debug_socket: debug.clone(),
+        git_hash: String::new(),
+        version: String::new(),
+        pid: std::process::id(),
+        started_at: String::new(),
+        sessions: Vec::new(),
+    };
+    registry.register(record.clone());
+    registry.save().await.unwrap();
+    let error = super::socket::prepare_serve_replacement(&socket)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unverified listener"));
+    assert!(child.0.try_wait().unwrap().is_none());
+
+    record.pid = pid;
+    registry.register(record);
+    registry.save().await.unwrap();
+    let _hold_rollout = super::rollout::try_handoff_gate().unwrap().unwrap();
+    let error = super::socket::prepare_serve_replacement(&socket)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("rollout admission"));
+    assert!(child.0.try_wait().unwrap().is_none());
+    drop(_hold_rollout);
+    let _gate = super::socket::prepare_serve_replacement(&socket)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGTERM));
+    super::socket::clear_stale_serve_sockets(&socket, &debug)
+        .await
+        .unwrap();
+    assert!(Listener::bind(socket).is_ok());
 }
 
 #[tokio::test]

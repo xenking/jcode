@@ -152,6 +152,24 @@ pub fn try_handoff_gate() -> Result<Option<File>> {
     try_lock(&journal_path()?.with_file_name("handoff.lock"))
 }
 
+#[cfg(unix)]
+pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(File, File)> {
+    let handoff =
+        try_handoff_gate()?.context("cannot replace the daemon during rollout admission")?;
+    let executor = try_lock(&journal_path()?.with_file_name("executor.lock"))?
+        .context("cannot replace the daemon during an active rollout")?;
+    if let Some(journal) = read_journal()?
+        && !journal.phase.terminal()
+        && super::socket::same_socket_path(&journal.socket, socket)
+    {
+        bail!(
+            "cannot replace the daemon while rollout {} is in progress",
+            journal.id
+        );
+    }
+    Ok((handoff, executor))
+}
+
 pub fn try_preparation_lock() -> Result<Option<File>> {
     try_lock(&journal_path()?.with_file_name("preparation.lock"))
 }

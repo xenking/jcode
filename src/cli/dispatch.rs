@@ -105,6 +105,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     match args.command {
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
+            replace,
             temporary_server,
             persistent_server,
             owner_pid,
@@ -139,7 +140,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 serve_start.elapsed().as_millis()
             ));
             let _persistence = crate::persistence_batch::start_daemon();
-            server.run().await?;
+            let replace = replace || std::env::var("JCODE_SERVE_REPLACE").as_deref() == Ok("1");
+            server
+                .run_with_replace(replace && !temporary_server)
+                .await?;
         }
         Some(Command::Acp { session_env }) => {
             acp::run_acp_command(

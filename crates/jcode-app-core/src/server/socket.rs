@@ -145,6 +145,146 @@ pub(super) async fn socket_has_live_listener(path: &std::path::Path) -> bool {
     }
 }
 
+#[cfg(unix)]
+pub(super) fn same_socket_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    resolved_socket_identity(left) == resolved_socket_identity(right)
+}
+
+enum ServeListener {
+    Missing,
+    Live(Option<u32>),
+}
+
+async fn serve_listener(path: &std::path::Path) -> Result<ServeListener> {
+    #[cfg(unix)]
+    {
+        match Stream::connect(path).await {
+            Ok(peer) => Ok(ServeListener::Live(
+                jcode_build_support::runtime_generation::socket_peer_pid(&peer.into_std()?),
+            )),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Ok(ServeListener::Missing)
+            }
+            Err(error) => Err(anyhow::Error::new(error)
+                .context(format!("Cannot check server socket {}", path.display()))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if socket_has_live_listener(path).await {
+            Ok(ServeListener::Live(
+                crate::registry::find_server_by_socket_sync(path).map(|server| server.pid),
+            ))
+        } else {
+            Ok(ServeListener::Missing)
+        }
+    }
+}
+
+pub(super) async fn reject_live_serve_socket(path: &std::path::Path) -> Result<()> {
+    if let ServeListener::Live(pid) = serve_listener(path).await? {
+        let owner = pid.map_or_else(|| " (PID unknown)".into(), |pid| format!(" (pid {pid})"));
+        anyhow::bail!(
+            "A live server is listening on {}{owner}. Use `jcode server reload`, `jcode server stop --force`, or `jcode serve --replace`.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Run with the startup daemon locks held. Never remove a live endpoint or a regular file.
+pub(super) async fn clear_stale_serve_sockets(
+    main: &std::path::Path,
+    debug: &std::path::Path,
+) -> Result<()> {
+    for path in [main, debug] {
+        reject_live_serve_socket(path).await?;
+    }
+    #[cfg(unix)]
+    for path in [main, debug] {
+        use std::os::unix::fs::FileTypeExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                let kind = metadata.file_type();
+                anyhow::ensure!(
+                    kind.is_socket() || kind.is_symlink(),
+                    "Not a socket: {}",
+                    path.display()
+                );
+                std::fs::remove_file(path)?;
+                crate::logging::info(&format!(
+                    "Removed stale server socket at {}",
+                    path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn prepare_serve_replacement(
+    path: &std::path::Path,
+) -> Result<Option<(std::fs::File, std::fs::File)>> {
+    let ServeListener::Live(pid) = serve_listener(path).await? else {
+        return Ok(None);
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        anyhow::bail!("serve --replace cannot verify the owner of this listener on this platform");
+    }
+    #[cfg(unix)]
+    {
+        use anyhow::Context;
+        let pid = pid
+            .filter(|pid| *pid != std::process::id())
+            .context("serve --replace could not verify a different live daemon PID")?;
+        let gate = super::rollout::guard_serve_replacement(path)?;
+        let registered = crate::registry::find_server_by_socket_sync(path)
+            .is_some_and(|server| server.pid == pid);
+        anyhow::ensure!(
+            registered,
+            "Refusing to replace unverified listener pid {pid} on {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            matches!(serve_listener(path).await?, ServeListener::Live(Some(current)) if current == pid),
+            "The listener on {} changed before replacement",
+            path.display()
+        );
+        // Do not signal a process group or escalate on a cached PID.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context(format!("Could not stop daemon pid {pid}"));
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match serve_listener(path).await? {
+                ServeListener::Missing => return Ok(Some(gate)),
+                ServeListener::Live(Some(current)) if current == pid => {}
+                ServeListener::Live(_) => anyhow::bail!(
+                    "A different listener claimed {} during replacement",
+                    path.display()
+                ),
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Daemon pid {pid} did not exit after SIGTERM. Try jcode server stop --force."
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 /// Reap a provably-stale socket left behind by a dead daemon.
 ///
 /// Background: after an upgrade or crash, the runtime socket file can survive

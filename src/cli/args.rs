@@ -180,6 +180,10 @@ pub(crate) enum Command {
 
     /// Start the agent server (background daemon)
     Serve {
+        /// Stop the verified daemon on this socket before serving (Unix).
+        #[arg(long, conflicts_with = "temporary_server")]
+        replace: bool,
+
         /// Internal: mark this server as temporary so it can self-clean when its owner exits.
         #[arg(long, hide = true)]
         temporary_server: bool,
