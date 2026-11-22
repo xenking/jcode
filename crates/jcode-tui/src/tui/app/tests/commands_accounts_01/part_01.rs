@@ -492,8 +492,8 @@ fn test_help_topic_shows_btw_command_details() {
         msg.content
     );
     assert!(
-        msg.content.contains("ctrl+p"),
-        "the help lists the key that opens the answer as a fork: {}",
+        msg.content.contains("Ctrl+p") && msg.content.contains("/btw #N"),
+        "the help lists promotion and history controls: {}",
         msg.content
     );
 }
@@ -1021,17 +1021,6 @@ fn test_test_command_queues_layered_verification_prompt() {
     assert!(queued.contains("Static analysis"));
     assert!(queued.contains("fault injection/chaos"));
     assert!(queued.contains("Final proof packet"));
-}
-
-#[test]
-fn test_btw_command_requires_question() {
-    let mut app = create_test_app();
-    app.input = "/btw".to_string();
-    app.submit_input();
-
-    let msg = app.display_messages().last().expect("missing btw error");
-    assert_eq!(msg.role, "error");
-    assert!(msg.content.contains("Usage: /btw <question>"));
 }
 
 #[test]

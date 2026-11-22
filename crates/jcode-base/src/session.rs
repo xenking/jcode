@@ -105,6 +105,9 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Immutable after the initial fork. Hidden is visibility, not provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    side_question_message_start: Option<usize>,
     #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
@@ -314,6 +317,8 @@ struct SessionStartupStub {
     #[serde(default)]
     hidden: bool,
     #[serde(default)]
+    side_question_message_start: Option<usize>,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
@@ -403,6 +408,7 @@ impl Session {
         session.last_active_at = stub.last_active_at;
         session.is_debug = stub.is_debug;
         session.hidden = stub.hidden;
+        session.side_question_message_start = stub.side_question_message_start;
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.migration_epoch = stub.migration_epoch;
@@ -449,6 +455,7 @@ impl Session {
         session.last_active_at = snapshot.last_active_at;
         session.is_debug = snapshot.is_debug;
         session.hidden = snapshot.hidden;
+        session.side_question_message_start = snapshot.side_question_message_start;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
         session.replay_events = snapshot.replay_events;
@@ -971,6 +978,7 @@ impl Session {
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
+            side_question_message_start: None,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -1038,6 +1046,7 @@ impl Session {
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
+            side_question_message_start: None,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -1227,35 +1236,6 @@ impl Session {
             .as_deref()
             .or_else(|| extract_session_name(&self.id))
             .unwrap_or(&self.id)
-    }
-
-    /// Append a model-visible notice telling the agent this session is a fork
-    /// of `parent_session_id`'s conversation.
-    ///
-    /// Forking happens when the user splits a window mid-conversation (often
-    /// while the parent agent is still streaming) and points the new window at
-    /// a clone of the transcript. Without this notice the forked agent assumes
-    /// it owns the in-flight request, duplicating the parent's work. The
-    /// notice is wrapped in `<system-reminder>` so it stays out of the visible
-    /// transcript while still reaching the model on the next turn.
-    pub fn append_fork_notice(&mut self, parent_session_id: &str, parent_display_name: &str) {
-        let text = format!(
-            "<system-reminder>\nThis session was forked (split) from session {parent} ({parent_id}) by the user. \
-The full conversation above is inherited from that session, but the original agent in {parent} \
-is still active and will continue handling whatever request or work was in progress there. \
-Do NOT continue or duplicate that in-flight work here. Treat the next user message as a fresh \
-request in this new forked session, using the inherited conversation only as context.\n</system-reminder>",
-            parent = parent_display_name,
-            parent_id = parent_session_id,
-        );
-        self.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text,
-                cache_control: None,
-            }],
-            Some(StoredDisplayRole::System),
-        );
     }
 
     /// Mark this session as a canary tester
@@ -2118,6 +2098,8 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default)]
     hidden: bool,
     #[serde(default)]
+    side_question_message_start: Option<usize>,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
@@ -2125,6 +2107,9 @@ struct RemoteStartupSessionSnapshot {
 
 #[path = "session/image_archive.rs"]
 mod image_archive;
+#[path = "session/side_questions.rs"]
+mod side_questions;
+pub use side_questions::load_side_question_history;
 #[path = "session/images.rs"]
 mod images;
 pub(crate) use images::is_image_annotation;

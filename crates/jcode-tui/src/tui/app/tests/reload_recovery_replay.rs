@@ -547,7 +547,6 @@ fn reload_recovery_delayed_history_after_completion_does_not_restart_turn() {
     let history = reload_replay_history(session_id, directive);
     app.handle_server_event(history.clone(), &mut remote);
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    let after_first_send = remote.next_request_id_for_test();
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(app.current_message_id.is_none());
     let id = 42;
@@ -562,12 +561,16 @@ fn reload_recovery_delayed_history_after_completion_does_not_restart_turn() {
         crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
         &mut remote,
     );
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
     app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
+    assert!(app.current_message_id.is_none());
+    let next_request_id = remote.next_request_id_for_test();
     app.handle_server_event(history, &mut remote);
-    assert_eq!(app.remote_context_meter_request, Some(after_first_send));
+    assert_eq!(app.remote_context_meter_request, Some(next_request_id));
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert_eq!(remote.next_request_id_for_test(), after_first_send + 1);
+    assert_eq!(remote.next_request_id_for_test(), next_request_id + 1);
     assert!(app.current_message_id.is_none());
 }
 

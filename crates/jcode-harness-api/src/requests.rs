@@ -137,6 +137,26 @@ pub enum ApiRequest {
         session_id: String,
     },
 
+    /// Fork the attached session into a durable side topic.
+    ForkSideQuestion {
+        session_id: String,
+    },
+
+    /// Read the parent's direct side topics, newest creation first, without attaching.
+    ListSideQuestions {
+        parent_session_id: String,
+    },
+
+    /// Read only the child-authored conversation, without attaching.
+    GetSideQuestionHistory {
+        session_id: String,
+    },
+
+    /// Make an existing side topic visible in the normal session catalog.
+    PromoteSideQuestion {
+        session_id: String,
+    },
+
     /// Create a fresh session containing a runtime-compacted handoff.
     /// The parent remains unchanged. Replies with `SessionForked`.
     TransferSession {

@@ -81,6 +81,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_session_saved",
     "get_runtime_info",
     "fork_session",
+    "fork_side_question",
     "transfer_session",
     "read_file",
     "find_files",
@@ -204,6 +205,8 @@ pub struct BridgeState {
     pending_recovery_history: Option<(u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
+    pending_side_question_forks: BTreeMap<u64, (u64, String)>,
+    pub(crate) side_questions_supported: bool,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -398,6 +401,14 @@ impl BridgeState {
     fn translate_request(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
+
+        if req == "fork_side_question" && !self.side_questions_supported {
+            return Self::error_reply(
+                api_id,
+                ErrorCode::UnknownRequest,
+                "This runtime does not support side questions.",
+            );
+        }
 
         // Stateful requests only mean something once this connection is
         // attached. Forwarding one before then is not merely useless: the
@@ -741,16 +752,7 @@ impl BridgeState {
                 }
                 vec![Outbound::Legacy(message)]
             }
-            "fork_session" => {
-                let id = self.legacy_id();
-                self.pending_fork_id = Some((id, api_id));
-                vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
-            }
-            "transfer_session" => {
-                let id = self.legacy_id();
-                self.pending_fork_id = Some((id, api_id));
-                vec![Outbound::Legacy(json!({"type": "transfer", "id": id}))]
-            }
+            "fork_session" | "fork_side_question" | "transfer_session" => self.translate_fork_request(req, api_id, request),
             "cancel" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -1061,8 +1063,10 @@ impl BridgeState {
                 // live snapshot so unattached dashboards and global event
                 // subscribers discover complete session state.
                 let limit = request["limit"].as_u64().map(|limit| limit as usize);
+                let hidden = Self::hidden_side_question_ids();
+                let scan_limit = limit.map(|limit| limit.saturating_add(hidden.len()));
                 let mut ids: BTreeSet<String> =
-                    Self::stored_session_ids(limit).into_iter().collect();
+                    Self::stored_session_ids(scan_limit).into_iter().collect();
                 if limit.is_some() {
                     // Bookmarks are how users find old work, so a recency
                     // limit must never hide them from pickers.
@@ -1073,6 +1077,7 @@ impl BridgeState {
                 if let Some(attached) = self.session_id.clone() {
                     ids.insert(attached);
                 }
+                ids.retain(|id| !hidden.contains(id));
                 if let Some(limit) = limit {
                     let mut recent: Vec<_> = ids.into_iter().collect();
                     recent.sort_unstable_by_key(|id| {
@@ -1083,7 +1088,12 @@ impl BridgeState {
                 }
                 // Connected user clients must remain discoverable even when
                 // their idle session is older than the persisted recency page.
-                ids.extend(self.user_connected_sessions.iter().cloned());
+                ids.extend(
+                    self.user_connected_sessions
+                        .iter()
+                        .filter(|id| !hidden.contains(*id))
+                        .cloned(),
+                );
                 // Titles are deliberately not cached. A rename is persisted
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
@@ -2633,59 +2643,7 @@ impl BridgeState {
                     vec![]
                 }
             }
-            "split_response" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some((_, api_id)) = self
-                    .pending_fork_id
-                    .take()
-                    .filter(|(legacy_id, _)| *legacy_id == id)
-                else {
-                    return vec![];
-                };
-                let session_id = event["new_session_id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let metadata = Self::resolve_session_metadata(&session_id);
-                vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::SessionForked {
-                        session: SessionInfo {
-                            user_connected: self.user_connected_sessions.contains(&session_id),
-                            edit_stats: None,
-                            context: None,
-                            parent_session_id: None,
-                            agent_label: None,
-                            swarm_status: None,
-                            transcript_bytes: Self::transcript_bytes(&session_id),
-                            saved: metadata.as_ref().is_some_and(|value| value.saved),
-                            updated_at_ms: Self::session_modified_ms(&session_id)
-                                .map(|value| value as i64),
-                            last_active_at_ms: metadata
-                                .as_ref()
-                                .and_then(|value| value.last_active_at_ms),
-                            session_id,
-                            working_dir: metadata
-                                .as_ref()
-                                .and_then(|value| value.working_dir.clone()),
-                            title: event["new_session_name"]
-                                .as_str()
-                                .map(str::to_string)
-                                .or_else(|| {
-                                    metadata
-                                        .as_ref()
-                                        .and_then(PersistedSessionMetadata::display_title)
-                                }),
-                            status: "idle".into(),
-                            archived: false,
-                            archived_at_ms: None,
-                            save_label: metadata
-                                .as_ref()
-                                .and_then(PersistedSessionMetadata::save_label),
-                        },
-                    },
-                )]
-            }
+            "side_question_forked" | "split_response" => self.translate_fork_reply(event),
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
@@ -3403,12 +3361,19 @@ impl BridgeState {
                     self.pending_fork_id = None;
                 }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or(fork_api_id).or_else(|| {
-                    self.pending_simple
-                        .iter()
-                        .position(|(legacy_id, _, _)| *legacy_id == id)
-                        .map(|index| self.pending_simple.remove(index).1)
-                });
+                let reply_to = no_reply_api_id
+                    .or(fork_api_id)
+                    .or_else(|| {
+                        self.pending_side_question_forks
+                            .remove(&id)
+                            .map(|(api_id, _)| api_id)
+                    })
+                    .or_else(|| {
+                        self.pending_simple
+                            .iter()
+                            .position(|(legacy_id, _, _)| *legacy_id == id)
+                            .map(|index| self.pending_simple.remove(index).1)
+                    });
                 let frame_event = ApiEvent::Error {
                     code: ErrorCode::Internal,
                     message,
@@ -4411,6 +4376,10 @@ impl BridgeState {
 mod tests;
 
 #[cfg(test)]
+#[path = "side_question_tests.rs"]
+mod side_question_tests;
+
+#[cfg(test)]
 #[path = "session_image_bridge_tests.rs"]
 mod session_image_bridge_tests;
 
@@ -4420,3 +4389,4 @@ mod user_response_capability_tests;
 
 #[path = "translate/session_files.rs"]
 mod session_files;
+mod session_forks;

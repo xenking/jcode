@@ -762,7 +762,7 @@ pub(super) async fn handle_trigger_memory_extraction(
 }
 
 #[path = "session_transfer_snapshot.rs"]
-mod session_transfer_snapshot;
+pub(super) mod session_transfer_snapshot;
 use session_transfer_snapshot::*;
 
 pub(super) async fn handle_split(

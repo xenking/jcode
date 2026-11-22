@@ -56,6 +56,7 @@ pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,
     TurnStopReason,
 };
+pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };
@@ -78,7 +79,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 22;
+pub const API_VERSION_MINOR: u32 = 23;
 
 pub use jcode_background_types::{
     BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,

@@ -1,10 +1,4 @@
-//! Client behavior against a fake harness.
-//!
-//! The correlation logic is the part of an SDK that fails silently: a reply
-//! delivered to the wrong waiter, or a stream event swallowed by a request
-//! that happened to be in flight, produces a hang rather than an error. None
-//! of that is visible from a passing `cargo build`, so it is driven here
-//! against a scripted server on a real socket pair.
+//! Client request correlation against a scripted harness on a real socket pair.
 
 #![cfg(unix)]
 
@@ -26,6 +20,8 @@ mod protocol_partial_disconnect;
 mod search_sessions;
 #[path = "client_behavior/swarm_status.rs"]
 mod swarm_status;
+#[path = "client_behavior/side_questions.rs"]
+mod side_questions;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.

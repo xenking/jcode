@@ -1829,7 +1829,7 @@ fn parse_jcode_session_info(
 
     let path = sessions_dir.join(format!("{stem}.json"));
     let session = load_session_summary(&path).ok()?;
-    if session.hidden {
+    if session.hidden && !crate::session::Session::side_question_was_promoted(stem) {
         return None;
     }
 

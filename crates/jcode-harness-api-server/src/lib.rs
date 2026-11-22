@@ -99,39 +99,8 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
         .flatten()
 }
 
-async fn daemon_background_tasks(
-    socket: &std::path::Path,
-    session_id: &str,
-    task_id: Option<&str>,
-    cancel: bool,
-) -> Result<Value> {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let mut stream = Stream::connect(socket).await?;
-        write_json_line(
-            &mut stream,
-            &serde_json::json!({
-                "type": "background_tasks", "id": 1, "session_id": session_id,
-                "task_id": task_id, "cancel": cancel,
-            }),
-        )
-        .await?;
-        let mut line = String::new();
-        read_frame(&mut BufReader::new(stream), &mut line).await?;
-        let reply: Value = serde_json::from_str(&line)?;
-        match reply["type"].as_str() {
-            Some("background_tasks") if !cancel => Ok(reply),
-            Some("done") if cancel => Ok(reply),
-            Some("error") => anyhow::bail!(
-                "{}",
-                reply["message"]
-                    .as_str()
-                    .unwrap_or("Native task inspection failed")
-            ),
-            _ => anyhow::bail!("Unexpected response to background task inspection"),
-        }
-    })
-    .await?
-}
+mod session_controls;
+use session_controls::{daemon_background_tasks, daemon_side_questions};
 
 #[derive(Default)]
 struct TaskWatch {
@@ -642,6 +611,9 @@ where
     let background_tasks_supported = daemon_caps
         .iter()
         .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
+    let side_questions_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -708,6 +680,10 @@ where
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
             .chain(
+                side_questions_supported
+                    .then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()),
+            )
+            .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()
                     .filter(|_| soft_interrupt_ids_supported)
@@ -725,6 +701,7 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.side_questions_supported = side_questions_supported;
     state.force_stop_turn_supported = force_stop_turn_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.supports_applets = hello["supports_applets"].as_bool();
@@ -829,6 +806,16 @@ where
                             message: "This runtime does not support manual Shake tools.".into(),
                         },
                     )).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("list_side_questions" | "get_side_question_history" | "promote_side_question")) {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if side_questions_supported {
+                        daemon_side_questions(&legacy_socket, &request).await
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support side questions.".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
                 if request["req"] == "list_sessions" {

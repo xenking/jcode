@@ -6,6 +6,15 @@ pub(super) fn clone_split_session(
     parent_session_id: &str,
     live_parent: Option<&Session>,
 ) -> anyhow::Result<(String, String)> {
+    let child = snapshot_child_session(parent_session_id, live_parent, false)?;
+    Ok((child.id.clone(), child.display_name().to_string()))
+}
+
+fn snapshot_child_session(
+    parent_session_id: &str,
+    live_parent: Option<&Session>,
+    side_question: bool,
+) -> anyhow::Result<Session> {
     // Keep the persisted snapshot authoritative, including while the parent is
     // busy. A brand-new Agent may not have saved anything yet, however. Only a
     // missing snapshot permits an in-memory fallback, never corrupt/unreadable
@@ -36,11 +45,41 @@ pub(super) fn clone_split_session(
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
     child.append_fork_notice(parent_session_id, parent.display_name());
-    child.save()?;
+    if side_question {
+        child.reasoning_effort = parent.reasoning_effort.clone();
+        child.context_cap = parent.context_cap;
+        child.save_new_side_question()?;
+    } else {
+        child.save()?;
+    }
 
     crate::session_env::inherit_session_env(parent_session_id, &child.id);
-    let name = child.display_name().to_string();
-    Ok((child.id.clone(), name))
+    Ok(child)
+}
+
+pub(in crate::server) fn handle_split_side_question(
+    id: u64,
+    parent_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+) -> ServerEvent {
+    let idle_agent = agent.try_lock().ok();
+    match snapshot_child_session(
+        parent_session_id,
+        idle_agent.as_ref().map(|agent| agent.session_for_split()),
+        true,
+    ) {
+        Ok(child) => ServerEvent::SideQuestionForked {
+            id,
+            topic: child
+                .side_question_topic()
+                .expect("new side-question child"),
+        },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Could not fork side question: {error:#}"),
+            retry_after_secs: None,
+        },
+    }
 }
 
 pub(super) fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {

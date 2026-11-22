@@ -37,6 +37,10 @@ const CAPABILITIES: &[Capability] = &[
     cap("create_session_with_options", "createSession"),
     cap("attach_session", "attachSession"),
     cap("fork_session", "forkSession"),
+    cap("fork_side_question", "forkSideQuestion"),
+    cap("list_side_questions", "listSideQuestions"),
+    cap("get_side_question_history", "getSideQuestionHistory"),
+    cap("promote_side_question", "promoteSideQuestion"),
     cap("transfer_session", "transferSession"),
     cap("detach_session", "detachSession"),
     cap("send_message", "sendMessage"),
@@ -241,7 +245,7 @@ const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    ["client.rs", "structured.rs"]
+    ["client.rs", "client/side_questions.rs", "structured.rs"]
         .into_iter()
         .map(|file| {
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {

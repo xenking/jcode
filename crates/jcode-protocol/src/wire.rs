@@ -719,6 +719,18 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    #[serde(rename = "split_side_question")]
+    SplitSideQuestion { id: u64 },
+
+    #[serde(rename = "list_side_questions")]
+    ListSideQuestions { id: u64, parent_session_id: String },
+
+    #[serde(rename = "get_side_question_history")]
+    GetSideQuestionHistory { id: u64, session_id: String },
+
+    #[serde(rename = "promote_side_question")]
+    PromoteSideQuestion { id: u64, session_id: String },
+
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
     Transfer { id: u64 },
@@ -1205,21 +1217,4 @@ impl std::fmt::Debug for Request {
 }
 
 #[cfg(test)]
-mod session_env_tests {
-    use super::*;
-
-    #[test]
-    fn session_environment_roundtrips_without_debug_secrets() {
-        let request = Request::SetSessionEnv {
-            id: 42,
-            env: [("TOKEN".into(), "private-secret".into())].into(),
-        };
-        let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["type"], "set_session_env");
-        assert_eq!(json["env"]["TOKEN"], "private-secret");
-        let decoded: Request = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded.id(), 42);
-        assert!(!format!("{decoded:?}").contains("private-secret"));
-        assert!(!format!("{decoded:?}").contains("TOKEN"));
-    }
-}
+mod session_env_tests;

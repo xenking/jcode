@@ -522,14 +522,14 @@ fn jcode_protocol_like_kv_miss() -> Value {
     })
 }
 
-struct ScopedJcodeHome {
+pub(super) struct ScopedJcodeHome {
     path: PathBuf,
     previous: Option<OsString>,
     _guard: MutexGuard<'static, ()>,
 }
 
 impl ScopedJcodeHome {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         let guard = jcode_home_test_lock();
         let previous = std::env::var_os("JCODE_HOME");
         let unique = SystemTime::now()
@@ -641,7 +641,7 @@ fn metadata_display_title_prefers_generated_title_over_todo_lane_label() {
     assert_eq!(metadata.display_title().as_deref(), Some("session-titles"));
 }
 
-fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
+pub(super) fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
     assert_eq!(outbound.len(), 1, "expected exactly one reply");
     match outbound.into_iter().next().expect("one outbound") {
         Outbound::Reply(frame) => frame.event,

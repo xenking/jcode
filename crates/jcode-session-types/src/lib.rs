@@ -32,21 +32,10 @@ pub use transcription::{
 };
 
 pub const FILE_ATTACHMENTS_CAPABILITY: &str = "file_attachments_v1";
-
-/// Last persisted model settings for a session catalog row, without its transcript.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionCatalogContext {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub modes: Vec<String>,
-    /// Estimated prompt-cache expiry in Unix milliseconds, not a guaranteed hit.
-    /// Absent when the provider's retention or the last refresh is unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_expires_at_ms: Option<i64>,
-}
+mod catalog;
+pub use catalog::{
+    SIDE_QUESTION_VISIBILITY_DIR, SIDE_QUESTIONS_CAPABILITY, SessionCatalogContext, SideQuestionTopic,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

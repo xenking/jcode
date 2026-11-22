@@ -8,7 +8,8 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 22;
+export const API_VERSION_MINOR = 23;
+export const SIDE_QUESTIONS_CAPABILITY = "side_questions_v1";
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -56,6 +57,17 @@ export interface SessionInfo {
   transcript_bytes?: number;
   archived?: boolean;
   archived_at_ms?: number;
+}
+
+/** Durable child session in a parent's BTW history, not a message-tree entry. */
+export interface SideQuestionTopic {
+  session_id: string;
+  parent_session_id: string;
+  created_at_ms: number;
+  /** Raw transcript offset. Not an index into rendered getHistory results. */
+  message_start?: number;
+  /** The child's last persisted model selection. Reading it does not attach a runtime. */
+  context?: SessionCatalogContext;
 }
 
 /** Live lifecycle fact from one daemon publication. */
@@ -324,6 +336,10 @@ export type ApiRequest =
   | { req: "create_session"; working_dir?: string; system_prompt?: string }
   | { req: "attach_session"; session_id: string }
   | { req: "fork_session"; session_id: string }
+  | { req: "fork_side_question"; session_id: string }
+  | { req: "list_side_questions"; parent_session_id: string }
+  | { req: "get_side_question_history"; session_id: string }
+  | { req: "promote_side_question"; session_id: string }
   | { req: "transfer_session"; session_id: string }
   | { req: "detach_session"; session_id: string }
   | { req: "configure_tools"; session_id: string; tools: ToolConfiguration }
@@ -553,6 +569,8 @@ export type ApiEvent =
   | { ev: "swarm_status"; session_id: string; updated_at_unix_ms: number; members: SwarmMemberInfo[] }
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
+  | { ev: "side_question_forked"; topic: SideQuestionTopic }
+  | { ev: "side_questions"; topics: SideQuestionTopic[] }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
   | { ev: "memory_injected"; session_id: string; count: number; content: string }
   | { ev: "memory_activity"; session_id: string; activity: MemoryActivitySnapshot }
@@ -813,6 +831,8 @@ export const KNOWN_EVENT_KINDS = [
   "swarm_status",
   "attached",
   "session_forked",
+  "side_question_forked",
+  "side_questions",
   "history",
   "compacted_history",
   "history_page",
@@ -895,6 +915,10 @@ export const KNOWN_REQUEST_KINDS = [
   "create_session",
   "attach_session",
   "fork_session",
+  "fork_side_question",
+  "list_side_questions",
+  "get_side_question_history",
+  "promote_side_question",
   "transfer_session",
   "detach_session",
   "configure_tools",
