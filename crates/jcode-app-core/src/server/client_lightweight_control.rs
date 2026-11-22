@@ -40,16 +40,50 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 pub(super) async fn openrig_host_identity() -> Option<String> {
-    openrig_host_identity_at("http://127.0.0.1:7433/healthz").await
+    static IDENTITY: OpenrigIdentity = OpenrigIdentity::new();
+    IDENTITY.get("http://127.0.0.1:7433/healthz").await
+}
+
+struct OpenrigIdentity {
+    // Only explicit identity requests reach this lock. Ping remains an
+    // independent liveness/presence snapshot even on cold starts.
+    cached: Mutex<Option<(tokio::time::Instant, Option<String>)>>,
+}
+
+impl OpenrigIdentity {
+    const fn new() -> Self {
+        Self {
+            cached: Mutex::const_new(None),
+        }
+    }
+
+    async fn get(&self, url: &str) -> Option<String> {
+        let mut cached = self.cached.lock().await;
+        if let Some((expires, identity)) = cached.as_ref()
+            && tokio::time::Instant::now() < *expires
+        {
+            return identity.clone();
+        }
+        let identity = openrig_host_identity_at(url).await;
+        let ttl = std::time::Duration::from_secs(if identity.is_some() { 60 } else { 5 });
+        // An expired claim is never returned if the host is no longer reachable.
+        *cached = Some((tokio::time::Instant::now() + ttl, identity.clone()));
+        identity
+    }
 }
 
 async fn openrig_host_identity_at(url: &str) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(750))
-        .build()
-        .ok()?;
+    static CLIENT: std::sync::LazyLock<Option<reqwest::Client>> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            // This endpoint is fixed to loopback HTTP. Don't open the OS trust store.
+            .tls_built_in_root_certs(false)
+            .timeout(std::time::Duration::from_millis(750))
+            .build()
+            .ok()
+    });
+    let client = CLIENT.as_ref()?;
     let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
@@ -92,6 +126,33 @@ mod openrig_identity_tests {
         let result = openrig_host_identity_at(&format!("http://{address}/healthz")).await;
         server.await.unwrap();
         result
+    }
+
+    #[tokio::test]
+    async fn concurrent_identity_requests_share_one_health_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/healthz", listener.local_addr().unwrap());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn({
+            let reads = reads.clone();
+            async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut input = [0; 4096];
+                    stream.read(&mut input).await.unwrap();
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"selfHostId\":\"host-a\"}").await.unwrap();
+                }
+            }
+        });
+        let cache = OpenrigIdentity::new();
+        let (a, b, c) = tokio::join!(cache.get(&url), cache.get(&url), cache.get(&url));
+        server.abort();
+        assert_eq!(a.as_deref(), Some("host-a"));
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
