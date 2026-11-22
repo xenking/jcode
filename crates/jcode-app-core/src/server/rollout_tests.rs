@@ -241,14 +241,41 @@ async fn staged_generation_is_a_snapshot_and_never_overwrites_an_existing_image(
 #[test]
 fn drain_skips_unchanged_daemon_and_never_waits_on_initiator() {
     let (_dir, _store, mut journal) = fixture();
-    let busy = || vec!["initiator".to_string(), "worker".to_string()];
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let _initiator = activity.admit("initiator").unwrap();
+    let _worker = activity.admit("worker").unwrap();
+    let _work = activity.in_tool_call("worker", "bash", "compile");
+    let mut waits = Vec::new();
+    for (session, id) in [
+        ("wait-1", journal.id.as_str()),
+        ("wait-2", &journal.id),
+        ("wait-other", "rollout_other"),
+    ] {
+        waits.push((
+            activity.admit(session).unwrap(),
+            activity.awaiting_tool(session, "rollout_wait", "call"),
+            activity.in_tool_call(session, "rollout_wait", "call"),
+            activity.rollout_wait(session, "call", id),
+        ));
+    }
     journal.intent.triggering_session = Some("initiator".into());
 
-    assert!(drain_blockers(busy(), &journal.intent, "abcdef123456").is_empty());
+    let snapshot = activity.snapshot();
+    assert!(drain_blockers(&snapshot, &journal, "abcdef123456").is_empty());
     assert_eq!(
-        drain_blockers(busy(), &journal.intent, "0000000"),
-        vec!["worker".to_string()]
+        drain_blockers(&snapshot, &journal, "0000000")
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["wait-other", "worker"]
+    );
+    assert!(snapshot.busy_sessions().contains(&"wait-1".into()));
+    let _concurrent = activity.in_tool_call("wait-1", "bash", "still-working");
+    let snapshot = activity.snapshot();
+    assert_eq!(
+        drain_blockers(&snapshot, &journal, "0000000")[0].reason,
+        "executing tool bash"
     );
     journal.intent.now = true;
-    assert!(drain_blockers(busy(), &journal.intent, "0000000").is_empty());
+    assert!(drain_blockers(&snapshot, &journal, "0000000").is_empty());
 }

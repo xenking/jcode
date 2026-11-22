@@ -323,7 +323,10 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
     run.say(
         "stage",
         "sent",
-        format!("daemon owns rollout {id}; jcode rollout --status; caller may exit"),
+        format!(
+            "daemon owns rollout {id} CLI {} Desktop {}; jcode rollout --status; caller may exit",
+            pair.cli, pair.desktop
+        ),
     )?;
     Ok(Outcome::Submitted(id))
 }

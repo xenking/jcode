@@ -43,7 +43,7 @@ pub fn register(session_id: &str, call_id: &str, name: &str) -> RunningToolGuard
         );
     }
     RunningToolGuard {
-        _activity: crate::turn_activity::global().in_tool(session_id, name),
+        _activity: crate::turn_activity::global().awaiting_tool(session_id, name, call_id),
         session_id: session_id.to_string(),
         token,
     }

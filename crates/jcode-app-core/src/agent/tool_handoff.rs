@@ -28,7 +28,7 @@ pub(super) fn handoff_budget(
     input: &serde_json::Value,
     foreground: Duration,
 ) -> Option<Duration> {
-    if is_human_decision(name) {
+    if is_human_decision(name) || name == crate::tool::rollout_wait::NAME {
         return None;
     }
     if auto_background_allowed(name, input) && !foreground.is_zero() {
@@ -45,10 +45,11 @@ pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> 
 }
 
 pub(in crate::agent) fn is_reload_replayable_wait(name: &str, input: &serde_json::Value) -> bool {
-    matches!(
-        (name, input.get("action").and_then(|value| value.as_str())),
-        ("bg", Some("wait")) | ("swarm", Some("await_members"))
-    )
+    name == crate::tool::rollout_wait::NAME
+        || matches!(
+            (name, input.get("action").and_then(|value| value.as_str())),
+            ("bg", Some("wait")) | ("swarm", Some("await_members"))
+        )
 }
 
 /// Name a handed-off task after the call's `intent`, so wait rows read

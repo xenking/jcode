@@ -24,7 +24,8 @@ Send pinned `--jcode-ref` and `--desktop-ref` values when coordinating rollout:
 - Identical requests, and requests covered by descendants in both repositories,
   join the owning transaction at durable submission. A join returns its ID and
   status, not a new build or a claim that rollout completed. A CLI-only owner
-  cannot cover a request that needs Desktop.
+  cannot cover a request that needs Desktop. A join does not change the owner's
+  drain policy, even if the joining caller passed `--now`.
 - A terminal caller with a newer compatible pair waits for the existing rollout
   to complete before starting preparation. A session caller receives the pending
   pair and owner instead of blocking the daemon's drain with its active turn.
@@ -33,6 +34,22 @@ Send pinned `--jcode-ref` and `--desktop-ref` values when coordinating rollout:
   `wake=false` when both session IDs are available. The operator or coordinators
   decide the next reviewed pair. Rollout never merges, rebases, force-checks out
   user changes or replaces the in-flight intent to reconcile a conflict.
+
+After submission or join, a session can call `rollout_wait` with `rollout_id`,
+`cli_sha`, and `desktop_sha` from the owning transaction. It must be the only
+tool call in the model's response. It reads the terminal receipt for that exact
+transaction. A bare shell sleep or a background wait does not register as a
+rollout waiter. The wait is ignored by that transaction's drain only while its
+foreground turn is waiting exclusively on the registered call. Another active
+tool or a waiter for a different transaction still blocks. Idle upgrades still
+see these turns as active.
+
+Reload checkpoints the unfinished typed tool call and replays it in the new
+daemon. A later transaction archives the previous terminal journal under
+`rollout/receipts/`, so replay can return the old outcome without reading the
+new transaction or running a build. `jcode rollout --status` shows the live
+blockers and reasons when the owning daemon is reachable during drain. The
+offline journal still exposes the phase, owner, and selected pair.
 
 The submitting CLI re-probes artifact versions against the pinned commits.
 `handoff.lock` serializes a change of preparation record with submission. If
@@ -66,8 +83,8 @@ resumes the same journal, rather than submitting another rollout.
 1. Probe the candidate using `version --json`, checking the reported `git_hash`.
 2. Install the immutable version and probe the installed binary again.
 3. Journal and update the shared-server and current channels.
-4. Drain the canonical turn-activity snapshot by default, including the initiating
-   turn because submission already returned. The canonical `drain_sessions`
+4. Drain the canonical turn-activity snapshot by default. Exclude the initiating
+   session and eligible typed waiters for this transaction. The canonical
    projection excludes checkpointable pending asks, which reload captures durably
    without waiting for an answer. They remain busy for idle-upgrade policy. No
    streaming-marker/roster union decides quiescence. `server:turn_activity` exposes
@@ -120,6 +137,12 @@ fixture build/package commands, and a private submission socket. It covers
 identical and newer requests, divergent requests, owner death with a surviving
 build, and an artifact whose version changes before submission. It does not
 compile a release or install a bundle.
+
+`scripts/accept-rollout-wait.py /path/to/jcode` checks stale preparation
+rejection, two typed waiters, a working session that still blocks drain, and
+recovery of both waits across a forced exec of the same binary. It uses a
+loopback provider and a synthetic journal on the private daemon. It does not
+install a build or package.
 
 `scripts/accept-rollout-daemon.py --old <binary> --new <binary>` uses two actual
 CLI generations with different compiled labels and a small fixture Desktop that

@@ -1669,16 +1669,27 @@ impl Agent {
                 let tool_input_for_spawn = tc.input.clone();
                 let bash_handoff = crate::tool::BashHandoff::for_tool(&tc.name);
                 let bash_handoff_for_tool = bash_handoff.clone();
+                let sole_rollout_wait =
+                    tc.name == crate::tool::rollout_wait::NAME && tool_count == 1;
+                if sole_rollout_wait {
+                    self.persist_session_now()?;
+                }
                 let tool_handle =
                     crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        tool_handoff::run_tool(
+                        let execution = tool_handoff::run_tool(
                             registry_clone,
                             tool_name_for_spawn,
                             tool_input_for_spawn,
                             ctx,
                             bash_handoff_for_tool,
-                        )
-                        .await
+                        );
+                        if sole_rollout_wait {
+                            crate::tool::rollout_wait::SOLE_CALL
+                                .scope((), execution)
+                                .await
+                        } else {
+                            execution.await
+                        }
                     })
                     .ok_or_else(|| {
                         anyhow::anyhow!("Session transfer in progress; tool not accepted")

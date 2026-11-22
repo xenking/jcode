@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::rollout_fs;
+use crate::turn_activity::{ActivitySnapshot, SessionActivity};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Intent {
@@ -113,6 +114,26 @@ pub fn status() -> Result<Option<Journal>> {
 
 pub fn read_journal() -> Result<Option<Journal>> {
     load_at(&journal_path()?)
+}
+
+fn receipt_path(id: &str) -> Result<PathBuf> {
+    if !id.starts_with("rollout_")
+        || id.len() > 128
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        bail!("invalid rollout ID");
+    }
+    Ok(journal_path()?
+        .with_file_name("receipts")
+        .join(format!("{id}.json")))
+}
+
+pub(crate) fn inspect(id: &str) -> Result<Option<Journal>> {
+    let receipt = receipt_path(id)?;
+    if let Some(journal) = read_journal()?.filter(|journal| journal.id == id) {
+        return Ok(Some(journal));
+    }
+    load_at(&receipt)
 }
 
 fn preparation_path() -> Result<PathBuf> {
@@ -271,7 +292,19 @@ pub(super) fn is_control_command(command: &str) -> bool {
 
 pub(super) fn control(command: &str) -> Result<String> {
     if command == "rollout_status" {
-        return Ok(serde_json::to_string(&status()?)?);
+        let Some(journal) = status()? else {
+            return Ok("null".into());
+        };
+        let snapshot = crate::turn_activity::global().snapshot();
+        let blockers = if journal.phase == Phase::Draining && journal.socket == super::socket_path()
+        {
+            drain_blockers(&snapshot, &journal, jcode_build_meta::git_hash())
+        } else {
+            Vec::new()
+        };
+        let mut value = serde_json::to_value(journal)?;
+        value["blockers"] = serde_json::to_value(blockers)?;
+        return Ok(value.to_string());
     }
     if command == "rollout_preparation_v1" {
         return Ok("true".into());
@@ -300,7 +333,8 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
     let path = journal_path()?;
     let _handoff = try_handoff_gate()?.context("another rollout admission is active")?;
     let store = Store::acquire(path.clone())?.context("another rollout executor is active")?;
-    if let Some(previous) = load_at(&path)?
+    let previous = load_at(&path)?;
+    if let Some(previous) = &previous
         && !previous.phase.terminal()
     {
         bail!(
@@ -358,6 +392,11 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
         recovery: serde_json::Value::Null,
         intent,
     };
+    if let Some(previous) = previous {
+        let receipt = receipt_path(&previous.id)?;
+        std::fs::create_dir_all(receipt.parent().context("rollout receipt has no parent")?)?;
+        save_at(&receipt, &previous)?;
+    }
     store.save(&journal)?;
     store.log(
         &journal,
@@ -471,18 +510,20 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
         loop {
-            let busy = drain_blockers(
-                crate::turn_activity::global().snapshot().drain_sessions(),
-                &journal.intent,
-                jcode_build_meta::git_hash(),
-            );
+            let snapshot = crate::turn_activity::global().snapshot();
+            let busy = drain_blockers(&snapshot, journal, jcode_build_meta::git_hash());
             if busy.is_empty() {
                 break;
             }
+            let detail = busy
+                .iter()
+                .map(|session| format!("{} ({})", session.session_id, session.reason))
+                .collect::<Vec<_>>()
+                .join(", ");
             if tokio::time::Instant::now() >= deadline {
-                bail!("drain timed out: {}", busy.join(", "));
+                bail!("drain timed out: {detail}");
             }
-            store.log(journal, &format!("draining: {}", busy.join(", ")))?;
+            store.log(journal, &format!("draining: {detail}"))?;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         preflight(&journal.staged_binary, &journal.intent.cli).await?;
@@ -572,12 +613,19 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
 /// rollout never reloads it), or with `--now`. The initiating session is never
 /// a blocker: it is waiting on this rollout, so waiting on it only ran the
 /// drain into its timeout. Reload recovery resumes it like any other turn.
-fn drain_blockers(busy: Vec<String>, intent: &Intent, serving: &str) -> Vec<String> {
-    if intent.now || same_commit(serving, &intent.cli) {
+fn drain_blockers<'a>(
+    snapshot: &'a ActivitySnapshot,
+    journal: &Journal,
+    serving: &str,
+) -> Vec<&'a SessionActivity> {
+    if journal.intent.now || same_commit(serving, &journal.intent.cli) {
         return Vec::new();
     }
-    busy.into_iter()
-        .filter(|session| intent.triggering_session.as_deref() != Some(session.as_str()))
+    snapshot
+        .drain_blockers(Some(&journal.id))
+        .filter(|session| {
+            journal.intent.triggering_session.as_deref() != Some(session.session_id.as_str())
+        })
         .collect()
 }
 

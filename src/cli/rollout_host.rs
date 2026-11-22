@@ -54,7 +54,24 @@ fn rollout_status() -> Result<serde_json::Value> {
         value["phase"] = serde_json::json!("preparing");
         return Ok(value);
     }
+    drop(gate);
+    if let Some(journal) = &journal
+        && journal.phase == rollout::Phase::Draining
+        && let Ok(socket) = control_socket(&journal.socket)
+        && let Ok(live) = daemon_control(&socket, "server:rollout_status")
+        && live["id"] == journal.id
+    {
+        return Ok(live);
+    }
     Ok(serde_json::to_value(journal)?)
+}
+
+fn control_socket(socket: &Path) -> Result<PathBuf> {
+    let filename = socket
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("invalid daemon socket")?;
+    Ok(socket.with_file_name(filename.replace(".sock", "-debug.sock")))
 }
 
 pub struct MacHost {
@@ -224,14 +241,7 @@ impl MacHost {
     }
 
     fn control_socket(&self) -> Result<PathBuf> {
-        let filename = self
-            .daemon_socket
-            .file_name()
-            .and_then(|s| s.to_str())
-            .context("invalid daemon socket")?;
-        Ok(self
-            .daemon_socket
-            .with_file_name(filename.replace(".sock", "-debug.sock")))
+        control_socket(&self.daemon_socket)
     }
 
     fn daemon(&self) -> Option<(u32, Option<String>)> {
@@ -304,6 +314,12 @@ impl Host for MacHost {
     }
 
     fn resolve(&mut self, repo: Repo, refname: &str, fetch: bool) -> Result<String> {
+        if matches!(refname.len(), 40 | 64)
+            && refname.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && let Ok(sha) = self.commit(repo, refname)
+        {
+            return Ok(sha);
+        }
         let dir = self.repo(repo).to_path_buf();
         if fetch {
             run(git(&dir).args(["fetch", "--quiet", "origin"]))?;

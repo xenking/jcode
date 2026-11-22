@@ -22,6 +22,7 @@ pub enum TurnPhase {
     Admitted,
     InTool,
     AskBlocked,
+    RolloutWaiting,
     CheckpointRequested,
     Checkpointed,
     Terminal,
@@ -35,6 +36,8 @@ pub struct SessionActivity {
     /// Checkpointing does not release execution or publication ownership.
     pub active: bool,
     pub checkpoint_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_rollout: Option<String>,
 }
 
 impl SessionActivity {
@@ -68,11 +71,20 @@ impl ActivitySnapshot {
     /// Reload drain waits for computation, not a user answer that can be
     /// durably checkpointed. Idle upgrades must use `busy_sessions` instead.
     pub fn drain_sessions(&self) -> Vec<String> {
-        self.sessions
-            .iter()
-            .filter(|session| session.is_busy() && !session.is_checkpointable())
+        self.drain_blockers(None)
             .map(|session| session.session_id.clone())
             .collect()
+    }
+
+    pub fn drain_blockers<'a>(
+        &'a self,
+        rollout: Option<&str>,
+    ) -> impl Iterator<Item = &'a SessionActivity> {
+        self.sessions.iter().filter(move |session| {
+            session.is_busy()
+                && !session.is_checkpointable()
+                && rollout.is_none_or(|id| session.waiting_rollout.as_deref() != Some(id))
+        })
     }
 
     pub fn session(&self, session_id: &str) -> Option<&SessionActivity> {
@@ -95,7 +107,15 @@ impl ActivitySnapshot {
 enum Participant {
     Admission,
     Execution,
-    Tool(String),
+    Tool {
+        name: String,
+        call: String,
+        foreground: bool,
+    },
+    RolloutWait {
+        rollout: String,
+        call: String,
+    },
 }
 
 #[derive(Default)]
@@ -106,11 +126,53 @@ struct SessionState {
 }
 
 impl SessionState {
+    fn waiting_rollout(&self) -> Option<&str> {
+        let mut admissions = 0;
+        let mut executions = 0;
+        let mut executing = false;
+        let mut foreground = false;
+        let (rollout, call) =
+            self.participants
+                .values()
+                .find_map(|participant| match participant {
+                    Participant::RolloutWait { rollout, call } => Some((rollout, call)),
+                    _ => None,
+                })?;
+        for participant in self.participants.values() {
+            match participant {
+                Participant::Admission => admissions += 1,
+                Participant::Execution => executions += 1,
+                Participant::Tool {
+                    name,
+                    call: owned,
+                    foreground: outer,
+                } if name == crate::tool::rollout_wait::NAME && call == owned => {
+                    let seen = if *outer {
+                        &mut foreground
+                    } else {
+                        &mut executing
+                    };
+                    if *seen {
+                        return None;
+                    }
+                    *seen = true;
+                }
+                Participant::RolloutWait {
+                    rollout: other,
+                    call: owned,
+                } if rollout == other && call == owned => (),
+                _ => return None,
+            }
+        }
+        (admissions <= 1 && executions <= 1 && foreground && executing).then_some(rollout)
+    }
+
     fn snapshot(&self, session_id: &str) -> SessionActivity {
         let active = !self.participants.is_empty();
+        let waiting_rollout = self.waiting_rollout().map(str::to_owned);
         let tool = self.participants.values().rev().find_map(|p| match p {
-            Participant::Tool(name) => Some(name.as_str()),
-            Participant::Admission | Participant::Execution => None,
+            Participant::Tool { name, .. } => Some(name.as_str()),
+            _ => None,
         });
         let (phase, reason) = if self.checkpointed {
             (
@@ -125,6 +187,11 @@ impl SessionState {
                     None if active => "checkpoint requested from admitted turn".into(),
                     None => "turn ended without checkpoint acknowledgement".into(),
                 },
+            )
+        } else if let Some(rollout) = &waiting_rollout {
+            (
+                TurnPhase::RolloutWaiting,
+                format!("passively waiting for rollout {rollout}"),
             )
         } else if let Some(tool) = tool {
             if tool == "ask" {
@@ -149,6 +216,7 @@ impl SessionState {
             reason,
             active,
             checkpoint_pending: self.checkpoint_requested && !self.checkpointed,
+            waiting_rollout,
         }
     }
 }
@@ -279,9 +347,53 @@ impl ActivityRegistry {
         self.insert(&mut state, session_id, Participant::Execution)
     }
 
-    pub fn in_tool(&self, session_id: &str, tool: &str) -> AdmissionGuard {
+    pub fn in_tool_call(&self, session_id: &str, tool: &str, call: &str) -> AdmissionGuard {
+        self.tool_participant(session_id, tool, call, false)
+    }
+
+    pub(crate) fn awaiting_tool(&self, session_id: &str, tool: &str, call: &str) -> AdmissionGuard {
+        self.tool_participant(session_id, tool, call, true)
+    }
+
+    fn tool_participant(
+        &self,
+        session_id: &str,
+        tool: &str,
+        call: &str,
+        foreground: bool,
+    ) -> AdmissionGuard {
         let mut state = self.lock();
-        self.insert(&mut state, session_id, Participant::Tool(tool.to_owned()))
+        self.insert(
+            &mut state,
+            session_id,
+            Participant::Tool {
+                name: tool.into(),
+                call: call.into(),
+                foreground,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub fn in_tool(&self, session_id: &str, tool: &str) -> AdmissionGuard {
+        self.in_tool_call(session_id, tool, "fixture")
+    }
+
+    pub(crate) fn rollout_wait(
+        &self,
+        session_id: &str,
+        call: &str,
+        rollout: &str,
+    ) -> AdmissionGuard {
+        let mut state = self.lock();
+        self.insert(
+            &mut state,
+            session_id,
+            Participant::RolloutWait {
+                rollout: rollout.into(),
+                call: call.into(),
+            },
+        )
     }
 
     fn insert(
@@ -392,6 +504,7 @@ impl ActivityRegistry {
                         reason: "checkpoint participant missing from lifecycle snapshot".into(),
                         active: false,
                         checkpoint_pending: true,
+                        waiting_rollout: None,
                     }),
                 })
                 .collect();

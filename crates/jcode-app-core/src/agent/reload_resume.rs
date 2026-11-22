@@ -273,10 +273,27 @@ impl Agent {
         let _running =
             crate::running_tool_registry::register(&self.session.id, &tool.id, &tool.name);
         let started = Instant::now();
+        let sole_rollout_wait = tool.name == crate::tool::rollout_wait::NAME
+            && self.session.messages[tool.message_index]
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                .count()
+                == 1;
+        let replay = async {
+            let execution = self.registry.execute(&tool.name, input, ctx);
+            if sole_rollout_wait {
+                crate::tool::rollout_wait::SOLE_CALL
+                    .scope((), execution)
+                    .await
+            } else {
+                execution.await
+            }
+        };
         let result = tokio::select! {
             biased;
             _ = shutdown.notified() => return Ok(false),
-            result = self.registry.execute(&tool.name, input, ctx) => result,
+            result = replay => result,
         };
         let (content, error) = match result {
             Ok(output) => (
