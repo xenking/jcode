@@ -585,10 +585,10 @@ pub struct ApiRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<&'static str>,
     pub stream: bool,
-    /// Hidden record of the effort this request runs at, emitted with its
-    /// response so later requests can replay the change as a control. Not
-    /// part of the wire payload.
+    /// Local effort replay metadata, emitted with the response but absent from the request.
     #[serde(skip)]
     pub effort_record: Option<Value>,
 }

@@ -1,12 +1,12 @@
 use super::*;
 
-struct EnvVarGuard {
+pub(super) struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
 impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let previous = std::env::var_os(key);
         jcode_base::env::set_var(key, value);
         Self { key, previous }
@@ -1641,6 +1641,7 @@ fn opus_55_request_json_supports_api_and_oauth_without_forced_tools() {
                         output_config,
                         temperature,
                         service_tier: None,
+                        speed: None,
                         stream: true,
                         effort_record: None,
                     };

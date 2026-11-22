@@ -19,7 +19,12 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// arbitrarily long digit string is safe. Invalid values are ignored and let
 /// the caller fall back to its normal exponential backoff.
 pub fn retry_after(headers: &HeaderMap) -> Option<RetryAfter> {
-    retry_after_raw_delay_at(headers, SystemTime::now()).map(RetryAfter::from_raw_delay)
+    retry_after_raw_delay(headers).map(RetryAfter::from_raw_delay)
+}
+
+/// Uncapped server hint for cooldown across requests, not for sleeping a turn.
+pub fn retry_after_raw_delay(headers: &HeaderMap) -> Option<Duration> {
+    retry_after_raw_delay_at(headers, SystemTime::now())
 }
 
 /// Parse a bounded retry delay from a provider JSON error body.

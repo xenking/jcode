@@ -15,14 +15,19 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
+mod fast_mode;
 mod reasoning_request;
 mod usage_recording;
 
 mod catalog;
+#[cfg(test)]
+mod speed_tests;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
-use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
+use jcode_provider_core::{
+    EventStream, NativeToolResultSender, Provider, SpeedAvailability, SpeedMode, SpeedOption,
+};
 fn oauth_beta_headers(model: &str) -> &'static str {
     jcode_provider_core::anthropic_oauth_beta_headers(model)
 }
@@ -119,6 +124,8 @@ fn direct_auth_mode() -> String {
 #[derive(Clone)]
 struct DirectTransportConfig {
     api_url: String,
+    #[cfg(test)]
+    api_fixture_url: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     oauth_api_url: Option<String>,
     headers: std::result::Result<HeaderMap, String>,
@@ -130,6 +137,8 @@ impl DirectTransportConfig {
     fn from_env() -> Self {
         Self {
             api_url: direct_api_url(),
+            #[cfg(test)]
+            api_fixture_url: None,
             #[cfg(any(test, feature = "test-support"))]
             oauth_api_url: None,
             headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
@@ -484,6 +493,7 @@ pub struct AnthropicProvider {
     model: Arc<std::sync::RwLock<String>>,
     reasoning_effort: Arc<std::sync::RwLock<Option<String>>>,
     service_tier: Arc<std::sync::RwLock<Option<String>>>,
+    fast: fast_mode::FastState,
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
@@ -543,6 +553,7 @@ impl AnthropicProvider {
     ) -> String {
         if jcode_provider_core::worker_request_is_pinned()
             || !is_oauth
+            || self.fast.requested_for(&selected_model)
             || !selected_model.to_ascii_lowercase().contains("fable")
         {
             return selected_model;
@@ -634,6 +645,7 @@ impl AnthropicProvider {
             model: Arc::new(std::sync::RwLock::new(model)),
             reasoning_effort: Arc::new(std::sync::RwLock::new(reasoning_effort)),
             service_tier: Arc::new(std::sync::RwLock::new(None)),
+            fast: fast_mode::FastState::default(),
             oauth_account: std::sync::RwLock::new(None),
             credentials: Arc::new(RwLock::new(None)),
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
@@ -1220,6 +1232,9 @@ impl AnthropicProvider {
                 "Cannot change Anthropic credential mode while a request is in progress"
             )
         })?;
+        if *mode_guard != mode {
+            self.fast.select(None);
+        }
         *mode_guard = mode;
         self.request_credential.store(0, Ordering::Release);
         drop(mode_guard);
@@ -1264,6 +1279,63 @@ impl AnthropicProvider {
     /// custom gateway, which may not implement server tools.
     fn first_party_api(&self) -> bool {
         self.direct_transport.api_url == API_URL
+    }
+
+    fn first_party_fast_api(&self) -> bool {
+        self.first_party_api()
+            && self.direct_transport.auth_mode == "header"
+            && self
+                .direct_transport
+                .auth_header
+                .eq_ignore_ascii_case("x-api-key")
+    }
+
+    fn fast_credential(&self) -> Option<fast_mode::Credential> {
+        use fast_mode::Credential;
+        use jcode_provider_core::ResolvedCredential;
+        match self.active_resolved_credential().or_else(|| {
+            if self.load_oauth_credentials().is_ok() {
+                Some(ResolvedCredential::Oauth)
+            } else if self.direct_api_key().is_ok() {
+                Some(ResolvedCredential::ApiKey)
+            } else {
+                None
+            }
+        })? {
+            ResolvedCredential::Oauth => Some(Credential::OAuth(
+                self.oauth_refresh_label()
+                    .unwrap_or_else(|| "default".into()),
+            )),
+            ResolvedCredential::ApiKey if self.first_party_fast_api() => Some(Credential::ApiKey),
+            _ => None,
+        }
+    }
+
+    fn fast_target(&self, model: &str) -> Option<fast_mode::Target> {
+        fast_mode::capability(model, false)?;
+        let credential = self.fast_credential()?;
+        fast_mode::capability(model, matches!(credential, fast_mode::Credential::OAuth(_)))?;
+        Some(fast_mode::Target {
+            model: model.to_string(),
+            credential,
+        })
+    }
+
+    fn fast_request(&self, model: &str, token: &str, is_oauth: bool) -> Option<fast_mode::Request> {
+        if !self.fast.requested_for(model) || (!is_oauth && !self.first_party_fast_api()) {
+            return None;
+        }
+        let credential = if is_oauth {
+            fast_mode::Credential::OAuth(usage_recording::credential_label(true, token)?)
+        } else {
+            fast_mode::Credential::ApiKey
+        };
+        let target = fast_mode::Target {
+            model: model.to_string(),
+            credential,
+        };
+        self.fast
+            .request(target, fast_mode::capability(model, is_oauth)?)
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1332,7 +1404,7 @@ fn anthropic_canonical_payload(request: &ApiRequest) -> serde_json::Result<Value
     let messages_value = serde_json::to_value(&request.messages)?;
     let system_value = serde_json::to_value(&request.system)?;
     let tools_value = serde_json::to_value(&request.tools)?;
-    Ok(Value::Object(serde_json::Map::from_iter([
+    let mut payload = serde_json::Map::from_iter([
         ("model".into(), json!(&request.model)),
         ("max_tokens".into(), json!(request.max_tokens)),
         ("thinking".into(), json!(&request.thinking)),
@@ -1341,7 +1413,11 @@ fn anthropic_canonical_payload(request: &ApiRequest) -> serde_json::Result<Value
         ("messages".into(), messages_value),
         ("system".into(), system_value),
         ("tools".into(), tools_value),
-    ])))
+    ]);
+    if let Some(speed) = request.speed {
+        payload.insert("speed".into(), json!(speed));
+    }
+    Ok(Value::Object(payload))
 }
 
 #[cfg(test)]
@@ -1368,6 +1444,7 @@ mod canonical_input_tests {
                 output_config: None,
                 temperature: Some(0.5),
                 service_tier: None,
+                speed: None,
                 stream: true,
                 effort_record: None,
             };
@@ -1441,6 +1518,7 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
+        let fast = self.fast_request(&model, &token, is_oauth);
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
@@ -1482,6 +1560,10 @@ impl Provider for AnthropicProvider {
             output_config,
             temperature,
             service_tier: self.current_service_tier_for_model(&model),
+            speed: fast
+                .as_ref()
+                .and_then(fast_mode::Request::mode)
+                .map(|_| "fast"),
             stream: true,
             effort_record,
         };
@@ -1537,6 +1619,7 @@ impl Provider for AnthropicProvider {
                 model_state,
                 direct_transport,
                 retry_settings,
+                fast,
             )
             .await;
         });
@@ -1577,6 +1660,9 @@ impl Provider for AnthropicProvider {
         let mut cached = self.credentials.try_write().map_err(|_| {
             anyhow::anyhow!("Cannot change Claude account while credentials are in use")
         })?;
+        if self.oauth_account_label().as_deref() != label {
+            self.fast.select(None);
+        }
         *self
             .oauth_account
             .write()
@@ -1663,6 +1749,9 @@ impl Provider for AnthropicProvider {
                 .any(|known| known == model)
         {
             anyhow::bail!("Model {} not supported by Anthropic provider", model);
+        }
+        if self.model() != model {
+            self.fast.select(None);
         }
         *self
             .model
@@ -1772,6 +1861,49 @@ impl Provider for AnthropicProvider {
         efforts
     }
 
+    fn speed_options(&self, model: &str) -> Vec<SpeedOption> {
+        let mut options = vec![SpeedOption::standard()];
+        let Some(target) = self.fast_target(model) else {
+            return options;
+        };
+        let (block, served) = self.fast.status(&target);
+        let availability = if block.is_some() {
+            SpeedAvailability::Unavailable
+        } else if served == Some(fast_mode::ServedSpeed::Fast) {
+            SpeedAvailability::Available
+        } else {
+            SpeedAvailability::Unknown
+        };
+        options.push(SpeedOption {
+            mode: SpeedMode::Fast,
+            availability,
+            reason: Some(match block {
+                Some(block) => block.detail(),
+                None => fast_mode::pricing_notice(&target),
+            }),
+        });
+        options
+    }
+
+    fn speed_mode(&self) -> SpeedMode {
+        match self.fast_target(&self.model()) {
+            Some(target) if self.fast.selected(&target) => SpeedMode::Fast,
+            _ => SpeedMode::Standard,
+        }
+    }
+
+    fn set_speed_mode(&self, mode: SpeedMode) -> Result<()> {
+        let target = match mode {
+            SpeedMode::Standard => None,
+            SpeedMode::Fast => Some(self.fast_target(&self.model()).context(
+                "Anthropic Fast is not supported on the current model and credential route",
+            )?),
+            SpeedMode::Ultrafast => anyhow::bail!("Anthropic does not offer Ultrafast speed"),
+        };
+        self.fast.select(target);
+        Ok(())
+    }
+
     fn service_tier(&self) -> Option<String> {
         match self
             .current_service_tier_for_model(&self.model())
@@ -1852,6 +1984,7 @@ impl Provider for AnthropicProvider {
             )),
             reasoning_effort: Arc::new(std::sync::RwLock::new(self.stored_reasoning_effort())),
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
+            fast: self.fast.fork(),
             credentials: Arc::new(RwLock::new(None)),
             oauth_account: std::sync::RwLock::new(self.oauth_account_label()),
             credential_mode: Arc::new(RwLock::new(self.credential_mode_snapshot())),
@@ -1905,6 +2038,7 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
+        let fast = self.fast_request(&model, &token, is_oauth);
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
@@ -1950,6 +2084,10 @@ impl Provider for AnthropicProvider {
             output_config,
             temperature,
             service_tier: self.current_service_tier_for_model(&model),
+            speed: fast
+                .as_ref()
+                .and_then(fast_mode::Request::mode)
+                .map(|_| "fast"),
             stream: true,
             effort_record,
         };
@@ -2004,6 +2142,7 @@ impl Provider for AnthropicProvider {
                 model_state,
                 direct_transport,
                 retry_settings,
+                fast,
             )
             .await;
         });
@@ -2064,246 +2203,8 @@ async fn force_refresh_oauth_token(
     Ok(refreshed.access_token)
 }
 
-/// Stream the response from Anthropic API
-#[expect(
-    clippy::too_many_arguments,
-    reason = "streaming requires transport, authentication, request, event, and session context"
-)]
-async fn stream_response(
-    client: Client,
-    token: String,
-    is_oauth: bool,
-    request: &ApiRequest,
-    tx: mpsc::Sender<Result<StreamEvent>>,
-    model_name: &str,
-    oauth_session_id: &str,
-    direct_transport: &DirectTransportConfig,
-    response_accepted: &mut bool,
-    usage_label: Option<&str>,
-) -> Result<()> {
-    use jcode_message_types::ConnectionPhase;
-    let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
-    if std::env::var("JCODE_ANTHROPIC_DEBUG")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        && let Ok(json) = serde_json::to_string_pretty(request)
-    {
-        jcode_base::logging::info(&format!("Anthropic request payload:\n{}", json));
-    }
-
-    let _ = tx
-        .send(Ok(StreamEvent::ConnectionPhase {
-            phase: ConnectionPhase::SendingRequest,
-        }))
-        .await;
-
-    let connect_start = std::time::Instant::now();
-    let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
-    // Build request with appropriate auth headers
-    let url = if is_oauth {
-        API_URL_OAUTH
-    } else {
-        direct_transport.api_url.as_str()
-    };
-    // Local HTTP regressions exercise the real OAuth retry loop without
-    // permitting a production environment override of the OAuth endpoint.
-    #[cfg(any(test, feature = "test-support"))]
-    let url = if is_oauth {
-        direct_transport.oauth_api_url.as_deref().unwrap_or(url)
-    } else {
-        url
-    };
-
-    let mut req = client.post(url);
-    if !is_oauth {
-        req = req.headers(
-            direct_transport
-                .headers
-                .clone()
-                .map_err(anyhow::Error::msg)?,
-        );
-    }
-    req = req.header("anthropic-version", API_VERSION).header(
-        "accept",
-        if is_oauth {
-            "application/json"
-        } else {
-            "text/event-stream"
-        },
-    );
-
-    if is_oauth {
-        // OAuth tokens require:
-        // 1. Bearer auth (NOT x-api-key)
-        // 2. User-Agent matching Claude CLI
-        // 3. Multiple beta headers
-        // 4. ?beta=true query param (in URL above)
-        let beta_header = anthropic_beta_header_with_thinking(
-            oauth_beta_headers(model_name),
-            request.thinking.is_some(),
-        );
-        let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
-        let beta_header = jcode_provider_anthropic::effort_controls::with_effort_control_beta(
-            &beta_header,
-            &request.messages,
-        );
-        req = apply_oauth_attribution_headers(
-            req.header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-                .header("anthropic-beta", beta_header),
-            oauth_session_id,
-        );
-    } else {
-        // Direct API keys use x-api-key
-        // Include prompt-caching beta header
-        let beta_header = if is_1m_model(model_name) {
-            "prompt-caching-2024-07-31,context-1m-2025-08-07"
-        } else {
-            "prompt-caching-2024-07-31"
-        };
-        let beta_header =
-            anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
-        let beta_header = jcode_provider_anthropic::effort_controls::with_effort_control_beta(
-            &beta_header,
-            &request.messages,
-        );
-        req = match direct_transport.auth_mode.as_str() {
-            "none" => req,
-            "bearer" => req.header("Authorization", format!("Bearer {token}")),
-            "header" => {
-                let header = HeaderName::from_bytes(direct_transport.auth_header.trim().as_bytes())
-                    .context("invalid JCODE_ANTHROPIC_AUTH_HEADER")?;
-                req.header(header, &token)
-            }
-            value => anyhow::bail!(
-                "invalid JCODE_ANTHROPIC_AUTH value '{value}' (expected bearer, header, or none)"
-            ),
-        };
-        req = req.header("anthropic-beta", beta_header);
-    }
-
-    let req = jcode_provider_core::request_compression::json_body(
-        req,
-        url,
-        request,
-        jcode_base::provider::request_compression_mode(),
-    )?;
-    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req,
-        stream_idle_timeout,
-    )
-    .await
-    .context("Failed to send request to Anthropic API")?;
-
-    let connect_ms = connect_start.elapsed().as_millis();
-    jcode_base::logging::info(&format!(
-        "HTTP connection established in {}ms (status={})",
-        connect_ms,
-        response.status()
-    ));
-
-    if is_oauth && (response.status().is_success() || response.status().as_u16() == 429) {
-        // Model responses already return real subscription limits, including
-        // quota walls. Keep those visible even when usage lookups are throttled.
-        // Recording them avoids a separate, heavily throttled usage lookup
-        // while the account is active. Never attribute API-key quotas here.
-        let headers = response.headers().clone();
-        let label = usage_label.map(str::to_owned);
-        let quota_token = token.clone();
-        tokio::task::spawn_blocking(move || {
-            jcode_base::usage::record_anthropic_response_limits(
-                &quota_token,
-                label.as_deref(),
-                &headers,
-            );
-        });
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
-        let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(jcode_provider_core::retry_after::error_with_retry_after(
-            format!("Anthropic API error ({}): {}", status, error_text),
-            retry_after,
-        ));
-    }
-
-    *response_accepted = true;
-    let _ = tx
-        .send(Ok(StreamEvent::ConnectionPhase {
-            phase: ConnectionPhase::WaitingForResponse,
-        }))
-        .await;
-
-    // Parse SSE stream
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
-    let mut sse_state = SseStreamState {
-        requested_model_base,
-        ..SseStreamState::default()
-    };
-
-    // Idle timeout between streamed chunks. Configurable via
-    // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
-    // so slow reasoning models don't trip a premature timeout (issue #434).
-    loop {
-        let chunk = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
-            Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
-            Ok(None) => break, // stream ended normally
-            Err(_) => {
-                jcode_base::logging::warn(&format!(
-                    "Anthropic SSE stream timed out (no data for {}s)",
-                    stream_idle_timeout.as_secs()
-                ));
-                anyhow::bail!(
-                    "Stream read timeout: no data received for {} seconds",
-                    stream_idle_timeout.as_secs()
-                );
-            }
-        };
-        buffer.push_str(&utf8.decode(&chunk));
-
-        // Process complete SSE events
-        while let Some(event) = parse_sse_event(&mut buffer) {
-            let events = process_sse_event(&event, &mut sse_state, is_oauth);
-            if event.event_type == "message_stop" {
-                // Record the effort this request ran at with its response, so
-                // later requests replay a change at this exact position.
-                if let Some(record) = request.effort_record.clone()
-                    && tx
-                        .send(Ok(StreamEvent::ProviderNative {
-                            provider:
-                                jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
-                                    .to_string(),
-                            item: record,
-                        }))
-                        .await
-                        .is_err()
-                {
-                    return Ok(());
-                }
-                usage_recording::record(usage_label, &request.model, &sse_state).await;
-                usage_recording::send_final_usage(&tx, &sse_state).await;
-                return Ok(());
-            }
-            for stream_event in events {
-                if let StreamEvent::Error { ref message, .. } = stream_event
-                    && is_retryable_error(&message.to_lowercase())
-                {
-                    anyhow::bail!("Retryable stream error: {}", message);
-                }
-                if tx.send(Ok(stream_event)).await.is_err() {
-                    return Ok(()); // Receiver dropped
-                }
-            }
-        }
-    }
-
-    usage_recording::send_final_usage(&tx, &sse_state).await;
-    Ok(())
-}
+mod messages_http;
+use messages_http::stream_response;
 
 mod error_classification;
 use error_classification::*;
@@ -2368,6 +2269,8 @@ struct SseStreamState {
     cache_creation_input_tokens: Option<u64>,
     served_model: Option<String>,
     service_tier: Option<String>,
+    fast_requested: bool,
+    served_speed: Option<fast_mode::ServedSpeed>,
     cache_creation_5m: Option<u64>,
     cache_creation_1h: Option<u64>,
     /// Lowercased base id of the model we asked for, so `message_start` can flag

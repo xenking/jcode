@@ -3,6 +3,13 @@ use super::*;
 use crate::sse_types::UsageInfo;
 
 pub(super) fn update_usage(state: &mut SseStreamState, usage: UsageInfo) {
+    if let Some(speed) = usage
+        .speed
+        .as_deref()
+        .and_then(fast_mode::ServedSpeed::from_usage)
+    {
+        state.served_speed = Some(speed);
+    }
     state.output_tokens = usage.output_tokens.map(u64::from).or(state.output_tokens);
     state.input_tokens = usage.input_tokens.map(u64::from).or(state.input_tokens);
     state.cache_read_input_tokens = usage
@@ -105,21 +112,17 @@ pub(super) async fn record(label: Option<&str>, requested_model: &str, state: &S
         state.cache_read_input_tokens,
         state.cache_creation_input_tokens,
     );
-    let tier = state.service_tier.clone();
+    let speed = match (state.served_speed, state.fast_requested) {
+        (Some(fast_mode::ServedSpeed::Fast), _) => Some("fast"),
+        (Some(fast_mode::ServedSpeed::Standard), _) | (None, false) => Some("standard"),
+        (None, true) => Some("unknown"),
+    };
     let (cache_5m, cache_1h) = (state.cache_creation_5m, state.cache_creation_1h);
     // Complete the durable write before forwarding terminal usage, independently
     // of the TUI consumer. Never charge incremental message_start/delta twice.
     if let Err(error) = tokio::task::spawn_blocking(move || {
         jcode_base::provider_activity::record_anthropic_oauth_usage(
-            &label,
-            &model,
-            input,
-            output,
-            read,
-            created,
-            tier.as_deref(),
-            cache_5m,
-            cache_1h,
+            &label, &model, input, output, read, created, speed, cache_5m, cache_1h,
         );
     })
     .await
@@ -241,6 +244,7 @@ mod tests {
                     output_config: None,
                     temperature: None,
                     service_tier: None,
+                    speed: None,
                     stream: true,
                     effort_record: None,
                 };

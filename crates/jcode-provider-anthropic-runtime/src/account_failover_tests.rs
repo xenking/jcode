@@ -576,6 +576,7 @@ fn http_retry_decision_with_policy(
                     output_config: None,
                     temperature: None,
                     service_tier: None,
+                    speed: None,
                     stream: true,
                     effort_record: None,
                 },
@@ -587,6 +588,7 @@ fn http_retry_decision_with_policy(
                 Arc::new(std::sync::RwLock::new("claude-sonnet-4-6".into())),
                 transport,
                 retry_settings,
+                None,
             ));
             let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 let mut rolled_back = false;

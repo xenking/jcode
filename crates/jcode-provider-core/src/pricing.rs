@@ -11,17 +11,20 @@ fn usd_per_token_str_to_micros_per_mtok(raw: &str) -> Option<u64> {
         .map(|usd_per_token| (usd_per_token * 1_000_000_000_000.0).round() as u64)
 }
 
-/// True when an Anthropic service tier value means fast mode. The Anthropic
-/// API spells the latency-optimized tier `auto`; jcode also accepts `priority`
-/// because `/fast on` is shared with OpenAI.
-fn anthropic_tier_is_fast(service_tier: Option<&str>) -> bool {
-    matches!(
-        service_tier
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("auto") | Some("priority")
-    )
+fn anthropic_price(
+    input_usd: f64,
+    output_usd: f64,
+    cache_read_usd: f64,
+    note: &str,
+) -> Option<RouteCheapnessEstimate> {
+    Some(RouteCheapnessEstimate::metered(
+        RouteCostSource::PublicApiPricing,
+        RouteCostConfidence::Exact,
+        usd_to_micros(input_usd),
+        usd_to_micros(output_usd),
+        Some(usd_to_micros(cache_read_usd)),
+        Some(note.to_string()),
+    ))
 }
 
 /// Published Anthropic API pricing (docs.anthropic.com/en/docs/about-claude/pricing).
@@ -30,46 +33,11 @@ fn anthropic_tier_is_fast(service_tier: Option<&str>) -> bool {
 /// includes the full 1M context window at standard pricing for Fable 5,
 /// Opus 4.8/4.7/4.6 and Sonnet 4.6, so the suffix never changes the estimate.
 pub fn anthropic_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
-    anthropic_api_pricing_with_tier(model, None)
-}
-
-/// Anthropic API pricing honoring the active service tier.
-///
-/// Fast mode (research preview) bills premium per-token rates on Opus
-/// 4.8/4.7/4.6; prompt-caching multipliers stack on top (cache read is 0.1x
-/// the fast-mode input rate). Tiers on models without fast-mode pricing fall
-/// back to standard rates.
-pub fn anthropic_api_pricing_with_tier(
-    model: &str,
-    service_tier: Option<&str>,
-) -> Option<RouteCheapnessEstimate> {
     let base = model.strip_suffix("[1m]").unwrap_or(model);
-    let exact = |input_usd: f64, output_usd: f64, cache_read_usd: f64, note: &str| {
-        Some(RouteCheapnessEstimate::metered(
-            RouteCostSource::PublicApiPricing,
-            RouteCostConfidence::Exact,
-            usd_to_micros(input_usd),
-            usd_to_micros(output_usd),
-            Some(usd_to_micros(cache_read_usd)),
-            Some(note.to_string()),
-        ))
-    };
-
-    if anthropic_tier_is_fast(service_tier) {
-        match base {
-            "claude-opus-4-8" => {
-                return exact(10.0, 50.0, 1.0, "Anthropic API fast mode pricing");
-            }
-            "claude-opus-4-7" | "claude-opus-4-6" => {
-                return exact(30.0, 150.0, 3.0, "Anthropic API fast mode pricing");
-            }
-            _ => {}
-        }
-    }
-
+    let exact = anthropic_price;
     match base {
         "claude-opus-5-5" => exact(4.0, 20.0, 0.20, "Anthropic API pricing"),
-        "claude-fable-5-2" => exact(8.0, 40.0, 0.20, "Anthropic API pricing"),
+        "claude-fable-5-2" | "claude-mythos-5-2" => exact(8.0, 40.0, 0.20, "Anthropic API pricing"),
         "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
@@ -85,6 +53,28 @@ pub fn anthropic_api_pricing_with_tier(
         "claude-haiku-4-5" => exact(1.0, 5.0, 0.1, "Anthropic API pricing"),
         _ => None,
     }
+}
+
+/// `auto` and `priority` refer to capacity commitments, not inference speed.
+/// Standard list prices are estimates and do not describe a private commitment.
+pub fn anthropic_api_pricing_with_tier(
+    model: &str,
+    _service_tier: Option<&str>,
+) -> Option<RouteCheapnessEstimate> {
+    anthropic_api_pricing(model)
+}
+
+/// Published first-party Fast rates. Use only for estimates of an explicit
+/// Fast choice or for usage confirmed by the provider as Fast.
+pub fn anthropic_api_fast_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
+    let base = model.strip_suffix("[1m]").unwrap_or(model);
+    let (input, output, cache_read) = match base {
+        "claude-fable-5-2" | "claude-mythos-5-2" => (16.0, 80.0, 0.40),
+        "claude-opus-5-5" => (8.0, 40.0, 0.40),
+        "claude-opus-5" | "claude-opus-4-8" => (10.0, 50.0, 1.0),
+        _ => return None,
+    };
+    anthropic_price(input, output, cache_read, "Anthropic API Fast list prices")
 }
 
 pub fn anthropic_oauth_pricing(model: &str, subscription: Option<&str>) -> RouteCheapnessEstimate {
@@ -393,29 +383,26 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_fast_mode_tier_bills_premium_rates() {
-        // Opus 4.6 fast mode: $30/$150, cache read 0.1x fast input.
-        let fast =
-            anthropic_api_pricing_with_tier("claude-opus-4-6", Some("auto")).expect("priced model");
-        assert_eq!(fast.input_price_per_mtok_micros, Some(30_000_000));
-        assert_eq!(fast.output_price_per_mtok_micros, Some(150_000_000));
-        assert_eq!(fast.cache_read_price_per_mtok_micros, Some(3_000_000));
-
-        // Opus 4.8 fast mode: $10/$50. `priority` spelling also accepted.
-        let opus48 = anthropic_api_pricing_with_tier("claude-opus-4-8", Some("priority"))
-            .expect("priced model");
-        assert_eq!(opus48.input_price_per_mtok_micros, Some(10_000_000));
-        assert_eq!(opus48.output_price_per_mtok_micros, Some(50_000_000));
-
-        // standard_only (off) and models without fast pricing use standard rates.
-        assert_eq!(
-            anthropic_api_pricing_with_tier("claude-opus-4-6", Some("standard_only")),
-            anthropic_api_pricing("claude-opus-4-6")
-        );
-        assert_eq!(
-            anthropic_api_pricing_with_tier("claude-sonnet-4-6", Some("auto")),
-            anthropic_api_pricing("claude-sonnet-4-6")
-        );
+    fn anthropic_fast_pricing_is_independent_of_capacity_tier() {
+        for (model, input, output, cached) in [
+            ("claude-opus-4-8", 10_000_000, 50_000_000, 1_000_000),
+            ("claude-opus-5", 10_000_000, 50_000_000, 1_000_000),
+            ("claude-opus-5-5[1m]", 8_000_000, 40_000_000, 400_000),
+            ("claude-fable-5-2", 16_000_000, 80_000_000, 400_000),
+            ("claude-mythos-5-2", 16_000_000, 80_000_000, 400_000),
+        ] {
+            let fast = anthropic_api_fast_pricing(model).unwrap();
+            assert_eq!(fast.input_price_per_mtok_micros, Some(input));
+            assert_eq!(fast.output_price_per_mtok_micros, Some(output));
+            assert_eq!(fast.cache_read_price_per_mtok_micros, Some(cached));
+            for tier in ["auto", "priority", "standard_only"] {
+                assert_eq!(
+                    anthropic_api_pricing_with_tier(model, Some(tier)),
+                    anthropic_api_pricing(model)
+                );
+            }
+        }
+        assert!(anthropic_api_fast_pricing("claude-opus-4-6").is_none());
     }
 
     #[test]

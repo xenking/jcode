@@ -17,11 +17,13 @@ pub(super) async fn run_stream_with_retries(
     model_state: Arc<std::sync::RwLock<String>>,
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
+    mut fast: Option<fast_mode::Request>,
 ) {
     let usage_label = usage_recording::credential_label(is_oauth, &initial_token);
     let mut token = initial_token;
     let mut last_error = None;
     let mut next_retry_delay = None;
+    let mut switching_to_standard = false;
     let mut attempted_forced_refresh = false;
     let original_model = model_name.clone();
     let mut model_name = model_name;
@@ -37,8 +39,18 @@ pub(super) async fn run_stream_with_retries(
     // shape; repair it once and retry instead of surfacing a 400.
     let mut prefill_repaired = false;
 
+    if let Some(block) = fast.as_ref().and_then(fast_mode::Request::block)
+        && tx
+            .send(Ok(StreamEvent::StatusDetail {
+                detail: block.detail(),
+            }))
+            .await
+            .is_err()
+    {
+        return;
+    }
     for attempt in 0..TRANSPORT_MAX_RETRIES {
-        if attempt > 0 {
+        if attempt > 0 && !std::mem::take(&mut switching_to_standard) {
             // Exponential backoff with jitter: ~1s, ~2s, ~4s
             let delay = jcode_provider_core::retry_after::retry_delay(
                 attempt,
@@ -93,12 +105,67 @@ pub(super) async fn run_stream_with_retries(
         )
         .await
         {
-            Ok(()) => {
+            Ok(served) => {
                 let _ = attempt_guard.finish().await;
+                if let Some(fast) = &fast {
+                    if let Some(served) = served {
+                        fast.confirm(served);
+                    }
+                    let status = match (fast.block(), served) {
+                        (Some(_), _) => None,
+                        (None, Some(fast_mode::ServedSpeed::Fast)) => {
+                            Some("Anthropic confirmed Fast speed")
+                        }
+                        (None, Some(fast_mode::ServedSpeed::Standard)) => {
+                            Some("Anthropic reported Standard speed after a Fast request")
+                        }
+                        (None, None) => Some("Anthropic did not confirm Fast speed"),
+                    };
+                    if let Some(status) = status
+                        && tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: status.into(),
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        jcode_base::logging::debug(
+                            "Anthropic Fast confirmation consumer disconnected",
+                        );
+                    }
+                }
                 return; // Success
             }
             Err(e) => {
                 let saw_output = attempt_guard.finish().await;
+                if fast.is_some() && (response_accepted || saw_output) {
+                    if tx.send(Err(e)).await.is_err() {
+                        jcode_base::logging::debug(
+                            "Anthropic Fast stream error consumer disconnected",
+                        );
+                    }
+                    return;
+                }
+                if let Some(fast) = fast.as_mut()
+                    && let Some(block) = e.downcast_ref::<fast_mode::FastBlock>()
+                {
+                    fast.fallback(block.clone());
+                    if tx
+                        .send(Ok(StreamEvent::StatusDetail {
+                            detail: block.detail(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    request.speed = None;
+                    // Fast's Retry-After applies to the Fast quota, not this
+                    // Standard retry. No second Fast attempt or nested retry loop.
+                    switching_to_standard = true;
+                    last_error = Some(e);
+                    continue;
+                }
                 // Use the full anyhow source chain ({:#}) rather than just the top
                 // context. The underlying cause (e.g. the HTTP/2 "stream error" or
                 // a connection reset) lives deeper than "Failed to send request to
@@ -130,6 +197,17 @@ pub(super) async fn run_stream_with_retries(
                         .await
                     {
                         Ok(refreshed_token) => {
+                            if fast.is_some()
+                                && usage_recording::credential_label(true, &refreshed_token)
+                                    != usage_label
+                            {
+                                if tx.send(Err(e.context(
+                                    "Anthropic OAuth refresh changed the account; Fast opt-in does not transfer",
+                                ))).await.is_err() {
+                                    jcode_base::logging::debug("Anthropic OAuth refresh status consumer disconnected");
+                                }
+                                return;
+                            }
                             jcode_base::logging::info(
                                 "Forced OAuth token refresh succeeded, retrying request.",
                             );
@@ -157,6 +235,7 @@ pub(super) async fn run_stream_with_retries(
                 // persist the switch for later turns. Server recommendations and
                 // the curated quality order both honor failover exclusions.
                 if !retry_settings.worker_request_is_pinned
+                    && fast.is_none()
                     && is_model_not_found_error(&error_str)
                     && !saw_output
                     && let Some(fallback) = anthropic_fallback_model(&tried_models, &error_str)
@@ -186,9 +265,12 @@ pub(super) async fn run_stream_with_retries(
                     continue;
                 }
                 if is_model_not_found_error(&error_str) && !saw_output {
-                    let _ = tx.send(Err(anyhow::anyhow!(
-                        "{e:#}\nAutomatic model failover has no eligible candidates (see provider.failover_excluded_models). Use /model to choose explicitly."
-                    ))).await;
+                    let guidance = if fast.is_some() {
+                        "Fast never substitutes another model. Use /model to choose explicitly."
+                    } else {
+                        "Automatic model failover has no eligible candidates (see provider.failover_excluded_models). Use /model to choose explicitly."
+                    };
+                    let _ = tx.send(Err(anyhow::anyhow!("{e:#}\n{guidance}"))).await;
                     return;
                 }
 
@@ -196,6 +278,7 @@ pub(super) async fn run_stream_with_retries(
                 // quota error before the usage cache observes the exhausted
                 // window. This is terminal for Fable, not a transient 429.
                 if !retry_settings.worker_request_is_pinned
+                    && fast.is_none()
                     && is_oauth
                     && !saw_output
                     && is_fable_scoped_limit_error(&model_name, &error_str)

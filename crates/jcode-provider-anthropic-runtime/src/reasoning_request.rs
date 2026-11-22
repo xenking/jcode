@@ -142,6 +142,7 @@ mod tests {
             output_config: None,
             temperature: None,
             service_tier: None,
+            speed: None,
             stream: true,
             effort_record: None,
         }

@@ -266,7 +266,7 @@ fn anthropic_priced_usage(
     output: Option<u64>,
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
-    tier: Option<&str>,
+    speed: Option<&str>,
     cache_creation_5m: Option<u64>,
     cache_creation_1h: Option<u64>,
 ) -> Totals {
@@ -279,34 +279,38 @@ fn anthropic_priced_usage(
         .unwrap_or(0)
         .checked_add(cache_creation_1h.unwrap_or(0))
         == Some(created);
-    let cost = jcode_provider_core::pricing::anthropic_api_pricing_with_tier(model, tier).and_then(
-        |price| {
-            if !complete {
-                return None;
-            }
-            let (input, output) = (input?, output?);
-            let input_price = price.input_price_per_mtok_micros?;
-            let output_price = price.output_price_per_mtok_micros?;
-            let read_price = if cached > 0 {
-                price.cache_read_price_per_mtok_micros?
-            } else {
-                0
-            };
-            Some(
-                (input as f64 * input_price as f64
-                    + output as f64 * output_price as f64
-                    + cached as f64 * read_price as f64
-                    + if writes_known {
-                        (cache_creation_5m.unwrap_or(0) as f64 * 1.25
-                            + cache_creation_1h.unwrap_or(0) as f64 * 2.0)
-                            * input_price as f64
-                    } else {
-                        0.0
-                    })
-                    / 1_000_000_000_000.0,
-            )
-        },
-    );
+    use jcode_provider_core::pricing::{anthropic_api_fast_pricing, anthropic_api_pricing};
+    let price = match speed {
+        Some("fast") => anthropic_api_fast_pricing(model),
+        None | Some("standard") => anthropic_api_pricing(model),
+        _ => None,
+    };
+    let cost = price.and_then(|price| {
+        if !complete {
+            return None;
+        }
+        let (input, output) = (input?, output?);
+        let input_price = price.input_price_per_mtok_micros?;
+        let output_price = price.output_price_per_mtok_micros?;
+        let read_price = if cached > 0 {
+            price.cache_read_price_per_mtok_micros?
+        } else {
+            0
+        };
+        Some(
+            (input as f64 * input_price as f64
+                + output as f64 * output_price as f64
+                + cached as f64 * read_price as f64
+                + if writes_known {
+                    (cache_creation_5m.unwrap_or(0) as f64 * 1.25
+                        + cache_creation_1h.unwrap_or(0) as f64 * 2.0)
+                        * input_price as f64
+                } else {
+                    0.0
+                })
+                / 1_000_000_000_000.0,
+        )
+    });
     Totals {
         requests: 1,
         input: input
@@ -324,7 +328,9 @@ fn anthropic_priced_usage(
 
 /// Record one authoritative Anthropic OAuth completion against its captured
 /// credential label. Input excludes both cache reads and cache creation.
-/// Tier is passed to the shared pricing helper. Cache-write costs are known
+/// Only acknowledged `usage.speed` permits a Fast estimate. `None` preserves
+/// Standard estimates for legacy callers, `Some("unknown")` for an unconfirmed
+/// Fast request leaves the price unknown. Cache-write costs are known
 /// only when the 5-minute and 1-hour breakdown sums to total cache creation.
 #[allow(clippy::too_many_arguments)]
 pub fn record_anthropic_oauth_usage(
@@ -334,7 +340,7 @@ pub fn record_anthropic_oauth_usage(
     output: Option<u64>,
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
-    tier: Option<&str>,
+    speed: Option<&str>,
     cache_creation_5m: Option<u64>,
     cache_creation_1h: Option<u64>,
 ) {
@@ -351,7 +357,7 @@ pub fn record_anthropic_oauth_usage(
         output,
         cache_read,
         cache_creation,
-        tier,
+        speed,
         cache_creation_5m,
         cache_creation_1h,
     );
@@ -511,19 +517,19 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_cache_ttl_and_fast_tier_pricing() {
-        for (tier, expected) in [
+    fn anthropic_cache_ttl_and_confirmed_speed_pricing() {
+        for (speed, expected) in [
             (None, 15.875),
-            (Some("auto"), 95.25),
-            (Some("priority"), 95.25),
+            (Some("standard"), 15.875),
+            (Some("fast"), 31.75),
         ] {
             let usage = anthropic_priced_usage(
-                "claude-opus-4-6",
+                "claude-opus-5",
                 Some(1_000_000),
                 Some(100_000),
                 Some(500_000),
                 Some(1_000_000),
-                tier,
+                speed,
                 Some(500_000),
                 Some(500_000),
             );
@@ -531,6 +537,18 @@ mod tests {
             assert_eq!(usage.unpriced_requests, 0);
             assert_eq!(usage.input, 2_500_000);
         }
+        let unconfirmed = anthropic_priced_usage(
+            "claude-opus-5",
+            Some(1_000_000),
+            Some(100_000),
+            None,
+            None,
+            Some("unknown"),
+            None,
+            None,
+        );
+        assert_eq!(unconfirmed.known_usd, 0.0);
+        assert_eq!(unconfirmed.unpriced_requests, 1);
         for (created, five, hour) in [
             (100, Some(99), Some(0)),
             (100, None, None),
