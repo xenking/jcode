@@ -418,6 +418,22 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Describe the speed choices for this model on this credential route.
+    fn speed_options(&self, _model: &str) -> Vec<SpeedOption> {
+        vec![SpeedOption::standard()]
+    }
+
+    fn speed_mode(&self) -> SpeedMode {
+        SpeedMode::Standard
+    }
+
+    fn set_speed_mode(&self, mode: SpeedMode) -> Result<()> {
+        match mode {
+            SpeedMode::Standard => Ok(()),
+            _ => anyhow::bail!("This route does not support {mode:?} speed"),
+        }
+    }
+
     /// Get the active service tier override (if applicable).
     fn service_tier(&self) -> Option<String> {
         None
@@ -932,6 +948,8 @@ impl NativeToolResult {
         }
     }
 }
+
+pub use jcode_message_types::{SpeedAvailability, SpeedMode, SpeedOption};
 
 /// Canonical User-Agent for generic outbound Jcode HTTP requests.
 pub const JCODE_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
