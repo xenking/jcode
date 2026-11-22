@@ -2,6 +2,10 @@
 
 Local text `read` reports a range past EOF separately from an empty file. A complete-file marker appears only when the returned window includes every line and no line was clipped. For files larger than 1 MiB the reader stops after the requested window when possible. It returns a continuation instead of scanning the suffix to report an exact count. Invalid UTF-8 in an unvisited suffix is not diagnosed until a read reaches it. A range at the end of a large file still scans its prefix to locate the requested line.
 
+## Native read scheduling
+
+Both agent turn loops can start up to four consecutive local regular-file `read` calls together. Writes, unknown tools, SDK overrides, remote execution and configured tool hooks are barriers. Results are published in request order. Explicit `batch` and `codemode` keep their existing execution semantics. Verify with `verify-jcode drive --evidence "$E" read-overlap`: two registry start events must precede either completion, and both file contents must appear in the correct order in the next model request.
+
 ## Version-checked line anchors (experimental)
 
 Enable in the configuration used by the daemon, then open a new session:
