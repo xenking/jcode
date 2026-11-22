@@ -3649,7 +3649,7 @@ pub(super) async fn handle_client(
                     follow_up.as_deref(),
                 );
                 let detail = Some(truncate_detail(&message, 160));
-                update_member_status_with_report_tldr(
+                let report_changed = update_member_status_with_report_tldr(
                     &req_session_id,
                     &status,
                     detail,
@@ -3662,9 +3662,9 @@ pub(super) async fn handle_client(
                     Some(&swarm_event_tx),
                 )
                 .await;
-                super::comm_control::close_reporter_task_on_terminal_report(
+                super::comm_control::persist_worker_report(
                     &req_session_id,
-                    &status,
+                    (&status, report_changed),
                     &swarm_members,
                     &swarms_by_id,
                     &swarm_plans,

@@ -7,7 +7,7 @@
 // this path: when the client-driven turn finishes, `handle_client` /
 // `CommReport` only update *member* status (`ready`/`failed`), never the plan
 // item. Terminalizing the task is the assignee's job (a `completed`/`failed`
-// `swarm report`, see `close_reporter_task_on_terminal_report`), or the
+// `swarm report`, see `persist_worker_report`), or the
 // coordinator's via task control / reassignment. These tests document that
 // contract so an accidental removal of the live-client skip (double-driving a
 // session) or a silent behavior change in the no-auto-flip gap is caught.
@@ -183,9 +183,9 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
 
     // A non-terminal report leaves the task open; a `completed` report from the
     // assignee closes it.
-    super::close_reporter_task_on_terminal_report(
+    super::persist_worker_report(
         worker,
-        "ready",
+        ("ready", false),
         &swarm_members,
         &swarms_by_id,
         &swarm_plans,
@@ -193,9 +193,9 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     )
     .await;
     assert_eq!(swarm_plans.read().await[swarm_id].items[0].status, "queued");
-    super::close_reporter_task_on_terminal_report(
+    super::persist_worker_report(
         worker,
-        "completed",
+        ("completed", false),
         &swarm_members,
         &swarms_by_id,
         &swarm_plans,
@@ -203,4 +203,84 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     )
     .await;
     assert_eq!(swarm_plans.read().await[swarm_id].items[0].status, "done");
+}
+
+#[tokio::test]
+async fn acknowledged_swarm_report_survives_restart_without_plan_task() -> Result<()> {
+    use crate::protocol::Request;
+    use crate::server::runtime::ServerRuntime;
+    use crate::transport::{Listener, Stream};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (_env, dir) = RuntimeEnvGuard::new();
+    let socket = dir.path().join("report.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(TestProvider),
+        socket.clone(),
+        dir.path().join("report-debug.sock"),
+    );
+    let swarm_id = "swarm-report-no-task";
+    let worker_id = "session-report-worker";
+    let mut worker = member(worker_id, swarm_id, "completed");
+    worker.latest_completion_report = Some("Previous report".into());
+    server
+        .swarm_state
+        .members
+        .write()
+        .await
+        .insert(worker_id.into(), worker);
+    server
+        .swarm_state
+        .swarms_by_id
+        .write()
+        .await
+        .insert(swarm_id.into(), HashSet::from([worker_id.into()]));
+    crate::server::persist_swarm_state_for(swarm_id, &server.swarm_state).await;
+
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon = runtime.spawn_main_accept_loop(Listener::bind(&socket)?);
+    let (reader, mut writer) = Stream::connect(&socket).await?.into_split();
+    let report = "Work finished and the focused tests passed.";
+    let request = Request::CommReport {
+        id: 1,
+        session_id: worker_id.into(),
+        status: Some("completed".into()),
+        message: report.into(),
+        validation: None,
+        follow_up: None,
+        tldr: None,
+    };
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&request)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(reader);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut line = String::new();
+            anyhow::ensure!(
+                reader.read_line(&mut line).await? > 0,
+                "daemon disconnected"
+            );
+            match serde_json::from_str(&line)? {
+                ServerEvent::Ack { id: 1 } => {}
+                ServerEvent::CommReportResponse { id: 1, .. } => return Ok::<_, anyhow::Error>(()),
+                event => anyhow::bail!("unexpected response: {event:?}"),
+            }
+        }
+    })
+    .await??;
+
+    // Read startup state before a shutdown or watchdog checkpoint can mask a lost report.
+    let loaded = crate::server::swarm_persistence::load_runtime_state();
+    drop(reader);
+    drop(writer);
+    runtime.shutdown().await;
+    daemon.await?;
+    assert_eq!(
+        loaded.members[worker_id]
+            .latest_completion_report
+            .as_deref(),
+        Some(report)
+    );
+    Ok(())
 }

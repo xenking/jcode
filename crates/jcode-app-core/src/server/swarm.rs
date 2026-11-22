@@ -1609,7 +1609,7 @@ pub(super) async fn update_member_status_with_report(
         event_counter,
         swarm_event_tx,
     )
-    .await
+    .await;
 }
 
 #[expect(
@@ -1627,7 +1627,7 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
-) {
+) -> bool {
     let completion_report = normalize_completion_report(completion_report);
     // Snapshot before publishing the status transition. Once published, an
     // await watcher can finalize concurrently and disappear from the pending
@@ -1668,12 +1668,12 @@ pub(super) async fn update_member_status_with_report_tldr(
         member_changed,
         status_changed,
         old_status,
-        _is_headless,
+        report_changed,
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
         if status != "stopped" && crate::turn_activity::session_is_stopped(session_id) {
-            return;
+            return false;
         }
         if let Some(member) = members.get_mut(session_id) {
             // The live gallery buffer mixes tool activity and partial prose.
@@ -1712,7 +1712,6 @@ pub(super) async fn update_member_status_with_report_tldr(
                 }
             }
             let name = member.friendly_name.clone();
-            let is_headless = member.is_headless;
             let report_back_to_session_id = member.report_back_to_session_id.clone();
             member.status = status.to_string();
             member.detail = detail;
@@ -1737,16 +1736,16 @@ pub(super) async fn update_member_status_with_report_tldr(
                 member_changed,
                 status_changed,
                 previous_status,
-                is_headless,
+                report_changed,
                 report_back_to_session_id,
             )
         } else {
-            (None, None, false, false, String::new(), false, None)
+            return false;
         }
     };
     if let Some(ref id) = swarm_id {
         if !member_changed {
-            return;
+            return false;
         }
 
         log_swarm_lifecycle(
@@ -1868,6 +1867,7 @@ pub(super) async fn update_member_status_with_report_tldr(
             }
         }
     }
+    report_changed
 }
 
 /// Inline workers have no entry in the server's live-session map. Clean their
