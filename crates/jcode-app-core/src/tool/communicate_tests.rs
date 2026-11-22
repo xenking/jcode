@@ -358,18 +358,17 @@ impl Provider for DelayedTestProvider {
     }
 
     fn name(&self) -> &str {
-        "claude"
+        // The embedded Jcode route derives its key from the provider name,
+        // not from ambient provider environment left by other socket tests.
+        "jcode"
     }
 
     fn model(&self) -> String {
-        "claude-communicate-test".into()
+        "communicate-test".into()
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        anyhow::ensure!(
-            model.strip_prefix("claude:").unwrap_or(model) == self.model(),
-            "Unexpected test route: {model}"
-        );
+        anyhow::ensure!(model == self.model(), "Unexpected test route: {model}");
         Ok(())
     }
 
