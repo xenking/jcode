@@ -167,7 +167,7 @@ fn load_at(path: &Path) -> Result<Option<Journal>> {
     load_json(path)
 }
 
-fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+pub(super) fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(
             serde_json::from_slice(&bytes)
@@ -206,7 +206,7 @@ fn try_lock(path: &Path) -> Result<Option<File>> {
     }
 }
 
-fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(super) fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
@@ -686,6 +686,7 @@ fn inode(_path: &Path) -> Result<u64> {
 }
 
 async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
+    let handoff = desktop_handoff(store, journal, "forward");
     if journal.desktop_swapped
         || match journal.incoming_inode {
             Some(expected) => {
@@ -698,7 +699,7 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
         store.save(journal)?;
         super::rollout_desktop::retire_stale_bridges(&journal.intent.app, &journal.intent.app)
             .await?;
-        return launch_desktop(store, journal).await;
+        return launch_desktop(store, journal, &handoff).await;
     }
     if journal.incoming_inode.is_none() {
         store.before(journal, "copy_incoming_bundle")?;
@@ -715,8 +716,9 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
         journal.backup_ready = true;
         store.after(journal, "previous bundle durable; installed app untouched")?;
     }
+    let pids = super::rollout_desktop::stage_windows(&journal.intent.app, &handoff)?;
     store.before(journal, "quit_desktop")?;
-    super::rollout_desktop::quit(&journal.intent.app).await?;
+    super::rollout_desktop::quit(&journal.intent.app, &pids).await?;
     super::rollout_desktop::retire_stale_bridges(&journal.intent.app, &journal.incoming_app)
         .await?;
     store.after(journal, "old desktop stopped")?;
@@ -729,28 +731,44 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     }
     journal.desktop_swapped = true;
     store.after(journal, "bundle atomically installed; backup retained")?;
-    launch_desktop(store, journal).await
+    launch_desktop(store, journal, &handoff).await
 }
 
-async fn launch_desktop(store: &Store, journal: &mut Journal) -> Result<()> {
-    if super::rollout_desktop::is_running(&journal.intent.app)? {
-        return Ok(());
-    }
+fn desktop_handoff(store: &Store, journal: &Journal, direction: &str) -> PathBuf {
+    store
+        .path
+        .with_file_name("desktop")
+        .join(&journal.id)
+        .join(format!("{direction}.json"))
+}
+
+async fn launch_desktop(store: &Store, journal: &mut Journal, handoff: &Path) -> Result<()> {
     store.before(journal, "launch_desktop")?;
-    super::rollout_desktop::launch(&journal.intent.app).await?;
+    super::rollout_desktop::launch(&journal.intent.app, handoff).await?;
     store.after(journal, "desktop launch requested")
 }
 
 async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
     store.phase(journal, Phase::RollingBack)?;
-    if journal.backup_ready {
+    let forward_handoff = desktop_handoff(store, journal, "forward");
+    let rollback_handoff = desktop_handoff(store, journal, "rollback");
+    let installed_incoming = journal.incoming_inode.is_some_and(|incoming| {
+        inode(&journal.intent.app).is_ok_and(|installed| installed == incoming)
+    });
+    if journal.backup_ready && (journal.desktop_swapped || installed_incoming) {
+        let pids = super::rollout_desktop::stage_windows(&journal.intent.app, &rollback_handoff)?;
         store.before(journal, "quit_failed_desktop")?;
-        super::rollout_desktop::quit(&journal.intent.app).await?;
+        super::rollout_desktop::quit(&journal.intent.app, &pids).await?;
         store.after(journal, "failed desktop stopped")?;
+        restore_bundle(store, journal)?;
     }
-    restore_bundle(store, journal)?;
-    if journal.backup_ready {
-        launch_desktop(store, journal).await?;
+    if rollback_handoff.try_exists()? {
+        launch_desktop(store, journal, &rollback_handoff).await?;
+    } else if journal.backup_ready
+        && (installed_incoming || forward_handoff.try_exists()?)
+        && !super::rollout_desktop::is_running(&journal.intent.app)?
+    {
+        launch_desktop(store, journal, &forward_handoff).await?;
     }
     restore_links(store, journal)?;
     store.phase(journal, Phase::RolledBack)?;

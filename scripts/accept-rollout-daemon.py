@@ -68,6 +68,17 @@ int main(int argc, char **argv) {
     FILE *launches = fopen(getenv("ROLLOUT_DESKTOP_LAUNCHES"), "a");
     if (!launches) return 2;
     fprintf(launches, "%d\n", getpid()); fclose(launches);
+    char manifest[4096];
+    snprintf(manifest, sizeof(manifest), "%s/windows/%d-1.json",
+             getenv("JCODE_DESKTOP_RESTART_DIR"), getpid());
+    FILE *state = fopen(manifest, "w");
+    if (!state) return 2;
+    fprintf(state, "{\"pid\":%d,\"window\":1,\"args\":[],\"env\":[],"
+                   "\"snapshot\":{\"format_version\":1,\"active\":0,\"slots\":[]}}", getpid());
+    fclose(state);
+    for (int index = 1; index < argc; ++index) {
+        if (!strncmp(argv[index], "--restore-state=", 16)) unlink(argv[index] + 16);
+    }
     char bridge[4096]; snprintf(bridge, sizeof(bridge), "%s/Contents/MacOS/jcode", getenv("JCODE_ROLLOUT_APP"));
     pid_t child = fork();
     if (child == 0) { execl(bridge, bridge, "--no-update", "api-bridge", NULL); _exit(3); }
@@ -93,6 +104,8 @@ class Host:
         self.debug = self.runtime / "jcode-debug.sock"
         self.journal = self.jcode_home / "rollout/journal.json"
         self.launches = root / "desktop-launches"
+        restart = root / "restart"
+        (restart / "windows").mkdir(parents=True)
         self.children = []
         for directory in (self.home, self.jcode_home, self.runtime, self.app, self.package / "Contents/MacOS"):
             directory.mkdir(parents=True, exist_ok=True)
@@ -124,6 +137,7 @@ class Host:
                         JCODE_SOCKET=str(self.socket), JCODE_API_SOCKET=str(self.runtime / "jcode-api.sock"),
                         JCODE_ROLLOUT_APP=str(self.app), JCODE_DEFERRED_AUTH_BOOTSTRAP="1",
                         ANTHROPIC_API_KEY="rollout-fixture-not-a-real-key", JCODE_NO_TELEMETRY="1",
+                        JCODE_DESKTOP_RESTART_DIR=str(restart),
                         ROLLOUT_DESKTOP_LAUNCHES=str(self.launches))
         if pause_backup:
             commands = root / "commands"

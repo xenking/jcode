@@ -1,5 +1,7 @@
 //! Desktop host effects and bridge provenance owned by the rollout daemon.
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -52,8 +54,179 @@ pub(super) fn is_running(app: &Path) -> Result<bool> {
     Ok(process_table()?.iter().any(|(_, _, exe)| exe == &desktop))
 }
 
-pub(super) async fn quit(app: &Path) -> Result<()> {
-    for pid in desktop_owned_pids(&process_table()?, app, std::process::id()) {
+#[derive(Deserialize, Serialize)]
+struct RestartWindow {
+    pid: u32,
+    window: u64,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    snapshot: serde_json::Value,
+    #[serde(default)]
+    process_env: BTreeMap<String, String>,
+}
+
+const PROFILE_ENV: &[&str] = &[
+    "HOME",
+    "XDG_STATE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "TMPDIR",
+    "JCODE_HOME",
+    "JCODE_RUNTIME_DIR",
+    "JCODE_SOCKET",
+    "JCODE_API_SOCKET",
+    "JCODE_DESKTOP_RESTART_DIR",
+    "JCODE_DESKTOP_CONFIG",
+];
+
+#[cfg(target_os = "macos")]
+fn started_at(pid: u32) -> Result<std::time::SystemTime> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo fills at most size bytes of the supplied buffer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    anyhow::ensure!(
+        read == size,
+        "cannot determine Desktop PID {pid} start time"
+    );
+    let info = unsafe { info.assume_init() };
+    Ok(std::time::UNIX_EPOCH
+        + Duration::from_secs(info.pbi_start_tvsec)
+        + Duration::from_micros(info.pbi_start_tvusec))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn started_at(_pid: u32) -> Result<std::time::SystemTime> {
+    bail!("Desktop rollout requires macOS process identities")
+}
+
+fn restart_dir(environment: &[String]) -> Result<PathBuf> {
+    let get = |name: &str| {
+        environment.iter().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name && !value.is_empty()).then(|| PathBuf::from(value))
+        })
+    };
+    if let Some(path) = get("JCODE_DESKTOP_RESTART_DIR") {
+        return Ok(path);
+    }
+    if let Some(path) = get("XDG_STATE_HOME") {
+        return Ok(path.join("jcode-desktop/restart"));
+    }
+    let home = get("HOME").context("Desktop process has no HOME")?;
+    Ok(home.join("Library/Application Support/Jcode/restart"))
+}
+
+fn read_restart_windows(
+    dir: &Path,
+    pid: u32,
+    start: std::time::SystemTime,
+) -> Result<Vec<RestartWindow>> {
+    let missing =
+        || format!("Desktop PID {pid} has no valid restart manifest; leaving Desktop running");
+    let mut windows = BTreeMap::new();
+    for entry in std::fs::read_dir(dir.join("windows")).with_context(missing)? {
+        let path = entry?.path();
+        let Some((owner, window)) = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split_once('-'))
+        else {
+            continue;
+        };
+        if path.extension().is_none_or(|ext| ext != "json") || owner.parse() != Ok(pid) {
+            continue;
+        }
+        let result = (|| -> Result<Option<RestartWindow>> {
+            let file = std::fs::File::open(&path)?;
+            // Check the owner's generation, not how long the window has been idle.
+            if file.metadata()?.modified()? < start {
+                return Ok(None);
+            }
+            let saved: RestartWindow = serde_json::from_reader(file)?;
+            anyhow::ensure!(saved.pid == pid && window.parse() == Ok(saved.window));
+            anyhow::ensure!(saved.snapshot["format_version"].as_u64() == Some(1));
+            let tabs = saved.snapshot["slots"].as_array().context("missing tabs")?;
+            anyhow::ensure!(saved.snapshot["active"].is_u64());
+            anyhow::ensure!(tabs.iter().all(|tab| {
+                tab["panel"]["session_id"].is_string() && tab["panel"]["draft"].is_object()
+            }));
+            Ok(Some(saved))
+        })();
+        let Some(saved) = result.map_err(|_| anyhow::anyhow!("{}", missing()))? else {
+            continue;
+        };
+        anyhow::ensure!(
+            windows.insert(saved.window, saved).is_none(),
+            "{}",
+            missing()
+        );
+    }
+    anyhow::ensure!(!windows.is_empty(), "{}", missing());
+    Ok(windows.into_values().collect())
+}
+
+pub(super) fn stage_windows(
+    app: &Path,
+    handoff: &Path,
+) -> Result<Vec<(u32, std::time::SystemTime)>> {
+    let mut pids = desktop_owned_pids(&process_table()?, app, std::process::id());
+    pids.sort_unstable();
+    if pids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut windows = Vec::new();
+    let mut owners = Vec::new();
+    for &pid in &pids {
+        let start = started_at(pid)?;
+        let environment = process_environment(pid).with_context(|| {
+            format!("cannot inspect Desktop PID {pid}; leaving Desktop running")
+        })?;
+        let profile: BTreeMap<_, _> = environment
+            .iter()
+            .filter_map(|entry| entry.split_once('='))
+            .filter(|(key, _)| PROFILE_ENV.contains(key))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
+        let captured = read_restart_windows(&restart_dir(&environment)?, pid, start)?;
+        windows.extend(captured.into_iter().map(|mut window| {
+            window.process_env = profile.clone();
+            window
+        }));
+        owners.push((pid, start));
+    }
+    std::fs::create_dir_all(handoff.parent().context("invalid Desktop handoff path")?)?;
+    for (index, window) in windows.iter().enumerate() {
+        super::rollout::save_at(&restore_file(handoff, index), &window.snapshot)?;
+    }
+    super::rollout::save_at(handoff, &windows)?;
+    Ok(owners)
+}
+
+pub(super) async fn quit(app: &Path, owners: &[(u32, std::time::SystemTime)]) -> Result<()> {
+    let mut current = desktop_owned_pids(&process_table()?, app, std::process::id());
+    current.sort_unstable();
+    anyhow::ensure!(
+        current == owners.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
+        "Desktop processes changed before quit; leaving Desktop running"
+    );
+    for &(pid, start) in owners {
+        anyhow::ensure!(
+            started_at(pid)? == start,
+            "Desktop PID {pid} changed before quit"
+        );
+    }
+    for &(pid, _) in owners {
         #[cfg(unix)]
         if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
             let error = std::io::Error::last_os_error();
@@ -72,8 +245,14 @@ pub(super) async fn quit(app: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn launch(app: &Path) -> Result<()> {
-    let mut command = launch_command(app);
+pub(super) async fn launch(app: &Path, handoff: &Path) -> Result<()> {
+    if let Some(windows) = super::rollout::load_json::<Vec<RestartWindow>>(handoff)? {
+        return launch_windows(app, handoff, windows).await;
+    }
+    if is_running(app)? {
+        return Ok(());
+    }
+    let command = launch_command(app);
     if app == Path::new("/Applications/Jcode.app") {
         // `open` returns once launch services accepted the app.
         let status = tokio::process::Command::from(command).status().await?;
@@ -82,8 +261,72 @@ pub(super) async fn launch(app: &Path) -> Result<()> {
         }
     } else {
         // The Desktop binary itself runs until quit; do not wait for it.
-        command.spawn()?;
+        spawn_desktop(command)?;
     }
+    Ok(())
+}
+
+fn restore_file(handoff: &Path, index: usize) -> PathBuf {
+    handoff.with_extension(format!("window-{index}.json"))
+}
+
+async fn launch_windows(app: &Path, handoff: &Path, windows: Vec<RestartWindow>) -> Result<()> {
+    let reset = !is_running(app)?;
+    for (index, window) in windows.into_iter().enumerate() {
+        let state = restore_file(handoff, index);
+        if !state.try_exists()? {
+            if !reset {
+                // A previous launch already consumed this window's staged copy.
+                continue;
+            }
+            super::rollout::save_at(&state, &window.snapshot)?;
+        }
+        let mut command = direct_launch_command(app);
+        command.args(window.args.iter().filter_map(|arg| match arg.as_str() {
+            "--single-panel" | "--no-sidebar" | "--workspace" => Some(arg.as_str()),
+            "--resume" => Some("--single-panel"),
+            _ => None,
+        }));
+        for key in PROFILE_ENV {
+            if let Some(value) = window.process_env.get(*key) {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        command.envs(
+            window
+                .env
+                .iter()
+                .filter(|(key, _)| {
+                    matches!(
+                        key.as_str(),
+                        "JCODE_DESKTOP_WORKING_DIR" | "JCODE_DESKTOP_STATE"
+                    )
+                })
+                .map(|(key, value)| (key, value)),
+        );
+        command.arg(format!("--restore-state={}", state.display()));
+        spawn_desktop(command)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while state.try_exists()? {
+            if tokio::time::Instant::now() >= deadline {
+                bail!(
+                    "Desktop did not restore window {}; saved handoff retained",
+                    index + 1
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    Ok(())
+}
+
+fn spawn_desktop(command: Command) -> Result<()> {
+    let mut child = tokio::process::Command::from(command).spawn()?;
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
     Ok(())
 }
 
@@ -99,18 +342,27 @@ fn launch_command(app: &Path) -> Command {
         open
     } else {
         // An overridden Applications path never invokes global launch services.
-        let mut direct = Command::new(app.join("Contents/MacOS/jcode-desktop"));
-        direct
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        direct
+        return direct_launch_command(app);
     };
+    clear_runtime_pin(&mut command);
+    command
+}
+
+fn direct_launch_command(app: &Path) -> Command {
+    let mut command = Command::new(app.join("Contents/MacOS/jcode-desktop"));
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    clear_runtime_pin(&mut command);
+    command
+}
+
+fn clear_runtime_pin(command: &mut Command) {
     command
         .env_remove(jcode_build_support::runtime_generation::TARGET_ENV)
         .env_remove(jcode_build_support::runtime_generation::RELOAD_ID_ENV)
         .env_remove(jcode_build_support::runtime_generation::GENERATION_ENV);
-    command
 }
 
 pub(super) async fn verify(app: &Path, cli: &str, desktop: &str) -> Result<()> {
@@ -864,6 +1116,47 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_windows_accept_unchanged_snapshots_but_not_previous_pid_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let windows = root.path().join("windows");
+        std::fs::create_dir(&windows).unwrap();
+        let generation = std::time::SystemTime::now() - Duration::from_secs(30);
+        let fixture = |pid, window| {
+            serde_json::json!({
+                "pid": pid, "window": window, "updated_at_ms": 1,
+                "args": [], "env": [],
+                "snapshot": {"format_version": 1, "active": 0, "slots": []}
+            })
+        };
+        let save = |name: &str, value: serde_json::Value| {
+            let path = windows.join(name);
+            std::fs::write(&path, value.to_string()).unwrap();
+            path
+        };
+        let stale = save("42-1.json", fixture(42, 1));
+        std::fs::File::options()
+            .write(true)
+            .open(stale)
+            .unwrap()
+            .set_modified(generation - Duration::from_secs(1))
+            .unwrap();
+        save("42-7.json", fixture(42, 7));
+        save("42-3.json", fixture(42, 3));
+        save("43-2.json", fixture(43, 2));
+        let saved = read_restart_windows(root.path(), 42, generation).unwrap();
+        assert_eq!(
+            saved
+                .into_iter()
+                .map(|window| window.window)
+                .collect::<Vec<_>>(),
+            [3, 7]
+        );
+        assert!(read_restart_windows(root.path(), 44, generation).is_err());
+        save("42-8.json", fixture(44, 8));
+        assert!(read_restart_windows(root.path(), 42, generation).is_err());
+    }
 
     #[test]
     fn a_scratch_tmpdir_does_not_hide_a_user_runtime_process() {
