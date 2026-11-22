@@ -85,17 +85,29 @@ pub(super) struct MemberRuntimeExtras {
 }
 
 #[derive(Default)]
-struct MemberProviderExtras {
+pub(super) struct MemberProviderExtras {
     name: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
 }
 
+impl From<&crate::protocol::SwarmMemberRuntime> for MemberProviderExtras {
+    fn from(runtime: &crate::protocol::SwarmMemberRuntime) -> Self {
+        Self {
+            name: runtime.provider.clone(),
+            model: runtime.model.clone(),
+            effort: runtime.effort.clone(),
+            worker_speed: None,
+        }
+    }
+}
+
 async fn member_provider_extras(
     session_id: &str,
     is_worker: bool,
     sessions: &SessionAgents,
+    mut retained: MemberProviderExtras,
 ) -> MemberProviderExtras {
     {
         let agents = sessions.read().await;
@@ -110,19 +122,24 @@ async fn member_provider_extras(
             };
         }
     }
-    // A busy worker still has a saved spawn policy. Never wait on its Agent.
-    MemberProviderExtras {
-        worker_speed: if is_worker {
-            super::run_blocking_io(|| {
-                crate::session::Session::load_startup_stub(session_id)
-                    .ok()
-                    .and_then(|session| session.worker_speed)
-            })
-        } else {
-            None
-        },
-        ..Default::default()
+    // A visible worker may not have published identity into the roster yet.
+    if (is_worker || retained.name.is_none() || retained.model.is_none())
+        && let Some(session) =
+            super::run_blocking_io(|| crate::session::Session::load_startup_stub(session_id).ok())
+    {
+        if retained.name.is_none() {
+            retained.name = session.provider_key.as_deref().and_then(|key| {
+                crate::provider::models::provider_for_model_with_hint("", Some(key))
+                    .map(str::to_owned)
+            });
+        }
+        retained.model = retained.model.or(session.model);
+        retained.effort = retained.effort.or(session.reasoning_effort);
+        if is_worker {
+            retained.worker_speed = session.worker_speed;
+        }
     }
+    retained
 }
 
 /// Gather live runtime extras for a single member session.
@@ -135,13 +152,14 @@ pub(super) async fn member_runtime_extras(
     is_worker: bool,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    retained: MemberProviderExtras,
 ) -> MemberRuntimeExtras {
     let activity = {
         let connections = client_connections.read().await;
         live_activity_snapshot(&connections, session_id, member_is_running)
     };
 
-    let provider = member_provider_extras(session_id, is_worker, sessions).await;
+    let provider = member_provider_extras(session_id, is_worker, sessions, retained).await;
 
     let metrics = crate::session_metrics::snapshot(
         session_id,
@@ -318,6 +336,7 @@ pub(super) async fn handle_comm_status(
             &target_session,
             member.report_back_to_session_id.is_some(),
             sessions,
+            (&member.runtime).into(),
         )
         .await;
 

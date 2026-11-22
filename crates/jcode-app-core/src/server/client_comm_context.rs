@@ -250,6 +250,7 @@ pub(super) async fn handle_comm_list(
             latest_completion_report: Option<String>,
             live_attachments: usize,
             status_age_secs: u64,
+            provider: super::comm_sync::MemberProviderExtras,
         }
 
         let touches = file_touch.reverse_snapshot().await;
@@ -279,6 +280,7 @@ pub(super) async fn handle_comm_list(
                             latest_completion_report: member.latest_completion_report.clone(),
                             live_attachments: member.event_txs.len(),
                             status_age_secs: member.last_status_change.elapsed().as_secs(),
+                            provider: (&member.runtime).into(),
                         }
                     })
                 })
@@ -293,6 +295,7 @@ pub(super) async fn handle_comm_list(
                 m.report_back_to_session_id.is_some(),
                 sessions,
                 client_connections,
+                m.provider,
             )
             .await;
 

@@ -376,7 +376,7 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
 }
 
 #[tokio::test]
-async fn comm_list_includes_member_status_and_detail() {
+async fn comm_list_and_status_include_busy_member_model_identity() {
     let requester = test_agent().await;
     let peer = test_agent().await;
 
@@ -426,7 +426,7 @@ async fn comm_list_includes_member_status_and_detail() {
                 status: "running".to_string(),
                 detail: Some("working on tests".to_string()),
                 friendly_name: Some("bear".to_string()),
-                report_back_to_session_id: None,
+                report_back_to_session_id: Some(requester_id.clone()),
                 latest_completion_report: None,
                 role: "agent".to_string(),
                 joined_at: Instant::now(),
@@ -435,7 +435,12 @@ async fn comm_list_includes_member_status_and_detail() {
                 output_tail: None,
                 todo_progress: None,
                 todo_items: Vec::new(),
-                runtime: crate::protocol::SwarmMemberRuntime::default(),
+                runtime: crate::protocol::SwarmMemberRuntime {
+                    model: Some("busy-worker-model".into()),
+                    provider: Some("busy-worker-provider".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                },
                 task_label: None,
             },
         ),
@@ -452,18 +457,23 @@ async fn comm_list_includes_member_status_and_detail() {
         ]),
     ));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let _busy = peer.lock().await;
 
-    handle_comm_list(
-        1,
-        requester_id,
-        &client_event_tx,
-        &swarm_members,
-        &swarms_by_id,
-        &file_touch,
-        &sessions,
-        &client_connections,
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        handle_comm_list(
+            1,
+            requester_id.clone(),
+            &client_event_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &file_touch,
+            &sessions,
+            &client_connections,
+        ),
     )
-    .await;
+    .await
+    .expect("list must not wait for the busy agent");
 
     match client_event_rx.recv().await.expect("comm list response") {
         ServerEvent::CommMembers { id, members } => {
@@ -474,6 +484,38 @@ async fn comm_list_includes_member_status_and_detail() {
                 .expect("peer entry present");
             assert_eq!(peer.status.as_deref(), Some("running"));
             assert_eq!(peer.detail.as_deref(), Some("working on tests"));
+            assert_eq!(peer.provider_name.as_deref(), Some("busy-worker-provider"));
+            assert_eq!(peer.provider_model.as_deref(), Some("busy-worker-model"));
+            assert_eq!(peer.provider_effort.as_deref(), Some("high"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::server::comm_sync::handle_comm_status(
+            2,
+            requester_id,
+            peer_id,
+            &sessions,
+            &swarm_members,
+            &client_connections,
+            &file_touch,
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("status must not wait for the busy agent");
+    match client_event_rx.recv().await.expect("comm status response") {
+        ServerEvent::CommStatusResponse { id: 2, snapshot } => {
+            assert_eq!(
+                snapshot.provider_name.as_deref(),
+                Some("busy-worker-provider")
+            );
+            assert_eq!(
+                snapshot.provider_model.as_deref(),
+                Some("busy-worker-model")
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
