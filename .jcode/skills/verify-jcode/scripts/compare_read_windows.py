@@ -2,7 +2,6 @@
 """Compare warm first-window reads in two private daemons via the provider boundary."""
 import argparse
 import contextlib
-import datetime
 import json
 import runpy
 import re
@@ -39,16 +38,18 @@ def main():
                 seat = seats[name]
                 offset = len(seat.records())
                 label = f'window-{i}-{name}'
-                seat.cli(label, label + ' [e2e:read-window]')
+                session = seat.cli(label, label + ' [e2e:read-window]')['session_id']
                 requests = [r for r in seat.records()[offset:] if r['agent'] and label in json.dumps(r['messages'])]
                 assert len(requests) == 2, (label, len(requests))
                 results = [m for m in requests[-1]['messages'] if m.get('tool_call_id') == 'call_window']
                 assert len(results) == 1 and 'fixture line 01' in str(results[0]['content']), results
                 if i:
-                    timing = re.search(r'tool timing: start=(\S+) finish=(\S+)', str(results[0]['content']))
-                    assert timing, results
-                    begin, end = [datetime.datetime.fromisoformat(s.replace('Z', '+00:00')) for s in timing.groups()]
-                    execution[name].append((end - begin).total_seconds() * 1000)
+                    entries = [entry for log in (seat.root / 'data/logs').glob('jcode-*.log')
+                               for entry in log.read_text(errors='replace').splitlines()
+                               if 'event=tool_lifecycle' in entry.lower() and 'phase=done' in entry
+                               and f'session_id={session}' in entry and 'tool_call_id=call_window' in entry]
+                    assert len(entries) == 1, (session, entries)
+                    execution[name].append(int(re.search(r'\belapsed_ms=(\d+)', entries[0])[1]))
                     times[name].append(1000 * (requests[1]['time'] - requests[0]['time']))
     report = {'fixture_mib': args.mib, 'metric': 'ms between provider request and next request containing tool result',
               'registry_execution_ms': execution, 'registry_median_ms': {k: statistics.median(v) for k, v in execution.items()},
