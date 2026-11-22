@@ -195,6 +195,7 @@ impl App {
 
     pub(super) fn note_client_interaction(&mut self) {
         self.wake_idle_hibernation();
+        self.record_rex_turn_outcome(None);
         // Every key/mouse/paste event routes through here, which makes this the
         // one place that reliably knows the user is actively driving the UI.
         self.last_user_interaction = Some(std::time::Instant::now());

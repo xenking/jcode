@@ -22,8 +22,10 @@ When `REX_BLOCK` is nonempty, the TUI writes OSC 7501 through its stdout writer,
 ESC ] 7501 ; state=idle:app=jcode ESC \
 ESC ] 7501 ; state=working:app=jcode ESC \
 ESC ] 7501 ; state=blocked:app=jcode:kind=question ESC \
+ESC ] 7501 ; state=done:app=jcode ESC \
+ESC ] 7501 ; state=error:app=jcode ESC \
 ```
 
-The inline `ask` picker reports `blocked` until the user answers. Other processing reports `working`; an inactive turn reports `idle`. This integration does not claim a separate permission or authentication lifecycle. Unchanged states produce no output. Failed writes can retry on the next update.
+The inline `ask` picker reports `blocked` until the user answers. Tool execution and scheduled automatic retries report `working`. A finished final response reports `done`; a turn that failed and stopped reports `error`. The next user interaction acknowledges the result. An inactive session with no unacknowledged result and a cancelled turn report `idle`. This integration does not infer separate permission or authentication states. Unchanged states produce no output. Failed writes can retry on the next update.
 
 On normal TUI quit, Jcode writes `ESC ] 7501 ; state=clear ESC \` once. Reloads keep the status because Jcode continues in the same block. Outside Rex, status reporting does nothing. No Rex subprocess is needed for status updates.

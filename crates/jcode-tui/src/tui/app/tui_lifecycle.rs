@@ -141,6 +141,7 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.record_rex_turn_outcome(Some(crate::tui::rex::TurnOutcome::Error));
         self.log_recovery_event(
             crate::logging::LogLevel::Warn,
             "RECOVERY_AUTO_RESUME_STOPPED",

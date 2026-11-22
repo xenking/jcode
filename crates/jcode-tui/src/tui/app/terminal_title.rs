@@ -5,6 +5,7 @@
 //! Time is the current/last observed working episode (including continuations),
 //! never the age of an open tab or a fabricated lifetime total.
 use super::{App, DisplayMessage};
+use crate::tui::rex::{AgentState, TurnOutcome};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -14,6 +15,7 @@ pub(super) struct TerminalTitleState {
     pub last_sent: String,
     pub last_refresh: Option<Instant>,
     pub last_work: Option<Duration>,
+    rex_outcome: Option<TurnOutcome>,
 }
 
 pub(super) fn edit_line_counts(message: &DisplayMessage) -> (usize, usize) {
@@ -61,18 +63,34 @@ fn title_with_metrics(
 }
 
 impl App {
+    pub(super) fn record_rex_turn_outcome(&mut self, outcome: Option<TurnOutcome>) {
+        self.terminal_title.get_mut().rex_outcome = outcome;
+    }
+
+    pub(super) fn rex_agent_state(&self) -> AgentState {
+        if self.ask_picker.is_some() {
+            AgentState::BlockedQuestion
+        } else if self.is_processing()
+            || (self.rate_limit_reset.is_some() && self.rate_limit_pending_message.is_some())
+            || self.pending_provider_failover.is_some()
+            || self.pending_automatic_failover_route.is_some()
+            || self.pending_automatic_failover_request_id.is_some()
+        {
+            AgentState::Working
+        } else {
+            self.terminal_title
+                .borrow()
+                .rex_outcome
+                .map(AgentState::from)
+                .unwrap_or(AgentState::Idle)
+        }
+    }
+
     pub(super) fn sync_terminal_agent_state(&self) {
         if self.suppress_terminal_title_updates {
             return;
         }
-        let state = if self.ask_picker.is_some() {
-            crate::tui::rex::AgentState::BlockedQuestion
-        } else if self.is_processing() {
-            crate::tui::rex::AgentState::Working
-        } else {
-            crate::tui::rex::AgentState::Idle
-        };
-        crate::tui::rex::sync(state);
+        crate::tui::rex::sync(self.rex_agent_state());
         if !self.is_remote_client() {
             return;
         }

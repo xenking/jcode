@@ -690,9 +690,16 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    let followup_scheduled = app.schedule_turn_end_followups_after_response(
-        app.last_stream_error.is_none() && app.streaming.response_output.has_final_response(),
+    let final_response =
+        app.last_stream_error.is_none() && app.streaming.response_output.has_final_response();
+    app.record_rex_turn_outcome(
+        if app.last_stream_error.is_some() || app.turn_guardrail_stopped {
+            Some(crate::tui::rex::TurnOutcome::Error)
+        } else {
+            final_response.then_some(crate::tui::rex::TurnOutcome::Done)
+        },
     );
+    let followup_scheduled = app.schedule_turn_end_followups_after_response(final_response);
     if !followup_scheduled {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {

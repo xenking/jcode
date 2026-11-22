@@ -8,7 +8,24 @@ pub(crate) enum AgentState {
     Idle,
     Working,
     BlockedQuestion,
+    Done,
+    Error,
     Clear,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TurnOutcome {
+    Done,
+    Error,
+}
+
+impl From<TurnOutcome> for AgentState {
+    fn from(outcome: TurnOutcome) -> Self {
+        match outcome {
+            TurnOutcome::Done => Self::Done,
+            TurnOutcome::Error => Self::Error,
+        }
+    }
 }
 
 impl AgentState {
@@ -17,6 +34,8 @@ impl AgentState {
             Self::Idle => "\x1b]7501;state=idle:app=jcode\x1b\\",
             Self::Working => "\x1b]7501;state=working:app=jcode\x1b\\",
             Self::BlockedQuestion => "\x1b]7501;state=blocked:app=jcode:kind=question\x1b\\",
+            Self::Done => "\x1b]7501;state=done:app=jcode\x1b\\",
+            Self::Error => "\x1b]7501;state=error:app=jcode\x1b\\",
             Self::Clear => "\x1b]7501;state=clear\x1b\\",
         }
     }
@@ -87,6 +106,8 @@ mod tests {
                 AgentState::BlockedQuestion,
                 "\x1b]7501;state=blocked:app=jcode:kind=question\x1b\\",
             ),
+            (AgentState::Done, "\x1b]7501;state=done:app=jcode\x1b\\"),
+            (AgentState::Error, "\x1b]7501;state=error:app=jcode\x1b\\"),
         ] {
             let mut reporter = Reporter::default();
             let mut output = Vec::new();

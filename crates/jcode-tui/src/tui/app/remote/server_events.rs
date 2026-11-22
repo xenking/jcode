@@ -471,9 +471,7 @@ fn handle_server_event_inner(
                     .as_ref()
                     .is_some_and(|picker| picker.tool_call_id == id)
             {
-                app.ask_picker = None;
-                app.clear_inline_view();
-                app.sync_btw_card();
+                app.dismiss_ask_picker();
             }
             super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
         }
@@ -928,6 +926,8 @@ fn handle_server_event_inner(
             not_queued,
         } => app.finish_soft_interrupt_recovery(id, &cancelled, &not_queued),
         ServerEvent::Interrupted => {
+            app.record_rex_turn_outcome(None);
+            app.dismiss_ask_picker();
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
                 app.remote_session_id,
@@ -1168,9 +1168,14 @@ fn handle_server_event_inner(
                     "client_turn_completed",
                     std::time::Duration::from_secs(30),
                 );
-                auto_poked = app.schedule_turn_end_followups_after_response(
-                    app.streaming.response_output.has_final_response(),
-                );
+                let final_response = app.streaming.response_output.has_final_response();
+                app.record_rex_turn_outcome(if app.turn_guardrail_stopped {
+                    Some(crate::tui::rex::TurnOutcome::Error)
+                } else {
+                    final_response.then_some(crate::tui::rex::TurnOutcome::Done)
+                });
+                app.dismiss_ask_picker();
+                auto_poked = app.schedule_turn_end_followups_after_response(final_response);
                 let mut stop_fields = app.recovery_log_fields("turn_end_policy");
                 stop_fields.push(("completed_request_id", id.to_string()));
                 stop_fields.push(("followup_scheduled", auto_poked.to_string()));
@@ -1272,6 +1277,10 @@ fn handle_server_event_inner(
                     "Server rejected queued continuation because a turn is still running; re-queued it and re-adopted the running turn",
                 );
                 return true;
+            }
+            if app.is_processing || app.current_message_id == Some(id) {
+                app.record_rex_turn_outcome(Some(crate::tui::rex::TurnOutcome::Error));
+                app.dismiss_ask_picker();
             }
             // Clamp server hints so a bogus value cannot park the turn for days.
             // Account rotation already ran on the server. A structured offer

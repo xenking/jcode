@@ -98,6 +98,72 @@ fn live_ask_result_preserves_questions_without_tool_input_event() {
     assert!(result.is_answered_ask());
 }
 
+#[test]
+fn rex_status_tracks_question_resume_success_and_acknowledgement() {
+    use crate::tui::rex::AgentState;
+
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert_eq!(app.rex_agent_state(), AgentState::Idle);
+    app.is_processing = true;
+    app.current_message_id = Some(42);
+    handle_server_event(
+        &mut app,
+        ServerEvent::ToolStart {
+            id: "question".into(),
+            name: "ask".into(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.rex_agent_state(), AgentState::Working);
+    handle_server_event(
+        &mut app,
+        ServerEvent::AskUserRequest {
+            request_id: "request".into(),
+            tool_call_id: "question".into(),
+            questions: serde_json::from_value(serde_json::json!([
+                {"question":"Which?", "options":[{"label":"A"},{"label":"B"}]}
+            ]))
+            .unwrap(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.rex_agent_state(), AgentState::BlockedQuestion);
+    assert!(
+        app.handle_ask_picker_key(crossterm::event::KeyCode::Enter)
+            .is_some()
+    );
+    assert_eq!(app.rex_agent_state(), AgentState::Working);
+
+    // This turn was cancelled before a final response. Its Done acknowledgement
+    // can arrive after Interrupted, but must not turn Idle into Done.
+    handle_server_event(&mut app, ServerEvent::Interrupted, &mut remote);
+    handle_server_event(&mut app, ServerEvent::Done { id: 42 }, &mut remote);
+    assert_eq!(app.rex_agent_state(), AgentState::Idle);
+
+    app.is_processing = true;
+    app.current_message_id = Some(43);
+    for event in [
+        ServerEvent::TextDelta {
+            text: "Completed.".into(),
+        },
+        ServerEvent::MessageEnd {
+            stop_reason: Some("stop".into()),
+        },
+    ] {
+        handle_server_event(&mut app, event, &mut remote);
+    }
+    assert_eq!(app.rex_agent_state(), AgentState::Working);
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
+    handle_server_event(&mut app, ServerEvent::Done { id: 43 }, &mut remote);
+    assert_eq!(app.rex_agent_state(), AgentState::Done);
+    app.note_client_interaction();
+    assert_eq!(app.rex_agent_state(), AgentState::Idle);
+}
+
 /// Point JCODE_HOME at a per-process temp dir when the environment does not
 /// already pin one, so tests never read the developer's real `~/.jcode`
 /// state (e.g. a populated ambient queue turns `has_notification()` on and

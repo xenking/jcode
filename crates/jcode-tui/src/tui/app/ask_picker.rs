@@ -231,11 +231,16 @@ impl super::App {
             }
             AskKeyOutcome::Done(response) => {
                 let request_id = picker.request_id.clone();
-                self.ask_picker = None;
-                self.clear_inline_view();
-                self.sync_btw_card();
+                self.dismiss_ask_picker();
                 Some((request_id, response))
             }
+        }
+    }
+
+    pub(super) fn dismiss_ask_picker(&mut self) {
+        if self.ask_picker.take().is_some() {
+            self.clear_inline_view();
+            self.sync_btw_card();
         }
     }
 }

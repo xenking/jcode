@@ -123,6 +123,8 @@ pub(in crate::tui::app) fn handle_server_event(
             if !same_turn {
                 app.deferred_stream_done_id = None;
                 app.deferred_stream_done_identity = None;
+                app.streaming.response_output.reset();
+                app.record_rex_turn_outcome(None);
             }
             app.is_processing = true;
             app.processing_started.get_or_insert_with(Instant::now);

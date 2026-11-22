@@ -61,6 +61,8 @@ fn issue_1685_openference_json_rate_limit_uses_retry_after_seconds_not_max_rpm()
 
 #[test]
 fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
+    use crate::tui::rex::AgentState;
+
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -82,6 +84,7 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
             .expect("held within budget");
         assert_eq!(pending.retry_attempts, attempt);
         assert!(app.rate_limit_reset.is_some());
+        assert_eq!(app.rex_agent_state(), AgentState::Working);
     }
 
     app.is_processing = true;
@@ -91,6 +94,7 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
         "no further automatic resend"
     );
     assert!(app.rate_limit_reset.is_none());
+    assert_eq!(app.rex_agent_state(), AgentState::Error);
     assert!(
         !app.auto_poke_incomplete_todos,
         "auto-poke must not restart the loop"
