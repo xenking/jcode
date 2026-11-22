@@ -133,6 +133,56 @@ async fn daemon_background_tasks(
     .await?
 }
 
+async fn daemon_side_questions(socket: &std::path::Path, request: &Value) -> ApiEvent {
+    use jcode_harness_api::{ApiRequest, ClientFrame};
+    use serde_json::json;
+
+    let (message, reply_kind) = match serde_json::from_value::<ClientFrame>(request.clone()).map(|frame| frame.request) {
+        Ok(ApiRequest::ListSideQuestions { parent_session_id }) if !parent_session_id.trim().is_empty() => (
+            json!({"type":"list_side_questions", "id":1, "parent_session_id":parent_session_id}),
+            "side_questions",
+        ),
+        Ok(ApiRequest::GetSideQuestionHistory { session_id }) if !session_id.trim().is_empty() => (
+            json!({"type":"get_side_question_history", "id":1, "session_id":session_id}),
+            "side_question_history",
+        ),
+        Ok(ApiRequest::PromoteSideQuestion { session_id }) if !session_id.trim().is_empty() => (
+            json!({"type":"promote_side_question", "id":1, "session_id":session_id}),
+            "done",
+        ),
+        _ => return ApiEvent::Error { code: ErrorCode::InvalidRequest, message: "Missing side-question session ID".into() },
+    };
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(&mut stream, &message).await?;
+        let mut line = String::new();
+        read_frame(&mut BufReader::new(stream), &mut line).await?;
+        let reply: Value = serde_json::from_str(&line)?;
+        if reply["id"] != 1 {
+            anyhow::bail!("Unexpected side-question reply ID");
+        }
+        match reply["type"].as_str() {
+            Some(kind) if kind == reply_kind => match kind {
+                "side_questions" => Ok(ApiEvent::SideQuestions { topics: serde_json::from_value(reply["topics"].clone())? }),
+                "side_question_history" if reply["session_id"] == message["session_id"] => Ok(ApiEvent::History {
+                    session_id: serde_json::from_value(reply["session_id"].clone())?,
+                    messages: serde_json::from_value(reply["messages"].clone())?,
+                    images: Vec::new(),
+                }),
+                "done" => Ok(ApiEvent::Ok),
+                _ => anyhow::bail!("Unexpected side-question reply session"),
+            },
+            Some("error") => anyhow::bail!("{}", reply["message"].as_str().unwrap_or("Side-question request failed")),
+            _ => anyhow::bail!("Unexpected side-question reply"),
+        }
+    }).await;
+    match response {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+        Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+    }
+}
+
 #[derive(Default)]
 struct TaskWatch {
     session_id: String,
@@ -642,6 +692,7 @@ where
     let background_tasks_supported = daemon_caps
         .iter()
         .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
+    let side_questions_supported = daemon_caps.iter().any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -707,6 +758,7 @@ where
             .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
+            .chain(side_questions_supported.then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()
@@ -725,6 +777,7 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.side_questions_supported = side_questions_supported;
     state.force_stop_turn_supported = force_stop_turn_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
@@ -828,6 +881,16 @@ where
                             message: "This runtime does not support manual Shake tools.".into(),
                         },
                     )).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("list_side_questions" | "get_side_question_history" | "promote_side_question")) {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if side_questions_supported {
+                        daemon_side_questions(&legacy_socket, &request).await
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support side questions.".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
                 if request["req"] == "list_sessions" {

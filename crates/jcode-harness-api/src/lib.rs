@@ -45,6 +45,7 @@ pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::SessionImageRef;
+pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_session_types::{
     AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY,
     ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextActionStatus,
@@ -78,7 +79,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 22;
+pub const API_VERSION_MINOR: u32 = 23;
 
 pub use jcode_background_types::{
     BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,

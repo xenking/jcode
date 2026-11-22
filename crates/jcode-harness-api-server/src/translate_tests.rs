@@ -2911,6 +2911,24 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
 }
 
 #[test]
+fn side_question_fork_never_falls_back_to_an_ordinary_split() {
+    let request = json!({"req": "fork_side_question", "id": 1, "session_id": "parent"});
+    let mut old = BridgeState::default();
+    old.session_id = Some("parent".into());
+    assert!(matches!(
+        only_reply_event(old.api_request_to_legacy(&request)),
+        ApiEvent::Error { code: ErrorCode::UnknownRequest, .. }
+    ));
+
+    let mut current = BridgeState::default();
+    current.session_id = Some("parent".into());
+    current.side_questions_supported = true;
+    // A capable backend must use the distinct durable side-question fork.
+    let output = current.api_request_to_legacy(&request);
+    assert!(matches!(&output[..], [Outbound::Legacy(frame)] if frame["type"] == "split_side_question"));
+}
+
+#[test]
 fn unattached_list_sessions_discovers_all_persisted_records() {
     let home = ScopedJcodeHome::new("persisted-discovery");
     let first_root = home.path.join("first-project");

@@ -944,7 +944,11 @@ impl Request {
             Request::SetSessionEnv { id, .. } => *id,
             Request::SetSessionSaved { id, .. } => *id,
             Request::PersistSession { id } => *id,
-            Request::Split { id } => *id,
+            Request::Split { id }
+            | Request::SplitSideQuestion { id }
+            | Request::ListSideQuestions { id, .. }
+            | Request::GetSideQuestionHistory { id, .. }
+            | Request::PromoteSideQuestion { id, .. } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
@@ -999,6 +1003,9 @@ impl Request {
             Request::Ping { .. }
                 | Request::OpenrigHostIdentity { .. }
                 | Request::SessionContextBreakdown { .. }
+                | Request::ListSideQuestions { .. }
+                | Request::GetSideQuestionHistory { .. }
+                | Request::PromoteSideQuestion { .. }
                 | Request::SessionShakeTools { .. }
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a

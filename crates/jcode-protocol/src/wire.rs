@@ -716,6 +716,18 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    #[serde(rename = "split_side_question")]
+    SplitSideQuestion { id: u64 },
+
+    #[serde(rename = "list_side_questions")]
+    ListSideQuestions { id: u64, parent_session_id: String },
+
+    #[serde(rename = "get_side_question_history")]
+    GetSideQuestionHistory { id: u64, session_id: String },
+
+    #[serde(rename = "promote_side_question")]
+    PromoteSideQuestion { id: u64, session_id: String },
+
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
     Transfer { id: u64 },

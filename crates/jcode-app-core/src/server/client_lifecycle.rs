@@ -2739,6 +2739,16 @@ pub(super) async fn handle_client(
                 handle_split(id, &client_session_id, &agent, &client_event_tx).await;
             }
 
+            Request::SplitSideQuestion { id } => {
+                let event = super::client_actions::handle_split_side_question(id, &client_session_id, &agent);
+                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: SplitSideQuestion");
+            }
+
+            request @ (Request::ListSideQuestions { .. } | Request::GetSideQuestionHistory { .. } | Request::PromoteSideQuestion { .. }) => {
+                let event = super::client_lightweight_control::handle_side_question_control(request).await;
+                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: side question read");
+            }
+
             Request::Transfer { id } => {
                 if reject_if_agent_busy_for_request(
                     id,

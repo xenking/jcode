@@ -105,6 +105,9 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Immutable after the initial fork. Hidden is visibility, not provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    side_question_message_start: Option<usize>,
     #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
@@ -314,6 +317,8 @@ struct SessionStartupStub {
     #[serde(default)]
     hidden: bool,
     #[serde(default)]
+    side_question_message_start: Option<usize>,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
@@ -403,6 +408,7 @@ impl Session {
         session.last_active_at = stub.last_active_at;
         session.is_debug = stub.is_debug;
         session.hidden = stub.hidden;
+        session.side_question_message_start = stub.side_question_message_start;
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.migration_epoch = stub.migration_epoch;
@@ -449,6 +455,7 @@ impl Session {
         session.last_active_at = snapshot.last_active_at;
         session.is_debug = snapshot.is_debug;
         session.hidden = snapshot.hidden;
+        session.side_question_message_start = snapshot.side_question_message_start;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
         session.replay_events = snapshot.replay_events;
@@ -971,6 +978,7 @@ impl Session {
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
+            side_question_message_start: None,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -1038,6 +1046,7 @@ impl Session {
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
+            side_question_message_start: None,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -2118,6 +2127,8 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default)]
     hidden: bool,
     #[serde(default)]
+    side_question_message_start: Option<usize>,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
@@ -2125,6 +2136,9 @@ struct RemoteStartupSessionSnapshot {
 
 #[path = "session/image_archive.rs"]
 mod image_archive;
+#[path = "session/side_questions.rs"]
+mod side_questions;
+pub use side_questions::load_side_question_history;
 #[path = "session/images.rs"]
 mod images;
 pub(crate) use images::is_image_annotation;

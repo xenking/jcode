@@ -828,6 +828,29 @@ pub(super) async fn handle_split(
     });
 }
 
+pub(super) fn handle_split_side_question(
+    id: u64,
+    parent_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+) -> ServerEvent {
+    let idle_agent = agent.try_lock().ok();
+    match session_transfer_snapshot::snapshot_child_session(
+        parent_session_id,
+        idle_agent.as_ref().map(|agent| agent.session_for_split()),
+        true,
+    ) {
+        Ok(child) => ServerEvent::SideQuestionForked {
+            id,
+            topic: child.side_question_topic().expect("new side-question child"),
+        },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Could not fork side question: {error:#}"),
+            retry_after_secs: None,
+        },
+    }
+}
+
 pub(super) async fn handle_transfer(
     id: u64,
     client_session_id: &str,

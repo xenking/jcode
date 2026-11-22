@@ -21,6 +21,7 @@ import {
 } from "./structured.js";
 import {
   API_VERSION_MAJOR,
+  SIDE_QUESTIONS_CAPABILITY,
   type AppletAction,
   type AnyApiEvent,
   type ApiEvent,
@@ -40,6 +41,7 @@ import {
   type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
+  type SideQuestionTopic,
   type SessionSearchHit,
   type SessionToolDefinition,
   type TextMatch,
@@ -584,6 +586,39 @@ export class JcodeClient extends EventEmitter {
       "session_forked",
     );
     return frame.session;
+  }
+
+  private requireSideQuestions(): void {
+    if (!this.supports(SIDE_QUESTIONS_CAPABILITY)) {
+      throw new HarnessError("unsupported", "This runtime does not support side questions.");
+    }
+  }
+
+  async forkSideQuestion(parentSessionId: string): Promise<SideQuestionTopic> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply(
+      { req: "fork_side_question", session_id: parentSessionId }, "side_question_forked",
+    );
+    return frame.topic;
+  }
+
+  async listSideQuestions(parentSessionId: string): Promise<SideQuestionTopic[]> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply(
+      { req: "list_side_questions", parent_session_id: parentSessionId }, "side_questions",
+    );
+    return frame.topics;
+  }
+
+  async getSideQuestionHistory(sessionId: string): Promise<HistoryMessage[]> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply({ req: "get_side_question_history", session_id: sessionId }, "history");
+    return frame.messages;
+  }
+
+  async promoteSideQuestion(sessionId: string): Promise<void> {
+    this.requireSideQuestions();
+    await this.requestOk({ req: "promote_side_question", session_id: sessionId });
   }
 
   async detachSession(sessionId: string): Promise<void> {

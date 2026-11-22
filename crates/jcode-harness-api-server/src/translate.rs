@@ -81,6 +81,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_session_saved",
     "get_runtime_info",
     "fork_session",
+    "fork_side_question",
     "transfer_session",
     "read_file",
     "find_files",
@@ -203,6 +204,7 @@ pub struct BridgeState {
     pending_recovery_history: Option<(u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
+    pub(crate) side_questions_supported: bool,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -397,6 +399,10 @@ impl BridgeState {
     fn translate_request(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
+
+        if req == "fork_side_question" && !self.side_questions_supported {
+            return Self::error_reply(api_id, ErrorCode::UnknownRequest, "This runtime does not support side questions.");
+        }
 
         // Stateful requests only mean something once this connection is
         // attached. Forwarding one before then is not merely useless: the
@@ -744,6 +750,14 @@ impl BridgeState {
                 self.pending_fork_id = Some((id, api_id));
                 vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
             }
+            "fork_side_question" => {
+                if request["session_id"].as_str().is_none_or(str::is_empty) {
+                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing parent session ID");
+                }
+                let id = self.legacy_id();
+                self.pending_fork_id = Some((id, api_id));
+                vec![Outbound::Legacy(json!({"type": "split_side_question", "id": id}))]
+            }
             "transfer_session" => {
                 let id = self.legacy_id();
                 self.pending_fork_id = Some((id, api_id));
@@ -1059,8 +1073,10 @@ impl BridgeState {
                 // live snapshot so unattached dashboards and global event
                 // subscribers discover complete session state.
                 let limit = request["limit"].as_u64().map(|limit| limit as usize);
+                let hidden = Self::hidden_side_question_ids();
+                let scan_limit = limit.map(|limit| limit.saturating_add(hidden.len()));
                 let mut ids: BTreeSet<String> =
-                    Self::stored_session_ids(limit).into_iter().collect();
+                    Self::stored_session_ids(scan_limit).into_iter().collect();
                 if limit.is_some() {
                     // Bookmarks are how users find old work, so a recency
                     // limit must never hide them from pickers.
@@ -1071,6 +1087,7 @@ impl BridgeState {
                 if let Some(attached) = self.session_id.clone() {
                     ids.insert(attached);
                 }
+                ids.retain(|id| !hidden.contains(id));
                 if let Some(limit) = limit {
                     let mut recent: Vec<_> = ids.into_iter().collect();
                     recent.sort_unstable_by_key(|id| {
@@ -1081,7 +1098,7 @@ impl BridgeState {
                 }
                 // Connected user clients must remain discoverable even when
                 // their idle session is older than the persisted recency page.
-                ids.extend(self.user_connected_sessions.iter().cloned());
+                ids.extend(self.user_connected_sessions.iter().filter(|id| !hidden.contains(*id)).cloned());
                 // Titles are deliberately not cached. A rename is persisted
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
@@ -2629,6 +2646,17 @@ impl BridgeState {
                     vec![ServerFrame::reply(api_id, ApiEvent::Ok)]
                 } else {
                     vec![]
+                }
+            }
+            "side_question_forked" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some((_, api_id)) = self.pending_fork_id.filter(|(pending, _)| *pending == id) else {
+                    return vec![];
+                };
+                self.pending_fork_id = None;
+                match serde_json::from_value(event["topic"].clone()) {
+                    Ok(topic) => vec![ServerFrame::reply(api_id, ApiEvent::SideQuestionForked { topic })],
+                    Err(error) => Self::invalid_daemon_event(Some(api_id), error.to_string()),
                 }
             }
             "split_response" => {
@@ -4183,6 +4211,21 @@ impl BridgeState {
             );
         }
         let _ = transaction.commit();
+    }
+
+    fn hidden_side_question_ids() -> BTreeSet<String> {
+        let Some(home) = Self::jcode_home() else {
+            return BTreeSet::new();
+        };
+        let path = home.join("state").join(jcode_session_types::SIDE_QUESTION_VISIBILITY_DIR);
+        std::fs::read_dir(path).into_iter().flatten().flatten().filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()?.to_str()? != "json"
+                || !std::fs::read(&path).is_ok_and(|bytes| bytes == b"true") {
+                return None;
+            }
+            Some(path.file_stem()?.to_str()?.to_owned())
+        }).collect()
     }
 
     fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
