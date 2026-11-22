@@ -368,6 +368,9 @@ impl Session {
     }
 
     fn checkpoint_snapshot(&mut self, snapshot_path: &Path, journal_path: &Path) -> Result<()> {
+        if self.is_ephemeral() {
+            return Ok(());
+        }
         // Remote `/restart` and `/reload` save the client's stub; writing it as a
         // snapshot wiped the server-owned transcript and deleted its journal.
         if self.persist_state.transcript_stripped && snapshot_path.exists() {
@@ -671,7 +674,10 @@ impl Session {
     /// Unlike routine turn saves, an unload requires synchronous durability
     /// and rejects the migration lease's successful no-write result.
     pub fn save_for_idle_unload(&mut self) -> Result<()> {
-        if self.persist_state.transcript_stripped || self.migration_lease_block().is_some() {
+        if self.is_ephemeral()
+            || self.persist_state.transcript_stripped
+            || self.migration_lease_block().is_some()
+        {
             bail!("Session {} cannot be checkpointed for idle unload", self.id);
         }
         self.save_prepared()?;
@@ -716,6 +722,9 @@ impl Session {
     }
 
     fn save_inner(&mut self, force: bool, reject_lease: bool) -> Result<()> {
+        if self.is_ephemeral() {
+            return Ok(());
+        }
         // Shutdown waits for this guard so it cannot exit mid-checkpoint.
         let pre_start = Instant::now();
         let _save_guard = SAVES_IN_FLIGHT

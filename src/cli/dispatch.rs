@@ -272,7 +272,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             message,
             json,
             ndjson,
+            output_last_message,
+            ephemeral,
         }) => {
+            let persistence =
+                commands::RunPersistence::from_args(args.resume.as_deref(), ephemeral)?;
+            let message = commands::RunInput::from(message).read()?;
             register_on_demand_server_spawner_for_run(
                 args.provider,
                 args.model.clone(),
@@ -281,10 +286,18 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_single_message_command(
                 &args.provider,
                 args.model.as_deref(),
-                args.resume.as_deref(),
+                persistence,
                 &message,
-                json,
-                ndjson,
+                commands::RunOutput {
+                    format: if json {
+                        commands::RunFormat::Json
+                    } else if ndjson {
+                        commands::RunFormat::Ndjson
+                    } else {
+                        commands::RunFormat::Plain
+                    },
+                    last_message: output_last_message.as_deref(),
+                },
             )
             .await?;
         }

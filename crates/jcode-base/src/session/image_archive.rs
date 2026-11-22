@@ -3,6 +3,21 @@ use super::{
     images::{archive_marker, image_id, is_archive_marker, write_archived_image},
 };
 
+fn archive_image(
+    session: &Session,
+    message_id: &str,
+    ordinal: usize,
+    media_type: &str,
+    data: &str,
+) -> anyhow::Result<String> {
+    if session.is_ephemeral() {
+        return Ok("[Older tool screenshot omitted from history]".to_owned());
+    }
+    let id = image_id(&session.id, message_id, ordinal);
+    write_archived_image(&id, data)?;
+    Ok(archive_marker(&id, media_type))
+}
+
 /// Archive oldest inline images before request-size recovery removes them from
 /// the model context. A failed write leaves the complete transcript untouched.
 pub(super) fn archive_to_budget(session: &mut Session, target: usize) -> usize {
@@ -31,15 +46,16 @@ pub(super) fn archive_to_budget(session: &mut Session, target: usize) -> usize {
         let ContentBlock::Image { media_type, data } = &message.content[block_index] else {
             unreachable!()
         };
-        let id = image_id(&session.id, &message.id, ordinal);
-        if let Err(error) = write_archived_image(&id, data) {
-            crate::logging::info(&format!(
-                "Cannot archive image for session {}: {error}",
-                session.id
-            ));
-            return 0;
+        match archive_image(session, &message.id, ordinal, media_type, data) {
+            Ok(marker) => archived.push((message_index, block_index, marker)),
+            Err(error) => {
+                crate::logging::info(&format!(
+                    "Cannot archive image for session {}: {error}",
+                    session.id
+                ));
+                return 0;
+            }
         }
-        archived.push((message_index, block_index, archive_marker(&id, media_type)));
         total = total.saturating_sub(length);
     }
     let count = archived.len();
@@ -98,15 +114,16 @@ pub(super) fn archive_and_decay(session: &mut Session) -> usize {
         let ContentBlock::Image { media_type, data } = &message.content[block_index] else {
             unreachable!()
         };
-        let id = image_id(&session.id, &message.id, ordinal);
-        if let Err(error) = write_archived_image(&id, data) {
-            crate::logging::info(&format!(
-                "Cannot archive tool image for session {}: {error}",
-                session.id
-            ));
-            return 0;
+        match archive_image(session, &message.id, ordinal, media_type, data) {
+            Ok(marker) => archived.push((message_index, block_index, marker)),
+            Err(error) => {
+                crate::logging::info(&format!(
+                    "Cannot archive tool image for session {}: {error}",
+                    session.id
+                ));
+                return 0;
+            }
         }
-        archived.push((message_index, block_index, archive_marker(&id, media_type)));
     }
     let count = archived.len();
     for (message_index, block_index, text) in archived {

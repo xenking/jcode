@@ -2563,22 +2563,27 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
+mod run_options;
+pub(super) use run_options::{RunFormat, RunInput, RunOutput, RunPersistence};
+
 /// Run a standalone, in-process agent, including its local continuation loop.
 ///
 /// Even when a daemon is available (or started on demand for swarm tools), it
 /// does not own this agent or receive its turns. Daemon-owned auto-poke applies
 /// only to daemon sessions, so these local loops must remain enabled here.
-pub async fn run_single_message_command(
+pub(super) async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
-    resume_session: Option<&str>,
+    persistence: RunPersistence<'_>,
     message: &str,
-    emit_json: bool,
-    emit_ndjson: bool,
+    output: RunOutput<'_>,
 ) -> Result<()> {
-    let provider =
-        super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
-            .await?;
+    let provider = super::provider_init::init_provider_for_run(
+        choice,
+        model,
+        output.format != RunFormat::Plain,
+    )
+    .await?;
     // Older model caches contain names but no account-scoped speed capabilities.
     // Hydrate those before the first headless request so an unsupported saved
     // tier cannot slip through the backward-compatible unknown-catalog path.
@@ -2609,13 +2614,18 @@ pub async fn run_single_message_command(
         // the agent runs. Warm runs skip this entirely and stay instant. (#390)
         wait_for_cold_cache_mcp_tools(&registry).await;
     }
-    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-    if let Err(error) = restore_agent_session_if_requested(&mut agent, resume_session) {
+    let mut agent = match persistence {
+        RunPersistence::Ephemeral => crate::agent::Agent::new_ephemeral(provider.clone(), registry),
+        _ => crate::agent::Agent::new(provider.clone(), registry),
+    };
+    if let RunPersistence::Resume(session_id) = persistence
+        && let Err(error) = agent.restore_session(session_id)
+    {
         agent.mark_closed();
         return Err(error);
     }
 
-    run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
+    run_single_message_with_agent(&mut agent, provider, message, output).await
 }
 
 /// Provider id for `jcode run --json`/`--ndjson` output.
@@ -2645,8 +2655,7 @@ async fn run_single_message_with_agent(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
     message: &str,
-    emit_json: bool,
-    emit_ndjson: bool,
+    output: RunOutput<'_>,
 ) -> Result<()> {
     // A detached dependency can outlive a model turn without holding an
     // in-process activity guard. Keep this CLI continuation alive across the
@@ -2654,23 +2663,32 @@ async fn run_single_message_with_agent(
     // run_once's nested read reservations are deliberately safe.
     let result: Result<()> = async {
         let _runtime_activity = crate::runtime_activity::global().try_enter()?;
-        if emit_json {
-            let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
-            let report = RunCommandReport {
-                session_id: agent.session_id().to_string(),
-                provider: run_report_provider_name(
-                    provider.as_ref(),
-                    agent.session_provider_key().as_deref(),
-                ),
-                model: provider.model(),
-                text,
-                usage: agent.last_usage().clone(),
-            };
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else if emit_ndjson {
-            run_single_message_command_ndjson(agent, provider, message).await?;
-        } else {
-            run_single_message_command_plain_with_auto_poke(agent, message).await?;
+        let start_index = agent.message_count();
+        match output.format {
+            RunFormat::Json => {
+                let text =
+                    run_single_message_command_capture_with_auto_poke(agent, message).await?;
+                let report = RunCommandReport {
+                    session_id: agent.session_id().to_string(),
+                    provider: run_report_provider_name(
+                        provider.as_ref(),
+                        agent.session_provider_key().as_deref(),
+                    ),
+                    model: provider.model(),
+                    text,
+                    usage: agent.last_usage().clone(),
+                };
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            RunFormat::Ndjson => {
+                run_single_message_command_ndjson(agent, provider, message).await?;
+            }
+            RunFormat::Plain => {
+                run_single_message_command_plain_with_auto_poke(agent, message).await?;
+            }
+        }
+        if let Some(path) = output.last_message {
+            run_options::write_last_message(path, agent.messages().iter().skip(start_index))?;
         }
         Ok(())
     }
@@ -3084,16 +3102,6 @@ async fn run_single_message_command_capture_with_auto_poke(
         }
     }
     Ok(outputs.join("\n\n"))
-}
-
-fn restore_agent_session_if_requested(
-    agent: &mut crate::agent::Agent,
-    resume_session: Option<&str>,
-) -> Result<()> {
-    if let Some(session_id) = resume_session {
-        agent.restore_session(session_id)?;
-    }
-    Ok(())
 }
 
 async fn run_single_message_command_ndjson(

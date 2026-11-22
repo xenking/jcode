@@ -244,8 +244,16 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "json")]
         ndjson: bool,
 
-        /// The message to send
-        message: String,
+        /// Write the final assistant message to this file on success
+        #[arg(short = 'o', long, value_name = "PATH")]
+        output_last_message: Option<std::path::PathBuf>,
+
+        /// Run without saving a resumable session
+        #[arg(long, conflicts_with = "resume")]
+        ephemeral: bool,
+
+        /// The message to send. Omit it or pass '-' to read stdin.
+        message: Option<String>,
     },
 
     /// Login to a provider via OAuth, API key, or local credentials

@@ -20,7 +20,7 @@ impl Agent {
     ) {
         // Debug sessions include both test sessions and headless swarm workers.
         // Workers use their assigned task label instead of a second model call.
-        if self.session.is_debug {
+        if self.session.is_debug || self.session.is_ephemeral() {
             return;
         }
         let (action, source) = titles::plan_for_session(&self.session, self.auto_title_owned);

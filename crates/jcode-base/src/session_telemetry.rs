@@ -78,6 +78,9 @@ pub fn save_context(
     account_label: Option<String>,
     context_policy: Option<jcode_session_types::ContextMeter>,
 ) {
+    if session.is_ephemeral() {
+        return;
+    }
     let Some(path) = path(&session.id) else {
         return;
     };

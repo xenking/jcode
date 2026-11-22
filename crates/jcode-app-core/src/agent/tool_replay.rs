@@ -95,9 +95,11 @@ impl Agent {
             tools: tools.clone(),
             mcp_late_register_resolved: self.mcp_late_register_resolved,
         };
-        let path = tool_surface_path(self.session_id())?;
-        crate::storage::assert_not_real_home(&path);
-        crate::storage::write_json_secret_sidecar(&path, &surface)?;
+        if !self.session.is_ephemeral() {
+            let path = tool_surface_path(self.session_id())?;
+            crate::storage::assert_not_real_home(&path);
+            crate::storage::write_json_secret_sidecar(&path, &surface)?;
+        }
         self.sent_tool_surface = Some(surface);
         Ok(tools)
     }

@@ -58,7 +58,7 @@ impl Agent {
     /// Record the inputs of the system prompt about to be sent, once per
     /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
     pub(super) fn record_prompt_inputs(&mut self) -> anyhow::Result<()> {
-        if self.prompt_inputs_recorded {
+        if self.prompt_inputs_recorded || self.session.is_ephemeral() {
             return Ok(());
         }
         let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {

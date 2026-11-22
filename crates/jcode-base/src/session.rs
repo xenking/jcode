@@ -250,6 +250,8 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub migration_epoch: u64,
     #[serde(skip)]
+    ephemeral: bool,
+    #[serde(skip)]
     persist_state: SessionPersistState,
     #[serde(skip)]
     provider_messages_cache: Vec<Message>,
@@ -1083,6 +1085,7 @@ impl Session {
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
             migration_epoch: 0,
+            ephemeral: false,
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
             provider_message_prefix_hashes_cache: Vec::new(),
@@ -1155,6 +1158,7 @@ impl Session {
             memory_injections: Vec::new(),
             replay_events: Vec::new(),
             migration_epoch: 0,
+            ephemeral: false,
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
             provider_message_prefix_hashes_cache: Vec::new(),
@@ -1357,16 +1361,30 @@ impl Session {
         self.status = status;
     }
 
+    pub fn create_ephemeral() -> Self {
+        let mut session = Self::create(None, None);
+        session.ephemeral = true;
+        session
+    }
+
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral
+    }
+
     /// Mark session as closed normally
     pub fn mark_closed(&mut self) {
         self.status = SessionStatus::Closed;
-        unregister_active_pid(&self.id);
+        if !self.is_ephemeral() {
+            unregister_active_pid(&self.id);
+        }
     }
 
     /// Mark session as crashed
     pub fn mark_crashed(&mut self, message: Option<String>) {
         self.status = SessionStatus::Crashed { message };
-        unregister_active_pid(&self.id);
+        if !self.is_ephemeral() {
+            unregister_active_pid(&self.id);
+        }
     }
 
     /// Mark session as having an error
@@ -1377,6 +1395,9 @@ impl Session {
     /// Why this in-memory copy may not run turns or persist on this machine
     /// because the session migrated (see `jcode_storage::session_lease`).
     pub fn migration_lease_block(&self) -> Option<crate::storage::SessionLeaseBlock> {
+        if self.is_ephemeral() {
+            return None;
+        }
         crate::storage::session_lease_block(&self.id, self.migration_epoch)
     }
 
@@ -1401,6 +1422,9 @@ impl Session {
 
     /// Write this session's on-disk presence markers for its owning PID.
     pub fn register_presence_markers(&self) {
+        if self.is_ephemeral() {
+            return;
+        }
         let pid = self.last_pid.unwrap_or_else(std::process::id);
         register_active_pid(&self.id, pid);
         self.sync_internal_presence_flag();
@@ -1411,8 +1435,7 @@ impl Session {
         self.status = SessionStatus::Active;
         self.last_pid = Some(pid);
         self.last_active_at = Some(Utc::now());
-        register_active_pid(&self.id, pid);
-        self.sync_internal_presence_flag();
+        self.register_presence_markers();
     }
 
     /// Keep the on-disk internal-session flag in sync with this session's

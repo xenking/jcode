@@ -638,6 +638,16 @@ impl Agent {
         Self::new_with_initial_working_dir(provider, registry, None)
     }
 
+    pub fn new_ephemeral(provider: Arc<dyn Provider>, registry: Registry) -> Self {
+        Self::new_with_initial_ownership(
+            provider,
+            registry,
+            None,
+            Session::create_ephemeral(),
+            true,
+        )
+    }
+
     pub(crate) fn mark_agent_started(&mut self) {
         self.session.agent_started = true;
     }
@@ -647,7 +657,7 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, true)
+        Self::new_with_parent_and_initial_working_dir(provider, registry, working_dir, None)
     }
 
     /// A connection may only be a viewer attaching to an existing Agent.
@@ -657,7 +667,13 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, false)
+        Self::new_with_initial_ownership(
+            provider,
+            registry,
+            working_dir,
+            Session::create(None, None),
+            false,
+        )
     }
 
     pub(crate) fn new_with_parent_and_initial_working_dir(
@@ -666,14 +682,20 @@ impl Agent {
         working_dir: Option<&str>,
         parent_id: Option<String>,
     ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
+        Self::new_with_initial_ownership(
+            provider,
+            registry,
+            working_dir,
+            Session::create(parent_id, None),
+            true,
+        )
     }
 
     fn new_with_initial_ownership(
         provider: Arc<dyn Provider>,
         registry: Registry,
         working_dir: Option<&str>,
-        parent_id: Option<String>,
+        mut session: Session,
         track_concurrency: bool,
     ) -> Self {
         let start = Instant::now();
@@ -684,7 +706,6 @@ impl Agent {
             *lap = Instant::now();
         };
         let tool_selection = crate::config::config().tools.selection();
-        let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }

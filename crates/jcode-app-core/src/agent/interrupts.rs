@@ -153,6 +153,9 @@ impl Agent {
     }
 
     pub fn persist_soft_interrupt_snapshot(&self) {
+        if self.session.is_ephemeral() {
+            return;
+        }
         let pending = match self.soft_interrupt_queue.lock() {
             Ok(queue) => queue,
             Err(_) => {
@@ -675,7 +678,9 @@ impl Agent {
             ));
             return Vec::new();
         }
-        if let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue) {
+        if !self.session.is_ephemeral()
+            && let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue)
+        {
             logging::warn(&format!(
                 "Failed to persist delivered queue for {}: {}",
                 self.session_id(),

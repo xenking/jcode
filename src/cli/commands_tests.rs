@@ -1346,7 +1346,7 @@ fn version_command_plain_output_includes_core_fields() {
 }
 
 #[tokio::test]
-async fn restore_agent_session_if_requested_restores_resumed_session() {
+async fn run_restores_a_requested_session() {
     let _guard = crate::storage::lock_test_env();
 
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
@@ -1363,11 +1363,18 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
     let fresh_session_id = resumed.session_id().to_string();
     assert_ne!(fresh_session_id, original_session_id);
 
-    restore_agent_session_if_requested(&mut resumed, Some(&original_session_id))
+    resumed
+        .restore_session(&original_session_id)
         .expect("restore session");
 
     assert_eq!(resumed.session_id(), original_session_id);
 }
+
+const RUN_MODES: [(&str, RunFormat); 3] = [
+    ("plain", RunFormat::Plain),
+    ("json", RunFormat::Json),
+    ("ndjson", RunFormat::Ndjson),
+];
 
 #[tokio::test]
 async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
@@ -1383,7 +1390,7 @@ async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
     crate::env::set_var("JCODE_RUN_AUTO_POKE_MAX_TURNS", "10");
     for enabled in [true, false] {
         crate::env::set_var("JCODE_RUN_AUTO_POKE", if enabled { "1" } else { "0" });
-        for mode in ["plain", "capture", "ndjson"] {
+        for (mode, format) in RUN_MODES {
             let provider: Arc<dyn Provider> = Arc::new(TestProvider);
             let registry = Registry::new(provider.clone()).await;
             let mut agent = crate::agent::Agent::new(provider.clone(), registry);
@@ -1399,8 +1406,10 @@ async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
                 &mut agent,
                 provider,
                 "go",
-                mode == "capture",
-                mode == "ndjson",
+                RunOutput {
+                    format,
+                    last_message: None,
+                },
             )
             .await
             .unwrap();
@@ -1441,11 +1450,7 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::set_var("JCODE_RUN_AUTO_POKE", "1");
     crate::env::set_var("JCODE_RUN_AUTO_POKE_MAX_TURNS", "2");
-    for (mode, json, ndjson) in [
-        ("plain", false, false),
-        ("capture", true, false),
-        ("ndjson", false, true),
-    ] {
+    for (mode, format) in RUN_MODES {
         let provider: Arc<dyn Provider> = Arc::new(TestProvider);
         let registry = Registry::new(provider.clone()).await;
         let mut agent = crate::agent::Agent::new(provider.clone(), registry);
@@ -1462,7 +1467,13 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
             .unwrap();
         {
             let mut run = std::pin::pin!(run_single_message_with_agent(
-                &mut agent, provider, "go", json, ndjson
+                &mut agent,
+                provider,
+                "go",
+                RunOutput {
+                    format,
+                    last_message: None
+                }
             ));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
@@ -1527,11 +1538,7 @@ async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
 
-    for (mode, emit_json, emit_ndjson) in [
-        ("plain", false, false),
-        ("json", true, false),
-        ("ndjson", false, true),
-    ] {
+    for (mode, format) in RUN_MODES {
         let provider: Arc<dyn Provider> = Arc::new(TestProvider);
         let registry = Registry::new(provider.clone()).await;
         let mut agent = crate::agent::Agent::new(provider.clone(), registry);
@@ -1545,8 +1552,10 @@ async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
             &mut agent,
             provider,
             "Return the test response.",
-            emit_json,
-            emit_ndjson,
+            RunOutput {
+                format,
+                last_message: None,
+            },
         )
         .await
         .unwrap_or_else(|error| panic!("{mode} run failed: {error:#}"));
@@ -1591,7 +1600,8 @@ async fn resumed_one_shot_closes_the_restored_session() {
 
     let registry = Registry::new(provider.clone()).await;
     let mut resumed = crate::agent::Agent::new(provider.clone(), registry);
-    restore_agent_session_if_requested(&mut resumed, Some(&session_id))
+    resumed
+        .restore_session(&session_id)
         .expect("restore one-shot session");
     let marker = crate::storage::active_pids_dir()
         .expect("active PID directory")
@@ -1605,8 +1615,10 @@ async fn resumed_one_shot_closes_the_restored_session() {
         &mut resumed,
         provider,
         "Finish the resumed one-shot session.",
-        true,
-        false,
+        RunOutput {
+            format: RunFormat::Json,
+            last_message: None,
+        },
     )
     .await
     .expect("run resumed one-shot session");
@@ -1633,11 +1645,7 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
 
-    for (mode, emit_json, emit_ndjson) in [
-        ("plain", false, false),
-        ("json", true, false),
-        ("ndjson", false, true),
-    ] {
+    for (mode, format) in RUN_MODES {
         let provider: Arc<dyn Provider> = Arc::new(FailingTestProvider);
         let registry = Registry::new(provider.clone()).await;
         let mut agent = crate::agent::Agent::new(provider.clone(), registry);
@@ -1650,8 +1658,10 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
             &mut agent,
             provider,
             "Fail this run.",
-            emit_json,
-            emit_ndjson,
+            RunOutput {
+                format,
+                last_message: None,
+            },
         )
         .await
         {
@@ -1674,6 +1684,98 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
             crate::session::SessionStatus::Closed
         ));
     }
+}
+
+#[tokio::test]
+async fn run_ci_artifact_and_ephemeral_session() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    for (mode, format) in RUN_MODES {
+        for succeed in [true, false] {
+            let provider: Arc<dyn Provider> = if succeed {
+                Arc::new(TestProvider)
+            } else {
+                Arc::new(FailingTestProvider)
+            };
+            let registry = Registry::new(provider.clone()).await;
+            let mut agent = crate::agent::Agent::new_ephemeral(provider.clone(), registry);
+            let id = agent.session_id().to_owned();
+            assert!(
+                !crate::storage::active_pids_dir()
+                    .unwrap()
+                    .join(&id)
+                    .exists()
+            );
+            let artifact = home.path().join("answer");
+            std::fs::write(&artifact, b"keep on failure").unwrap();
+            let result = run_single_message_with_agent(
+                &mut agent,
+                provider,
+                "Write the response.",
+                RunOutput {
+                    format,
+                    last_message: Some(&artifact),
+                },
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeed, "{mode}: {result:?}");
+            let expected = if succeed {
+                RUN_TEST_RESPONSE
+            } else {
+                "keep on failure"
+            };
+            assert_eq!(
+                std::fs::read(&artifact).unwrap(),
+                expected.as_bytes(),
+                "{mode}"
+            );
+            assert!(
+                crate::session::Session::load(&id).is_err(),
+                "{mode} can resume {id}"
+            );
+            assert!(
+                !crate::session::session_exists(&id),
+                "{mode} left a transcript"
+            );
+            assert!(!crate::session::session_journal_path(&id).unwrap().exists());
+            assert!(
+                !crate::session::session_path(&id)
+                    .unwrap()
+                    .with_extension("tool-surface")
+                    .exists()
+            );
+            assert!(crate::session::load_prompt_inputs(&id).is_none());
+        }
+    }
+}
+
+#[test]
+fn run_ephemeral_policy_blocks_direct_session_checkpoints() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut session = crate::session::Session::create_ephemeral();
+    let persistent = crate::session::Session::create(None, None);
+    assert_eq!(session.is_debug, persistent.is_debug);
+    let _streaming = crate::session::StreamingGuard::for_session(&session);
+    assert!(
+        !crate::storage::streaming_pids_dir()
+            .unwrap()
+            .join(&session.id)
+            .exists()
+    );
+    let explicit_path = home.path().join("explicit.json");
+    session.save_prepared().unwrap();
+    session.save_rewritten_context().unwrap();
+    session.save_snapshot_to(&explicit_path).unwrap();
+    assert!(!explicit_path.exists());
+    assert!(!crate::session::session_exists(&session.id));
+    assert!(session.save_for_idle_unload().is_err());
 }
 
 #[path = "commands/tests/cloud_sessions_tests.rs"]
@@ -1708,6 +1810,8 @@ impl Drop for SavedEnv {
     }
 }
 
+const RUN_TEST_RESPONSE: &str = "  ok\n\nтест \n";
+
 struct TestProvider;
 
 #[async_trait]
@@ -1721,7 +1825,9 @@ impl Provider for TestProvider {
     ) -> Result<EventStream> {
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
-            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta(RUN_TEST_RESPONSE.to_string())))
+                .await;
             let _ = tx
                 .send(Ok(StreamEvent::MessageEnd {
                     stop_reason: Some("end_turn".to_string()),

@@ -955,10 +955,11 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
-            assert_eq!(message, "hello");
+            assert_eq!(message.as_deref(), Some("hello"));
         }
         other => panic!("unexpected command: {:?}", other),
     }
@@ -972,12 +973,51 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);
-            assert_eq!(message, "hello");
+            assert_eq!(message.as_deref(), Some("hello"));
         }
         other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn run_ci_options_parse_with_implicit_or_explicit_stdin() {
+    for (args, expected_message) in [
+        (vec!["jcode", "run", "-o", "answer", "--ephemeral"], None),
+        (
+            vec!["jcode", "run", "--output-last-message", "answer", "-"],
+            Some("-"),
+        ),
+    ] {
+        match Args::try_parse_from(args).unwrap().command {
+            Some(Command::Run {
+                message,
+                output_last_message,
+                ephemeral,
+                ..
+            }) => {
+                assert_eq!(message.as_deref(), expected_message);
+                assert_eq!(output_last_message.unwrap(), std::path::Path::new("answer"));
+                assert_eq!(ephemeral, expected_message.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn run_ephemeral_conflicts_with_global_resume() {
+    for args in [
+        ["jcode", "run", "--ephemeral", "--resume", "session-id"],
+        ["jcode", "--resume", "session-id", "run", "--ephemeral"],
+    ] {
+        assert_eq!(
+            Args::try_parse_from(args).unwrap_err().kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
     }
 }
 
