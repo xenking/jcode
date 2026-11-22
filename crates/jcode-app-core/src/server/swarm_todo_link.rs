@@ -79,6 +79,25 @@ fn is_lane_task(task_id: &str) -> bool {
     task_id.starts_with(LANE_ID_PREFIX)
 }
 
+pub(super) fn check_lane_completion(worker: &str, task_id: &str) -> anyhow::Result<()> {
+    if !is_lane_task(task_id) {
+        return Ok(());
+    }
+    let todos = crate::todo::load_todos(worker).map_err(|error| {
+        anyhow::anyhow!("Cannot verify assigned lane {task_id} for {worker}: {error:#}")
+    })?;
+    if let Some(todo) = todos
+        .iter()
+        .find(|todo| is_open(todo) && lane_id(todo) == task_id)
+    {
+        anyhow::bail!(
+            "Worker ended its turn with an open lane todo: {}",
+            todo.content
+        );
+    }
+    Ok(())
+}
+
 /// Convert open todos into swarm plan items: one item per lane.
 ///
 /// Layout comes from [`crate::todo::stages::stage_layout`]: stages run in

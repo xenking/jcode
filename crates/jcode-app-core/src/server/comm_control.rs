@@ -579,34 +579,44 @@ fn spawn_assigned_task_run(
 
         match result {
             Ok(_) => {
-                let previous_items = {
-                    let plans = swarm_plans.read().await;
-                    plans
+                let lane_check =
+                    super::swarm_todo_link::check_lane_completion(&target_session, &task_id);
+                let (previous_items, outcome) = {
+                    let mut plans = swarm_plans.write().await;
+                    let previous_items = plans
                         .get(&swarm_id)
                         .map(|plan| plan.items.clone())
-                        .unwrap_or_default()
-                };
-                let mut auto_completed = false;
-                {
-                    let now_ms = now_unix_ms();
-                    let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                        && turn_end_should_auto_complete(&item.status)
-                    {
-                        auto_completed = true;
-                        item.status = "done".to_string();
+                        .unwrap_or_default();
+                    let outcome = plans.get_mut(&swarm_id).and_then(|plan| {
+                        let item = plan.items.iter_mut().find(|item| item.id == task_id)?;
+                        if item.assigned_to.as_deref() != Some(target_session.as_str())
+                            || !turn_end_should_auto_complete(&item.status)
+                        {
+                            return None;
+                        }
+                        let now_ms = now_unix_ms();
+                        item.status = if lane_check.is_ok() { "done" } else { "failed" }.into();
                         let progress = plan.task_progress.entry(task_id.clone()).or_default();
                         progress.last_heartbeat_unix_ms = Some(now_ms);
                         progress.last_checkpoint_unix_ms = Some(now_ms);
-                        progress.checkpoint_summary = Some("task completed".to_string());
+                        progress.checkpoint_summary = Some(match &lane_check {
+                            Ok(()) => "task completed".into(),
+                            Err(error) => truncate_detail(&error.to_string(), 120),
+                        });
                         progress.completed_at_unix_ms = Some(now_ms);
                         progress.stale_since_unix_ms = None;
                         progress.checkpoint_count =
                             Some(progress.checkpoint_count.unwrap_or(0) + 1);
                         plan.version += 1;
-                    }
-                }
+                        Some(lane_check)
+                    });
+                    (previous_items, outcome)
+                };
+                let (plan_reason, lane_failure) = match outcome {
+                    Some(Ok(())) => ("task_completed", None),
+                    Some(Err(error)) => ("task_failed", Some(error.to_string())),
+                    None => ("task_turn_ended", None),
+                };
                 let swarm_state = SwarmState {
                     members: Arc::clone(&swarm_members),
                     swarms_by_id: Arc::clone(&swarms_by_id),
@@ -614,11 +624,6 @@ fn spawn_assigned_task_run(
                     coordinators: Arc::clone(&swarm_coordinators),
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                let plan_reason = if auto_completed {
-                    "task_completed"
-                } else {
-                    "task_turn_ended"
-                };
                 broadcast_swarm_plan_with_previous(
                     &swarm_id,
                     Some(plan_reason.to_string()),
@@ -630,8 +635,14 @@ fn spawn_assigned_task_run(
                 .await;
                 update_member_status_with_report(
                     &target_session,
-                    "completed",
-                    None,
+                    if lane_failure.is_some() {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                    lane_failure
+                        .as_deref()
+                        .map(|detail| truncate_detail(detail, 120)),
                     completion_report,
                     &swarm_members,
                     &swarms_by_id,
@@ -640,7 +651,15 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
-                let _ = events.sender().send(ServerEvent::Done { id: 0 });
+                let terminal = match lane_failure {
+                    Some(message) => ServerEvent::Error {
+                        id: 0,
+                        message,
+                        retry_after_secs: None,
+                    },
+                    None => ServerEvent::Done { id: 0 },
+                };
+                let _ = events.sender().send(terminal);
             }
             Err(error) => {
                 {
