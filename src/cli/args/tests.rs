@@ -1011,12 +1011,14 @@ fn run_ci_options_parse_with_implicit_or_explicit_stdin() {
 #[test]
 fn run_ephemeral_conflicts_with_global_resume() {
     for args in [
-        ["jcode", "run", "--ephemeral", "--resume", "session-id"],
-        ["jcode", "--resume", "session-id", "run", "--ephemeral"],
+        vec!["jcode", "run", "--ephemeral", "--resume", "session-id"],
+        vec!["jcode", "--resume", "session-id", "run", "--ephemeral"],
+        vec!["jcode", "run", "--resume", "--ephemeral"],
     ] {
+        let args = Args::try_parse_from(args).unwrap();
         assert_eq!(
-            Args::try_parse_from(args).unwrap_err().kind(),
-            clap::error::ErrorKind::ArgumentConflict
+            args.validate_run_options().unwrap_err().to_string(),
+            "--resume cannot be used with --ephemeral"
         );
     }
 }

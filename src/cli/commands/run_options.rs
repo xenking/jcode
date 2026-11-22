@@ -53,12 +53,11 @@ pub(in crate::cli) enum RunPersistence<'a> {
 }
 
 impl<'a> RunPersistence<'a> {
-    pub(in crate::cli) fn from_args(resume: Option<&'a str>, ephemeral: bool) -> Result<Self> {
-        match (resume, ephemeral) {
-            (Some(_), true) => bail!("--resume cannot be used with --ephemeral"),
-            (None, true) => Ok(Self::Ephemeral),
-            (Some(id), false) => Ok(Self::Resume(id)),
-            (None, false) => Ok(Self::Save),
+    pub(in crate::cli) fn from_args(resume: Option<&'a str>, ephemeral: bool) -> Self {
+        if ephemeral {
+            Self::Ephemeral
+        } else {
+            resume.map_or(Self::Save, Self::Resume)
         }
     }
 }

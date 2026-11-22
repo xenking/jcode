@@ -25,6 +25,7 @@ use provider_init::ProviderChoice;
 mod debug_parent;
 use debug_parent::*;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    args.validate_run_options()?;
     adopt_runtime_handoff_env(args.command.as_ref());
     arm_debug_client_parent_death_signal();
     if matches!(args.command, Some(Command::Review(_)))
@@ -280,8 +281,6 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             output_last_message,
             ephemeral,
         }) => {
-            let persistence =
-                commands::RunPersistence::from_args(args.resume.as_deref(), ephemeral)?;
             let message = commands::RunInput::from(message).read()?;
             register_on_demand_server_spawner_for_run(
                 args.provider,
@@ -291,7 +290,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_single_message_command(
                 &args.provider,
                 args.model.as_deref(),
-                persistence,
+                commands::RunPersistence::from_args(args.resume.as_deref(), ephemeral),
                 &message,
                 commands::RunOutput {
                     format: if json {

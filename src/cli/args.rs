@@ -180,6 +180,23 @@ pub(crate) struct Args {
     pub(crate) command: Option<Command>,
 }
 
+impl Args {
+    pub(super) fn validate_run_options(&self) -> anyhow::Result<()> {
+        if self.resume.is_some()
+            && matches!(
+                self.command,
+                Some(Command::Run {
+                    ephemeral: true,
+                    ..
+                })
+            )
+        {
+            anyhow::bail!("--resume cannot be used with --ephemeral");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     /// List configured MCP servers or manage remote-server OAuth credentials
@@ -249,7 +266,7 @@ pub(crate) enum Command {
         output_last_message: Option<std::path::PathBuf>,
 
         /// Run without saving a resumable session
-        #[arg(long, conflicts_with = "resume")]
+        #[arg(long)]
         ephemeral: bool,
 
         /// The message to send. Omit it or pass '-' to read stdin.
