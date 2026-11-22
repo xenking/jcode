@@ -773,9 +773,26 @@ impl Agent {
         let next = if mode == SpeedMode::Standard {
             None
         } else {
+            let model = provider.model();
+            let availability = provider
+                .speed_options(&model)
+                .into_iter()
+                .find(|option| option.mode == mode);
+            if availability.as_ref().is_some_and(|option| {
+                option.availability == jcode_provider_core::SpeedAvailability::Unavailable
+            }) {
+                anyhow::bail!(
+                    "{}",
+                    availability
+                        .and_then(|option| option.reason)
+                        .unwrap_or_else(|| format!(
+                            "{mode:?} speed is unavailable on the selected route"
+                        ))
+                );
+            }
             Some(crate::session::StoredSpeedSelection {
                 mode,
-                model: provider.model(),
+                model,
                 route: provider.speed_route_identity().ok_or_else(|| {
                     anyhow::anyhow!("The active credential route could not be identified")
                 })?,
@@ -783,13 +800,16 @@ impl Agent {
         };
         let previous_mode = provider.speed_mode();
         provider.set_speed_mode(mode)?;
-        if provider.speed_mode() != mode
-            || next.as_ref().is_some_and(|choice| {
-                provider.model() != choice.model
-                    || provider.speed_route_identity().as_deref() != Some(choice.route.as_str())
-            })
-        {
-            let _ = provider.set_speed_mode(previous_mode);
+        let route_changed = next.as_ref().is_some_and(|choice| {
+            provider.model() != choice.model
+                || provider.speed_route_identity().as_deref() != Some(choice.route.as_str())
+        });
+        if provider.speed_mode() != mode || route_changed {
+            let _ = provider.set_speed_mode(if route_changed {
+                SpeedMode::Standard
+            } else {
+                previous_mode
+            });
             anyhow::bail!("The provider did not apply {mode:?} speed to the selected route");
         }
         Ok(next)

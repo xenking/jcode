@@ -1306,7 +1306,9 @@ impl AnthropicProvider {
                 self.oauth_refresh_label()
                     .unwrap_or_else(|| "default".into()),
             )),
-            ResolvedCredential::ApiKey if self.first_party_fast_api() => Some(Credential::ApiKey),
+            ResolvedCredential::ApiKey if self.first_party_fast_api() => Some(Credential::ApiKey(
+                Self::fast_api_identity(&self.direct_api_key().ok()?),
+            )),
             _ => None,
         }
     }
@@ -1321,21 +1323,38 @@ impl AnthropicProvider {
         })
     }
 
-    fn fast_request(&self, model: &str, token: &str, is_oauth: bool) -> Option<fast_mode::Request> {
-        if !self.fast.requested_for(model) || (!is_oauth && !self.first_party_fast_api()) {
-            return None;
+    fn fast_api_identity(token: &str) -> String {
+        jcode_base::provider::openai_catalog_scope_for_credential(false, token)
+    }
+
+    fn fast_request(
+        &self,
+        model: &str,
+        token: &str,
+        is_oauth: bool,
+    ) -> Result<Option<fast_mode::Request>> {
+        if !self.fast.requested_for(model) {
+            return Ok(None);
         }
+        anyhow::ensure!(
+            is_oauth || self.first_party_fast_api(),
+            "Anthropic Fast requires the selected native credential route"
+        );
         let credential = if is_oauth {
-            fast_mode::Credential::OAuth(usage_recording::credential_label(true, token)?)
+            fast_mode::Credential::OAuth(
+                usage_recording::credential_label(true, token)
+                    .context("Cannot identify the selected Anthropic Fast account")?,
+            )
         } else {
-            fast_mode::Credential::ApiKey
+            fast_mode::Credential::ApiKey(Self::fast_api_identity(token))
         };
         let target = fast_mode::Target {
             model: model.to_string(),
             credential,
         };
-        self.fast
-            .request(target, fast_mode::capability(model, is_oauth)?)
+        let wire = fast_mode::capability(model, is_oauth)
+            .context("The selected model no longer supports Anthropic Fast")?;
+        self.fast.request(target, wire).map(Some).context("The Anthropic credential route changed after selecting Fast; choose a speed before retrying")
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1518,7 +1537,7 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let fast = self.fast_request(&model, &token, is_oauth);
+        let fast = self.fast_request(&model, &token, is_oauth)?;
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
@@ -1892,6 +1911,13 @@ impl Provider for AnthropicProvider {
         }
     }
 
+    fn speed_route_identity(&self) -> Option<String> {
+        match self.fast_credential()? {
+            fast_mode::Credential::ApiKey(fingerprint) => Some(format!("anthropic:{fingerprint}")),
+            fast_mode::Credential::OAuth(label) => Some(format!("anthropic:oauth:{label}")),
+        }
+    }
+
     fn set_speed_mode(&self, mode: SpeedMode) -> Result<()> {
         let target = match mode {
             SpeedMode::Standard => None,
@@ -2038,7 +2064,7 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let fast = self.fast_request(&model, &token, is_oauth);
+        let fast = self.fast_request(&model, &token, is_oauth)?;
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request

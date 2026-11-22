@@ -164,7 +164,7 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     &request,
                     &input,
                     input.len(),
-                    &tx
+                    &tx,
                     None,
                 )
                 .await,

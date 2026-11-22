@@ -54,7 +54,7 @@ impl ServedSpeed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Credential {
     OAuth(String),
-    ApiKey,
+    ApiKey(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub(super) struct Target {
 pub(super) fn pricing_notice(target: &Target) -> String {
     let billing = match target.credential {
         Credential::OAuth(_) => "Uses paid Anthropic usage credits, even when plan quota remains",
-        Credential::ApiKey => "Billed to the Anthropic API organization",
+        Credential::ApiKey(_) => "Billed to the Anthropic API organization",
     };
     let price =
         jcode_provider_core::pricing::anthropic_api_fast_pricing(&target.model).and_then(|p| {
