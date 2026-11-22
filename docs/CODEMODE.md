@@ -26,6 +26,9 @@ Three places now carry that guidance:
   find matches with `agentgrep`, pass their paths and line numbers to `read`
   for small windows, and return only relevant `path:line` entries. Use
   `Promise.allSettled` when independent reads can succeed or fail separately.
+  Call `swarm` directly for short coordination. Use `codemode` for dependent
+  swarm reads or to return only needed fields from large results. See the
+  [swarm wire measurement](research/swarm-token-cost.md).
 - The tool description leads with the same shapes before the mechanics, and
   says which tool wins for each (`batch` for 1-10 independent calls, `bash`
   for shell work).

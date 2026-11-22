@@ -46,16 +46,17 @@ pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks in
 /// `batch` instead (codemode was 0.14% of 7,884 tool calls).
 pub const CODEMODE_PROMPT: &str = "# Tool calls
 
-`codemode` runs one JavaScript or TypeScript program that calls tools itself, so a whole lookup chain costs one turn instead of many. Type annotations are erased before it runs, so `types()` output can be copied as-is. Reach for it when:
+`codemode` runs one JavaScript or TypeScript program that calls tools itself. Copy `types()` output as-is. Use it when:
 - the task needs 5 or more tool calls,
 - each call needs the previous call's result,
 - you would loop over a list another tool returned,
-- a tool returns far more output than you need and you only want a summary.
-Only the script's return value and console output reach the conversation, so intermediate data costs no context.
+- a tool returns far more output than you need.
 
-For example, use `agentgrep` to find matches, use their paths and line numbers to `read` small windows, then return only the relevant `path:line` entries. Use `max_output_tokens: 4000` when a preview is enough. For independent reads where partial results are useful, use `Promise.allSettled`.
+Only the result, logs, and call receipts reach the conversation. Use `Promise.allSettled` for independent calls when partial results are useful.
+For example, pass `agentgrep` hits to `read` and return only needed `path:line` entries.
 
-Use `batch` for a handful (1-10) independent calls whose results you want verbatim. Use `bash` for shell work, not as a way to fan out tool calls. Call a tool directly when one call is enough.";
+Call `swarm` directly for short coordination. Use `codemode` for dependent swarm reads or to return only needed fields from large results.
+Use `batch` for a handful (1-10) independent calls whose results you want verbatim. Use `bash` for shell work, not to fan out tool calls. Call a tool directly when one call is enough.";
 
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

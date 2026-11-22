@@ -87,6 +87,8 @@ fn codemode_prompt_names_the_conditions_where_it_beats_other_tools() {
         "each call needs the previous call's result",
         "loop over a list another tool returned",
         "far more output than you need",
+        "Call `swarm` directly for short coordination",
+        "`codemode` for dependent swarm reads or to return only needed fields",
         "`batch` for a handful (1-10) independent calls",
         "`bash` for shell work",
     ] {
