@@ -95,10 +95,7 @@ fn started_at(pid: u32) -> Result<std::time::SystemTime> {
             size,
         )
     };
-    anyhow::ensure!(
-        read == size,
-        "cannot determine Desktop PID {pid} start time"
-    );
+    anyhow::ensure!(read == size, "cannot determine PID {pid} start time");
     let info = unsafe { info.assume_init() };
     Ok(std::time::UNIX_EPOCH
         + Duration::from_secs(info.pbi_start_tvsec)
@@ -438,8 +435,35 @@ struct BridgeProcess {
     pid: u32,
     parent_pid: u32,
     executable: PathBuf,
+    #[cfg(target_os = "macos")]
+    start: std::time::SystemTime,
     sockets: Vec<PathBuf>,
     devices: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+impl BridgeProcess {
+    fn is_live(&self) -> Result<bool> {
+        if unsafe { libc::kill(self.pid as libc::pid_t, 0) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
+        let current_start = started_at(self.pid);
+        let current_executable = executable_of(self.pid);
+        if (current_start.is_err() || current_executable.is_none()) && !process_exists(self.pid) {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            current_start? == self.start
+                && current_executable.is_some_and(|path| same_path(&path, &self.executable)),
+            "bridge process {} identity changed since discovery",
+            self.pid
+        );
+        Ok(true)
+    }
 }
 
 #[derive(Default)]
@@ -585,8 +609,21 @@ fn wait_for_bridge_exit(ops: &mut impl BridgeRetirement) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+fn confirm_idle_bridge(ops: &mut impl BridgeRetirement, blocked: &str) -> Result<bool> {
+    let inspection = ops.no_clients();
+    if !ops.alive()? {
+        return Ok(false);
+    }
+    anyhow::ensure!(inspection?, "{blocked}");
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
 fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement) -> Result<()> {
     let result = (|| -> Result<()> {
+        if !ops.alive()? {
+            return Ok(());
+        }
         match ops.request() {
             Ok(())
             | Err(jcode_sdk::Error {
@@ -611,15 +648,21 @@ fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement
         if !ops.alive()? {
             return Ok(());
         }
-        if !ops.no_clients()? {
-            bail!("bridge has clients or socket inspection is inconclusive");
+        if !confirm_idle_bridge(
+            ops,
+            "bridge has clients or socket inspection is inconclusive",
+        )? {
+            return Ok(());
         }
         ops.wait(Duration::from_secs(1));
         if !ops.alive()? {
             return Ok(());
         }
-        if !ops.no_clients()? {
-            bail!("bridge gained clients or socket inspection is inconclusive");
+        if !confirm_idle_bridge(
+            ops,
+            "bridge gained clients or socket inspection is inconclusive",
+        )? {
+            return Ok(());
         }
         ops.signal(libc::SIGTERM)?;
         for _ in 0..50 {
@@ -631,8 +674,11 @@ fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement
         if !ops.alive()? {
             return Ok(());
         }
-        if !ops.no_clients()? {
-            bail!("bridge has clients or socket inspection is inconclusive after SIGTERM");
+        if !confirm_idle_bridge(
+            ops,
+            "bridge has clients or socket inspection is inconclusive after SIGTERM",
+        )? {
+            return Ok(());
         }
         ops.signal(libc::SIGKILL)?;
         for _ in 0..50 {
@@ -654,15 +700,9 @@ fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement
 }
 
 #[cfg(target_os = "macos")]
-fn process_start(pid: u32) -> Result<String> {
-    output(Command::new("ps").args(["-p", &pid.to_string(), "-o", "lstart="]))
-}
-
-#[cfg(target_os = "macos")]
 struct SystemBridgeRetirement<'a> {
     process: &'a BridgeProcess,
     socket: &'a Path,
-    start: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -675,35 +715,14 @@ impl BridgeRetirement for SystemBridgeRetirement<'_> {
         )
     }
     fn alive(&mut self) -> Result<bool> {
-        let rc = unsafe { libc::kill(self.process.pid as i32, 0) };
-        if rc != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(false);
-            }
-            return Err(error.into());
-        }
-        let start = match process_start(self.process.pid) {
-            Ok(start) => start,
-            Err(_) if !process_exists(self.process.pid) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        let executable = executable_of(self.process.pid);
-        if executable.is_none() && !process_exists(self.process.pid) {
-            return Ok(false);
-        }
-        if start != self.start
-            || !executable.is_some_and(|exe| same_path(&exe, &self.process.executable))
-        {
-            bail!("bridge process identity changed");
-        }
-        Ok(true)
+        self.process.is_live()
     }
     fn no_clients(&mut self) -> Result<bool> {
         if !self.alive()? {
             bail!("bridge exited during inspection");
         }
-        let peer = std::os::unix::net::UnixStream::connect(self.socket)?;
+        let peer = std::os::unix::net::UnixStream::connect(self.socket)
+            .with_context(|| format!("connect to bridge listener {}", self.socket.display()))?;
         if jcode_build_support::runtime_generation::socket_peer_pid(&peer) != Some(self.process.pid)
         {
             bail!("bridge listener peer changed");
@@ -716,7 +735,10 @@ impl BridgeRetirement for SystemBridgeRetirement<'_> {
             return Ok(());
         }
         if unsafe { libc::kill(self.process.pid as i32, signal) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
         }
         Ok(())
     }
@@ -727,11 +749,19 @@ impl BridgeRetirement for SystemBridgeRetirement<'_> {
 
 fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProcess>> {
     let listing = output(Command::new("ps").args(["-ww", "-Ao", "uid=,pid=,ppid=,command="]))?;
+    #[cfg(target_os = "macos")]
+    let shared_state = crate::storage::jcode_dir()?;
     #[cfg(unix)]
     let uid = unsafe { libc::geteuid() };
     #[cfg(not(unix))]
     let uid = 0;
     bridges_from_listing(&listing, uid, std::process::id(), |pid, parent_pid| {
+        #[cfg(target_os = "macos")]
+        let start = match started_at(pid) {
+            Ok(start) => start,
+            Err(_) if !process_exists(pid) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !process_has_user_environment(pid, home, runtime)? {
             return Ok(None);
         }
@@ -750,17 +780,58 @@ fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProces
                 )));
             }
         };
+        #[cfg(target_os = "macos")]
+        let complete = observed.devices.len() == observed.descriptors
+            && observed.paths.len() + observed.peers.len() == observed.descriptors;
         let mut sockets = observed.paths;
         sockets.sort();
         sockets.dedup();
-        Ok(Some(BridgeProcess {
+        let bridge = BridgeProcess {
             pid,
             parent_pid,
             executable,
+            #[cfg(target_os = "macos")]
+            start,
             sockets,
             devices: observed.devices,
-        }))
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let private_seat = complete && private_seat_bridge(&bridge, &shared_state);
+            if !bridge.is_live()? || private_seat {
+                return Ok(None);
+            }
+        }
+        Ok(Some(bridge))
     })
+}
+
+#[cfg(target_os = "macos")]
+fn private_seat_bridge(bridge: &BridgeProcess, shared_state: &Path) -> bool {
+    // Desktop starts standalone private OpenRig bridges on a dedicated endpoint.
+    // A different JCODE_HOME alone never exempts a shared listener.
+    let [socket] = bridge.sockets.as_slice() else {
+        return false;
+    };
+    bridge
+        .executable
+        .file_name()
+        .is_some_and(|name| name == "jcode-harness-api-bridge")
+        && socket.file_name().is_some_and(|name| name == "api.sock")
+        && socket
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("jc-seat-"))
+        && process_environment(bridge.pid)
+            .and_then(|env| {
+                env.into_iter()
+                    .find_map(|entry| entry.strip_prefix("JCODE_HOME=").map(PathBuf::from))
+            })
+            .filter(|path| path.is_absolute())
+            .and_then(|path| path.canonicalize().ok())
+            .zip(shared_state.canonicalize().ok())
+            .is_some_and(|(private, shared)| private != shared)
 }
 
 fn bridges_from_listing(
@@ -843,19 +914,7 @@ pub(super) async fn retire_stale_bridges(app: &Path, target_app: &Path) -> Resul
             };
             #[cfg(target_os = "macos")]
             {
-                let start = match process_start(process.pid) {
-                    Ok(start) => start,
-                    Err(_) if !process_exists(process.pid) => return Ok(()),
-                    Err(error) => return Err(error).with_context(context),
-                };
-                retire_with_fallback(
-                    process,
-                    &mut SystemBridgeRetirement {
-                        process,
-                        socket,
-                        start,
-                    },
-                )
+                retire_with_fallback(process, &mut SystemBridgeRetirement { process, socket })
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -1243,6 +1302,7 @@ mod tests {
         exit_on_term: bool,
         exit_at: Option<Duration>,
         request: Option<jcode_sdk::Error>,
+        exits_during_inspection: bool,
     }
 
     impl BridgeRetirement for FakeBridge {
@@ -1256,6 +1316,10 @@ mod tests {
             Ok(self.alive)
         }
         fn no_clients(&mut self) -> Result<bool> {
+            if self.exits_during_inspection {
+                self.alive = false;
+                return Err(std::io::Error::from_raw_os_error(libc::ENOENT).into());
+            }
             let listing = self
                 .snapshots
                 .pop_front()
@@ -1290,6 +1354,7 @@ mod tests {
                 pid: 77,
                 parent_pid: 1,
                 executable: "/fixture/old/jcode".into(),
+                start: std::time::UNIX_EPOCH,
                 sockets: vec!["/fixture/run/jcode-api.sock".into()],
                 devices: vec![],
             },
@@ -1304,6 +1369,7 @@ mod tests {
                     jcode_sdk::ErrorKind::UnsupportedCapability,
                     "fixture",
                 )),
+                exits_during_inspection: false,
             },
         )
     }
@@ -1335,6 +1401,7 @@ mod tests {
                 pid: 88,
                 parent_pid: 1,
                 executable: target.into(),
+                start: std::time::UNIX_EPOCH,
                 sockets: vec!["/fixture/new.sock".into()],
                 devices: vec!["0x88".into()],
             };
@@ -1426,6 +1493,16 @@ mod tests {
     }
 
     #[test]
+    fn bridge_exit_during_late_socket_inspection_is_not_a_rollout_failure() {
+        let (process, mut bridge) = fake_bridge(&[], false);
+        bridge.request = None;
+        bridge.exits_during_inspection = true;
+        retire_with_fallback(&process, &mut bridge).unwrap();
+        assert!(!bridge.alive);
+        assert!(bridge.signals.is_empty());
+    }
+
+    #[test]
     fn retirement_api_waits_before_fallback_and_rechecks_before_kill() {
         let (process, mut fake) = fake_bridge(&[Some(IDLE), Some(IDLE), Some(CLIENT)], false);
         fake.request = None;
@@ -1444,6 +1521,7 @@ mod tests {
                 pid,
                 parent_pid,
                 executable: old_bridge.clone(),
+                start: std::time::UNIX_EPOCH,
                 sockets: vec![PathBuf::from("/fixture/run/jcode-api.sock")],
                 devices: vec!["0x777".into()],
             }))
@@ -1480,6 +1558,7 @@ mod tests {
             pid: std::process::id(),
             parent_pid: 1,
             executable: "/fixture/backup/Jcode.app/Contents/MacOS/jcode".into(),
+            start: std::time::UNIX_EPOCH,
             sockets: vec![socket],
             devices: vec![],
         };
@@ -1493,6 +1572,36 @@ mod tests {
         })
         .unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn stale_pid_generation_does_not_send_retirement_to_live_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("bridge.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let pid = std::process::id();
+        let process = BridgeProcess {
+            pid,
+            parent_pid: 1,
+            executable: executable_of(pid).unwrap(),
+            start: started_at(pid).unwrap() - Duration::from_micros(1),
+            sockets: vec![socket.clone()],
+            devices: vec![],
+        };
+        let error = retire_with_fallback(
+            &process,
+            &mut SystemBridgeRetirement {
+                process: &process,
+                socket: &socket,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("identity changed since discovery"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -1513,6 +1622,7 @@ mod tests {
             pid: 12,
             parent_pid: 11,
             executable: app.join("Contents/MacOS/jcode"),
+            start: std::time::UNIX_EPOCH,
             sockets: vec![PathBuf::from("/fixture/run/jcode-api-new.sock")],
             devices: vec!["0x123".into()],
         };
@@ -1520,6 +1630,7 @@ mod tests {
             pid: 77,
             parent_pid: 1,
             executable: PathBuf::from("/fixture/backup/Jcode.app/Contents/MacOS/jcode"),
+            start: std::time::UNIX_EPOCH,
             sockets: vec![PathBuf::from("/fixture/run/jcode-api.sock")],
             devices: vec!["0x777".into()],
         };
@@ -1554,20 +1665,40 @@ mod tests {
 
     #[test]
     fn isolated_desktop_bridge_discovery_uses_real_processes_and_socket() {
-        for foreign in [false, true] {
-            exercise_live_desktop_connection(foreign);
+        for role in [BridgeFixture::Bundle, BridgeFixture::ForeignShared] {
+            exercise_live_desktop_connection(role);
         }
     }
 
-    fn exercise_live_desktop_connection(foreign: bool) {
+    #[test]
+    fn private_seat_listener_does_not_enter_shared_rollout_census() {
+        exercise_live_desktop_connection(BridgeFixture::PrivateSeat);
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum BridgeFixture {
+        Bundle,
+        ForeignShared,
+        PrivateSeat,
+    }
+
+    fn exercise_live_desktop_connection(role: BridgeFixture) {
         let dir = tempfile::tempdir().unwrap();
         let app = dir.path().join("Jcode.app");
         let macos = app.join("Contents/MacOS");
         let runtime = dir.path().join("runtime");
         let home = dir.path().join("home with space");
+        let private_root = dir.path().join("jc-seat-fixture");
+        let socket = if role == BridgeFixture::PrivateSeat {
+            std::fs::create_dir(&private_root).unwrap();
+            private_root.join("api.sock")
+        } else {
+            runtime.join("jcode-api.sock")
+        };
         std::fs::create_dir_all(&macos).unwrap();
         std::fs::create_dir_all(&runtime).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
+        let seat_state = home.join("seat-state");
+        std::fs::create_dir_all(&seat_state).unwrap();
         let source = dir.path().join("fixture.c");
         std::fs::write(&source, r#"
 #include <sys/socket.h>
@@ -1578,19 +1709,24 @@ mod tests {
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {
-    if (argc == 3 && strcmp(argv[2], "api-bridge") == 0) {
+    if (argc == 3) {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/jcode-api.sock", getenv("JCODE_RUNTIME_DIR"));
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", getenv("BRIDGE_SOCKET"));
         if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 1)) return 2;
         if (accept(fd, NULL, NULL) < 0) return 4;
         for (;;) pause();
     }
     pid_t child = fork();
-    if (child == 0) execl(getenv("BRIDGE_EXE"), getenv("BRIDGE_EXE"), "--no-update", "api-bridge", NULL);
+    if (child == 0) {
+        const char *bridge = getenv("BRIDGE_EXE");
+        if (getenv("STANDALONE")) execl(bridge, bridge, getenv("BRIDGE_SOCKET"), "/fixture/jcode.sock", NULL);
+        else execl(bridge, bridge, "--no-update", "api-bridge", NULL);
+        _exit(6);
+    }
     int client = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/jcode-api.sock", getenv("JCODE_RUNTIME_DIR"));
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", getenv("BRIDGE_SOCKET"));
     for (int i = 0; connect(client, (struct sockaddr *)&addr, sizeof(addr)) != 0; i++) {
         if (i == 100) return 5;
         usleep(10000);
@@ -1600,12 +1736,14 @@ int main(int argc, char **argv) {
 }
 "#).unwrap();
         let desktop = macos.join("jcode-desktop");
-        let bridge = if foreign {
-            let backup = dir.path().join("Backup.app/Contents/MacOS");
-            std::fs::create_dir_all(&backup).unwrap();
-            backup.join("jcode")
-        } else {
-            macos.join("jcode")
+        let bridge = match role {
+            BridgeFixture::PrivateSeat => macos.join("jcode-harness-api-bridge"),
+            BridgeFixture::ForeignShared => {
+                let backup = dir.path().join("Backup.app/Contents/MacOS");
+                std::fs::create_dir_all(&backup).unwrap();
+                backup.join("jcode-harness-api-bridge")
+            }
+            BridgeFixture::Bundle => macos.join("jcode"),
         };
         assert!(
             Command::new("cc")
@@ -1618,10 +1756,17 @@ int main(int argc, char **argv) {
         );
         std::fs::copy(&desktop, &bridge).unwrap();
         let pidfile = dir.path().join("pid");
-        let mut parent = Command::new(&desktop)
+        let mut launch = Command::new(&desktop);
+        launch.env_remove("STANDALONE");
+        if role != BridgeFixture::Bundle {
+            launch.env("STANDALONE", "1");
+        }
+        let mut parent = launch
             .env("HOME", &home)
+            .env("JCODE_HOME", &seat_state)
             .env("JCODE_RUNTIME_DIR", &runtime)
             .env("BRIDGE_EXE", &bridge)
+            .env("BRIDGE_SOCKET", &socket)
             .env("BRIDGE_PID", &pidfile)
             .spawn()
             .unwrap();
@@ -1631,28 +1776,26 @@ int main(int argc, char **argv) {
                 .unwrap_or_default()
                 .parse::<u32>()
                 && process_has_user_environment(pid, &home, &runtime).unwrap_or(false)
-                && let (Some(executable), Ok(desktop_sockets), Ok(bridge_sockets)) = (
-                    executable_of(pid),
-                    unix_sockets(parent.id()),
-                    unix_sockets(pid),
-                )
+                && let (Ok(desktop_sockets), Ok(bridge_sockets)) =
+                    (unix_sockets(parent.id()), unix_sockets(pid))
             {
                 assert!(
-                    !only_listener(&bridge_sockets, &runtime.join("jcode-api.sock")),
+                    !only_listener(&bridge_sockets, &socket),
                     "accepted Desktop connection must not look idle"
                 );
-                let process = BridgeProcess {
-                    pid,
-                    parent_pid: parent.id(),
-                    executable,
-                    sockets: bridge_sockets.paths,
-                    devices: bridge_sockets.devices,
+                if role == BridgeFixture::PrivateSeat {
+                    break user_bridge_processes(&home, &runtime)
+                        .map(|bridges| bridges.iter().all(|bridge| bridge.pid != pid));
+                }
+                let bridges = match user_bridge_processes(&home, &runtime) {
+                    Ok(bridges) => bridges,
+                    Err(error) => break Err(error),
                 };
                 match verify_desktop_connections(
                     &[desktop_sockets],
-                    &[process],
+                    &bridges,
                     &app.join("Contents/MacOS/jcode"),
-                    &runtime.join("jcode-api.sock"),
+                    &socket,
                 ) {
                     Ok(true) => break Ok(true),
                     Err(error) => break Err(error),
@@ -1675,10 +1818,13 @@ int main(int argc, char **argv) {
             let _ = parent.kill();
         }
         let _ = parent.wait();
-        if foreign {
+        if role == BridgeFixture::PrivateSeat {
+            assert!(result.unwrap(), "private seat bridge entered shared census");
+        } else if role == BridgeFixture::ForeignShared {
+            let error = format!("{:#}", result.unwrap_err());
             assert!(
-                result.is_err(),
-                "foreign bridge was not rejected: {result:?}"
+                error.contains("Desktop is connected to foreign bridge"),
+                "foreign shared bridge was not identified: {error}"
             );
         } else {
             assert!(
