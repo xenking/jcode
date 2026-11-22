@@ -564,6 +564,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         ],
         2,
         &tx,
+        None,
     )
     .await;
 
@@ -593,6 +594,7 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
         ],
         2,
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -623,6 +625,7 @@ async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
             ],
             2,
             &tx,
+            None,
         )
         .await
     });

@@ -3057,6 +3057,31 @@ impl BridgeState {
                     None => vec![ServerFrame::event(info)],
                 }
             }
+            "status_detail"
+                if self.current_speed_mode != jcode_harness_api::SpeedMode::Standard =>
+            {
+                event["detail"]
+                    .as_str()
+                    .map(|detail| {
+                        ServerFrame::event(ApiEvent::ProviderStatusDetail {
+                            session_id: session(self),
+                            detail: detail.into(),
+                        })
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            "speed_reported" => {
+                let Ok(actual) = serde_json::from_value(event["actual"].clone()) else {
+                    return vec![];
+                };
+                vec![ServerFrame::event(ApiEvent::SpeedModeReported {
+                    session_id: session(self),
+                    requested: serde_json::from_value(event["requested"].clone())
+                        .unwrap_or_default(),
+                    actual,
+                })]
+            }
             "service_tier_reported" => {
                 use jcode_harness_api::SpeedMode;
                 let mode = |tier: &str| match tier {

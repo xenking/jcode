@@ -367,6 +367,11 @@ pub enum ServerEvent {
         requested: Option<String>,
         tier: String,
     },
+    #[serde(rename = "speed_reported")]
+    SpeedReported {
+        requested: Option<jcode_message_types::SpeedMode>,
+        actual: jcode_message_types::SpeedMode,
+    },
 
     /// Provider has finished the visible assistant message, but the turn may still be
     /// finalizing bookkeeping such as session IDs or completion trailers.

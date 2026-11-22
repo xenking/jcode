@@ -2344,6 +2344,41 @@ fn speed_mode_ack_and_attach_snapshot_are_independent_of_effort() {
 }
 
 #[test]
+fn provider_speed_observation_never_overwrites_the_selected_mode() {
+    use jcode_harness_api::SpeedMode;
+    let mut state = state_with_session();
+    state.note_models(&json!({"speed_mode":"fast"}));
+    for event in [
+        json!({"type":"service_tier_reported", "requested":"priority", "tier":"default"}),
+        json!({"type":"speed_reported", "requested":"fast", "actual":"standard"}),
+    ] {
+        let frames = state.legacy_event_to_api(&event);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].reply_to, None);
+        assert!(matches!(
+            frames[0].event,
+            ApiEvent::SpeedModeReported {
+                requested: Some(SpeedMode::Fast),
+                actual: SpeedMode::Standard,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        state.runtime_info(),
+        ApiEvent::RuntimeInfo {
+            speed_mode: SpeedMode::Fast,
+            ..
+        }
+    ));
+    let detail =
+        state.legacy_event_to_api(&json!({"type":"status_detail", "detail":"Fast cooldown"}));
+    assert!(
+        matches!(&detail[0].event, ApiEvent::ProviderStatusDetail { detail, .. } if detail == "Fast cooldown")
+    );
+}
+
+#[test]
 fn reasoning_effort_reports_provider_refusal() {
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({

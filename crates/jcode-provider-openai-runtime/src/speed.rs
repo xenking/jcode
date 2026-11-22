@@ -9,6 +9,19 @@ pub(super) struct PremiumSpeed {
 }
 
 impl OpenAIProvider {
+    pub(super) fn verify_speed_route(
+        credentials: &CodexCredentials,
+        premium_route: Option<&str>,
+    ) -> Result<()> {
+        if let Some(route) = premium_route {
+            anyhow::ensure!(
+                Self::speed_route_for(credentials).as_deref() == Some(route),
+                "The OpenAI credential route changed after speed was selected; select a speed before retrying"
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn speed_route_for(credentials: &CodexCredentials) -> Option<String> {
         let oauth = Self::is_chatgpt_mode(credentials);
         if !oauth {
@@ -20,12 +33,22 @@ impl OpenAIProvider {
             }
         }
         let identity = if oauth {
-            credentials
+            let workspace = credentials
                 .account_id
                 .as_deref()
-                .filter(|id| !id.is_empty())?
+                .filter(|id| !id.is_empty())?;
+            let user = credentials
+                .id_token
+                .as_deref()
+                .and_then(jcode_base::auth::codex::extract_user_id)
+                .or_else(|| jcode_base::auth::codex::extract_user_id(&credentials.access_token))
+                .unwrap_or_else(|| credentials.refresh_token.clone());
+            if user.is_empty() {
+                return None;
+            }
+            format!("{workspace}\n{user}")
         } else {
-            credentials.access_token.as_str()
+            credentials.access_token.clone()
         };
         if identity.is_empty() {
             return None;

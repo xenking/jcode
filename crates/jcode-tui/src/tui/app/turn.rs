@@ -805,6 +805,7 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::SpeedReported { .. } => {}
                                     StreamEvent::ServiceTier { tier, requested } => {
                                         self.remote_reported_service_tier = Some((requested, tier.clone()));
                                         self.status_detail = Some(format!("Provider tier: {tier}"));

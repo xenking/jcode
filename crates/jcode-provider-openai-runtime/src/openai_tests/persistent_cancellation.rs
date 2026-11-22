@@ -62,6 +62,7 @@ async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
         &input,
         input.len(),
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::Success));
@@ -508,6 +509,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
             &input,
             input.len(),
             &tx,
+            None,
         )
         .await
     });

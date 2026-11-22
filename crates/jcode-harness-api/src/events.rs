@@ -692,6 +692,11 @@ pub enum ApiEvent {
         actual: crate::SpeedMode,
     },
 
+    ProviderStatusDetail {
+        session_id: String,
+        detail: String,
+    },
+
     /// An API-key credential was persisted or removed.
     CredentialUpdated {
         provider: String,

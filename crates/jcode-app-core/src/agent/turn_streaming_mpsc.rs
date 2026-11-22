@@ -874,6 +874,9 @@ impl Agent {
                     StreamEvent::ServiceTier { tier, requested } => {
                         let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
+                    StreamEvent::SpeedReported { requested, actual } => {
+                        let _ = event_tx.send(ServerEvent::SpeedReported { requested, actual });
+                    }
                     StreamEvent::ResolvedModel { model } => {
                         reported_model = Some(model.clone());
                         usage_recorder.resolve_model(model);

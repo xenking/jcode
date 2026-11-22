@@ -448,6 +448,7 @@ impl Provider for OpenAIProvider {
                             input,
                             input_item_count,
                             &attempt_tx,
+                            premium_route.as_deref(),
                         ),
                     )
                     .await;
@@ -465,6 +466,7 @@ impl Provider for OpenAIProvider {
                                 &request,
                                 Arc::clone(&turn_state),
                                 &tx,
+                                premium_route.as_deref(),
                             )
                             .await;
                             return;
@@ -652,6 +654,7 @@ impl Provider for OpenAIProvider {
                             Arc::clone(&persistent_ws),
                             Arc::clone(&turn_state),
                             input_item_count,
+                            premium_route.as_deref(),
                         )
                         .await
                     } else {
@@ -693,6 +696,7 @@ impl Provider for OpenAIProvider {
                                 "https".to_string()
                             },
                             attempt_tx,
+                            premium_route.as_deref(),
                         )
                         .await
                     };
@@ -709,6 +713,7 @@ impl Provider for OpenAIProvider {
                                 &request,
                                 Arc::clone(&turn_state),
                                 &tx,
+                                premium_route.as_deref(),
                             )
                             .await;
                             return;

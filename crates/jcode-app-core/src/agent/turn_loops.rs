@@ -612,6 +612,7 @@ impl Agent {
                         }
                         self.last_status_detail = Some(detail);
                     }
+                    StreamEvent::SpeedReported { .. } => {}
                     StreamEvent::ServiceTier { tier, .. } => {
                         if trace {
                             eprintln!("[trace] provider_service_tier={tier}");

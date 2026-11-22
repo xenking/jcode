@@ -47,6 +47,7 @@ async fn await_stream_start(mut stream: EventStream) -> Result<EventStream> {
             StreamEvent::ConnectionType { .. }
             | StreamEvent::StatusDetail { .. }
             | StreamEvent::ServiceTier { .. }
+            | StreamEvent::SpeedReported { .. }
             | StreamEvent::ResolvedModel { .. }
             | StreamEvent::SessionId(_)
             | StreamEvent::UpstreamProvider { .. } => false,

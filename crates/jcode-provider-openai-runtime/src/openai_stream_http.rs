@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -8,6 +9,7 @@ pub(crate) async fn stream_response(
     turn_state: Arc<StdMutex<Option<String>>>,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
     let requested_tier = request
@@ -38,6 +40,7 @@ pub(crate) async fn stream_response(
         return Ok(());
     }
     let creds = credentials.read().await;
+    OpenAIProvider::verify_speed_route(&creds, premium_route)?;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
     if access_token != creds.access_token {

@@ -72,6 +72,7 @@ async fn http_transport_idle_case(heartbeats: bool, complete: bool) {
             Arc::new(StdMutex::new(None)),
             "fixture".into(),
             tx,
+            None,
         ),
     )
     .await

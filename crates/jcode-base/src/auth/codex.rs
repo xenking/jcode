@@ -600,6 +600,17 @@ pub fn extract_account_id(id_token: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+pub fn extract_user_id(token: &str) -> Option<String> {
+    let payload = decode_jwt_payload(token)?;
+    payload
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_user_id"))
+        .or_else(|| payload.get("sub"))?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
 pub fn extract_email(id_token: &str) -> Option<String> {
     let payload = decode_jwt_payload(id_token)?;
     payload

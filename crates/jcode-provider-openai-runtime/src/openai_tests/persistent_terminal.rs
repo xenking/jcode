@@ -165,6 +165,7 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     &input,
                     input.len(),
                     &tx
+                    None,
                 )
                 .await,
                 PersistentWsResult::Success
@@ -483,6 +484,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
             ],
             2,
             &tx,
+            None,
         )
         .await
     });

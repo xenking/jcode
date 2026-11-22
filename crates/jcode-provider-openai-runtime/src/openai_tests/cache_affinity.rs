@@ -21,6 +21,7 @@ async fn service_tier_header_changes_invalidate_persistent_socket() {
             &[],
             0,
             &tx,
+            None,
         )
         .await;
         assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -51,6 +52,7 @@ async fn oauth_routing_header_changes_invalidate_persistent_socket() {
             &[],
             0,
             &tx,
+            None,
         )
         .await;
         assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -120,6 +122,7 @@ async fn cache_affinity_changed_session_cannot_reuse_old_handshake() {
         &input,
         input.len(),
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::NotAvailable));

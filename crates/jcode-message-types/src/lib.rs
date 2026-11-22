@@ -939,6 +939,10 @@ pub enum StreamEvent {
         tier: String,
         requested: Option<String>,
     },
+    SpeedReported {
+        requested: Option<SpeedMode>,
+        actual: SpeedMode,
+    },
     /// Error occurred
     Error {
         message: String,

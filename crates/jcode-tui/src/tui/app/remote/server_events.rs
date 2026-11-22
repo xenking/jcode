@@ -743,6 +743,7 @@ fn handle_server_event_inner(
             app.apply_status_detail(detail);
             eager_stream_redraw
         }
+        ServerEvent::SpeedReported { .. } => false,
         ServerEvent::ServiceTierReported { requested, tier } => {
             // `auto` is an unresolved routing policy, not the tier ultimately
             // used for a response. It can precede a resolved `default` report

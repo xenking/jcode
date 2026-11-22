@@ -88,6 +88,7 @@ pub(super) async fn recover_opaque_ws_rejection(
     request: &Value,
     turn_state: Arc<StdMutex<Option<String>>>,
     tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) {
     emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
     jcode_base::logging::warn(
@@ -102,6 +103,7 @@ pub(super) async fn recover_opaque_ws_rejection(
         turn_state,
         "https recovery: opaque websocket rejection".into(),
         recovery_tx,
+        premium_route,
     );
     tokio::pin!(recovery);
     let mut failed = false;
@@ -539,8 +541,16 @@ pub(super) async fn try_persistent_ws_continuation(
     input: &[Value],
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) -> PersistentWsResult {
     let mut guard = Arc::clone(persistent_ws).lock_owned().await;
+    if premium_route.is_some() {
+        let result = OpenAIProvider::verify_speed_route(&*credentials.read().await, premium_route);
+        if let Err(error) = result {
+            let _ = tx.send(Err(error)).await;
+            return PersistentWsResult::TerminalError;
+        }
+    }
     let mut attempt = RecoverableAttempt {
         state: guard.take(),
         phase: RecoveryPhase::Idle,
@@ -1515,6 +1525,7 @@ mod fresh_ws_wire_tests;
 
 /// Stream response via WebSocket, saving the connection for reuse.
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
@@ -1523,6 +1534,7 @@ pub(super) async fn stream_response_websocket_persistent(
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     turn_state: Arc<StdMutex<Option<String>>>,
     input_item_count: usize,
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     let request_credentials = Arc::clone(&credentials);
     let result = after_authentication(
@@ -1538,6 +1550,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 input_item_count,
                 access_token,
                 account_label,
+                premium_route,
             )
         },
     )
@@ -1555,6 +1568,7 @@ async fn stream_response_websocket_authenticated(
     input_item_count: usize,
     access_token: String,
     account_label: Option<String>,
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
     let requested_tier = request
@@ -1585,6 +1599,7 @@ async fn stream_response_websocket_authenticated(
     ));
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
+    OpenAIProvider::verify_speed_route(&creds, premium_route)?;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
     if access_token != creds.access_token {

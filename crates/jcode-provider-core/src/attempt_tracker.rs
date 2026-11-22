@@ -61,6 +61,7 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::ConnectionPhase { .. }
         | StreamEvent::StatusDetail { .. }
         | StreamEvent::ServiceTier { .. }
+        | StreamEvent::SpeedReported { .. }
         | StreamEvent::Error { .. }
         | StreamEvent::SessionId(_)
         | StreamEvent::UpstreamProvider { .. } => false,
