@@ -358,7 +358,19 @@ impl Provider for DelayedTestProvider {
     }
 
     fn name(&self) -> &str {
-        "test"
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "claude-communicate-test".into()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        anyhow::ensure!(
+            model.strip_prefix("claude:").unwrap_or(model) == self.model(),
+            "Unexpected test route: {model}"
+        );
+        Ok(())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
