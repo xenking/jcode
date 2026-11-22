@@ -206,6 +206,148 @@ async fn prefix_test_provider() -> OpenAIProvider {
 }
 
 #[tokio::test]
+async fn websocket_reuses_chain_for_final_answer_after_whitespace_only_output() {
+    use serde_json::json;
+
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _test_session = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "websocket");
+    let _prewarm = EnvVarGuard::set("JCODE_OPENAI_PREWARM", "0");
+    let _key = EnvVarGuard::set("JCODE_OPENAI_PROMPT_CACHE_KEY", "empty-result-fixture");
+    let prompt = "<system-reminder>The previous provider response was empty after tool results. Provide the final answer.</system-reminder>";
+
+    let mut server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let first = prefix_test_request(&mut socket).await;
+        assert_eq!(first["input"].as_array().unwrap().len(), 1);
+        assert_eq!(first["prompt_cache_key"], "empty-result-fixture");
+        let tool_call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"fixture","arguments":"{}","status":"completed"});
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_tool"}}),
+            json!({"type":"response.output_item.done","item":tool_call}),
+            json!({"type":"response.completed","response":{"id":"resp_tool","status":"completed","output":[]}}),
+        ] {
+            socket
+                .send(WsMessage::Text(event.to_string()))
+                .await
+                .unwrap();
+        }
+
+        let tool_result = prefix_test_request(&mut socket).await;
+        assert_eq!(tool_result["previous_response_id"], "resp_tool");
+        assert_eq!(
+            tool_result["input"],
+            json!([{
+                "type":"function_call_output", "call_id":"call_fixture", "output":"fixture result"
+            }])
+        );
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_blank"}}),
+            json!({"type":"response.output_text.delta","delta":" \n\t"}),
+            json!({"type":"response.output_item.done","item":{
+                "type":"message","id":"msg_blank","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":" \n\t","annotations":[]}]
+            }}),
+            json!({"type":"response.completed","response":{"id":"resp_blank","status":"completed","output":[]}}),
+        ] {
+            socket
+                .send(WsMessage::Text(event.to_string()))
+                .await
+                .unwrap();
+        }
+
+        let retry = loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Text(text))) => {
+                    break serde_json::from_str::<Value>(&text).unwrap();
+                }
+                Some(Ok(WsMessage::Ping(data))) => {
+                    socket.send(WsMessage::Pong(data)).await.unwrap()
+                }
+                other => {
+                    panic!("required final-answer retry dropped the healthy socket: {other:?}")
+                }
+            }
+        };
+        assert_eq!(retry["previous_response_id"], "resp_blank");
+        assert_eq!(
+            retry["input"],
+            json!([{
+                "type":"message","role":"user","content":[{"type":"input_text","text":prompt}]
+            }])
+        );
+        for field in ["instructions", "tools", "model", "prompt_cache_key"] {
+            assert_eq!(retry[field], first[field], "{field}");
+        }
+        prefix_test_response(&mut socket, "resp_public_answer").await;
+    });
+
+    let provider = prefix_test_provider().await;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut messages = vec![ChatMessage::user(&"stable history ".repeat(128))];
+        let mut response = provider
+            .complete(&messages, &[], "prefix fixture", None)
+            .await
+            .unwrap();
+        while let Some(event) = response.next().await {
+            event.expect("tool call completion");
+        }
+        for (role, content) in [
+            (
+                Role::Assistant,
+                ContentBlock::ToolUse {
+                    id: "call_fixture".into(),
+                    name: "fixture".into(),
+                    input: json!({}),
+                    thought_signature: None,
+                },
+            ),
+            (
+                Role::User,
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_fixture".into(),
+                    content: "fixture result".into(),
+                    is_error: None,
+                },
+            ),
+        ] {
+            messages.push(ChatMessage {
+                role,
+                content: vec![content].into(),
+                timestamp: None,
+                tool_duration_ms: None,
+            });
+        }
+        let mut response = provider
+            .complete(&messages, &[], "prefix fixture", None)
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(event) = response.next().await {
+            if let StreamEvent::TextDelta(delta) = event.expect("blank completion") {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, " \n\t");
+        // The agent omits whitespace-only assistant messages from history.
+        messages.push(ChatMessage::user(prompt));
+        prefix_test_complete(&provider, &messages, "resp_public_answer").await;
+    })
+    .await;
+    if result.is_err() && !server.is_finished() {
+        server.abort();
+    }
+    (&mut server).await.expect("same-socket wire assertions");
+    result.expect("loopback completions");
+}
+
+#[tokio::test]
 async fn request_only_tail_replays_full_wire_input_and_reports_low_read() {
     use jcode_base::kv_cache_monitor::{
         KvCacheMonitor, MissReason, RequestRoute, RequestSignature,

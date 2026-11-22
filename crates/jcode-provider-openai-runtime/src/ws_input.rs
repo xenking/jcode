@@ -192,6 +192,18 @@ fn match_replay_order<'a>(
             {
                 continue;
             }
+            // The agent does not persist whitespace-only assistant text. The
+            // previous response still owns it, so a new user message can follow
+            // it without replaying the full input or advancing the cursor.
+            if identity["type"] == "message"
+                && identity["role"] == "assistant"
+                && identity["text"]
+                    .as_str()
+                    .is_some_and(|text| text.trim().is_empty())
+                && current.is_some_and(|item| item["type"] == "message" && item["role"] == "user")
+            {
+                continue;
+            }
             return Err(OutputReplayMismatch {
                 input_index: index,
                 output_index,
