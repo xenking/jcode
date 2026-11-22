@@ -2411,64 +2411,6 @@ impl App {
         }
     }
 
-    fn record_kv_cache_miss_sample(&mut self, request: &PendingKvCacheRequest, input_tokens: u64) {
-        // A first fill without a reusable-prefix baseline is not a proven
-        // cache loss, even with an explicit zero read. Do not label it a miss.
-        let Some(baseline) = request.baseline.as_ref() else {
-            return;
-        };
-        if baseline.input_tokens == 0 {
-            return;
-        }
-        let expected_tokens = if request.provider == baseline.provider {
-            baseline.input_tokens
-        } else {
-            input_tokens
-        };
-
-        // Missing telemetry is not an explicit cache miss. Write-only usage
-        // and providers omitting cached_tokens must not trigger harness alarms.
-        let Some(read_tokens) = self.streaming.streaming_cache_read_tokens else {
-            return;
-        };
-        let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
-            return;
-        }
-
-        let optimal_pct = ratio_pct(read_tokens, expected_tokens);
-        let reason =
-            self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
-        if reason == KvCacheMissReason::LowRead
-            && Self::kv_cache_warm_read_shortfall(request, baseline, read_tokens)
-        {
-            // The daemon still reports any request-only suffix change that the
-            // local projection cannot see.
-            return;
-        }
-
-        self.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
-            turn_number: request.turn_number,
-            call_index: request.call_index,
-            missed_tokens,
-            reason,
-        });
-        if self.kv_cache.kv_cache_miss_samples.len() > Self::KV_CACHE_MAX_MISS_SAMPLES {
-            let overflow =
-                self.kv_cache.kv_cache_miss_samples.len() - Self::KV_CACHE_MAX_MISS_SAMPLES;
-            self.kv_cache.kv_cache_miss_samples.drain(0..overflow);
-        }
-
-        self.maybe_push_kv_cache_miss_notice(
-            request,
-            reason,
-            missed_tokens,
-            read_tokens,
-            expected_tokens,
-            baseline.completed_at,
-        );
-    }
-
     /// Surface explicit, meaningful cache loss as soon as usage is known.
     /// Expected route changes and expiry are informational, not harness blame.
     /// Documented harness invalidations are attributed to their source.
