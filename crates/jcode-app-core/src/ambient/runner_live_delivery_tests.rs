@@ -23,7 +23,7 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 StreamEvent::TextDelta("Scheduled live output.".to_string()),
                 StreamEvent::MessageEnd { stop_reason: None },
             ]);
-            let provider: Arc<dyn Provider> = Arc::new(streaming);
+            let provider: Arc<dyn Provider> = Arc::new(streaming.clone());
             let server = Server::new_with_paths(
                 provider.clone(),
                 socket.clone(),
@@ -41,6 +41,8 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             };
             let mut session = Session::create(None, Some("live schedule regression".to_string()));
+            session.working_dir = Some(temp.path().display().to_string());
+            assert!(session.ensure_initial_session_context_message());
             session.save().expect("save target session");
             let subscribe_id = attached
                 .subscribe_with_info(
@@ -76,12 +78,12 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 .deliver_scheduled_direct_item(&provider, &item)
                 .await
                 .expect("deliver scheduled task");
-            let mut saw_text = false;
+            let mut streamed = String::new();
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     match attached.read_event().await.expect("attached client event") {
                         ServerEvent::TextDelta { text } => {
-                            saw_text |= text.contains("Scheduled live output.");
+                            streamed.push_str(&text);
                         }
                         ServerEvent::Done { id: 0 } => break,
                         ServerEvent::Error { message, .. } => panic!("live turn error: {message}"),
@@ -91,9 +93,14 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
             })
             .await
             .expect("scheduled output and Done must reach the original attachment");
-            assert!(
-                saw_text,
+            assert_eq!(
+                streamed, "Scheduled live output.",
                 "live attachment must receive the scheduled response"
+            );
+            assert_eq!(
+                streaming.supplied_tools.lock().unwrap().len(),
+                1,
+                "only the scheduled turn may call the provider"
             );
             let error = runner
                 .notify_live_session("missing-scheduled-target", "not delivered")

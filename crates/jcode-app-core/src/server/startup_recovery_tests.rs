@@ -520,6 +520,13 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
     let mut idle = crate::session::Session::create(None, Some("idle".to_string()));
     idle.save()?;
     let mut headed = crate::session::Session::create(None, Some("headed".to_string()));
+    headed.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Finish the attached work.".into(),
+            cache_control: None,
+        }],
+    );
     headed.save()?;
     for id in [&worker.id, &headed.id, &idle.id] {
         super::super::reload_recovery::persist_intent(

@@ -12,16 +12,17 @@ use tokio::sync::mpsc;
 
 pub(crate) use crate::session::RELOAD_INTERRUPTED_MARKER;
 
-/// Restore and mode changes can append skill instructions without starting a
-/// turn. They are model-visible, but must neither create nor hide pending work.
+/// Session bootstrap and mode changes persist model-visible context without
+/// starting a turn. They must neither create nor hide pending work.
 pub(crate) fn last_turn_message_for_recovery(messages: &[StoredMessage]) -> Option<&StoredMessage> {
     messages.iter().rev().find(|message| {
-        !(message.role == Role::User
-            && message.display_role == Some(StoredDisplayRole::System)
-            && matches!(
-                &message.content[..],
-                [ContentBlock::Text { text, .. }] if text.starts_with("<system-reminder>\n# Active Skill\n\n")
-            ))
+        !crate::session::is_initial_session_context_message(message)
+            && !(message.role == Role::User
+                && message.display_role == Some(StoredDisplayRole::System)
+                && matches!(
+                    &message.content[..],
+                    [ContentBlock::Text { text, .. }] if text.starts_with("<system-reminder>\n# Active Skill\n\n")
+                ))
     })
 }
 

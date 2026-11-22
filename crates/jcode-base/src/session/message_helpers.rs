@@ -17,6 +17,16 @@ pub(crate) fn is_visible_conversation_message(message: &StoredMessage) -> bool {
         && !is_scheduled_task_message(message)
 }
 
+/// The initial session-context snapshot is provider-visible, but is not a turn.
+pub fn is_initial_session_context_message(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.display_role == Some(StoredDisplayRole::System)
+        && matches!(
+            &message.content[..],
+            [ContentBlock::Text { text, .. }] if text.starts_with(SESSION_CONTEXT_PREFIX)
+        )
+}
+
 /// Recognize scheduler prompts persisted before they received an explicit
 /// system display role. This keeps old sessions from treating them as user
 /// prompts after resume.

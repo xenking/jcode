@@ -2,6 +2,41 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn restored_active_bootstrap_context_is_not_an_interrupted_turn() {
+    let mut session = crate::session::Session::create(None, None);
+    assert!(session.ensure_initial_session_context_message());
+    let agent = test_agent(session.messages.to_vec());
+    assert!(!restored_session_was_interrupted(
+        &session.id,
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+    assert_eq!(
+        agent.reload_resume_plan(true),
+        crate::agent::ResumePlan::Nothing
+    );
+
+    session.add_message_with_display_role(
+        crate::message::Role::User,
+        vec![ContentBlock::Text {
+            text: "[Scheduled task]\nFinish testing.".into(),
+            cache_control: None,
+        }],
+        Some(crate::session::StoredDisplayRole::System),
+    );
+    let agent = test_agent(session.messages.to_vec());
+    assert!(restored_session_was_interrupted(
+        &session.id,
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+    assert_eq!(
+        agent.reload_resume_plan(true),
+        crate::agent::ResumePlan::UserPrompt
+    );
+}
+
+#[test]
 fn restored_active_pending_tool_counts_as_interrupted() {
     let message = crate::session::StoredMessage {
         attachment_data: None,

@@ -98,7 +98,9 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 #[path = "session/message_helpers.rs"]
 mod message_helpers;
 pub(crate) use message_helpers::is_visible_conversation_message;
-pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
+pub use message_helpers::{
+    derive_session_provider_key, is_initial_session_context_message, is_scheduled_task_message,
+};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredSpeedSelection {
     pub mode: jcode_provider_core::SpeedMode,
