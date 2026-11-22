@@ -1315,6 +1315,8 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
+                        let codemode =
+                            crate::tool::codemode_ledger::output_summary(&tc.name, &output);
                         let mut blocks = tool_output_to_content_blocks(tc.id, output);
                         if self.provider.name().eq_ignore_ascii_case("openai")
                             && self.native_deferred_mcp()
@@ -1324,11 +1326,7 @@ impl Agent {
                                 &tools,
                             );
                         }
-                        self.add_message_with_duration(
-                            Role::User,
-                            blocks,
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
+                        self.add_tool_result(blocks, tool_elapsed.as_millis() as u64, codemode);
                         tool_results_dirty = true;
                     }
                     Err(e) => {
@@ -1353,14 +1351,14 @@ impl Agent {
                         if print_output {
                             println!("{}", error_msg);
                         }
-                        self.add_message_with_duration(
-                            Role::User,
+                        self.add_tool_result(
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
-                            Some(tool_elapsed.as_millis() as u64),
+                            tool_elapsed.as_millis() as u64,
+                            crate::tool::codemode_ledger::error_summary(&e),
                         );
                         tool_results_dirty = true;
                     }

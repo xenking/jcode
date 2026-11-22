@@ -23,6 +23,7 @@ pub(crate) mod bridge_reload;
 mod browser;
 mod calendar;
 mod codemode;
+pub(crate) mod codemode_ledger;
 mod communicate;
 pub(crate) use communicate::swarm_instruction_tokens;
 #[cfg(target_os = "macos")]
@@ -875,7 +876,7 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        self.execute_inner(name, input, ctx, false).await
+        self.execute_inner(name, input, ctx, false, None).await
     }
 
     pub(crate) async fn execute_parallel_read(
@@ -884,7 +885,19 @@ impl Registry {
         input: Value,
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
-        self.execute_inner(name, input, ctx, true).await
+        self.execute_inner(name, input, ctx, true, None).await
+    }
+
+    async fn execute_codemode_subcall(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+        ledger: &codemode_ledger::CallLedger,
+        seq: usize,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(name, input, ctx, false, Some((ledger, seq)))
+            .await
     }
 
     async fn execute_inner(
@@ -893,6 +906,7 @@ impl Registry {
         input: Value,
         ctx: ToolContext,
         parallel_read: bool,
+        codemode: Option<(&codemode_ledger::CallLedger, usize)>,
     ) -> Result<ToolOutput> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
@@ -1042,6 +1056,16 @@ impl Registry {
         }
 
         let started_at = std::time::Instant::now();
+        if let Some((ledger, seq)) = codemode {
+            ledger.dispatched(
+                seq,
+                resolved_name,
+                &input,
+                &ctx.session_id,
+                started_at,
+                !is_custom,
+            );
+        }
         // Hooks, policy, telemetry and the context guard stay in the runtime.
         // Only the workspace side effect moves to the execution environment.
         let result = if !is_custom && remote_exec::routes(resolved_name) {
@@ -1050,6 +1074,9 @@ impl Registry {
             tool.execute(input.clone(), ctx.clone()).await
         };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        if let Some((ledger, seq)) = codemode {
+            ledger.finished(seq, latency_ms, &result);
+        }
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
         Self::fire_post_tool_hook(resolved_name, &input, &ctx, &result, latency_ms);

@@ -519,6 +519,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
             kept_reversed.insert(
                 0,
                 StoredMessage {
+                    codemode: None,
                     attachment_data: None,
                     id: crate::id::new_id("message"),
                     role: Role::User,
@@ -799,6 +800,7 @@ fn import_session_from_file_with_target(
                 .unwrap_or_else(|| crate::id::new_id("msg"));
 
             imported_messages.push(StoredMessage {
+                codemode: None,
                 attachment_data: None,
                 id: msg_id,
                 role,
@@ -950,6 +952,7 @@ fn append_text_message(
         return;
     }
     session.append_stored_message(StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: crate::id::new_id("msg"),
         role,

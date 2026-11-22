@@ -59,6 +59,9 @@ pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,
     TurnStopReason,
 };
+pub use jcode_session_types::{
+    CodemodeCall, CodemodeCallStatus, CodemodeDirection, CodemodeStatus, CodemodeSummary,
+};
 pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,

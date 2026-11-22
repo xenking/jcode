@@ -493,6 +493,7 @@ pub(super) fn recent_history_window(
     }
     messages = messages.split_off(start);
     messages.insert(0, HistoryMessage {
+        codemode: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, tool_duration_ms: None,
         role: "system".to_owned(),
@@ -606,6 +607,7 @@ pub(super) fn apply_history_images_base(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
+        codemode: msg.codemode,
         attachments: msg.attachments,
         response_stats: msg.response_stats,
         timestamp_ms: msg.timestamp_ms,

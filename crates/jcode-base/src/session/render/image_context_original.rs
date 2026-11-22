@@ -67,6 +67,7 @@ pub fn render_messages_and_images_with_compacted_history(
             ));
         }
         rendered.push(RenderedMessage {
+            codemode: None,
             response_stats: None,
             tool_duration_ms: None,
             role: "system".to_string(),
@@ -105,6 +106,7 @@ pub fn render_messages_and_images_with_compacted_history(
     errors.sort_by_key(|(timestamp, _)| *timestamp);
     let mut errors = errors.into_iter().peekable();
     let render_error = |content: &String| RenderedMessage {
+        codemode: None,
         response_stats: None,
         tool_duration_ms: None,
         role: "error".to_string(),
@@ -144,6 +146,7 @@ pub fn render_messages_and_images_with_compacted_history(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                codemode: None,
                 response_stats: None,
                 tool_duration_ms: None,
                 role: "system".to_string(),
@@ -222,6 +225,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            codemode: None,
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -246,6 +250,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     current_tool = tool_data.clone();
 
                     rendered.push(RenderedMessage {
+                        codemode: msg.codemode.clone(),
                         response_stats: None,
                         tool_duration_ms: msg.tool_duration_ms,
                         role: "tool".to_string(),
@@ -310,6 +315,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            codemode: None,
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -332,6 +338,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         }
                     });
                     rendered.push(RenderedMessage {
+                        codemode: None,
                         response_stats: None,
                         tool_duration_ms: None,
                         role: "tool".to_string(),
@@ -355,6 +362,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 user_prompt_count += 1;
             }
             rendered.push(RenderedMessage {
+                codemode: None,
                 response_stats: None,
                 tool_duration_ms: None,
                 role: role.to_string(),

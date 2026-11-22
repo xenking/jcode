@@ -10,6 +10,13 @@ fn history_tool_preserves_duration() {
 }
 
 impl BridgeState {
+    pub(super) fn codemode_summary(
+        event: &Value,
+    ) -> Option<Box<jcode_harness_api::CodemodeSummary>> {
+        event.get("codemode_status")?;
+        serde::Deserialize::deserialize(event).ok()
+    }
+
     pub(super) fn daemon_list<T: serde::de::DeserializeOwned>(
         event: &Value,
         field: &str,
@@ -39,6 +46,7 @@ impl BridgeState {
         let data = &message["tool_data"];
         let id = data["id"].as_str().filter(|id| !id.is_empty())?;
         (message["role"] == "tool").then(|| jcode_harness_api::HistoryTool {
+            codemode: Self::codemode_summary(message),
             duration_ms: message["tool_duration_ms"].as_u64(),
             id: id.to_string(),
             name: data["name"].as_str().unwrap_or("").to_string(),

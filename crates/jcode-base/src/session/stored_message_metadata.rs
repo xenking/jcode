@@ -19,6 +19,8 @@ struct Metadata<'a> {
     tool_duration_ms: &'a Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_usage: &'a Option<StoredTokenUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codemode: &'a Option<Box<jcode_session_types::CodemodeSummary>>,
 }
 
 fn metadata(message: &StoredMessage) -> Metadata<'_> {
@@ -30,6 +32,7 @@ fn metadata(message: &StoredMessage) -> Metadata<'_> {
         timestamp: &message.timestamp,
         tool_duration_ms: &message.tool_duration_ms,
         token_usage: &message.token_usage,
+        codemode: &message.codemode,
     }
 }
 

@@ -10,6 +10,7 @@ fn assistant_message(
     cache_creation_input_tokens: Option<u64>,
 ) -> crate::session::StoredMessage {
     crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: id.to_string(),
         role: Role::Assistant,
@@ -32,6 +33,7 @@ fn sums_assistant_usage_only_from_the_turn_start() {
     let messages = vec![
         assistant_message("before", 100, 20, Some(100), Some(30), Some(4)),
         crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: "user".to_string(),
             role: Role::User,
@@ -56,6 +58,7 @@ fn sums_assistant_usage_only_from_the_turn_start() {
 #[test]
 fn returns_none_without_assistant_usage() {
     let messages = vec![crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "user".to_string(),
         role: Role::User,

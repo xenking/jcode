@@ -198,6 +198,7 @@ impl Agent {
                 self.session.insert_message(
                     message_index + 1 + inserted + offset,
                     StoredMessage {
+                        codemode: None,
                         id: id::new_id("message"),
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
@@ -317,6 +318,7 @@ impl Agent {
         );
         self.persist_session_now()?;
         let _ = event_tx.send(ServerEvent::ToolDone {
+            codemode: None,
             id: tool.id.clone(),
             name: tool.name.clone(),
             output: content,
@@ -376,6 +378,7 @@ impl Agent {
                 }
                 for (id, name, content) in self.append_interrupted_tool_results(&interrupted)? {
                     let _ = event_tx.send(ServerEvent::ToolDone {
+                        codemode: None,
                         id,
                         name,
                         output: content.clone(),

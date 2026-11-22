@@ -220,6 +220,7 @@ fn in_flight_count_excludes_foreign_queued_session() {
 fn latest_assistant_report_uses_last_non_empty_assistant_message() {
     let messages = vec![
         HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -230,6 +231,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             tool_data: None,
         },
         HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -240,6 +242,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             tool_data: None,
         },
         HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,

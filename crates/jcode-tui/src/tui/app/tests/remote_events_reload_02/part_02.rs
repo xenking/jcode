@@ -471,6 +471,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
     // First result arrives. This must not erase tool_b's streamed input.
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "tool_a".to_string(),
             name: "webfetch".to_string(),
             output: "page A body".to_string(),
@@ -491,6 +492,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
     // Second result arrives and its display message keeps the intent/url.
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "tool_b".to_string(),
             name: "webfetch".to_string(),
             output: "page B body".to_string(),
@@ -504,11 +506,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
         .display_messages()
         .iter()
         .rev()
-        .find(|dm| {
-            dm.tool_data
-                .as_ref()
-                .is_some_and(|td| td.id == "tool_b")
-        })
+        .find(|dm| dm.tool_data.as_ref().is_some_and(|td| td.id == "tool_b"))
         .expect("missing tool_b display message");
     let tool_b = tool_b_msg.tool_data.as_ref().unwrap();
     assert_eq!(tool_b.intent.as_deref(), Some("Fetch page B"));
@@ -599,6 +597,7 @@ fn send_native_search_row(
     );
     app.handle_server_event(
         ServerEvent::ToolDone {
+            codemode: None,
             id: id.to_string(),
             name: "web_search".to_string(),
             output: "1. Rust\n   https://www.rust-lang.org/".to_string(),
@@ -642,6 +641,7 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
     );
     app.handle_server_event(
         ServerEvent::ToolDone {
+            codemode: None,
             id: "toolu_earlier".to_string(),
             name: "bash".to_string(),
             output: "ok".to_string(),
@@ -713,6 +713,7 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
     );
     app.handle_server_event(
         ServerEvent::ToolDone {
+            codemode: None,
             id: "toolu_bash".to_string(),
             name: "bash".to_string(),
             output: "ok".to_string(),

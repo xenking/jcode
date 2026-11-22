@@ -1154,6 +1154,7 @@ mod tests {
                 write.write_all(frame.as_bytes()).await.unwrap();
                 finish_tool.await.unwrap();
                 let event = ServerEvent::ToolDone {
+                    codemode: None,
                     id: "busy-tool".into(),
                     name: "bash".into(),
                     output: "finished after background acknowledgement".into(),

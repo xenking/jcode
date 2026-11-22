@@ -1864,6 +1864,7 @@ impl Agent {
                     is_error: Some(true),
                 };
                 let stored_message = StoredMessage {
+                    codemode: None,
                     attachment_data: None,
                     id: id::new_id("message"),
                     role: Role::User,

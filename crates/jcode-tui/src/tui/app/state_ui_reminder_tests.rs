@@ -9,6 +9,7 @@ fn stored_actionable_reminders_render_as_short_system_notices() {
         "\nLeave todos marked Completely blocked alone until the condition is cleared. Continue independent actionable work.",
     ] {
         let stored = crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: "saved-reminder".into(),
             role: Role::User,

@@ -8,11 +8,13 @@
 //! (so session policy, hooks, and MCP routing all apply), and persists the
 //! script `store()` per session between runs.
 
+use super::codemode_ledger::{self, CallLedger, StoreError};
 use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use jcode_codemode::{Host, Limits, ToolInfo};
+use jcode_session_types::CodemodeStatus;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
@@ -55,12 +57,14 @@ struct RegistryHost {
     registry: Registry,
     ctx: ToolContext,
     counter: AtomicUsize,
+    ledger: Arc<CallLedger>,
 }
 
 impl Host for RegistryHost {
     fn call_tool(&self, name: String, args: Value) -> BoxFuture<'static, Result<Value, String>> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let registry = self.registry.clone();
+        let ledger = self.ledger.clone();
         let sub_ctx = self.ctx.for_subcall(format!("codemode-{n}-{name}"));
         Box::pin(async move {
             let args = match args {
@@ -75,7 +79,10 @@ impl Host for RegistryHost {
                 }
                 other => return Err(format!("arguments must be an object, got {other}")),
             };
-            match registry.execute(&name, args, sub_ctx).await {
+            match registry
+                .execute_codemode_subcall(&name, args, sub_ctx, &ledger, n)
+                .await
+            {
                 Ok(output) => Ok(jcode_codemode::decode_tool_output(&output.output)),
                 Err(err) => Err(crate::util::format_error_chain(&err)),
             }
@@ -402,10 +409,12 @@ impl Tool for CodemodeTool {
             })
             .collect();
 
+        let ledger = Arc::new(CallLedger::default());
         let host = Arc::new(RegistryHost {
             registry,
             ctx: ctx.clone(),
             counter: AtomicUsize::new(0),
+            ledger: ledger.clone(),
         });
         let store = load_store(&ctx.session_id)?;
         let limits = Limits {
@@ -428,18 +437,33 @@ impl Tool for CodemodeTool {
             Some(tokens) => budget_report(&out, tokens, spill, store_result.is_ok()),
             None => bound_report(render_report(&out), MAX_REPORT_CHARS, spill),
         };
-        store_result.with_context(|| {
+        let store_result = store_result.with_context(|| {
             format!("codemode executed but its store was NOT persisted:\n{report}")
-        })?;
+        });
+        if let Err(error) = store_result {
+            return Err(StoreError {
+                error,
+                summary: ledger.summary(CodemodeStatus::Error),
+            }
+            .into());
+        }
         if out.error.is_some() && out.tool_calls == 0 && out.logs.is_empty() {
             // Nothing happened: surface as a tool error so the model retries.
             anyhow::bail!("{report}");
         }
-        Ok(ToolOutput::new(report).with_title(format!(
-            "codemode: {} call{}",
-            out.tool_calls,
-            if out.tool_calls == 1 { "" } else { "s" }
-        )))
+        let status = if out.error.is_some() {
+            CodemodeStatus::Error
+        } else {
+            CodemodeStatus::Success
+        };
+        Ok(codemode_ledger::attach(
+            ToolOutput::new(report).with_title(format!(
+                "codemode: {} call{}",
+                out.tool_calls,
+                if out.tool_calls == 1 { "" } else { "s" }
+            )),
+            ledger.summary(status),
+        ))
     }
 }
 

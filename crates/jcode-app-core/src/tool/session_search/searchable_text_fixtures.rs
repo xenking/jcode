@@ -3,6 +3,7 @@ use serde_json::json;
 
 pub(super) fn message(blocks: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
+        codemode: None,
         id: "projection-fixture".into(),
         role: jcode_message_types::Role::User,
         content: blocks.into(),

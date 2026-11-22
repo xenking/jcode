@@ -675,6 +675,7 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
     );
     session.rename_title(Some("Custom release planning".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
@@ -714,6 +715,7 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
         Some("Generated first prompt".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
@@ -824,6 +826,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
     );
     session.rename_title(Some("Manual session title".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
@@ -885,6 +888,7 @@ fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
     );
     saved_session.mark_saved(Some("Pinned Session".to_string()));
     saved_session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "saved-msg".to_string(),
         role: crate::message::Role::User,
@@ -907,6 +911,7 @@ fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
             Some(format!("Newer Unsaved {idx:03}")),
         );
         session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("msg-{idx}"),
             role: crate::message::Role::User,
@@ -946,6 +951,7 @@ fn load_sessions_preserves_snapshot_saved_when_journal_meta_omits_saved() {
     );
     session.mark_saved(Some("Legacy Saved".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "saved-legacy-msg".to_string(),
         role: crate::message::Role::User,
@@ -1035,6 +1041,7 @@ fn session_matches_query_searches_jcode_transcript_contents() {
         Some("Transcript Search".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,
@@ -1082,6 +1089,7 @@ fn jcode_search_index_keeps_late_turns_after_reaching_its_budget() {
             format!("turn-{index} {}", "x".repeat(7_500))
         };
         session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("msg{index}"),
             role: crate::message::Role::User,
@@ -1369,6 +1377,7 @@ fn benchmark_resume_loading_reports_timings() {
             Some(format!("Resume Bench {idx:03}")),
         );
         session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("msg-{idx}-1"),
             role: crate::message::Role::User,
@@ -1383,6 +1392,7 @@ fn benchmark_resume_loading_reports_timings() {
             token_usage: None,
         });
         session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("msg-{idx}-2"),
             role: crate::message::Role::Assistant,

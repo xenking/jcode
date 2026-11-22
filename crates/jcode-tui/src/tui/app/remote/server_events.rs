@@ -464,6 +464,7 @@ fn handle_server_event_inner(
             name,
             output,
             error,
+            ..
         } => {
             if name == "ask"
                 && app
@@ -1766,6 +1767,7 @@ fn handle_server_event_inner(
                 messages.reserve(prefix.len() + tail.len());
                 messages.extend(prefix.into_iter().map(|msg| {
                     crate::protocol::HistoryMessage {
+                        codemode: None,
                         attachments: Vec::new(),
                         response_stats: None,
                         timestamp_ms: None,

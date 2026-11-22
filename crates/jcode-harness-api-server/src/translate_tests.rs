@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn codemode_bridge_keeps_ordered_receipts_separate_from_the_wrapper_result() {
+    let mut state = state_with_session();
+    let calls = json!([
+        { "tool": "swarm", "action": "message", "actor": "fox", "target": "fish", "direction": "outbound", "status": "success", "duration_ms": 20 },
+        { "tool": "lookup", "status": "error", "duration_ms": 3 }
+    ]);
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"tool_done", "id":"wrapper", "name":"codemode", "output":"wrapper failed after delivery",
+        "codemode_status":"error", "codemode_calls": calls
+    }));
+    let value = serde_json::to_value(&frames[0].event).unwrap();
+    assert_eq!(value["call_id"], "wrapper");
+    assert_eq!(value["output"], "wrapper failed after delivery");
+    assert_eq!(value["codemode_calls"], calls);
+    assert_eq!(value["codemode_status"], "error");
+    assert!(value.get("error").is_none());
+
+    let row = json!({"role":"tool", "tool_data":{"id":"wrapper", "name":"codemode"},
+        "codemode_status":"error", "codemode_calls": calls});
+    let history_tool = BridgeState::history_tool(&row).unwrap();
+    assert_eq!(
+        serde_json::to_value(history_tool).unwrap()["codemode_calls"],
+        calls
+    );
+}
+
+#[test]
 fn legacy_swarm_statuses_have_distinct_receive_order_stamps() {
     let mut state = state_with_session();
     let stamps = ["ready", "running"].map(|status| {

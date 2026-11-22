@@ -792,6 +792,7 @@ impl App {
                     tool_duration_ms: None,
                 };
                 let stored_message = crate::session::StoredMessage {
+                    codemode: None,
                     attachment_data: None,
                     id: id::new_id("message"),
                     role: Role::User,

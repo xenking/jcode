@@ -1579,6 +1579,34 @@ impl Session {
         token_usage: Option<StoredTokenUsage>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
+        self.push_message(
+            role,
+            content,
+            tool_duration_ms,
+            token_usage,
+            display_role,
+            None,
+        )
+    }
+
+    pub fn add_tool_result(
+        &mut self,
+        content: impl Into<crate::message::SharedContent>,
+        duration_ms: u64,
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    ) -> String {
+        self.push_message(Role::User, content, Some(duration_ms), None, None, codemode)
+    }
+
+    fn push_message(
+        &mut self,
+        role: Role,
+        content: impl Into<crate::message::SharedContent>,
+        tool_duration_ms: Option<u64>,
+        token_usage: Option<StoredTokenUsage>,
+        display_role: Option<StoredDisplayRole>,
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    ) -> String {
         let id = new_id("message");
         self.append_stored_message(StoredMessage {
             attachment_data: None,
@@ -1589,6 +1617,7 @@ impl Session {
             timestamp: Some(Utc::now()),
             tool_duration_ms,
             token_usage,
+            codemode,
         });
         id
     }

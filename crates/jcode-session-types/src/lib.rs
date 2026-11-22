@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 mod ask;
 pub mod assistant_text;
+mod codemode;
+pub use codemode::*;
 mod context_breakdown;
 pub use context_breakdown::{
     CONTEXT_BREAKDOWN_CAPABILITY, ContextActionForecast, ContextActionMeasurement,
@@ -163,6 +165,8 @@ pub struct RenderedMessage {
     /// Execution duration for a completed tool row, when recorded by the runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codemode: Option<Box<CodemodeSummary>>,
     /// Present only on the final visible assistant row of a completed stored
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -447,6 +451,8 @@ pub struct StoredMessage {
     pub tool_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<StoredTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codemode: Option<Box<CodemodeSummary>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

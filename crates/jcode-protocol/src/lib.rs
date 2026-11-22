@@ -286,6 +286,8 @@ pub struct HistoryMessage {
     pub timestamp_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_duration_ms: Option<u64>,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,

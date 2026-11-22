@@ -55,6 +55,17 @@ impl Agent {
         id
     }
 
+    pub(super) fn add_tool_result(
+        &mut self,
+        content: Vec<ContentBlock>,
+        duration_ms: u64,
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    ) -> String {
+        let id = self.session.add_tool_result(content, duration_ms, codemode);
+        self.note_session_message_added();
+        id
+    }
+
     pub(crate) fn add_message_ext(
         &mut self,
         role: Role,

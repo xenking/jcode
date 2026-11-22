@@ -242,6 +242,8 @@ pub enum ApiEvent {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(flatten)]
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
     },
 
     /// Images the model just received from a tool result or image generator.
@@ -1003,6 +1005,50 @@ pub struct HistoryTool {
     pub name: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub input: serde_json::Value,
+    #[serde(flatten)]
+    pub codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+}
+
+#[test]
+fn codemode_live_and_history_metadata_round_trip_without_touching_output() {
+    let legacy = serde_json::json!({
+        "ev": "tool_done", "session_id": "s", "call_id": "parent", "name": "codemode",
+        "output": "wrapper result"
+    });
+    let event: ApiEvent = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(event, ApiEvent::ToolDone { codemode: None, .. }));
+    assert_eq!(serde_json::to_value(&event).unwrap(), legacy);
+
+    let mut live = legacy;
+    live["codemode_status"] = serde_json::json!("error");
+    live["codemode_calls_omitted"] = serde_json::json!(2);
+    live["codemode_calls"] = serde_json::json!([
+        {"tool":"swarm", "action":"message", "actor":"fox", "target":"fish", "direction":"outbound", "status":"success", "duration_ms":4},
+        {"tool":"read", "status":"error", "duration_ms":7},
+        {"tool":"grep", "status":"interrupted", "duration_ms":8}
+    ]);
+    let event: ApiEvent = serde_json::from_value(live.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&event).unwrap(), live);
+    let ApiEvent::ToolDone {
+        codemode: Some(codemode),
+        ..
+    } = event
+    else {
+        panic!("missing ledger")
+    };
+    let history_tool = HistoryTool {
+        id: "parent".into(),
+        name: "codemode".into(),
+        input: serde_json::Value::Null,
+        duration_ms: None,
+        codemode: Some(codemode),
+    };
+    let history = serde_json::to_value(&history_tool).unwrap();
+    assert_eq!(history["codemode_calls"], live["codemode_calls"]);
+    assert_eq!(
+        serde_json::from_value::<HistoryTool>(history).unwrap(),
+        history_tool
+    );
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2623,6 +2623,7 @@ async fn sdk_socket_cancel_workflow(
     other_session.title = Some("sdk other session".into());
     for index in 0..8 {
         other_session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("history-{index}"),
             role: if index % 2 == 0 {

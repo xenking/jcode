@@ -508,6 +508,7 @@ async fn cloud_session_listing_rejects_http_and_schema_errors() {
 
 fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "m".into(),
         role,

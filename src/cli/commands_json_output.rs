@@ -48,16 +48,24 @@ pub(super) fn emit_ndjson_event(
             name,
             output,
             error,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
+            codemode,
+        } => {
+            let mut row = serde_json::json!({
                 "type": "tool_done",
                 "id": id,
                 "name": name,
                 "output": output,
                 "error": error,
-            }),
-        ),
+            });
+            if let Some(codemode) = codemode
+                && let serde_json::Value::Object(fields) = serde_json::to_value(codemode)?
+            {
+                row.as_object_mut()
+                    .expect("tool_done object")
+                    .extend(fields);
+            }
+            write_json_line(stdout, &row)
+        }
         ServerEvent::TokenUsage {
             input,
             output,

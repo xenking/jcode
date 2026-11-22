@@ -35,6 +35,7 @@ fn native_search_duration_includes_execution_and_preserves_late_query() {
     assert_eq!(app.streaming_tool_calls[0].input["query"], "jcode timing");
     app.handle_server_event(
         ServerEvent::ToolDone {
+            codemode: None,
             id: "ws_timed".into(),
             name: "web_search".into(),
             output: "Searched: jcode timing".into(),
@@ -62,6 +63,7 @@ fn tool_duration_remote_completion_and_local_update() {
     ] {
         app.handle_server_event(
             crate::protocol::ServerEvent::ToolDone {
+                codemode: None,
                 id: id.into(),
                 name: "bash".into(),
                 output: output.into(),
@@ -83,6 +85,7 @@ fn tool_duration_remote_completion_and_local_update() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "observed".into(),
             name: "bash".into(),
             output: "failed".into(),
@@ -118,6 +121,7 @@ fn tool_duration_replay_does_not_measure_playback_clock() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "replay".into(),
             name: "bash".into(),
             output: "done".into(),

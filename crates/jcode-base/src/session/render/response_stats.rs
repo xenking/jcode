@@ -107,6 +107,7 @@ mod tests {
 
     fn text(role: Role, text: &str, usage: Option<StoredTokenUsage>) -> StoredMessage {
         StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: String::new(),
             role,
@@ -132,6 +133,7 @@ mod tests {
     }
     fn row(index: usize) -> RenderedMessage {
         RenderedMessage {
+            codemode: None,
             attachments: Vec::new(),
             role: "assistant".into(),
             content: "answer".into(),

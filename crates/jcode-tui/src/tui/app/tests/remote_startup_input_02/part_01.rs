@@ -1376,6 +1376,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.provider_key = Some("test-provider".to_string());
         app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: "msg-1".to_string(),
             role: Role::User,
@@ -1741,8 +1742,7 @@ fn test_retrieve_pending_message_with_alt_and_super_up() {
             app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
                 .unwrap();
         }
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
 
         assert_eq!(app.queued_count(), 1, "modifier {modifier:?}");
         assert!(app.input().is_empty(), "modifier {modifier:?}");
@@ -2177,7 +2177,8 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
                     .active_option()
                     .is_some_and(|route| route.api_method == api_method)
         });
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
         let levels: Vec<String> = app
             .inline_interactive_state
             .as_ref()

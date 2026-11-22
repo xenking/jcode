@@ -1511,6 +1511,7 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
+                codemode: msg.codemode,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
@@ -1540,6 +1541,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                codemode: msg.codemode,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
@@ -1573,6 +1575,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                codemode: msg.codemode,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,

@@ -69,16 +69,25 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
                 ]
                 .iter()
                 .any(|prefix| text.starts_with(prefix)));
-        let tool = if message.role == "tool" {
-            message.tool_data.map(|tool| {
-                serde_json::json!({
-                    "id": tool.id, "name": tool.name, "input": tool.input,
-                    "duration_ms": message.tool_duration_ms,
-                })
-            })
-        } else {
-            None
-        };
+        #[derive(Serialize)]
+        struct PagedTool {
+            id: String,
+            name: String,
+            input: serde_json::Value,
+            duration_ms: Option<u64>,
+            #[serde(flatten, skip_serializing_if = "Option::is_none")]
+            codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        }
+        let tool = (message.role == "tool")
+            .then_some(message.tool_data)
+            .flatten()
+            .map(|tool| PagedTool {
+                id: tool.id,
+                name: tool.name,
+                input: tool.input,
+                duration_ms: message.tool_duration_ms,
+                codemode: message.codemode,
+            });
         records.push(serde_json::json!({
             "message": { "role": message.role, "content": message.content,
                 "timestamp_ms": message.timestamp_ms, "response_stats": message.response_stats, "tool": tool },

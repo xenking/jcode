@@ -1858,6 +1858,7 @@ async fn run_waits_for_working_swarm_members_instead_of_poking() {
 fn run_turn_tool_call_detection_only_looks_at_new_messages() {
     use crate::message::{ContentBlock, Role};
     let stored = |content: Vec<ContentBlock>| crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "m".into(),
         role: Role::Assistant,

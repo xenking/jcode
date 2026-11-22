@@ -504,6 +504,7 @@ fn render_messages_and_images_internal(
             ));
         }
         rendered.push(RenderedMessage {
+            codemode: None,
             attachments: Vec::new(),
             response_stats: None,
             tool_duration_ms: None,
@@ -575,6 +576,7 @@ fn render_messages_and_images_internal(
     memory_rows.sort_by_key(|injection| injection.before_message.unwrap_or(usize::MAX));
     let mut memory_rows = memory_rows.into_iter().peekable();
     let render_error = |content: String| RenderedMessage {
+        codemode: None,
         attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
@@ -624,6 +626,7 @@ fn render_messages_and_images_internal(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                codemode: None,
                 attachments: Vec::new(),
                 response_stats: None,
                 tool_duration_ms: None,
@@ -755,6 +758,7 @@ fn render_messages_and_images_internal(
                             &mut text_boundaries,
                             reasoning_len,
                             RenderedMessage {
+                                codemode: None,
                                 attachments: Vec::new(),
                                 response_stats: None,
                                 tool_duration_ms: None,
@@ -790,6 +794,7 @@ fn render_messages_and_images_internal(
                     }
 
                     rendered.push(RenderedMessage {
+                        codemode: msg.codemode.clone(),
                         attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: msg.tool_duration_ms,
@@ -866,6 +871,7 @@ fn render_messages_and_images_internal(
                             &mut text_boundaries,
                             reasoning_len,
                             RenderedMessage {
+                                codemode: None,
                                 attachments: Vec::new(),
                                 response_stats: None,
                                 tool_duration_ms: None,
@@ -889,6 +895,7 @@ fn render_messages_and_images_internal(
                         }
                     });
                     rendered.push(RenderedMessage {
+                        codemode: None,
                         attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: None,
@@ -928,6 +935,7 @@ fn render_messages_and_images_internal(
                 &mut text_boundaries,
                 reasoning_len,
                 RenderedMessage {
+                    codemode: None,
                     attachments: msg
                         .attachment_data
                         .as_ref()
@@ -995,6 +1003,7 @@ fn push_text_rows(
 /// recalled.
 fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
     RenderedMessage {
+        codemode: None,
         attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
@@ -1244,6 +1253,7 @@ fn compaction_divider_row(
     idle: bool,
 ) -> RenderedMessage {
     RenderedMessage {
+        codemode: None,
         attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,

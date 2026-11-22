@@ -331,6 +331,7 @@ mod tests {
         );
         p.observe(
             &ServerEvent::ToolDone {
+                codemode: None,
                 id: "native".into(),
                 name: "search".into(),
                 output: String::new(),
@@ -428,6 +429,7 @@ mod tests {
         assert_eq!(p.value.tool_intent.as_deref(), Some("Run tests"));
         p.observe(
             &ServerEvent::ToolDone {
+                codemode: None,
                 id: "t".into(),
                 name: "bash".into(),
                 output: "ok".into(),

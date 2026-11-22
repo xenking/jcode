@@ -207,6 +207,29 @@ export interface HistoryMessage {
   role: string;
   content: string;
   attachments?: StoredAttachment[];
+  tool?: HistoryTool;
+}
+
+export type CodemodeStatus = "success" | "error";
+
+export interface CodemodeCall {
+  tool: string;
+  action?: string;
+  actor?: string;
+  target?: string;
+  direction?: "outbound";
+  status: CodemodeStatus | "interrupted";
+  duration_ms: number;
+}
+
+export interface HistoryTool {
+  id: string;
+  name: string;
+  input?: unknown;
+  duration_ms?: number;
+  codemode_status?: CodemodeStatus;
+  codemode_calls?: CodemodeCall[];
+  codemode_calls_omitted?: number;
 }
 
 export type RenderedImageSource =
@@ -629,6 +652,10 @@ export type ApiEvent =
       name: string;
       output: string;
       error?: string;
+      codemode_status?: CodemodeStatus;
+      /** Dispatched calls only. This does not replace the wrapper output. */
+      codemode_calls?: CodemodeCall[];
+      codemode_calls_omitted?: number;
     }
   | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
   | { ev: "applet_state"; session_id: string; snapshot: AgentApplets }

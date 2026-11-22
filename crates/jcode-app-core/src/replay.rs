@@ -58,6 +58,8 @@ pub enum TimelineEventKind {
         output: String,
         #[serde(default)]
         is_error: bool,
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
     },
 
     /// Token usage update (drives context bar)
@@ -207,6 +209,7 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
                                 name: tool_name,
                                 output: truncate_for_timeline(content),
                                 is_error: is_error.unwrap_or(false),
+                                codemode: msg.codemode.clone(),
                             },
                         });
                         t += duration_ms.min(100); // Small gap after tool result
@@ -507,6 +510,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 name,
                 output,
                 is_error,
+                codemode,
             } => {
                 let id = pending_tool_ids.pop().unwrap_or_else(|| {
                     tool_id_counter += 1;
@@ -515,6 +519,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 out.push((
                     delay,
                     ReplayEvent::Server(ServerEvent::ToolDone {
+                        codemode: codemode.clone(),
                         id,
                         name: name.clone(),
                         output: output.clone(),

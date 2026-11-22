@@ -148,6 +148,7 @@ fn decision_card_is_a_numbered_user_turn_and_wraps_without_clicking() {
 fn reloaded_decision_keeps_questions_and_user_turn_count() {
     let mut app = create_test_app();
     let rendered = crate::session::RenderedMessage {
+        codemode: None,
         attachments: Vec::new(),
         role: "tool".into(), content: "User answers:\n1. Which? -> B\n".into(),
         tool_data: Some(crate::message::ToolCall { id: "history-ask".into(), name: "ask".into(),

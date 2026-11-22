@@ -60,6 +60,7 @@ fn fixtures(home: &Path, count: usize) -> Vec<SessionInfo> {
             if i == count / 2 { NEEDLE } else { "padding" }
         );
         local.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("message-{i}"),
             role: crate::message::Role::User,

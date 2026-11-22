@@ -636,6 +636,25 @@ fn typescript_sdk_lists_every_field() {
 }
 
 #[test]
+fn typescript_sdk_names_the_flattened_codemode_fields() {
+    let Some(sdk) = sdk_protocol_source() else {
+        return;
+    };
+    let live = sdk_variant_block(&sdk, "ev", "tool_done").unwrap();
+    let (_, history) = sdk.split_once("export interface HistoryTool {").unwrap();
+    let (history, _) = history.split_once('}').unwrap();
+    for row in [live.as_str(), history] {
+        for field in [
+            "codemode_status?",
+            "codemode_calls?",
+            "codemode_calls_omitted?",
+        ] {
+            assert!(row.contains(field), "missing {field} in {row}");
+        }
+    }
+}
+
+#[test]
 fn typescript_context_breakdown_matches_flattened_wire_payload() {
     let Some(sdk) = sdk_protocol_source() else {
         return;

@@ -611,6 +611,7 @@ impl Agent {
                                     });
                                 }
                                 let _ = event_tx.send(ServerEvent::ToolDone {
+                                    codemode: None,
                                     id,
                                     name,
                                     output,
@@ -758,6 +759,7 @@ impl Agent {
                             .cloned()
                             .unwrap_or_default();
                         let _ = event_tx.send(ServerEvent::ToolDone {
+                            codemode: None,
                             id: tool_use_id.clone(),
                             name: tool_name,
                             output: content.clone(),
@@ -1612,6 +1614,7 @@ impl Agent {
                     });
                     logging::warn(&error_msg);
                     let _ = event_tx.send(ServerEvent::ToolDone {
+                        codemode: None,
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: error_msg.clone(),
@@ -1802,6 +1805,8 @@ impl Agent {
                     match result {
                         Ok(output) => {
                             let output = cap_tool_output_for_history(&tc.name, output);
+                            let codemode =
+                                crate::tool::codemode_ledger::output_summary(&tc.name, &output);
                             let mut side_pane_images =
                                 tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
                             let mut blocks = tool_output_to_content_blocks(tc.id.clone(), output);
@@ -1813,10 +1818,10 @@ impl Agent {
                                     &tools,
                                 );
                             }
-                            let message_id = self.add_message_with_duration(
-                                Role::User,
+                            let message_id = self.add_tool_result(
                                 blocks,
-                                Some(tool_elapsed.as_millis() as u64),
+                                tool_elapsed.as_millis() as u64,
+                                codemode.clone(),
                             );
                             label_session_images(
                                 &self.session,
@@ -1844,6 +1849,7 @@ impl Agent {
                                 })
                                 .unwrap_or_default();
                             let _ = event_tx.send(ServerEvent::ToolDone {
+                                codemode,
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 output: output_text,
@@ -1865,22 +1871,24 @@ impl Agent {
                             tool_results_dirty = true;
                         }
                         Err(e) => {
+                            let codemode = crate::tool::codemode_ledger::error_summary(&e);
                             let error_msg = format!("Error: {}", e);
                             let _ = event_tx.send(ServerEvent::ToolDone {
+                                codemode: codemode.clone(),
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 output: error_msg.clone(),
                                 error: Some(error_msg.clone()),
                             });
 
-                            self.add_message_with_duration(
-                                Role::User,
+                            self.add_tool_result(
                                 vec![ContentBlock::ToolResult {
                                     tool_use_id: tc.id.clone(),
                                     content: error_msg,
                                     is_error: Some(true),
                                 }],
-                                Some(tool_elapsed.as_millis() as u64),
+                                tool_elapsed.as_millis() as u64,
+                                codemode,
                             );
                             tool_results_dirty = true;
                         }
@@ -1926,6 +1934,7 @@ impl Agent {
                     // but do not publish a false ToolDone to live clients.
                     if !(is_reload && tc.name == "ask") {
                         let _ = event_tx.send(ServerEvent::ToolDone {
+                            codemode: None,
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             output: interrupted_msg.clone(),
@@ -2015,6 +2024,7 @@ impl Agent {
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
+                        codemode: None,
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: bg_msg.clone(),

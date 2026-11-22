@@ -3,6 +3,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .into_iter()
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -18,6 +19,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
 #[test]
 fn rendered_tool_history_preserves_timing_on_wire() {
     let row = crate::session::RenderedMessage {
+        codemode: None,
         timestamp_ms: Some(20_000),
         tool_duration_ms: Some(7_000),
         response_stats: None,
@@ -55,6 +57,7 @@ fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
     messages.insert(
         1,
         crate::protocol::HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -160,6 +163,7 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -194,6 +198,7 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
 fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, role: "system".to_owned(),
@@ -316,6 +321,7 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
     let mut session = crate::session::Session::create_with_id(session_id.to_owned(), None, None);
     for index in 0..8 {
         session.append_stored_message(crate::session::StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("message-{index}"),
             role: if index % 2 == 0 {

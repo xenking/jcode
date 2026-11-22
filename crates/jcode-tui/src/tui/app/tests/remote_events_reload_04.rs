@@ -777,6 +777,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg-startup-stub".to_string(),
         role: crate::message::Role::User,
@@ -2688,6 +2689,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             session_id: "ses_restore_context_tokens".to_string(),
             messages: vec![
                 crate::protocol::HistoryMessage {
+                    codemode: None,
                     tool_duration_ms: None,
                     timestamp_ms: Some(1),
                     attachments: Vec::new(),
@@ -2698,6 +2700,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    codemode: None,
                     tool_duration_ms: None,
                     timestamp_ms: Some(2),
                     attachments: Vec::new(),

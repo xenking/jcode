@@ -863,6 +863,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     );
     session.model = Some("mock-model".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg-busy-fallback".to_string(),
         role: crate::message::Role::User,

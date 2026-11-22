@@ -14,6 +14,7 @@ fn at(seconds: i64) -> chrono::DateTime<Utc> {
 
 fn user_message(second: i64) -> StoredMessage {
     StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: format!("user-{second}"),
         role: Role::User,
@@ -31,6 +32,7 @@ fn user_message(second: i64) -> StoredMessage {
 
 fn assistant_message(second: i64, prompt_tokens: u64) -> StoredMessage {
     StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: format!("assistant-{second}"),
         role: Role::Assistant,

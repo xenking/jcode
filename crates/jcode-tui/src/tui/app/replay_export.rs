@@ -320,6 +320,7 @@ mod tests {
             json!([{"name":"Historical pinned work","status":"in_progress","priority":"high"}])
                 .to_string();
         let event = crate::replay::ReplayEvent::Server(crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "recorded_tool".into(),
             name: "todo".into(),
             output,
@@ -337,6 +338,7 @@ mod tests {
         assert!(!app.refresh_pinned_todos_if_needed());
         assert_eq!(app.pinned_todos_payload.as_deref(), Some(restored.as_str()));
         let error = crate::replay::ReplayEvent::Server(crate::protocol::ServerEvent::ToolDone {
+            codemode: None,
             id: "failed_tool".into(),
             name: "todo".into(),
             output: "[]".into(),

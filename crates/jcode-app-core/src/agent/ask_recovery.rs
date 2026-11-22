@@ -190,6 +190,7 @@ impl Agent {
                 .context("recovered ask is missing its persisted result")?;
             if event_tx
                 .send(ServerEvent::ToolDone {
+                    codemode: None,
                     id: ask.id,
                     name: "ask".into(),
                     output: output_text.clone(),

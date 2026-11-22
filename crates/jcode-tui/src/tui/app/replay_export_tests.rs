@@ -119,7 +119,7 @@ async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
     let timeline = vec![
         TimelineEvent { t:0, kind:TimelineEventKind::Thinking { duration:1 } },
         TimelineEvent { t:1, kind:TimelineEventKind::ToolDone { name:"todo".into(),
-            output:json!([{"id":"finished", "content":"Recorded completed work", "status":"completed", "priority":"high"}]).to_string(), is_error:false } },
+            output:json!([{"id":"finished", "content":"Recorded completed work", "status":"completed", "priority":"high"}]).to_string(), is_error:false, codemode:None } },
         TimelineEvent { t:2, kind:TimelineEventKind::Done },
     ];
     for (_, event) in crate::replay::timeline_to_replay_events(&timeline) {
@@ -195,6 +195,7 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             kind: TimelineEventKind::ToolDone {
                 name: "todo".into(),
                 output: json!([todo("HISTORICAL_FIRST")]).to_string(),
+                codemode: None,
                 is_error: false,
             },
         },
@@ -203,6 +204,7 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             kind: TimelineEventKind::ToolDone {
                 name: "todo".into(),
                 output: json!([todo("HISTORICAL_LATEST")]).to_string(),
+                codemode: None,
                 is_error: false,
             },
         },

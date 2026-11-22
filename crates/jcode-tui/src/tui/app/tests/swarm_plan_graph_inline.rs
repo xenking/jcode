@@ -522,6 +522,7 @@ fn history_event_for_session_with_messages(
 
 fn user_history_message(content: &str) -> crate::protocol::HistoryMessage {
     crate::protocol::HistoryMessage {
+        codemode: None,
         attachments: Vec::new(),
         response_stats: None,
         timestamp_ms: None,

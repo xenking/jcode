@@ -312,6 +312,7 @@ mod tests {
     fn saved_session(id: &str, text: &str) -> Session {
         let mut session = Session::create_with_id(id.to_string(), None, None);
         session.append_stored_message(StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: format!("{id}_m1"),
             role: Role::User,
@@ -371,6 +372,7 @@ mod tests {
         // Ensure a distinct mtime even on coarse-timestamp filesystems.
         std::thread::sleep(Duration::from_millis(20));
         session.append_stored_message(StoredMessage {
+            codemode: None,
             attachment_data: None,
             id: "session_prewarm_stale_m2".to_string(),
             role: Role::Assistant,

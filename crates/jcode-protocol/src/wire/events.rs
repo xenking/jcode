@@ -220,6 +220,8 @@ pub enum ServerEvent {
         output: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
     },
 
     /// Rendered images produced during the live turn, including image-bearing

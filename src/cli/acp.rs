@@ -1849,6 +1849,7 @@ impl EventMapper {
                 name,
                 output,
                 error,
+                ..
             } => vec![json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": id,

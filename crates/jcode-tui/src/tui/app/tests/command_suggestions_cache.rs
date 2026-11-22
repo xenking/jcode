@@ -82,6 +82,7 @@ fn advancing_the_epoch_forces_recomputation_for_identical_input() {
 
     // Mutate state the key deliberately does not track, then advance the frame.
     app.session.messages.push(crate::session::StoredMessage {
+        codemode: None,
         attachment_data: None,
         id: "msg-rewind-target".to_string(),
         role: Role::User,

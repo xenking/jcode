@@ -812,7 +812,7 @@ impl CommunicateInput {
 /// frequently invent near-miss verbs (e.g. `inbox` for reading messages, `send`
 /// for `message`), which previously produced an "Unknown action" error. Unknown
 /// inputs are returned unchanged so the normal validation path still reports them.
-fn canonical_swarm_action(action: &str) -> &str {
+pub(super) fn canonical_swarm_action(action: &str) -> &str {
     match action.trim().to_ascii_lowercase().as_str() {
         "inbox" | "messages" | "check_messages" | "read_messages" | "read_inbox" => "read",
         "send" | "msg" | "send_message" => "message",
@@ -831,6 +831,41 @@ fn canonical_swarm_action(action: &str) -> &str {
         "kill" | "terminate" => "stop",
         _ => action,
     }
+}
+
+pub(super) fn display_swarm_action(action: &str) -> Option<&str> {
+    ADVERTISED_SWARM_ACTIONS
+        .iter()
+        .copied()
+        .find(|known| *known == action)
+        .or(match action {
+            "share"
+            | "share_append"
+            | "read"
+            | "broadcast"
+            | "channel"
+            | "set_swarm_label"
+            | "list_channels"
+            | "channel_members"
+            | "propose_plan"
+            | "approve_plan"
+            | "reject_plan"
+            | "cleanup"
+            | "assign_role"
+            | "report"
+            | "read_context"
+            | "resync_plan"
+            | "assign_task"
+            | "assign_next"
+            | "start"
+            | "start_task"
+            | "wake"
+            | "reassign"
+            | "replace"
+            | "subscribe_channel"
+            | "unsubscribe_channel" => Some(action),
+            _ => None,
+        })
 }
 
 #[path = "swarm_model_schema.rs"]

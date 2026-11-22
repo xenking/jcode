@@ -156,6 +156,72 @@ async fn registry() -> Registry {
 }
 
 #[tokio::test]
+async fn codemode_ledger_projects_only_dispatched_calls_after_partial_wrapper_failure() {
+    struct SwarmProbe(Arc<AtomicUsize>);
+    #[async_trait]
+    impl Tool for SwarmProbe {
+        fn name(&self) -> &str {
+            "swarm"
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            if input["to_session"] == "fish" {
+                tokio::task::yield_now().await;
+                Ok(ToolOutput::new("NESTED_RESULT_SECRET"))
+            } else {
+                Err(anyhow::anyhow!("NESTED_ERROR_SECRET"))
+            }
+        }
+    }
+
+    use jcode_session_types::{CodemodeCallStatus, CodemodeDirection};
+    let registry = registry().await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    registry
+        .tools
+        .write()
+        .await
+        .insert("swarm".into(), Arc::new(SwarmProbe(effects.clone())));
+    let output = registry.execute("codemode", json!({"code":r#"
+        const name = ['sw', 'arm'].join('');
+        if (false) await tools.swarm({action:'broadcast', message:'not dispatched'});
+        await Promise.allSettled([
+            callTool(name, {action:'send', to_session:'fish', message:'NESTED_INPUT_SECRET'}),
+            callTool(name, {action:'message', to_session:'TARGET_SECRET', message:'NESTED_INPUT_SECRET'}),
+            callTool(name, 7),
+            callTool('unknown_tool', {}),
+        ]);
+        throw Error('wrapper failed');
+    "#}), ctx("session_fox_1234567890123_deadbeef")).await.unwrap();
+    assert_eq!(effects.load(Ordering::Relaxed), 2);
+    let summary = codemode_ledger::output_summary("codemode", &output).unwrap();
+    assert_eq!(summary.status, CodemodeStatus::Error);
+    assert_eq!(summary.calls.len(), 2);
+    assert_eq!(summary.calls[0].tool, "swarm");
+    assert_eq!(summary.calls[0].action.as_deref(), Some("message"));
+    assert_eq!(summary.calls[0].actor.as_deref(), Some("fox"));
+    assert_eq!(summary.calls[0].target.as_deref(), Some("fish"));
+    assert_eq!(
+        summary.calls[0].direction,
+        Some(CodemodeDirection::Outbound)
+    );
+    assert_eq!(summary.calls[0].status, CodemodeCallStatus::Success);
+    assert_eq!(summary.calls[1].status, CodemodeCallStatus::Error);
+    assert_eq!(summary.calls[1].target, None);
+    let metadata = serde_json::to_string(&summary).unwrap();
+    assert!(!metadata.contains("SECRET"));
+    assert!(!metadata.contains("unknown_tool"));
+    assert!(output.output.contains("wrapper failed"));
+    assert!(!output.output.contains("NESTED_RESULT_SECRET"));
+}
+
+#[tokio::test]
 async fn opt_in_budget_preserves_unbudgeted_output_and_store() {
     let registry = registry().await;
     let session = format!("codemode-budget-{}", uuid::Uuid::new_v4());

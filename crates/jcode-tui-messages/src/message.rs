@@ -636,6 +636,7 @@ mod tests {
     #[test]
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
+            codemode: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
@@ -671,6 +672,7 @@ mod tests {
     #[test]
     fn rendered_attachments_are_collapsed_in_transcript() {
         let rendered = RenderedMessage {
+            codemode: None,
             attachments: vec![
                 jcode_session_types::StoredAttachment::File {
                     name: "main.rs".into(),
@@ -700,6 +702,7 @@ mod tests {
     #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
+            codemode: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,

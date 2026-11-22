@@ -6,6 +6,7 @@ fn reload_replay_history(
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![crate::protocol::HistoryMessage {
+            codemode: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
