@@ -333,36 +333,115 @@ pub fn push_reasoning_blocks(
     reasoning_signature: Option<&str>,
     store_replay_context: bool,
 ) {
+    let anthropic = crate::provider::is_anthropic_reasoning_provider(provider_name);
+    if store_replay_context
+        && anthropic
+        && let Some(signature) = reasoning_signature.filter(|s| !s.is_empty())
+    {
+        blocks.insert(
+            0,
+            ContentBlock::AnthropicThinking {
+                thinking: reasoning_content.to_string(),
+                signature: signature.to_string(),
+            },
+        );
+        return;
+    }
+
     if reasoning_content.is_empty() {
         return;
     }
 
-    // Whether the replay block we stored already contains the readable text.
-    let mut readable_replay_stored = false;
-    if store_replay_context {
-        if provider_name.eq_ignore_ascii_case("anthropic") {
-            if let Some(signature) = reasoning_signature.filter(|s| !s.is_empty()) {
-                blocks.push(ContentBlock::AnthropicThinking {
-                    thinking: reasoning_content.to_string(),
-                    signature: signature.to_string(),
-                });
-                readable_replay_stored = true;
-            }
-        } else if provider_name.eq_ignore_ascii_case("openai") {
-            // OpenAI native reasoning items carry encrypted content, not readable
-            // text, so a separate history trace is still required below.
+    let text = reasoning_content.to_string();
+    // OpenAI replay items carry encrypted content, not the readable trace.
+    blocks.push(
+        if store_replay_context && !anthropic && !provider_name.eq_ignore_ascii_case("openai") {
+            ContentBlock::Reasoning { text }
         } else {
-            blocks.push(ContentBlock::Reasoning {
-                text: reasoning_content.to_string(),
-            });
-            readable_replay_stored = true;
+            ContentBlock::ReasoningTrace { text }
+        },
+    );
+}
+
+/// Reasoning captured during one stream attempt. Completed signed blocks move
+/// into the ordered response, leaving only non-replayed text in the history trace.
+pub struct TurnReasoning<'a> {
+    provider_name: &'a str,
+    store_replay_context: bool,
+    replay_anthropic: bool,
+    trace: String,
+    signature: String,
+    block_start: usize,
+    signed_text_len: usize,
+    signed_has_text: bool,
+}
+
+impl<'a> TurnReasoning<'a> {
+    pub fn new(provider_name: &'a str, store_replay_context: bool) -> Self {
+        Self {
+            provider_name,
+            store_replay_context,
+            replay_anthropic: store_replay_context
+                && crate::provider::is_anthropic_reasoning_provider(provider_name),
+            trace: String::new(),
+            signature: String::new(),
+            block_start: 0,
+            signed_text_len: 0,
+            signed_has_text: false,
         }
     }
 
-    if !readable_replay_stored {
-        blocks.push(ContentBlock::ReasoningTrace {
-            text: reasoning_content.to_string(),
-        });
+    pub fn push_text(&mut self, delta: &str) {
+        self.trace.push_str(delta);
+    }
+
+    pub fn push_signature(&mut self, delta: &str) {
+        if self.replay_anthropic {
+            self.signature.push_str(delta);
+        }
+    }
+
+    pub fn finish_block(
+        &mut self,
+        items: &mut provider_native::ProviderNativeItems,
+        text_len: usize,
+    ) {
+        if !self.replay_anthropic {
+            return;
+        }
+        if !self.signature.is_empty() {
+            let thinking = if self.block_start == 0 {
+                std::mem::take(&mut self.trace)
+            } else {
+                self.trace.split_off(self.block_start)
+            };
+            self.signed_text_len += thinking.len();
+            self.signed_has_text |= !thinking.trim().is_empty();
+            items.push_anthropic_thinking(text_len, thinking, std::mem::take(&mut self.signature));
+        }
+        self.block_start = self.trace.len();
+    }
+
+    pub fn text_len(&self) -> usize {
+        self.signed_text_len + self.trace.len()
+    }
+
+    pub fn has_text(&self) -> bool {
+        self.signed_has_text || !self.trace.trim().is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new(self.provider_name, self.store_replay_context);
+    }
+
+    pub fn append_history(&self, blocks: &mut Vec<ContentBlock>) {
+        push_reasoning_blocks(
+            blocks,
+            self.provider_name,
+            &self.trace,
+            None,
+            self.store_replay_context,
+        );
     }
 }
 

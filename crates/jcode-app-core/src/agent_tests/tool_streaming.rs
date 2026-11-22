@@ -96,6 +96,96 @@ fn finish() -> StreamEvent {
     }
 }
 
+#[derive(Clone, Default)]
+struct ClaudeThinkingProvider(Arc<Mutex<Option<Vec<ContentBlock>>>>);
+
+#[async_trait]
+impl Provider for ClaudeThinkingProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let events = if let Some(assistant) = messages.iter().rfind(|m| m.role == Role::Assistant) {
+            *self.0.lock().unwrap() = Some(assistant.content.to_vec());
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageEnd { stop_reason: None },
+            ]
+        } else {
+            vec![
+                StreamEvent::ThinkingStart,
+                StreamEvent::ThinkingDelta("look up the result".into()),
+                StreamEvent::ThinkingSignatureDelta("sig-".into()),
+                StreamEvent::ThinkingSignatureDelta("first".into()),
+                StreamEvent::ThinkingEnd,
+                StreamEvent::ThinkingStart,
+                StreamEvent::ThinkingSignatureDelta("sig-empty".into()),
+                StreamEvent::ThinkingEnd,
+                StreamEvent::TextDelta("Checking.".into()),
+                start("toolu_capture"),
+                delta("toolu_capture", "{}"),
+                end("toolu_capture"),
+                finish(),
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn name(&self) -> &str {
+        "Claude"
+    }
+
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn claude_tool_followup_replays_signed_thinking_blocks_before_text() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for streaming in [false, true] {
+        let provider = Arc::new(ClaudeThinkingProvider::default());
+        let registry = Registry::empty();
+        registry
+            .register("capture".into(), Arc::new(CaptureTool(InputLog::default())))
+            .await;
+        let mut agent = Agent::new(provider.clone(), registry);
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "capture the input".into(),
+                cache_control: None,
+            }],
+        );
+        if streaming {
+            let (out, _rx) = tokio_mpsc::unbounded_channel();
+            agent.run_turn_streaming_mpsc(out).await.unwrap();
+        } else {
+            agent.run_turn(false).await.unwrap();
+        }
+
+        let request = provider.0.lock().unwrap();
+        assert!(
+            matches!(request.as_deref(), Some([
+                ContentBlock::AnthropicThinking { thinking: first, signature: sig_first },
+                ContentBlock::AnthropicThinking { thinking: empty, signature: sig_empty },
+                ContentBlock::Text { text, .. },
+                ContentBlock::ToolUse { id, .. },
+            ]) if first == "look up the result" && sig_first == "sig-first"
+                && empty.is_empty() && sig_empty == "sig-empty"
+                && text == "Checking." && id == "toolu_capture"),
+            "streaming={streaming}: {request:?}"
+        );
+    }
+}
+
 async fn next_tool_event(rx: &mut tokio_mpsc::UnboundedReceiver<ServerEvent>) -> ServerEvent {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

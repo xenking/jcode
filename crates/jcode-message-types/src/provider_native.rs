@@ -281,9 +281,13 @@ impl ProviderNativeTracker {
 /// resent exactly as produced, and citations reference text after the results.
 #[derive(Debug, Default, Clone)]
 pub struct ProviderNativeItems {
-    /// (byte offset into the response text at arrival, provider, item)
-    items: Vec<(usize, String, Value)>,
+    /// (byte offset into the response text at arrival, block)
+    items: Vec<(usize, crate::ContentBlock)>,
     text_boundaries: Vec<usize>,
+}
+
+fn is_hidden_block(block: &crate::ContentBlock) -> bool {
+    matches!(block, crate::ContentBlock::ProviderNative { item, .. } if is_hidden_control_item(item))
 }
 
 impl ProviderNativeItems {
@@ -300,7 +304,32 @@ impl ProviderNativeItems {
         {
             return;
         }
-        self.items.push((text_len, provider, item));
+        self.items.push((
+            text_len,
+            crate::ContentBlock::ProviderNative { provider, item },
+        ));
+    }
+
+    pub fn push_anthropic_thinking(
+        &mut self,
+        text_len: usize,
+        thinking: String,
+        signature: String,
+    ) {
+        self.items.push((
+            text_len,
+            crate::ContentBlock::AnthropicThinking {
+                thinking,
+                signature,
+            },
+        ));
+    }
+
+    pub fn anthropic_thinking(&self) -> impl Iterator<Item = &crate::ContentBlock> {
+        self.items
+            .iter()
+            .map(|(_, block)| block)
+            .filter(|block| matches!(block, crate::ContentBlock::AnthropicThinking { .. }))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -329,7 +358,7 @@ impl ProviderNativeItems {
         if self
             .items
             .iter()
-            .any(|(offset, _, _)| *offset > start && *offset < end)
+            .any(|(offset, _)| *offset > start && *offset < end)
             || self
                 .text_boundaries
                 .iter()
@@ -340,7 +369,7 @@ impl ProviderNativeItems {
         if crate::replace_text_suffix(text, old, new).is_none() {
             return false;
         }
-        for (offset, _, _) in &mut self.items {
+        for (offset, _) in &mut self.items {
             if *offset >= end {
                 *offset = text.len();
             }
@@ -363,8 +392,11 @@ impl ProviderNativeItems {
         // Completed items can have expensive display summaries we never consume.
         self.items
             .iter()
-            .find_map(
-                |(_, provider, item)| match (provider.as_str(), str_field(item, "type")) {
+            .find_map(|(_, block)| {
+                let crate::ContentBlock::ProviderNative { provider, item } = block else {
+                    return None;
+                };
+                match (provider.as_str(), str_field(item, "type")) {
                     (PROVIDER_NATIVE_ANTHROPIC, Some("server_tool_use"))
                         if str_field(item, "id") == Some(id) =>
                     {
@@ -382,8 +414,8 @@ impl ProviderNativeItems {
                         Some(serde_json::json!({ "query": query }))
                     }
                     _ => None,
-                },
-            )
+                }
+            })
             .unwrap_or(Value::Null)
     }
 
@@ -396,16 +428,13 @@ impl ProviderNativeItems {
         // Hidden bookkeeping items have no position in the response. Keep
         // them first so checks on the last block (a paused server tool turn)
         // still see the real response tail.
-        for (_, provider, item) in self
-            .items
-            .iter()
-            .filter(|(_, _, item)| is_hidden_control_item(item))
-        {
-            blocks.push(crate::ContentBlock::ProviderNative {
-                provider: provider.clone(),
-                item: item.clone(),
-            });
-        }
+        blocks.extend(
+            self.items
+                .iter()
+                .map(|(_, block)| block)
+                .filter(|block| is_hidden_block(block))
+                .cloned(),
+        );
         let mut cursor = 0usize;
         let push_text = |blocks: &mut Vec<crate::ContentBlock>, segment: &str| {
             if !segment.trim().is_empty() {
@@ -426,8 +455,8 @@ impl ProviderNativeItems {
             }
             push_text(blocks, &text[start..end]);
         };
-        for (offset, provider, item) in &self.items {
-            if is_hidden_control_item(item) {
+        for (offset, block) in &self.items {
+            if is_hidden_block(block) {
                 continue;
             }
             let mut at = (*offset).clamp(cursor, text.len());
@@ -436,10 +465,7 @@ impl ProviderNativeItems {
             }
             push_until(&mut blocks, cursor, at);
             cursor = at;
-            blocks.push(crate::ContentBlock::ProviderNative {
-                provider: provider.clone(),
-                item: item.clone(),
-            });
+            blocks.push(block.clone());
         }
         push_until(&mut blocks, cursor, text.len());
         blocks

@@ -493,8 +493,8 @@ impl Agent {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
+            let mut reasoning =
+                crate::message::TurnReasoning::new(&provider_name, store_reasoning_content);
             // Whether a live reasoning region is currently streaming to the client.
             // Raw reasoning deltas are sent as `ReasoningDelta`; the client owns the
             // dim/italic styling and live partial-line rendering. We close the region
@@ -576,7 +576,7 @@ impl Agent {
                         || !tool_calls.is_empty()
                         || !streaming_tools.is_empty()
                         || reasoning_open
-                        || !reasoning_content.is_empty()
+                        || reasoning.text_len() != 0
                         || !provider_native_items.is_empty();
                     if !saw_message_end
                         && !executed_native_tool
@@ -658,7 +658,7 @@ impl Agent {
                                 || !tool_calls.is_empty()
                                 || !streaming_tools.is_empty()
                                 || reasoning_open
-                                || !reasoning_content.is_empty()
+                                || reasoning.text_len() != 0
                                 || !provider_native_items.is_empty();
                             match self
                                 .wait_for_network_recovery_mpsc(
@@ -705,11 +705,11 @@ impl Agent {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
                         });
                     }
-                    StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingEnd => {
+                        reasoning.finish_block(&mut provider_native_items, text_content.len());
+                    }
                     StreamEvent::ThinkingSignatureDelta(signature) => {
-                        if store_reasoning_content {
-                            reasoning_signature.push_str(&signature);
-                        }
+                        reasoning.push_signature(&signature);
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Always stream reasoning to clients. Whether to *render*
@@ -734,7 +734,7 @@ impl Agent {
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
-                        reasoning_content.push_str(&thinking_text);
+                        reasoning.push_text(&thinking_text);
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         if reasoning_open {
@@ -1155,8 +1155,7 @@ impl Agent {
                         tool_id_to_name.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
-                        reasoning_content.clear();
-                        reasoning_signature.clear();
+                        reasoning.clear();
                         reasoning_open = false;
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
@@ -1334,7 +1333,7 @@ impl Agent {
                                 || !tool_calls.is_empty()
                                 || !streaming_tools.is_empty()
                                 || reasoning_open
-                                || !reasoning_content.is_empty()
+                                || reasoning.text_len() != 0
                                 || !provider_native_items.is_empty();
                             match self
                                 .wait_for_network_recovery_mpsc(
@@ -1576,13 +1575,7 @@ impl Agent {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            reasoning.append_history(&mut content_blocks);
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
@@ -1728,14 +1721,14 @@ impl Agent {
                             && let Some(notice) = Self::provider_guardrail_notice(
                                 stop_reason.as_deref(),
                                 text_content.trim().is_empty(),
-                                !reasoning_content.trim().is_empty(),
+                                reasoning.has_text(),
                             )
                         {
                             logging::warn(&format!(
                                 "{}: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
                                 Self::empty_turn_log_event(stop_reason.as_deref()),
                                 stop_reason,
-                                reasoning_content.len()
+                                reasoning.text_len()
                             ));
                             let _ = event_tx.send(ServerEvent::ProviderGuardrail {
                                 stop_reason: stop_reason.clone(),

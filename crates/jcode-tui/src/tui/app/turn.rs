@@ -310,8 +310,8 @@ impl App {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
+            let mut reasoning =
+                crate::message::TurnReasoning::new(&provider_name, store_reasoning_content);
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Provider-executed tool items (e.g. native web search), stored
             // verbatim at their position in the response for exact replay.
@@ -378,19 +378,14 @@ impl App {
                                         tool_calls.extend(pending_tools.drain());
                                         if !text_content.is_empty() || !tool_calls.is_empty() {
                                             let mut content_blocks = Vec::new();
+                                            content_blocks.extend(provider_native_items.anthropic_thinking().cloned());
                                             if !text_content.is_empty() {
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: format!("{}\n\n[generation interrupted by user]", text_content),
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            reasoning.append_history(&mut content_blocks);
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -441,19 +436,14 @@ impl App {
                                             tool_calls.extend(pending_tools.drain());
                                             // Build content blocks for partial response
                                             let mut content_blocks = Vec::new();
+                                            content_blocks.extend(provider_native_items.anthropic_thinking().cloned());
                                             if !text_content.is_empty() {
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: text_content.clone(),
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            reasoning.append_history(&mut content_blocks);
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -499,7 +489,6 @@ impl App {
                                         self.clear_streaming_render_state();
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
-                                        reasoning_content.clear();
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -848,8 +837,7 @@ impl App {
                                         pending_tools.clear();
                                         generated_image_contexts.clear();
                                         sdk_tool_results.clear();
-                                        reasoning_content.clear();
-                                        reasoning_signature.clear();
+                                        reasoning.clear();
                                         openai_reasoning_items.clear();
                                         provider_native_items.clear();
                                         openai_native_compaction = None;
@@ -912,9 +900,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingSignatureDelta(signature) => {
-                                        if store_reasoning_content {
-                                            reasoning_signature.push_str(&signature);
-                                        }
+                                        reasoning.push_signature(&signature);
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
                                         self.resume_streaming_tps();
@@ -942,7 +928,7 @@ impl App {
                                         // Always capture reasoning text so it can be
                                         // persisted as a history-only trace, regardless
                                         // of provider replay support.
-                                        reasoning_content.push_str(&thinking_text);
+                                        reasoning.push_text(&thinking_text);
                                         // When reasoning text is hidden, the status flip to
                                         // "thinking…" is the only visible signal, so repaint
                                         // promptly on the first delta.
@@ -951,6 +937,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
+                                        reasoning.finish_block(&mut provider_native_items, text_content.len());
                                         self.pause_streaming_tps(true);
                                         self.thinking_start = None;
                                         self.thinking_buffer.clear();
@@ -1254,13 +1241,7 @@ impl App {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            reasoning.append_history(&mut content_blocks);
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }

@@ -422,8 +422,8 @@ impl Agent {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
+            let mut reasoning =
+                crate::message::TurnReasoning::new(&provider_name, store_reasoning_content);
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Provider-executed tool items (e.g. native web search), stored
             // verbatim at their position in the response for exact replay.
@@ -527,14 +527,13 @@ impl Agent {
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
-                        reasoning_content.push_str(&thinking_text);
+                        reasoning.push_text(&thinking_text);
                     }
                     StreamEvent::ThinkingSignatureDelta(signature) => {
-                        if store_reasoning_content {
-                            reasoning_signature.push_str(&signature);
-                        }
+                        reasoning.push_signature(&signature);
                     }
                     StreamEvent::ThinkingEnd => {
+                        reasoning.finish_block(&mut provider_native_items, text_content.len());
                         // Don't print here - ThinkingDone has accurate timing
                         _thinking_start = None;
                     }
@@ -823,8 +822,7 @@ impl Agent {
                         streaming_tools.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
-                        reasoning_content.clear();
-                        reasoning_signature.clear();
+                        reasoning.clear();
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
                         openai_native_compaction = None;
@@ -1059,7 +1057,7 @@ impl Agent {
                 && text_content.is_empty()
                 && tool_calls.is_empty()
                 && streaming_tools.is_empty()
-                && reasoning_content.is_empty()
+                && reasoning.text_len() == 0
                 && provider_native_items.is_empty()
             {
                 match self
@@ -1186,13 +1184,7 @@ impl Agent {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            reasoning.append_history(&mut content_blocks);
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
@@ -1275,7 +1267,7 @@ impl Agent {
                 if let Some(notice) = Self::provider_guardrail_notice(
                     stop_reason.as_deref(),
                     visible_text_is_empty,
-                    !reasoning_content.trim().is_empty(),
+                    reasoning.has_text(),
                 ) {
                     logging::warn(&format!(
                         "{}: turn ended with no visible output (stop_reason={:?})",

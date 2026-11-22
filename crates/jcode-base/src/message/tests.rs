@@ -932,6 +932,44 @@ fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
 }
 
 #[test]
+fn claude_thinking_keeps_native_tool_order_and_respects_replay_setting() {
+    for preserve in [true, false] {
+        let mut reasoning = TurnReasoning::new("Claude", preserve);
+        let mut native = provider_native::ProviderNativeItems::default();
+        reasoning.push_text("unsigned");
+        reasoning.finish_block(&mut native, 0);
+        reasoning.push_text("signed");
+        reasoning.push_signature("sig-1");
+        reasoning.finish_block(&mut native, 0);
+        native.push(
+            0,
+            "anthropic".into(),
+            serde_json::json!({"type":"web_search_tool_result"}),
+        );
+        reasoning.push_signature("sig-2");
+        reasoning.finish_block(&mut native, 0);
+        let mut blocks = native.interleave("after search");
+        reasoning.append_history(&mut blocks);
+
+        if preserve {
+            assert!(matches!(blocks.as_slice(), [
+                ContentBlock::AnthropicThinking { thinking: first, signature: sig1 },
+                ContentBlock::ProviderNative { .. },
+                ContentBlock::AnthropicThinking { thinking: second, signature: sig2 },
+                ContentBlock::Text { .. },
+                ContentBlock::ReasoningTrace { text },
+            ] if first == "signed" && sig1 == "sig-1" && second.is_empty() && sig2 == "sig-2" && text == "unsigned"));
+        } else {
+            assert!(matches!(blocks.as_slice(), [
+                ContentBlock::ProviderNative { .. },
+                ContentBlock::Text { .. },
+                ContentBlock::ReasoningTrace { text },
+            ] if text == "unsignedsigned"));
+        }
+    }
+}
+
+#[test]
 fn push_reasoning_blocks_openai_keeps_readable_trace() {
     let mut blocks = Vec::new();
     // OpenAI native reasoning is encrypted/unreadable, so a readable trace is

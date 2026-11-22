@@ -182,10 +182,13 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
     if !crate::config::config().provider.preserve_reasoning_context {
         return false;
     }
-    matches!(
-        provider_name.to_ascii_lowercase().as_str(),
-        "openrouter" | "anthropic" | "openai"
-    )
+    is_anthropic_reasoning_provider(provider_name)
+        || provider_name.eq_ignore_ascii_case("openrouter")
+        || provider_name.eq_ignore_ascii_case("openai")
+}
+
+pub(crate) fn is_anthropic_reasoning_provider(provider_name: &str) -> bool {
+    provider_name.eq_ignore_ascii_case("anthropic") || provider_name.eq_ignore_ascii_case("claude")
 }
 
 #[path = "direct_profile_routes.rs"]
@@ -607,8 +610,8 @@ impl MultiProvider {
                     bound_label
                 );
             }
-            if let Some(reason) = models::bound_account_quota_cooldown(key, &bound_label)
-                .or_else(|| {
+            if let Some(reason) =
+                models::bound_account_quota_cooldown(key, &bound_label).or_else(|| {
                     account_failover::multi_account_provider_kind(active)
                         .filter(|kind| crate::usage::account_known_exhausted(*kind, &bound_label))
                         .map(|_| "OAuth usage exhausted".to_string())
