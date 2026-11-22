@@ -120,25 +120,29 @@ pub(crate) async fn stream_response(
     }
 
     let connect_ms = connect_start.elapsed().as_millis();
-    jcode_base::logging::info(&format!(
-        "HTTP connection established in {}ms (status={})",
-        connect_ms,
-        response.status()
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "HTTP connection established in {}ms (status={})",
+            connect_ms,
+            response.status()
+        )
+    });
     // Correlation ids let a stalled request be looked up provider-side
     // without logging any content (issue #1759). Carried into every later
     // lifecycle event for this stream.
     let response_ids = reqwest_header_fields(response.headers());
-    let mut connected_fields = vec![
-        ("model", request_model.clone()),
-        ("status", response.status().as_u16().to_string()),
-        ("connect_ms", connect_ms.to_string()),
-    ];
-    connected_fields.extend(response_ids.iter().cloned());
     log_openai_stream_lifecycle(
         jcode_base::logging::LogLevel::Debug,
         "https_connected",
-        || connected_fields,
+        || {
+            let mut fields = vec![
+                ("model", request_model.clone()),
+                ("status", response.status().as_u16().to_string()),
+                ("connect_ms", connect_ms.to_string()),
+            ];
+            fields.extend(response_ids.iter().cloned());
+            fields
+        },
     );
     if response.status().is_success() && usage_exhausted {
         jcode_base::logging::warn(&format!(

@@ -404,7 +404,9 @@ fn response_http_request(
             builder = builder.header("chatgpt-account-id", account_id);
         }
     }
-    if let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok()) {
+    if jcode_base::logging::LogLevel::Debug.is_enabled()
+        && let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok())
+    {
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Debug,
             "https_request_routing_headers",
@@ -1711,20 +1713,23 @@ async fn stream_response_websocket_authenticated(
                 );
             }
             let connect_ms = connect_start.elapsed().as_millis();
-            jcode_base::logging::info(&format!(
-                "WebSocket connection established in {}ms (persistent mode)",
-                connect_ms
-            ));
-            let mut fields = vec![
-                ("model", request_model_label.clone()),
-                ("connect_ms", connect_ms.to_string()),
-            ];
-            // Handshake correlation ids identify the socket provider-side.
-            fields.extend(tungstenite_header_fields(&response));
+            jcode_base::logging::debug_lazy(|| {
+                format!(
+                    "WebSocket connection established in {}ms (persistent mode)",
+                    connect_ms
+                )
+            });
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Debug,
                 "fresh_ws_connected",
-                || fields,
+                || {
+                    let mut fields = vec![
+                        ("model", request_model_label.clone()),
+                        ("connect_ms", connect_ms.to_string()),
+                    ];
+                    fields.extend(tungstenite_header_fields(&response));
+                    fields
+                },
             );
             (stream, response)
         }
