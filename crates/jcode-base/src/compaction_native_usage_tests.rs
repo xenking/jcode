@@ -22,6 +22,10 @@ impl Provider for VisionNativeProvider {
     fn supports_image_input(&self) -> bool {
         true
     }
+    fn supports_explicit_native_compaction(&self) -> bool {
+        true
+    }
+
     async fn native_compact(
         &self,
         _: &[Message],
@@ -88,6 +92,10 @@ impl Provider for UsageOnlyNativeProvider {
         Arc::new(Self {
             accounting_attributions: self.accounting_attributions.clone(),
         })
+    }
+
+    fn supports_explicit_native_compaction(&self) -> bool {
+        true
     }
 
     async fn native_compact(

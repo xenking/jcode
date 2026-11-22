@@ -546,6 +546,12 @@ pub trait Provider: Send + Sync {
         self.supports_compaction()
     }
 
+    /// Whether a manual request can call the native compaction endpoint.
+    /// Provider-managed automatic compaction is a separate capability.
+    fn supports_explicit_native_compaction(&self) -> bool {
+        false
+    }
+
     /// Ask the provider to produce a native compaction artifact.
     async fn native_compact(
         &self,

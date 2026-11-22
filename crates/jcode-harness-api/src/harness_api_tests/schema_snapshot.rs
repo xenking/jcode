@@ -670,7 +670,11 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
                 current_tokens: Some(40_000),
                 compact: None,
                 shake: None,
-                compact_status: Some(ContextActionStatus::SavingsUnknown),
+                compact_measurement: Some(ContextActionMeasurement {
+                    before_tokens: 40_000,
+                    after_tokens: 10_000,
+                }),
+                compact_status: None,
                 shake_status: Some(ContextActionStatus::NoEligible),
             }),
         },
@@ -683,7 +687,14 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
             "missing wire field {key}"
         );
     }
-    assert_eq!(wire["action_forecast"]["compact_status"], "savings_unknown");
+    assert_eq!(
+        wire["action_forecast"]["compact_measurement"]["before_tokens"],
+        40_000
+    );
+    assert_eq!(
+        wire["action_forecast"]["compact_measurement"]["after_tokens"],
+        10_000
+    );
     assert_eq!(wire["action_forecast"]["shake_status"], "no_eligible");
     let forecast = sdk
         .split_once("export interface ContextActionForecast {")

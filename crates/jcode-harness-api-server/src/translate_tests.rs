@@ -2031,7 +2031,11 @@ fn context_breakdown_round_trip_without_attaching() {
         "type": "context_breakdown", "id": request["id"],
         "session_id": "session_saved", "model": null,
         "total_tokens": null, "limit_tokens": null, "estimated": true,
-        "categories": [{"kind": "conversation", "tokens": 0}, {"kind": "dynamic_tools", "tokens": null}]
+        "categories": [{"kind": "conversation", "tokens": 0}, {"kind": "dynamic_tools", "tokens": null}],
+        "action_forecast": {
+            "current_tokens": 40000, "compact": null, "shake": null,
+            "compact_measurement": {"before_tokens": 40000, "after_tokens": 41000}
+        }
     }));
     assert_eq!(replies.len(), 1);
     let reply = serde_json::to_value(&replies[0]).unwrap();
@@ -2041,6 +2045,12 @@ fn context_breakdown_round_trip_without_attaching() {
     assert_eq!(reply["categories"][0]["tokens"], 0);
     assert_eq!(reply["categories"][1]["tokens"], serde_json::Value::Null);
     assert_eq!(reply["total_tokens"], serde_json::Value::Null);
+    assert_eq!(
+        reply["action_forecast"]["compact_measurement"],
+        json!({
+            "before_tokens": 40000, "after_tokens": 41000,
+        })
+    );
 }
 
 #[test]

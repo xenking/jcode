@@ -32,7 +32,7 @@ impl OpenAIProvider {
         existing_summary_text: Option<&str>,
         existing_openai_encrypted_content: Option<&str>,
     ) -> Result<jcode_provider_core::NativeCompactionResult> {
-        if self.native_compaction_mode != OpenAINativeCompactionMode::Explicit {
+        if !self.supports_explicit_native_compaction() {
             anyhow::bail!(
                 "OpenAI native explicit compaction is disabled (mode={})",
                 self.native_compaction_mode.as_str()

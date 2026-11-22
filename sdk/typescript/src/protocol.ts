@@ -536,6 +536,8 @@ export interface ContextActionForecast {
   current_tokens: number | null;
   compact: ContextActionSavings | null;
   shake: ContextActionSavings | null;
+  /** Dry-run of the local archive, excluding provider-generated decisions. */
+  compact_measurement?: ContextActionMeasurement;
   compact_status?: ContextActionStatus;
   shake_status?: ContextActionStatus;
 }

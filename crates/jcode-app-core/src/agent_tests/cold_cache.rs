@@ -56,6 +56,21 @@ async fn fixture(
     prose_tokens: usize,
     tool_tokens: usize,
 ) -> (TestHome, Agent, usize) {
+    fixture_with_provider(
+        configured_ttl,
+        prose_tokens,
+        tool_tokens,
+        Arc::new(ColdProvider),
+    )
+    .await
+}
+
+async fn fixture_with_provider(
+    configured_ttl: u64,
+    prose_tokens: usize,
+    tool_tokens: usize,
+    provider: Arc<dyn Provider>,
+) -> (TestHome, Agent, usize) {
     let home = TestHome(std::env::var_os("JCODE_HOME"), tempfile::tempdir().unwrap());
     crate::env::set_var("JCODE_HOME", home.1.path());
     std::fs::write(
@@ -71,6 +86,7 @@ shake_protect_tokens = 16000
 shake_min_region_tokens = 400
 shake_min_savings_tokens = 4000
 snapcompact = true
+snapcompact_decisions_model = "off"
 snapcompact_cache_expiry = true
 cache_expiry_threshold_tokens = 200000
 cache_ttl_secs = {configured_ttl}
@@ -80,7 +96,6 @@ reactive_threshold_tokens = 900000
     )
     .unwrap();
     crate::config::Config::invalidate_cache();
-    let provider: Arc<dyn Provider> = Arc::new(ColdProvider);
     let mut agent = Agent::new(provider, Registry::empty());
     agent.add_message(
         Role::User,
@@ -256,24 +271,100 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
     assert_eq!(shake_dividers(&agent), ["shake_manual"]);
 }
 
+#[derive(Clone, Copy)]
+struct ArchivePreviewProvider {
+    explicit: bool,
+}
+
+#[async_trait]
+impl Provider for ArchivePreviewProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("local Snapcompact preview and apply must not call a model")
+    }
+
+    async fn native_compact(
+        &self,
+        _: &[Message],
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<jcode_provider_core::NativeCompactionResult> {
+        panic!("native Auto does not expose the explicit manual endpoint")
+    }
+
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    fn model(&self) -> String {
+        "gpt-6-test".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(*self)
+    }
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    fn uses_jcode_compaction(&self) -> bool {
+        self.explicit
+    }
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.explicit
+    }
+    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        (!self.explicit).then_some(800_000)
+    }
+    fn context_window(&self) -> usize {
+        1_000_000
+    }
+}
+
 #[tokio::test]
-async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
+async fn manual_snapcompact_preview_matches_apply_without_writing_the_session() {
     use jcode_session_types::ContextActionStatus;
 
     let _guard = crate::storage::lock_test_env();
-    let (_home, mut agent, _) = fixture(300, 250_000, 9_000).await;
-    let before = agent.inspect_context_breakdown(false, false).await;
-    let forecast = before.action_forecast.unwrap();
+    let provider = Arc::new(ArchivePreviewProvider { explicit: false });
+    let (_home, mut agent, _) = fixture_with_provider(300, 160_000, 9_000, provider.clone()).await;
+    agent.session.context_cap = Some(1_000_000);
+    let original = serde_json::to_vec(&agent.session).unwrap();
+    let before = agent.inspect_context_breakdown(false, true).await;
     assert_eq!(
-        forecast.compact_status,
-        Some(ContextActionStatus::SavingsUnknown)
+        before.meter.unwrap().compaction_mode.as_deref(),
+        Some("provider_native")
     );
-    assert_eq!(forecast.compact, None);
+    let forecast = before.action_forecast.unwrap();
+    assert_eq!(forecast.compact_status, None);
+    let prediction = forecast
+        .compact_measurement
+        .expect("local Snapcompact preview");
+    assert_eq!(serde_json::to_vec(&agent.session).unwrap(), original);
     assert!(agent.session.compaction.is_none());
 
-    let (message, started) = agent.request_manual_compaction();
+    agent.provider = Arc::new(ArchivePreviewProvider { explicit: true });
+    let explicit = agent
+        .inspect_context_breakdown(false, true)
+        .await
+        .action_forecast
+        .unwrap();
+    assert_eq!(
+        explicit.compact_status,
+        Some(ContextActionStatus::SavingsUnknown)
+    );
+    assert_eq!(explicit.compact_measurement, None);
+    let mut copy = agent.session.clone();
+    copy.id = "session_snapcompact_apply_copy".into();
+    let mut apply = Agent::new_with_session(provider, Registry::empty(), copy, None);
+    let (message, started) = apply.request_manual_compaction();
     assert!(started, "{message}");
-    let busy = agent
+    let busy = apply
         .inspect_context_breakdown(false, false)
         .await
         .action_forecast
@@ -283,7 +374,7 @@ async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
 
     let event = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let (event, error, pending) = agent.poll_compaction_status();
+            let (event, error, pending) = apply.poll_compaction_status();
             if let Some(event) = event {
                 break event;
             }
@@ -294,13 +385,31 @@ async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
     .await
     .expect("manual Compact completed");
     assert_eq!(event.trigger, "manual");
-    assert!(
-        event
-            .pre_tokens
-            .zip(event.post_tokens)
-            .is_some_and(|(pre, post)| pre > post)
+    assert_eq!(event.method.as_deref(), Some("snapcompact"));
+    assert_eq!(Some(prediction.before_tokens), event.pre_tokens);
+    assert_eq!(Some(prediction.after_tokens), event.post_tokens);
+    assert!(event.pre_tokens.unwrap() > event.post_tokens.unwrap());
+    assert_eq!(compaction_dividers(&apply), ["manual"]);
+    assert_eq!(serde_json::to_vec(&agent.session).unwrap(), original);
+}
+
+#[tokio::test]
+async fn text_only_manual_compaction_preview_leaves_provider_savings_unknown() {
+    use jcode_session_types::ContextActionStatus;
+
+    let _guard = crate::storage::lock_test_env();
+    let (_home, agent, _) = fixture(300, 250_000, 9_000).await;
+    let forecast = agent
+        .inspect_context_breakdown(false, true)
+        .await
+        .action_forecast
+        .unwrap();
+    assert_eq!(
+        forecast.compact_status,
+        Some(ContextActionStatus::SavingsUnknown)
     );
-    assert_eq!(compaction_dividers(&agent), ["manual"]);
+    assert_eq!(forecast.compact_measurement, None);
+    assert!(agent.session.compaction.is_none());
 }
 
 #[tokio::test]

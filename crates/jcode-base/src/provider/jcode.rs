@@ -247,6 +247,10 @@ impl Provider for JcodeProvider {
         self.inner.uses_jcode_compaction()
     }
 
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.inner.supports_explicit_native_compaction()
+    }
+
     async fn native_compact(
         &self,
         messages: &[Message],

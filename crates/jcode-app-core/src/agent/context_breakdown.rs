@@ -1,6 +1,6 @@
 use super::turn_execution::{LATE_MCP_ANNOUNCEMENT_MARKER, LATE_SKILL_ANNOUNCEMENT_MARKER};
 use super::*;
-use crate::compaction::{self, CompactionManager, CompactionProjection};
+use crate::compaction::{self, CompactionManager, CompactionProjection, ManualSnapcompactPreview};
 use crate::prompt::{self, SplitSystemPrompt};
 use crate::provider::models::{
     context_limit_for_model_with_provider, provider_for_model_with_hint,
@@ -8,28 +8,70 @@ use crate::provider::models::{
 use crate::session_telemetry::{self, SessionTelemetry};
 use crate::util::APPROX_CHARS_PER_TOKEN;
 use jcode_session_types::{
-    ContextActionForecast, ContextActionSavings, ContextActionStatus, ContextBreakdown,
-    ContextBreakdownCategory, ContextBreakdownKind as Kind, ContextMeter,
+    ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextActionStatus,
+    ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind as Kind, ContextMeter,
     ContextMeterState as State, ContextOccupancySource as Source,
 };
 use std::path::Path;
 
+pub(crate) struct ContextBreakdownSnapshot {
+    breakdown: ContextBreakdown,
+    compact: Option<ManualSnapcompactPreview>,
+}
+
+impl ContextBreakdownSnapshot {
+    pub(crate) async fn complete(mut self) -> ContextBreakdown {
+        if let Some(compact) = self.compact
+            && let Ok(Some((before_tokens, after_tokens))) =
+                tokio::task::spawn_blocking(|| compact.measure()).await
+            && let Some(forecast) = self.breakdown.action_forecast.as_mut()
+        {
+            forecast.compact_measurement = Some(ContextActionMeasurement {
+                before_tokens,
+                after_tokens,
+            });
+            forecast.compact_status = None;
+        }
+        self.breakdown
+    }
+}
+
 impl Agent {
+    #[cfg(test)]
     pub(crate) async fn inspect_context_breakdown(
         &self,
         summary_only: bool,
         include_snapcompact: bool,
     ) -> ContextBreakdown {
+        self.snapshot_context_breakdown(summary_only, include_snapcompact)
+            .await
+            .complete()
+            .await
+    }
+
+    pub(crate) async fn snapshot_context_breakdown(
+        &self,
+        summary_only: bool,
+        include_snapcompact: bool,
+    ) -> ContextBreakdownSnapshot {
         let model = self.provider_model();
         let provider = self.provider.name();
         let telemetry = session_telemetry::read_context(&self.session.id);
         let mut meter = self.context_policy().await;
         apply_occupancy(&mut meter, &self.session, telemetry.as_ref(), State::Live);
         if summary_only && meter.occupied_tokens.is_some() {
-            return meter_only(Some(self.session.id.clone()), Some(model), meter);
+            return ContextBreakdownSnapshot {
+                breakdown: meter_only(Some(self.session.id.clone()), Some(model), meter),
+                compact: None,
+            };
         }
         let source = self.session.messages_for_provider_uncached();
-        let action_forecast = (!summary_only).then(|| self.forecast_context_actions(&source));
+        let (action_forecast, compact) = if summary_only {
+            (None, None)
+        } else {
+            let (forecast, compact) = self.forecast_context_actions(&source);
+            (Some(forecast), compact)
+        };
         let projection = inspect_messages(
             &self.session,
             source,
@@ -48,7 +90,10 @@ impl Agent {
             crate::tool::sdk::custom(self.session_id(), name)
         });
         counts.action_forecast = action_forecast;
-        counts.finish(Some(self.session.id.clone()), Some(model), meter)
+        ContextBreakdownSnapshot {
+            breakdown: counts.finish(Some(self.session.id.clone()), Some(model), meter),
+            compact,
+        }
     }
 
     pub(super) async fn record_completed_context_observation(&mut self, prompt_tokens: u64) {
@@ -108,21 +153,32 @@ impl Agent {
 }
 
 impl Agent {
-    fn forecast_context_actions(&self, messages: &[Message]) -> ContextActionForecast {
+    fn forecast_context_actions(
+        &self,
+        messages: &[Message],
+    ) -> (ContextActionForecast, Option<ManualSnapcompactPreview>) {
         let compaction = self.registry.compaction();
         let Ok(manager) = compaction.try_read() else {
-            return ContextActionForecast::unavailable(ContextActionStatus::Busy);
+            return (
+                ContextActionForecast::unavailable(ContextActionStatus::Busy),
+                None,
+            );
         };
         if manager.is_compacting() {
-            return ContextActionForecast::unavailable(ContextActionStatus::Busy);
+            return (
+                ContextActionForecast::unavailable(ContextActionStatus::Busy),
+                None,
+            );
         }
-        let compact_status = if self.is_swarm_worker() || !self.provider.supports_compaction() {
-            ContextActionStatus::Unsupported
-        } else if manager.can_manually_compact(messages) {
-            ContextActionStatus::SavingsUnknown
-        } else {
-            ContextActionStatus::NoEligible
-        };
+        let (compact_status, compact) =
+            if self.is_swarm_worker() || !self.provider.supports_compaction() {
+                (ContextActionStatus::Unsupported, None)
+            } else {
+                match manager.snapshot_manual_snapcompact(messages, &*self.provider) {
+                    Ok(compact) => (ContextActionStatus::SavingsUnknown, compact),
+                    Err(_) => (ContextActionStatus::NoEligible, None),
+                }
+            };
         let start = manager.active_start(messages);
         let config = manager.manual_tool_shake_config();
         let (shake, shake_status) = match self.session.preview_shake_stored_messages(start, &config)
@@ -135,13 +191,17 @@ impl Agent {
             ),
             compaction::ShakeOutcome::NoChange => (None, Some(ContextActionStatus::NoEligible)),
         };
-        ContextActionForecast {
-            current_tokens: None,
-            compact: None,
-            shake,
-            compact_status: Some(compact_status),
-            shake_status,
-        }
+        (
+            ContextActionForecast {
+                current_tokens: None,
+                compact: None,
+                shake,
+                compact_measurement: None,
+                compact_status: Some(compact_status),
+                shake_status,
+            },
+            compact,
+        )
     }
 }
 

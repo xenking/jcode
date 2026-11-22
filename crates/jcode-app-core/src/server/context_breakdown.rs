@@ -19,9 +19,11 @@ pub(super) async fn reply(
         }
         let live = sessions.read().await.get(&session_id).cloned();
         if let Some(agent) = live.as_ref().and_then(|agent| agent.try_lock().ok()) {
-            agent
-                .inspect_context_breakdown(summary_only, include_snapcompact)
-                .await
+            let snapshot = agent
+                .snapshot_context_breakdown(summary_only, include_snapcompact)
+                .await;
+            drop(agent);
+            snapshot.complete().await
         } else {
             let saved_id = session_id.clone();
             let mut saved = match tokio::task::spawn_blocking(move || {

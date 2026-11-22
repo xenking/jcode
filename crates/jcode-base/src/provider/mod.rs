@@ -2686,6 +2686,13 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.active_provider() == ActiveProvider::OpenAI
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.supports_explicit_native_compaction())
+    }
+
     async fn native_compact(
         &self,
         messages: &[Message],

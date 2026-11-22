@@ -1199,6 +1199,10 @@ impl Provider for OpenAIProvider {
             || self.native_compaction_mode != OpenAINativeCompactionMode::Auto
     }
 
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.native_compaction_mode == OpenAINativeCompactionMode::Explicit
+    }
+
     async fn native_compact(
         &self,
         messages: &[ChatMessage],
