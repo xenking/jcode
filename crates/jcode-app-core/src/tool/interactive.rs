@@ -178,6 +178,27 @@ impl Attachment {
     pub(crate) fn session_is(&self, session_id: &str) -> bool {
         self.session_id == session_id
     }
+
+    pub(crate) fn pending_ask_ids(&self) -> Vec<String> {
+        let all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let routes = ROUTES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(route) = routes.get(&self.session_id).and_then(|routes| {
+            routes
+                .iter()
+                .find(|route| route.id == self.id && !route.target.is_closed())
+        }) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<_> = all
+            .get(&self.session_id)
+            .into_iter()
+            .flat_map(|asks| asks.values())
+            .filter(|ask| route.can_answer(&ask.request_id))
+            .map(|ask| ask.request_id.clone())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +472,43 @@ mod tests {
         let last = replayed.pop().unwrap();
         last.response_tx.send("answer".into()).unwrap();
         assert_eq!(waiting.pop().unwrap().await.unwrap(), "answer");
+    }
+
+    #[tokio::test]
+    async fn pending_snapshot_is_scoped_to_the_attachment_owner() {
+        let session = "ask-snapshot-owner-test";
+        let (ui, mut ui_rx) = mpsc::unbounded_channel();
+        let owner = attach_client(session, ui, true);
+        let (other, mut other_rx) = mpsc::unbounded_channel();
+        let peer = attach(session, other);
+        let (unrelated, _unrelated_rx) = mpsc::unbounded_channel();
+        let unrelated = attach("ask-snapshot-other-session", unrelated);
+
+        let mut waits = Vec::new();
+        for id in ["ask-normal", "ask-premium-spawn-owner"] {
+            let (response_tx, response) = oneshot::channel();
+            waits.push(response);
+            owner_sender(session)
+                .unwrap()
+                .send(StdinInputRequest {
+                    request_id: id.into(),
+                    prompt: String::new(),
+                    is_password: false,
+                    ask_questions: Some(serde_json::json!([{}])),
+                    response_tx,
+                })
+                .unwrap();
+            assert_eq!(ui_rx.recv().await.unwrap().request_id, id);
+        }
+        assert_eq!(other_rx.try_recv().unwrap().request_id, "ask-normal");
+        assert!(other_rx.try_recv().is_err());
+        assert_eq!(
+            owner.pending_ask_ids(),
+            ["ask-normal", "ask-premium-spawn-owner"]
+        );
+        assert_eq!(peer.pending_ask_ids(), ["ask-normal"]);
+        assert!(unrelated.pending_ask_ids().is_empty());
+        drop(waits);
     }
 
     #[tokio::test]

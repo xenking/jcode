@@ -663,6 +663,7 @@ fn side_panel_events_hydrate_before_attach_and_route_only_to_matching_session() 
             reply(
                 frame,
                 ApiEvent::Attached {
+                    pending_ask_ids: None,
                     session: session(session_id),
                 },
                 writer,
@@ -960,6 +961,7 @@ fn create_session_options_preserve_system_prompt_wire_values() {
                 reply(
                     &frame,
                     ApiEvent::Attached {
+                        pending_ask_ids: None,
                         session: session("created"),
                     },
                     &mut writer,
@@ -1076,6 +1078,47 @@ fn set_session_env_sends_replacement_and_clear() {
     }
     drop(client);
     server.join().expect("server thread");
+}
+
+#[test]
+fn ask_response_distinguishes_only_the_exact_stale_reply() {
+    use jcode_sdk::{AskResponse, ErrorKind, api::ErrorCode};
+    const STALE: &str =
+        "The input request is no longer pending on this connection; your answer was not accepted";
+    let client = fake_harness(|frame, writer| {
+        let ApiRequest::AskResponse { request_id, .. } = &frame.request else {
+            panic!("unexpected request: {:?}", frame.request);
+        };
+        let event = match request_id.as_str() {
+            "live" => ApiEvent::Ok,
+            "stale" => ApiEvent::Error {
+                code: ErrorCode::Internal,
+                message: STALE.into(),
+            },
+            _ => ApiEvent::Error {
+                code: ErrorCode::Internal,
+                message: format!("transport: {STALE}"),
+            },
+        };
+        reply(frame, event, writer);
+    });
+    client
+        .respond_to_ask("s1", "live", AskResponse::default())
+        .unwrap();
+    assert_eq!(
+        client
+            .respond_to_ask("s1", "stale", AskResponse::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::AskNotPending,
+    );
+    assert_eq!(
+        client
+            .respond_to_ask("s1", "other", AskResponse::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Harness(ErrorCode::Internal),
+    );
 }
 
 #[test]

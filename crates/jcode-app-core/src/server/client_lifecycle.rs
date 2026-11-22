@@ -2008,6 +2008,10 @@ pub(super) async fn handle_client(
                     &client_session_id,
                     client_is_processing,
                     session_control.pending_soft_interrupt_count(),
+                    stdin_attachment
+                        .as_ref()
+                        .filter(|attachment| attachment.session_is(&client_session_id))
+                        .map(crate::tool::interactive::Attachment::pending_ask_ids),
                     &sessions,
                     &writer,
                 )

@@ -903,19 +903,32 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Attached { session } => Ok(session),
+            ApiEvent::Attached { session, .. } => Ok(session),
             other => Err(unexpected("attached", &other)),
         }
     }
 
     pub fn attach_session(&self, session_id: &str) -> Result<SessionInfo> {
+        self.attach_session_with_pending_asks(session_id)
+            .map(|(session, _)| session)
+    }
+
+    /// Attach and read the authoritative IDs of questions answerable on this connection.
+    /// `None` means the runtime cannot provide the snapshot, not that no questions are pending.
+    pub fn attach_session_with_pending_asks(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionInfo, Option<Vec<String>>)> {
         match self
             .request_ok(ApiRequest::AttachSession {
                 session_id: session_id.to_string(),
             })?
             .event
         {
-            ApiEvent::Attached { session } => Ok(session),
+            ApiEvent::Attached {
+                session,
+                pending_ask_ids,
+            } => Ok((session, pending_ask_ids)),
             other => Err(unexpected("attached", &other)),
         }
     }
@@ -1409,6 +1422,7 @@ impl JcodeClient {
             response,
         })
         .map(drop)
+        .map_err(crate::errors::classify_ask_response_error)
     }
 
     pub fn respond_to_permission(
@@ -2166,7 +2180,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }
         | History { session_id, .. } => Some(session_id.as_str()),
-        Attached { session } => Some(session.session_id.as_str()),
+        Attached { session, .. } => Some(session.session_id.as_str()),
         _ => None,
     }
 }

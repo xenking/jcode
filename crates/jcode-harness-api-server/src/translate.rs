@@ -2218,6 +2218,9 @@ impl BridgeState {
                     let mut frames = vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Attached {
+                            pending_ask_ids: event
+                                .get("pending_ask_ids")
+                                .and_then(|ids| serde_json::from_value(ids.clone()).ok()),
                             session: SessionInfo {
                                 user_connected: self.user_connected_sessions.contains(&session_id),
                                 edit_stats: None,
@@ -3591,7 +3594,7 @@ impl BridgeState {
             _ => vec![],
         };
         for frame in &mut frames {
-            if let ApiEvent::Attached { session } | ApiEvent::SessionForked { session } =
+            if let ApiEvent::Attached { session, .. } | ApiEvent::SessionForked { session } =
                 &mut frame.event
             {
                 jcode_harness_api::enrich_sessions_from_local_edit_stats(std::slice::from_mut(

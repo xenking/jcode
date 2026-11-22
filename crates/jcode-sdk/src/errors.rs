@@ -21,6 +21,8 @@ pub enum ErrorKind {
     UnexpectedReply,
     /// The harness answered with an error frame. Carries the wire code.
     Harness(jcode_harness_api::ErrorCode),
+    /// The specific Ask request no longer accepts answers on this attachment.
+    AskNotPending,
     /// I/O trouble on the transport.
     Transport,
     /// The peer sent a malformed frame. Reconnecting may replay the same corrupt data.
@@ -78,6 +80,7 @@ impl ErrorKind {
             Self::CloudAuth => "cloud_auth",
             Self::CloudNotEntitled => "cloud_not_entitled",
             Self::HostKeyMismatch => "host_key_mismatch",
+            Self::AskNotPending => "ask_not_pending",
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",
@@ -137,3 +140,13 @@ impl From<jcode_harness_api::FrameError> for Error {
 
 /// Result alias used throughout the SDK.
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn classify_ask_response_error(mut error: Error) -> Error {
+    if error.kind == ErrorKind::Harness(jcode_harness_api::ErrorCode::Internal)
+        && error.message
+            == "The input request is no longer pending on this connection; your answer was not accepted"
+    {
+        error.kind = ErrorKind::AskNotPending;
+    }
+    error
+}

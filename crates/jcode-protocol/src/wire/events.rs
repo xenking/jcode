@@ -681,6 +681,9 @@ pub enum ServerEvent {
         /// Soft interrupts queued and not yet injected. Omitted by older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pending_soft_interrupts: Option<usize>,
+        /// Structured inputs answerable on this attachment. Absent before attach or on older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_ask_ids: Option<Vec<String>>,
     },
 
     /// Response for debug command

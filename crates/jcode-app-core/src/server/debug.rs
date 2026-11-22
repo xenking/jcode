@@ -427,6 +427,7 @@ pub(super) async fn handle_debug_client(
                     message_count,
                     is_processing: *is_processing.read().await,
                     pending_soft_interrupts: None,
+                    pending_ask_ids: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

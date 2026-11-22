@@ -823,7 +823,7 @@ fn created_session_reports_requested_working_dir_before_first_prompt() {
         "type": "state", "id": probe["id"], "session_id": "fresh",
         "message_count": 0, "is_processing": false,
     }));
-    let ApiEvent::Attached { session } = &reply[0].event else {
+    let ApiEvent::Attached { session, .. } = &reply[0].event else {
         panic!("expected attached")
     };
     assert_eq!(session.working_dir.as_deref(), Some("/workspace/fresh"));
@@ -876,7 +876,7 @@ fn attach_session_without_persisted_working_dir_reclaims_live_target() {
     assert_eq!(reply.len(), 2);
     assert_eq!(reply[0].reply_to, Some(41));
     assert!(
-        matches!(&reply[0].event, ApiEvent::Attached { session } if session.session_id == "live-empty")
+        matches!(&reply[0].event, ApiEvent::Attached { session, .. } if session.session_id == "live-empty")
     );
     assert_eq!(state.session_id.as_deref(), Some("live-empty"));
     assert!(state.pending_attach_id.is_none());
@@ -1044,15 +1044,19 @@ fn state_event_answers_pending_attach() {
 
     let frames = state.legacy_event_to_api(&json!({
         "type": "state", "id": state_id, "session_id": "abc",
-        "message_count": 0, "is_processing": false,
+        "message_count": 0, "is_processing": false, "pending_ask_ids": ["ask-live"],
     }));
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].reply_to, Some(5));
     match &frames[0].event {
-        ApiEvent::Attached { session } => {
+        ApiEvent::Attached {
+            session,
+            pending_ask_ids,
+        } => {
             assert_eq!(session.session_id, "abc");
             assert_eq!(session.title.as_deref(), Some("Persisted attach rename"));
             assert_eq!(session.working_dir.as_deref(), project.to_str());
+            assert_eq!(pending_ask_ids.as_deref(), Some(&["ask-live".into()][..]));
         }
         other => panic!("unexpected: {other:?}"),
     }
@@ -3927,7 +3931,7 @@ fn list_and_attach_expose_swarm_ownership_without_nesting_forks() {
     let frames = state.legacy_event_to_api(
         &json!({"type": "state", "id": probe["id"], "session_id": "child", "is_processing": false}),
     );
-    let ApiEvent::Attached { session } = &frames[0].event else {
+    let ApiEvent::Attached { session, .. } = &frames[0].event else {
         panic!("expected attach")
     };
     assert_eq!(session.parent_session_id.as_deref(), Some("root"));

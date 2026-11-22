@@ -40,6 +40,7 @@ fn out_of_order_replies_reach_the_right_waiter() {
             reply(
                 frame,
                 ApiEvent::Attached {
+                    pending_ask_ids: None,
                     session: session(&id),
                 },
                 writer,

@@ -224,6 +224,7 @@ fn serve_connection(
                 reply(
                     frame.id,
                     ApiEvent::Attached {
+                        pending_ask_ids: None,
                         session: session(&session_id),
                     },
                     &mut writer,

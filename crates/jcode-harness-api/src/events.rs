@@ -59,7 +59,12 @@ pub enum ApiEvent {
     },
 
     /// Reply to `CreateSession` / `AttachSession`.
-    Attached { session: SessionInfo },
+    Attached {
+        session: SessionInfo,
+        /// Ask IDs answerable on this attachment. Older daemons omit the snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_ask_ids: Option<Vec<String>>,
+    },
 
     /// Reply to `ForkSession`.
     SessionForked { session: SessionInfo },

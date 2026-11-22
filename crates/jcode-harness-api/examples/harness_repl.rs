@@ -52,7 +52,7 @@ fn run_session<R: BufRead, W: Write>(mut client: HarnessClient<R, W>, message: &
     let session_id = loop {
         let frame = client.recv().expect("recv");
         print_event(&frame);
-        if let ApiEvent::Attached { session } = &frame.event {
+        if let ApiEvent::Attached { session, .. } = &frame.event {
             break session.session_id.clone();
         }
     };
@@ -121,6 +121,7 @@ fn run_demo() {
                 "create_session" => reply(&ServerFrame::reply(
                     id,
                     ApiEvent::Attached {
+                        pending_ask_ids: None,
                         session: jcode_harness_api::SessionInfo {
                             edit_stats: None,
                             context: None,
