@@ -9,6 +9,7 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
     let worker_queue = agent.lock().await.soft_interrupt_queue();
     let child = "session_stop-tree-child";
     let other = "stop-tree-unrelated";
+    let crashed = "session_stop-tree-crashed";
     let swarm = "stop-tree";
     let child_swarm = "stop-tree-nested";
     let members = Arc::new(RwLock::new(HashMap::from([
@@ -19,11 +20,15 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
             owned_member(child, child_swarm, "running", worker),
         ),
         (other.into(), member(other, swarm, "ready")),
+        (
+            crashed.into(),
+            owned_member(crashed, swarm, "crashed", owner),
+        ),
     ])));
     let swarms = Arc::new(RwLock::new(HashMap::from([
         (
             swarm.into(),
-            HashSet::from([owner.into(), worker.into(), other.into()]),
+            HashSet::from([owner.into(), worker.into(), other.into(), crashed.into()]),
         ),
         (child_swarm.into(), HashSet::from([child.into()])),
     ])));
@@ -60,11 +65,11 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
     let activity = crate::turn_activity::global();
     let worker_turn = activity.admit(worker).unwrap();
     let child_turn = activity.admit(child).unwrap();
-    let stop = async {
+    let stop = async |id, requester: &str, target: &str| {
         crate::server::comm_session::handle_comm_stop(
-            17,
-            owner.into(),
-            worker.into(),
+            id,
+            requester.into(),
+            target.into(),
             false,
             &stop_tx,
             &sessions,
@@ -143,15 +148,58 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
         );
     };
     tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::join!(stop, verify);
+        tokio::join!(stop(17, owner, worker), verify);
     })
     .await
     .unwrap();
+
+    // The stopped roster row can expire before the coordinator retries.
+    members.write().await.remove(worker);
+    swarms.write().await.get_mut(swarm).unwrap().remove(worker);
+    stop(18, owner, worker).await;
+    let response = stop_rx.recv().await;
+    assert!(
+        matches!(response, Some(ServerEvent::Done { id: 18 })),
+        "{response:?}"
+    );
+
+    stop(19, owner, "session_unknown_stop_target").await;
+    assert!(matches!(
+        stop_rx.recv().await,
+        Some(ServerEvent::Error { id: 19, .. })
+    ));
+
+    let mut crashed_session = crate::session::Session::create_with_id(crashed.into(), None, None);
+    crashed_session.mark_crashed(Some("Interrupted by a disconnect".into()));
+    crashed_session.save_prepared().unwrap();
+    members.write().await.remove(crashed);
+    crate::server::remove_session_from_swarm(
+        crashed,
+        swarm,
+        &members,
+        &swarms,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await;
+
+    stop(20, owner, crashed).await;
+    let response = stop_rx.recv().await;
+    assert!(
+        matches!(response, Some(ServerEvent::Done { id: 20 })),
+        "{response:?}"
+    );
+    stop(21, child, crashed).await;
+    assert!(matches!(
+        stop_rx.recv().await,
+        Some(ServerEvent::Error { id: 21, .. })
+    ));
 }
 
 #[tokio::test]
 async fn await_all_settles_after_both_workers_are_stopped() {
-    assert_await_settles_after_both_workers_are_stopped(vec!["wolf".into(), "koala-id".into()]).await;
+    assert_await_settles_after_both_workers_are_stopped(vec!["wolf".into(), "koala-id".into()])
+        .await;
 }
 
 #[tokio::test]

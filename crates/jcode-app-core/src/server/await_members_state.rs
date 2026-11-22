@@ -26,6 +26,32 @@ pub(crate) struct StoppedMember {
     pub friendly_name: Option<String>,
 }
 
+fn save_stopped_member(swarm_id: &str, identifier: &str, stopped: &StoppedMember) {
+    let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
+    save_json_state(STOPPED_MEMBERS_DIR, &key, stopped, "stopped swarm member");
+}
+
+pub(super) fn remember_terminal_swarm_departure(swarm_id: &str, session_id: &str) {
+    use crate::session::{Session, SessionStatus};
+    if stopped_member(swarm_id, session_id).is_none()
+        && Session::load_startup_stub(session_id).is_ok_and(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Closed | SessionStatus::Crashed { .. } | SessionStatus::Error { .. }
+            )
+        })
+    {
+        save_stopped_member(
+            swarm_id,
+            session_id,
+            &StoppedMember {
+                session_id: session_id.to_owned(),
+                friendly_name: None,
+            },
+        );
+    }
+}
+
 pub(super) fn record_stopped_member(
     swarm_id: &str,
     session_id: &str,
@@ -44,8 +70,7 @@ pub(super) fn record_stopped_member(
         identifiers.push(name);
     }
     for identifier in identifiers {
-        let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
-        save_json_state(STOPPED_MEMBERS_DIR, &key, &stopped, "stopped swarm member");
+        save_stopped_member(swarm_id, identifier, &stopped);
     }
 
     // Swarm-wide waits track live membership (including late joiners).

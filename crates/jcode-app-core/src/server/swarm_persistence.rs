@@ -652,6 +652,10 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 terminal_retention,
                 true,
             ) else {
+                super::await_members_state::remember_terminal_swarm_departure(
+                    &member_swarm_id,
+                    &member_session_id,
+                );
                 pruned_terminal_members += 1;
                 pruned_members_by_swarm
                     .entry(member_swarm_id)

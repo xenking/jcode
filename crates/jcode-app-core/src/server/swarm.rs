@@ -1173,14 +1173,22 @@ pub(super) async fn remove_session_from_swarm(
     remove_plan_participant(swarm_id, session_id, swarm_plans).await;
     super::live_status::forget(session_id);
 
-    {
+    let was_member = {
         let mut swarms = swarms_by_id.write().await;
         if let Some(swarm) = swarms.get_mut(swarm_id) {
-            swarm.remove(session_id);
+            let was_member = swarm.remove(session_id);
             if swarm.is_empty() {
                 swarms.remove(swarm_id);
             }
+            was_member
+        } else {
+            false
         }
+    };
+    if was_member {
+        super::run_blocking_io(|| {
+            super::await_members_state::remember_terminal_swarm_departure(swarm_id, session_id);
+        });
     }
 
     let was_coordinator = {

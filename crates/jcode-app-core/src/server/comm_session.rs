@@ -1070,6 +1070,20 @@ pub(super) async fn handle_comm_stop(
         match resolve_stop_target_session(&swarm_id, &target_session, swarm_members).await {
             Ok(target_session) => target_session,
             Err(message) => {
+                let exact_id = target_session.trim();
+                // A stop receipt is scoped to this swarm. Never use it to
+                // bypass authorization for a live or reattached target.
+                if let Some(_slot) = sessions.try_reserve(exact_id)
+                    && !sessions.read().await.contains_key(exact_id)
+                    && !swarm_members.read().await.contains_key(exact_id)
+                    && super::run_blocking_io(|| {
+                        super::await_members_state::stopped_member(&swarm_id, exact_id)
+                            .is_some_and(|(session_id, _)| session_id == exact_id)
+                    })
+                {
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                    return;
+                }
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message,
