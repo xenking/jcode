@@ -180,13 +180,14 @@ fn direct_neon_404_preserves_selected_model_and_original_error() {
                     }
                 }
                 reader.read_exact(&mut vec![0; length]).await.unwrap();
-                reader
-                    .get_mut()
+                let socket = reader.get_mut();
+                socket
                     .write_all(
                         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     )
                     .await
                     .unwrap();
+                socket.shutdown().await.unwrap();
             });
             let mut provider = GeminiProvider::new();
             provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -197,8 +198,8 @@ fn direct_neon_404_preserves_selected_model_and_original_error() {
                     break err;
                 }
             };
-            assert!(err.to_string().contains("gemini-4-neon"));
-            assert!(format!("{err:#}").contains("HTTP 404"));
+            assert!(err.to_string().contains("gemini-4-neon"), "{err:#}");
+            assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
             assert_eq!(provider.model(), "gemini-4-neon");
             server.await.unwrap();
         });

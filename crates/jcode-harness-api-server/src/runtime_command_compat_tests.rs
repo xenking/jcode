@@ -26,16 +26,8 @@ async fn reply_to(reader: &mut (impl AsyncBufRead + Unpin), id: u64) -> Value {
 }
 
 async fn runtime_capability_case(initial_timeout: bool, refreshed_support: Option<bool>) {
-    let root = std::env::temp_dir().join(format!(
-        "jcode-runtime-capability-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let socket = root.join("daemon.sock");
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let (client, bridge) = tokio::io::duplex(8192);
     let (bridge_read, bridge_write) = tokio::io::split(bridge);
@@ -181,8 +173,6 @@ async fn runtime_capability_case(initial_timeout: bool, refreshed_support: Optio
 
     write.shutdown().await.unwrap();
     bridge_task.await.unwrap().unwrap();
-    drop(listener);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
