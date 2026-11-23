@@ -287,7 +287,7 @@ async fn persistent_ws_background_keepalive_round_trips_and_answers_server_ping(
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide active OpenAI account model cache across async websocket state setup"
 )]
-async fn test_set_model_clears_persistent_ws_state() {
+async fn selecting_models_without_sending_preserves_persistent_ws_state() {
     let _guard = jcode_base::storage::lock_test_env();
     jcode_base::auth::codex::set_active_account_override(Some(
         "openai-set-model-clears-ws".to_string(),
@@ -301,16 +301,18 @@ async fn test_set_model_clears_persistent_ws_state() {
     });
     jcode_base::provider::populate_account_models_for_scope(
         &provider.catalog_scope(),
-        vec!["gpt-5.3-codex".to_string()],
+        vec!["gpt-5.3-codex".to_string(), "gpt-5.4".to_string()],
     );
+    provider.set_model("gpt-5.4").expect("set initial model");
     let (state, server) = test_persistent_ws_state().await;
     *provider.persistent_ws.lock().await = Some(state);
 
     provider.set_model("gpt-5.3-codex").expect("set model");
+    provider.set_model("gpt-5.4").expect("restore original model");
 
     assert!(
-        provider.persistent_ws.lock().await.is_none(),
-        "changing models should reset the persistent websocket chain"
+        provider.persistent_ws.lock().await.is_some(),
+        "unsent model choices should preserve the persistent websocket chain"
     );
     server.abort();
     jcode_base::auth::codex::set_active_account_override(None);
@@ -551,8 +553,9 @@ async fn speed_uses_the_exact_catalog_and_does_not_follow_a_route_change() {
     assert_eq!(availability(&api, "gpt-6-astra", SpeedMode::Ultrafast), SpeedAvailability::Available);
     assert_eq!(availability(&api, "gpt-6.2-astra", SpeedMode::Ultrafast), SpeedAvailability::Unknown);
     assert_eq!(availability(&oauth, "gpt-6.2-astra", SpeedMode::Ultrafast), SpeedAvailability::Unavailable);
-    assert_eq!(availability(&oauth, "gpt-6.2-astra[1m]", SpeedMode::Fast), SpeedAvailability::Unknown);
-    assert_eq!(availability(&oauth, "future-ultra", SpeedMode::Ultrafast), SpeedAvailability::Unknown);
+    assert_eq!(availability(&oauth, "gpt-6.2-astra[1m]", SpeedMode::Fast), SpeedAvailability::Available);
+    assert_eq!(availability(&oauth, "future-ultra", SpeedMode::Ultrafast), SpeedAvailability::Available);
+    assert_eq!(availability(&oauth, "future-uncatalogued", SpeedMode::Ultrafast), SpeedAvailability::Unknown);
     assert_eq!(availability(&api, "future-ultra", SpeedMode::Ultrafast), SpeedAvailability::Unavailable);
     oauth.set_speed_mode(SpeedMode::Fast).unwrap();
     assert!(oauth.set_speed_mode(SpeedMode::Ultrafast).is_err());

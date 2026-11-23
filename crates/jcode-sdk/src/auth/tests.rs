@@ -537,7 +537,14 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
             assert!(task.join().unwrap().is_err());
             assert!(started.elapsed() < Duration::from_secs(2));
             assert!(!flow.has_callback_listener());
-            assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+            drop(_peer);
+            let next = client.begin("openai", None).unwrap();
+            next.start().unwrap();
+            assert!(
+                next.has_callback_listener(),
+                "the next login must reclaim the port"
+            );
+            next.cancel().unwrap();
         }
     }
 
