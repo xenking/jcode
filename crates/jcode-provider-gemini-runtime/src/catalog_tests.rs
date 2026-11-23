@@ -252,6 +252,7 @@ fn developer_catalog_paginates_and_preserves_cache_on_failure() {
                     Err(err) => panic!("accept: {err}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
