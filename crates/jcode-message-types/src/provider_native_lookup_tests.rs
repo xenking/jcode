@@ -1,13 +1,13 @@
 //! Lookup oracle frozen from 3de375bd4, provider_native.rs:323-329.
 //! Display conversion remains the independent semantic authority.
 use super::*;
+use crate::ContentBlock;
 use serde_json::json;
 
-fn original(items: &ProviderNativeItems, id: &str) -> Value {
+fn original(items: &[(&str, &Value)], id: &str) -> Value {
     items
-        .items
         .iter()
-        .filter_map(|(_, provider, item)| provider_native_display(provider, item))
+        .filter_map(|(provider, item)| provider_native_display(provider, item))
         .find(|display| display.id == id && display.output.is_none())
         .and_then(|display| display.input)
         .unwrap_or(Value::Null)
@@ -55,28 +55,31 @@ fn frozen_lookup_oracle_malformed_duplicates_and_order() {
         json!({"type":"server_tool_use","id":"same","input":false}),
         json!({"type":"web_search_call","status":"searching"}),
     ]);
+    let later = json!({"type":"server_tool_use","id":"same","input":"later"});
     for provider in ["anthropic", "openai", "unknown", ""] {
         for item in &candidates {
             // Direct storage deliberately exercises live OpenAI snapshots that push
             // filters today, guarding lookup semantics independently of ingestion.
             for reversed in [false, true] {
-                let first = (0, provider.to_owned(), item.clone());
-                let second = (
-                    0,
-                    "anthropic".into(),
-                    json!({"type":"server_tool_use","id":"same","input":"later"}),
-                );
-                let items = ProviderNativeItems {
-                    items: if reversed {
-                        vec![second, first]
-                    } else {
-                        vec![first, second]
-                    },
-                };
+                let mut raw = [(provider, item), ("anthropic", &later)];
+                if reversed {
+                    raw.reverse();
+                }
+                let mut items = ProviderNativeItems::default();
+                items.push_anthropic_thinking(0, "thinking".into(), "signature".into());
+                items.items.extend(raw.map(|(provider, item)| {
+                    (
+                        0,
+                        ContentBlock::ProviderNative {
+                            provider: provider.to_owned(),
+                            item: item.clone(),
+                        },
+                    )
+                }));
                 for id in ["same", "", "missing"] {
                     assert_eq!(
                         items.call_input(id),
-                        original(&items, id),
+                        original(&raw, id),
                         "{provider} {item} reversed={reversed} id={id}"
                     );
                 }

@@ -1,8 +1,6 @@
 use super::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::hint::black_box;
-use std::time::Instant;
 
 thread_local! {
     static ALLOCATIONS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
@@ -218,6 +216,9 @@ fn cpu_ns() -> u128 {
 #[ignore]
 #[cfg(target_os = "linux")]
 fn benchmark_message_hash() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
     let mut cases = vec![
         ("small", Message::user("hello")),
         ("mixed", shapes().pop().unwrap()),
