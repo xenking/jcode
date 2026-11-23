@@ -179,5 +179,10 @@ unsafe_code = "forbid"
 [dev-dependencies.pretty_assertions]
 version = "1"
 
+# ratatui-jcode: run the published examples through the Ratatui facade.
+[dev-dependencies.ratatui]
+version = "0.30"
+default-features = false
+
 [dev-dependencies.rstest]
 version = "0.26"
