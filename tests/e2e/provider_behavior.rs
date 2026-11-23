@@ -415,7 +415,8 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     ));
     std::fs::create_dir_all(&runtime_dir)?;
 
-    // A session left with a pending user turn the assistant never answered.
+    // A closed session with a pending user turn. Attaching it must not schedule
+    // crash recovery before the explicit resume-all request.
     let mut session = Session::create(None, Some("Interrupted Session".to_string()));
     session.model = Some("model-a".to_string());
     session.add_message(
@@ -425,6 +426,7 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
             cache_control: None,
         }],
     );
+    session.mark_closed();
     session.save()?;
 
     let socket_path = runtime_dir.join("jcode.sock");
@@ -457,7 +459,10 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     let mut resume_all_result: Option<(usize, usize)> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && (!saw_continuation || resume_all_result.is_none()) {
-        let event = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await??;
+        let mut event = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await??;
+        while let ServerEvent::TurnEvent { event: inner, .. } = event {
+            event = *inner;
+        }
         match event {
             ServerEvent::TextDelta { text } if text.contains("Continuing the migration now.") => {
                 saw_continuation = true;

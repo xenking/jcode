@@ -60,6 +60,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
             }
             .into(),
         );
+        session.mark_closed();
         session.save()?;
 
         wait_for_server_ready(&socket_path, &debug_socket_path).await?;
