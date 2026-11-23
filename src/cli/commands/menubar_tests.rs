@@ -141,6 +141,7 @@ fn menu_presence_includes_only_user_root_sessions() {
         None,
         Some("Root work".to_string()),
     );
+    root.set_debug(false);
     root.mark_active();
     root.save().expect("save root session");
 
@@ -158,6 +159,7 @@ fn menu_presence_includes_only_user_root_sessions() {
         Some(root.id.clone()),
         Some("Child work".to_string()),
     );
+    child.set_debug(false);
     child.mark_active();
     child.save().expect("save child session");
 

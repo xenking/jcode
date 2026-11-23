@@ -41,6 +41,7 @@ fn public_prompt_builders_deduplicate_home_and_aliases_but_preserve_distinct_fil
             ])
             .current_dir(cwd)
             .env("HOME", &home)
+            .env_remove("JCODE_HOME")
             // The child is a test binary too, so its home resolution is isolated
             // away from $HOME by default. Pin the home under test; the cases then
             // still exercise deduplication by real path via cwd.
