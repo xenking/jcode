@@ -393,6 +393,11 @@ fn cli_notice_reports_user_auth_and_goal_that_cannot_complete() {
 #[tokio::test]
 async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_timeout() {
     let _guard = crate::storage::lock_test_env();
+    // Durable await records live in the runtime dir, which the user's live
+    // daemon scans and rewrites. Keep this test's records out of it.
+    let _env = SavedEnv::capture(&["JCODE_RUNTIME_DIR"]);
+    let runtime = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
     for timed_out in [false, true] {
         let key = format!("cli-await-{}", uuid::Uuid::new_v4());
         let id = crate::todo::await_dependency::dependency_id(&key, 1);
