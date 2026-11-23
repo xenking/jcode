@@ -10,7 +10,7 @@ pub use jcode_batch_types::{BatchProgress, BatchSubcallProgress, BatchSubcallSta
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -618,7 +618,8 @@ fn latest_update_status() -> &'static Mutex<Option<UpdateStatus>> {
 #[derive(Default)]
 struct ModelsUpdatedPublishState {
     last_published_at: Option<Instant>,
-    publish_pending: bool,
+    // A cancelled debounce task leaves no live timer to coalesce with.
+    pending_timer: Weak<()>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -771,24 +772,29 @@ impl Bus {
                     let elapsed = now.saturating_duration_since(last);
                     if elapsed >= MODELS_UPDATED_DEBOUNCE {
                         state.last_published_at = Some(now);
+                        state.pending_timer = Weak::new();
                         None
-                    } else if state.publish_pending {
+                    } else if state.pending_timer.strong_count() != 0 {
                         return;
                     } else {
-                        state.publish_pending = true;
-                        Some(MODELS_UPDATED_DEBOUNCE - elapsed)
+                        let timer = Arc::new(());
+                        state.pending_timer = Arc::downgrade(&timer);
+                        Some((MODELS_UPDATED_DEBOUNCE - elapsed, timer))
                     }
                 }
             }
         };
 
-        if let Some(delay) = delay {
+        if let Some((delay, timer)) = delay {
             let Ok(handle) = tokio::runtime::Handle::try_current() else {
                 let mut state = self
                     .models_updated_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.publish_pending = false;
+                if !state.pending_timer.ptr_eq(&Arc::downgrade(&timer)) {
+                    return;
+                }
+                state.pending_timer = Weak::new();
                 state.last_published_at = Some(Instant::now());
                 drop(state);
                 self.publish(BusEvent::ModelsUpdated);
@@ -805,7 +811,10 @@ impl Bus {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.publish_pending = false;
+                if !state.pending_timer.ptr_eq(&Arc::downgrade(&timer)) {
+                    return;
+                }
+                state.pending_timer = Weak::new();
                 state.last_published_at = Some(Instant::now());
                 drop(state);
                 if sender.send(BusEvent::ModelsUpdated).is_err() {
@@ -933,6 +942,30 @@ mod tests {
         assert!(bus.runtime_delivery_checkpoint().is_none());
         drop(receiver.try_recv().unwrap());
         assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
+
+    #[test]
+    fn cancelled_debounce_does_not_suppress_next_models_update() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+        };
+        let bus = Bus::new_isolated_for_tests();
+        let mut rx = bus.subscribe();
+        runtime().block_on(async {
+            bus.publish_models_updated();
+            bus.publish_models_updated();
+            assert!(matches!(rx.try_recv(), Ok(BusEvent::ModelsUpdated)));
+        });
+        runtime().block_on(async {
+            bus.publish_models_updated();
+            assert!(matches!(
+                timeout(Duration::from_secs(2), rx.recv()).await,
+                Ok(Ok(BusEvent::ModelsUpdated))
+            ));
+        });
     }
 
     #[tokio::test]
