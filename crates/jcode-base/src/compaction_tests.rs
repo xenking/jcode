@@ -2098,6 +2098,7 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
 
 #[test]
 fn set_active_model_without_overrides_keeps_global_settings() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new();
     let before = manager.effective_config().clone();
     manager.set_active_model(Some("no-overrides-provider"), Some("no-overrides-model"));

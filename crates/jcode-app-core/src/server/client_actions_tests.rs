@@ -663,6 +663,7 @@ async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale
 
 #[tokio::test]
 async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() {
+    let _env_guard = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Working on scheduled task.".to_string()),
@@ -670,8 +671,10 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     ]);
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::new(provider_dyn.clone()).await;
-    let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
-    let session_id = agent.lock().await.session_id().to_string();
+    let mut agent = Agent::new(provider_dyn, registry);
+    agent.set_debug(true);
+    let session_id = agent.session_id().to_string();
+    let agent = Arc::new(Mutex::new(agent));
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
     ));
@@ -729,6 +732,9 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
                     if text.contains("Working on scheduled task.") =>
                 {
                     return text;
+                }
+                Some(ServerEvent::Error { message, .. }) => {
+                    panic!("scheduled task failed: {message}")
                 }
                 Some(_) => continue,
                 None => panic!("live member stream closed before scheduled task ran"),
