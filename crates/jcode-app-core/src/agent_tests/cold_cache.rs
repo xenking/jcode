@@ -855,7 +855,6 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         Some("opaque-checkpoint")
     );
     let restored = serde_json::from_value(serde_json::to_value(persisted).unwrap()).unwrap();
-    crate::todo::save_todos(&agent.session.id, &[]).unwrap();
     agent
         .registry
         .compaction()
@@ -864,6 +863,22 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         .restore_persisted_stored_state_with(&restored, &agent.session.messages);
     let (after_reload, _) = agent.messages_for_provider(None).await.unwrap();
     assert_eq!(anthropic_wire(&after_reload), wire);
+
+    crate::todo::save_todos(&agent.session.id, &[]).unwrap();
+    let (after_clear, _) = agent.messages_for_provider(None).await.unwrap();
+    let mut after_clear = anthropic_wire(&after_clear);
+    let latest = after_clear.as_array_mut().unwrap().last_mut().unwrap();
+    let overlay = latest["content"].as_array_mut().unwrap().pop().unwrap();
+    assert!(
+        overlay["text"]
+            .as_str()
+            .unwrap()
+            .contains("The todo plan is now empty.")
+    );
+    assert_eq!(
+        after_clear, wire,
+        "clearing todos changes only the live overlay"
+    );
 }
 
 #[tokio::test]

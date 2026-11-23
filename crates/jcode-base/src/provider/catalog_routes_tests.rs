@@ -18,6 +18,7 @@ fn names_only_catalog_keeps_future_openai_models_on_direct_routes() {
 #[test]
 fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
     let home = crate::storage::jcode_dir().unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let accounts: Vec<_> = ["work", "personal", "research"].into_iter().map(|label| {
