@@ -295,9 +295,10 @@ fn pause_schema_is_shared_strict_and_carries_the_guidance() {
     let auth = update["requires_user_auth"]["description"]
         .as_str()
         .unwrap();
-    assert!(auth.starts_with("Pause until the user completes an authentication"));
-    assert!(auth.contains("Approvals, decisions, retries"));
-    assert!(auth.contains("use waiting_on"));
+    assert!(auth.starts_with("Pause only for user login, 2FA or credentials"));
+    assert!(auth.contains("Not for approvals, decisions, retries or worker waits"));
+    let waiting = update["waiting_on"]["description"].as_str().unwrap();
+    assert!(waiting.contains("background"));
     let goal = &properties["goals"]["items"]["properties"]["cannot_complete"];
     assert_eq!(goal["type"], "string");
     let goal = goal["description"].as_str().unwrap();

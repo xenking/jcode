@@ -36,7 +36,7 @@ pub(crate) fn generic_batch_schema() -> Value {
                         "parameters": {
                             "type": "object",
                             "additionalProperties": true,
-                            "description": r#"Complete child input. Example: {"tool":"mcp","intent":"Inspect","parameters":{"action":"call","server":"s","tool":"raw","arguments":{}}}"#
+                            "description": r#"Child tool arguments, e.g. {"action":"call","server":"s","tool":"raw"}."#
                         }
                     },
                     "additionalProperties": true
