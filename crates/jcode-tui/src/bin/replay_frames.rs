@@ -58,23 +58,6 @@ fn color(value: Color) -> Value {
     json!({"index": index})
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_colors_preserve_reset_rgb_and_all_palette_entries() {
-        assert_eq!(color(Color::Reset), Value::Null);
-        assert_eq!(color(Color::Rgb(10, 20, 30)), json!({"rgb":[10,20,30]}));
-        for index in 0..=255 {
-            assert_eq!(color(Color::Indexed(index)), json!({"index":index}));
-        }
-        assert_eq!(color(Color::Black), json!({"index":0}));
-        assert_eq!(color(Color::White), json!({"index":15}));
-        assert_eq!(color(Color::LightBlue), json!({"index":12}));
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -169,4 +152,21 @@ async fn main() -> Result<()> {
         args.output.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_colors_preserve_reset_rgb_and_all_palette_entries() {
+        assert_eq!(color(Color::Reset), Value::Null);
+        assert_eq!(color(Color::Rgb(10, 20, 30)), json!({"rgb":[10,20,30]}));
+        for index in 0..=255 {
+            assert_eq!(color(Color::Indexed(index)), json!({"index":index}));
+        }
+        assert_eq!(color(Color::Black), json!({"index":0}));
+        assert_eq!(color(Color::White), json!({"index":15}));
+        assert_eq!(color(Color::LightBlue), json!({"index":12}));
+    }
 }
