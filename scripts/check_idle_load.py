@@ -49,6 +49,7 @@ import time
 
 BUDGET_FILE = Path(__file__).with_name("idle_load_budget.json")
 ACCEPT = "[TIMING] main accept: connection accepted"
+ACCEPT_LINE = re.compile(rf"\[(?:INFO|DEBUG)\] (?:\[(?:srv|ses|prv|mod):[^\]]+\] )?{re.escape(ACCEPT)}")
 LIST_INTERVAL = 3.0
 SAMPLE_INTERVAL = 0.25
 START_TIMEOUT = 30
@@ -120,7 +121,7 @@ def log_delta(start, end):
                 if not line:
                     raise RuntimeError(f"log truncated while reading: {path}")
                 template = re.sub(rb"^\[\d{4}-\d{2}-\d{2} [^\]]+\] ", b"", line.rstrip()).decode(errors="replace")
-                if template == f"[INFO] {ACCEPT}":
+                if ACCEPT_LINE.fullmatch(template):
                     stats.accepts += 1
                 # Fold session IDs, durations and sizes to show the repeated offender.
                 template = re.sub(r"\bsession_\w+_\d{6,}[\w-]*", "<session>", template)
@@ -338,6 +339,8 @@ def run(binary, root, seconds):
             "JCODE_HOME": str(home), "JCODE_RUNTIME_DIR": str(runtime), "JCODE_TEST_SESSION": "1",
             "JCODE_TEMP_SERVER": "1", "JCODE_SERVER_OWNER_PID": str(os.getpid()),
             "JCODE_NO_TELEMETRY": "1", "JCODE_NON_INTERACTIVE": "1",
+            # The daemon emits the accept marker at debug level.
+            "JCODE_TRACE": "1",
             "JCODE_PROVIDER": "openai-compatible", "JCODE_MODEL": "idle-fixture",
             "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "idle-fixture",
             "JCODE_OPENAI_COMPAT_API_BASE": base, "OPENAI_COMPAT_API_KEY": "fixture-only",
@@ -401,7 +404,7 @@ def main():
         budget = load_budget(args.budget)
         # A short root avoids AF_UNIX path length failures with macOS TMPDIR.
         with tempfile.TemporaryDirectory(prefix="jc-idle-", dir="/tmp") as directory:
-            elapsed, logs, cpu, rewrites, polls = run(args.binary.resolve(strict=True), Path(directory), args.seconds)
+            elapsed, logs, cpu, rewrites, polls = run(args.binary.resolve(strict=True), Path(directory).resolve(), args.seconds)
         rows = budget_rows(budget, elapsed, logs.accepts, logs.bytes, cpu, rewrites)
         show_report(rows, elapsed, logs, polls)
         return int(any(row.exceeded for row in rows))

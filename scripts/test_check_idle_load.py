@@ -38,18 +38,19 @@ class IdleLoadTest(unittest.TestCase):
     def test_log_window_excludes_startup_and_includes_new_file(self):
         with tempfile.TemporaryDirectory() as directory:
             old, new = (Path(directory) / filename for filename in ("old.log", "new.log"))
-            accept = b"[2026-11-22 22:00:00.111] [INFO] [TIMING] main accept: connection accepted\n"
+            legacy = b"[2026-11-22 22:00:00.111] [INFO] [TIMING] main accept: connection accepted\n"
+            accept = b"[2026-11-22 22:00:00.111] [DEBUG] [srv:test] [TIMING] main accept: connection accepted\n"
             unrelated = b"[2026-11-22 22:00:02.222] [INFO] Ambient runner nudged\n"
-            old.write_bytes(accept)
+            old.write_bytes(legacy)
             start = check.log_snapshot([old])
-            old.write_bytes(accept + unrelated)
-            new.write_bytes(accept)
+            old.write_bytes(legacy + unrelated)
+            new.write_bytes(accept + legacy)
             end = check.log_snapshot([old, new])
             with new.open("ab") as file:
                 file.write(accept)  # Outside the timed window.
             stats = check.log_delta(start, end)
-            self.assertEqual(stats.accepts, 1)
-            self.assertEqual(stats.bytes, len(accept) + len(unrelated))
+            self.assertEqual(stats.accepts, 2)
+            self.assertEqual(stats.bytes, len(accept) + len(legacy) + len(unrelated))
             self.assertEqual(stats.templates["[INFO] Ambient runner nudged"], len(unrelated))
             with self.assertRaisesRegex(RuntimeError, "disappeared"):
                 check.log_delta(start, check.log_snapshot([new]))
