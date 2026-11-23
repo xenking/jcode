@@ -6,8 +6,10 @@ use super::{
 #[test]
 fn side_question_fork_never_falls_back_to_an_ordinary_split() {
     let request = json!({"req": "fork_side_question", "id": 1, "session_id": "parent"});
-    let mut old = BridgeState::default();
-    old.session_id = Some("parent".into());
+    let mut old = BridgeState {
+        session_id: Some("parent".into()),
+        ..BridgeState::default()
+    };
     assert!(matches!(
         only_reply_event(old.api_request_to_legacy(&request)),
         ApiEvent::Error {
@@ -16,9 +18,11 @@ fn side_question_fork_never_falls_back_to_an_ordinary_split() {
         }
     ));
 
-    let mut current = BridgeState::default();
-    current.session_id = Some("parent".into());
-    current.side_questions_supported = true;
+    let mut current = BridgeState {
+        session_id: Some("parent".into()),
+        side_questions_supported: true,
+        ..BridgeState::default()
+    };
     // A capable backend must use the distinct durable side-question fork.
     let output = current.api_request_to_legacy(&request);
     assert!(
