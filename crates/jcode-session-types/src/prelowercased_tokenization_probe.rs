@@ -1,10 +1,11 @@
 //! Ignored optimized CPU/allocation probe. Run with:
 //! justrust test -p jcode-session-types --release tokenization_probe -- --ignored --nocapture
+#[cfg(target_os = "linux")]
 use super::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::hint::black_box;
-use std::time::Instant;
+#[cfg(target_os = "linux")]
+use std::{hint::black_box, time::Instant};
 
 struct CountingAllocator;
 thread_local! {
@@ -34,6 +35,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn optimized(text: &str) -> Vec<String> {
     tokenize_prelowercased_session_search_text(&text.to_lowercase())
 }
