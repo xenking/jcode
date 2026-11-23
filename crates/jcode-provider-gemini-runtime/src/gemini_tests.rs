@@ -981,6 +981,7 @@ fn post_json_retries_transient_http_responses_against_local_server() {
                     Err(err) => panic!("accept: {err}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();

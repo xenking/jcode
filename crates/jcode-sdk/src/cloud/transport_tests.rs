@@ -22,6 +22,7 @@ fn serve(count: usize, connect_delay: Duration) -> (String, std::thread::JoinHan
             };
             let requests = requests.clone();
             workers.push(std::thread::spawn(move || {
+            socket.set_nonblocking(false).unwrap();
             socket.set_nodelay(true).unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             std::thread::sleep(connect_delay);

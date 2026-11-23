@@ -26,12 +26,13 @@ fn inference_profile_discovery_reads_all_sdk_pages() {
                     Err(err) => panic!("accept: {err}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();
             let mut reader = std::io::BufReader::new(&stream);
             let mut request = String::new();
-            reader.read_line(&mut request).unwrap();
+            assert!(reader.read_line(&mut request).unwrap() > 0);
             loop {
                 let mut line = String::new();
                 assert!(reader.read_line(&mut line).unwrap() > 0);
