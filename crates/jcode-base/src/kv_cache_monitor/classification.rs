@@ -289,6 +289,16 @@ fn reason(
     if baseline.utc_day != pending.utc_day && provider_rolls_cache_daily(&new.provider) {
         return Some(MissReason::DailyRollover);
     }
+    // An estimated TTL is only the provider's typical retention, so it may not
+    // overrule the harness-caused checks above. A clean append idle past it is
+    // still most likely an eviction: 14 of 14 Codex OAuth requests idle for over
+    // an hour read back cold in the November 2026 daemon logs.
+    if let Some(ttl) = old.cache_ttl_secs
+        && old.ttl_is_estimate
+        && idle_duration(baseline, pending).is_some_and(|idle| idle >= Duration::from_secs(ttl))
+    {
+        return Some(MissReason::Expired);
+    }
     if read == 0 {
         return Some(MissReason::ZeroRead);
     }

@@ -533,6 +533,11 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             or_unknown(ctx.new_effort)
         ),
         MissReason::Expired => match (ctx.idle_secs, ctx.ttl_secs) {
+            (Some(idle), Some(ttl)) if ctx.ttl_is_estimate => format!(
+                "idle {} exceeded the provider's typical {} cache retention",
+                format_duration_secs(idle),
+                format_duration_secs(ttl)
+            ),
             (Some(idle), Some(ttl)) => format!(
                 "idle {} exceeded the {} cache TTL",
                 format_duration_secs(idle),
@@ -629,6 +634,8 @@ pub struct KvCacheMonitor {
     checkpoint_dirty: bool,
     pending: Option<Pending>,
     tail: TailGapModel,
+    /// Consecutive requests that read back less than half their prefix.
+    cold_streak: u32,
 }
 
 impl KvCacheMonitor {
@@ -642,6 +649,40 @@ impl KvCacheMonitor {
         self.checkpoint_dirty = false;
         self.pending = None;
         self.tail.reset();
+        self.cold_streak = 0;
+    }
+
+    /// Pretend the last request completed `by` earlier.
+    #[cfg(test)]
+    fn backdate_baseline(&mut self, by: Duration) {
+        if let Some(baseline) = self.baseline.as_mut() {
+            let baseline = Arc::make_mut(baseline);
+            baseline.completed_at -= by;
+            baseline.completed_in_process =
+                baseline.completed_in_process.and_then(|at| at.checked_sub(by));
+        }
+    }
+
+    /// OpenAI writes a prompt's cache after answering it. The request right
+    /// after a cold one can still find that write unfinished and read cold
+    /// again: in the daemon logs, 63 of 134 such follow-ons within two minutes
+    /// did. The cold request was already reported, so its first follow-on with
+    /// an unchanged prefix is the same miss. A second one is reported again.
+    fn is_cold_write_follow_on(&self, miss: &KvCacheMiss, route: &RequestRoute) -> bool {
+        let follow_on = self.cold_streak == 1
+            && miss.prefix_unchanged
+            && matches!(
+                miss.reason,
+                MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+            )
+            && is_openai_cache_provider(&route.provider);
+        if follow_on {
+            crate::logging::info(&format!(
+                "KV_CACHE_WARMING provider={} model={} expected={} read={}; the previous request was cold and its cache write had not landed yet, not a second miss",
+                route.provider, route.model, miss.expected_tokens, miss.read_tokens,
+            ));
+        }
+        follow_on
     }
 
     /// Read only on session restoration. Within a process, intentional resets
@@ -775,6 +816,16 @@ impl KvCacheMonitor {
                 miss.is_some(),
             );
         }
+        let miss = miss.filter(|miss| !self.is_cold_write_follow_on(miss, &pending.route));
+        if let Some(read) = read_tokens
+            && reusable_cache_tokens > 0
+        {
+            self.cold_streak = if read.saturating_mul(2) < reusable_cache_tokens {
+                self.cold_streak.saturating_add(1)
+            } else {
+                0
+            };
+        }
         if reusable_cache_tokens > 0 {
             self.baseline = Some(Arc::new(Baseline {
                 route: pending.route,
@@ -900,7 +951,7 @@ mod tests {
             };
             monitor.begin_request(route.clone(), sig(&[10]));
             monitor.note_canonical_input(snapshot(vec![10], Some(5)));
-            assert!(monitor.finish_request(20_000, Some(0)).is_none());
+            assert!(monitor.finish_request(20_000, Some(19_500)).is_none());
             monitor.begin_request(route.clone(), sig(&[10, 11]));
             monitor.note_canonical_input(snapshot(vec![10, 11], options));
             if delta {
@@ -1098,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_openai_partial_reads_do_not_prove_eviction_and_recover() {
+    fn openai_partial_reads_right_after_a_cold_write_are_warm_up() {
         for (baseline, input, read, next_input, next_read) in [
             (19_970, 20_372, 4_352, 27_278, 20_352),
             (30_379, 30_743, 20_096, 32_143, 30_336),
@@ -1107,13 +1158,9 @@ mod tests {
             monitor.begin_request(openai_route(), sig(&[10]));
             assert!(monitor.finish_request(baseline, Some(0)).is_none());
             monitor.begin_request(openai_route(), sig(&[10, 11]));
-            let miss = monitor
-                .finish_request(input, Some(read))
-                .expect("partial read");
-            assert_eq!(miss.reason, MissReason::LowRead);
-            assert_eq!(miss.missed_tokens, baseline - read);
-            assert!(miss.detail.contains("cause unconfirmed"), "{}", miss.detail);
-            assert!(!miss.detail.contains("so the provider"), "{}", miss.detail);
+            // The cold first request is still being written: OpenAI warms
+            // up over the next request, which is not a second miss.
+            assert_eq!(monitor.finish_request(input, Some(read)), None);
             monitor.begin_request(openai_route(), sig(&[10, 11, 12]));
             assert!(
                 monitor
@@ -1224,6 +1271,90 @@ mod tests {
         let model = TailGapModel::default();
         assert!(model.is_miss("claude", 40_000, 38_900));
         assert!(!model.is_miss("claude", 40_000, 39_100));
+    }
+
+    /// Codex OAuth publishes no retention, so its TTL is the 31m estimate.
+    fn openai_oauth_route() -> RequestRoute {
+        RequestRoute {
+            provider: "openai-oauth".into(),
+            model: "gpt-6.2-sol".into(),
+            cache_ttl_secs: Some(1_860),
+            ttl_is_estimate: true,
+            ..RequestRoute::default()
+        }
+    }
+
+    /// Session `dragon`, 2026-11-24 02:05: a 256K prompt resent after two
+    /// idle hours read 4.22K, and the tool-loop request 12s later read 4.22K
+    /// again before the third one read 256K. In the logs, every OAuth request
+    /// after more than an hour idle (14 of 14) came back cold.
+    #[test]
+    fn openai_idle_past_typical_retention_is_expiry_and_its_rewrite_is_not_a_second_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_oauth_route(), sig(&[10]));
+        assert!(monitor.finish_request(255_705, Some(254_848)).is_none());
+        monitor.backdate_baseline(Duration::from_secs(2 * 3_600));
+
+        monitor.begin_request(openai_oauth_route(), sig(&[10, 11]));
+        let expired = monitor
+            .finish_request_with_prefix(255_867, Some(255_867), Some(4_224))
+            .expect("the idle request pays for the whole prompt");
+        assert_eq!(expired.reason, MissReason::Expired);
+        assert!(!expired.reason.harness_caused());
+        assert!(expired.detail.contains("idle 2h"), "{}", expired.detail);
+        assert!(expired.detail.contains("typical"), "{}", expired.detail);
+        assert!(!expired.detail.contains("unconfirmed"), "{}", expired.detail);
+
+        monitor.begin_request(openai_oauth_route(), sig(&[10, 11, 12]));
+        assert_eq!(
+            monitor.finish_request_with_prefix(256_650, Some(256_650), Some(4_224)),
+            None,
+            "the provider was still writing the prefix the expired request sent"
+        );
+
+        // A backend that stays cold is reported again.
+        monitor.begin_request(openai_oauth_route(), sig(&[10, 11, 12, 13]));
+        let still_cold = monitor
+            .finish_request_with_prefix(257_486, Some(257_486), Some(4_224))
+            .expect("a second cold follow-on is a miss");
+        assert_eq!(still_cold.reason, MissReason::LowRead);
+
+        monitor.begin_request(openai_oauth_route(), sig(&[10, 11, 12, 13, 14]));
+        assert!(
+            monitor
+                .finish_request_with_prefix(257_884, Some(257_884), Some(257_152))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn estimated_expiry_never_hides_a_harness_change() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_oauth_route(), sig(&[10, 11]));
+        assert!(monitor.finish_request(100_000, Some(99_000)).is_none());
+        monitor.backdate_baseline(Duration::from_secs(2 * 3_600));
+        monitor.begin_request(openai_oauth_route(), sig(&[99, 11, 12]));
+        let miss = monitor.finish_request(101_000, Some(4_224)).expect("miss");
+        assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    #[test]
+    fn a_cold_follow_on_after_a_rewritten_prefix_is_still_a_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_oauth_route(), sig(&[10]));
+        assert!(monitor.finish_request(200_000, Some(4_224)).is_none());
+        monitor.begin_request(openai_oauth_route(), sig(&[99, 11]));
+        let miss = monitor.finish_request(201_000, Some(4_224)).expect("miss");
+        assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    #[test]
+    fn anthropic_writes_synchronously_so_a_cold_follow_on_is_a_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10]));
+        assert!(monitor.finish_request(120_000, Some(0)).is_none());
+        monitor.begin_request(route(), sig(&[10, 11]));
+        assert!(monitor.finish_request(121_000, Some(4_000)).is_some());
     }
 
     #[test]

@@ -161,7 +161,12 @@ impl Agent {
         };
         let provider = self.kv_cache_provider_identity();
         let route = crate::kv_cache_monitor::RequestRoute {
-            cache_ttl_secs: crate::provider::cache_ttl_for_provider_model(&provider, Some(model)),
+            // Codex OAuth publishes no retention. The cold-cache estimate lets
+            // a long idle gap explain its miss instead of reading as unknown.
+            cache_ttl_secs: crate::provider::cache_ttl_for_provider_model(&provider, Some(model))
+                .or_else(|| {
+                    crate::provider::shake_cache_ttl_for_provider_model(&provider, Some(model))
+                }),
             ttl_is_estimate: crate::provider::cache_ttl_is_estimate(&provider),
             provider,
             model: model.to_string(),
