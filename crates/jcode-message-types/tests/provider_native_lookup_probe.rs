@@ -1,4 +1,6 @@
 //! Standalone allocator isolates this probe from the library test allocator.
+#![cfg(target_os = "linux")]
+
 use jcode_message_types::provider_native::{ProviderNativeItems, provider_native_display};
 use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -54,7 +56,6 @@ fn original(items: &Recorded, id: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-#[cfg(target_os = "linux")]
 fn thread_cpu_ns() -> u64 {
     #[repr(C)]
     struct Timespec {
@@ -71,7 +72,6 @@ fn thread_cpu_ns() -> u64 {
 
 #[test]
 #[ignore = "explicit alternating thread CPU and allocation probe"]
-#[cfg(target_os = "linux")]
 fn lookup_alternating_thread_cpu_probe() {
     use std::hint::black_box;
     for (name, count, results, hit) in [
