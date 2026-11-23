@@ -579,7 +579,11 @@ class Harness:
         if resume:
             argv += ["--resume", resume]
         self.event(action="tui-launch", argv=argv)
-        command = shlex.join(["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in self.env.items()], *argv])
+        # Linux binds file-controlled clients to their parent. Only the pane
+        # should inherit these paths, not the daemon that outlives `launch`.
+        env = dict(self.env, JCODE_DEBUG_CMD_PATH=str(self.root / "debug.cmd"),
+                   JCODE_DEBUG_RESPONSE_PATH=str(self.root / "debug.response"))
+        command = shlex.join(["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in env.items()], *argv])
         self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "verify",
                   "-x", str(self.state["cols"]), "-y", str(self.state["rows"]),
                   "-c", str(self.root / "workspace"), command)
@@ -1239,9 +1243,7 @@ def launch(args, *, prepare_workspace=None):
            "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
            "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
            "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
-           "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model",
-           "JCODE_DEBUG_CMD_PATH": str(root / "debug.cmd"),
-           "JCODE_DEBUG_RESPONSE_PATH": str(root / "debug.response")}
+           "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model"}
     state = {"schema": 1, "owner": owner, "evidence": str(evidence), "runtime": str(root),
              "cols": args.cols, "rows": args.rows,
              "source_binary": str(binary), "binary_sha256": binary_sha256, "tmux": tmux,

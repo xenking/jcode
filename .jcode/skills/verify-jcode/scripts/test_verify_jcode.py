@@ -5,7 +5,9 @@ import importlib.util
 import json
 import plistlib
 from pathlib import Path
+import shlex
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -43,6 +45,33 @@ class VerificationSafetyTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_only_the_tui_pane_gets_file_debug_control(self):
+        evidence = self.base / "launched"
+        binary = self.base / "fake-jcode"
+        binary.write_text("#!/bin/sh\necho jcode-fixture\n")
+        binary.chmod(0o700)
+        args = SimpleNamespace(binary=binary, cols=160, rows=48, evidence=evidence,
+                               loopback_exec_worker=False)
+        with patch.object(HELPER.tempfile, "mkdtemp", return_value=str(self.base / "fixture")), \
+                patch.object(HELPER.shutil, "which", return_value="/usr/bin/tmux"), \
+                patch.object(HELPER.Harness, "spawn", autospec=True) as spawn, \
+                patch.object(HELPER.Harness, "cli"), \
+                patch.object(HELPER.Harness, "tmux", return_value="123\n") as tmux, \
+                patch.object(HELPER.Harness, "frame"), \
+                patch.object(HELPER.Harness, "doctor"), \
+                patch.object(HELPER, "wait_for", return_value="1234"), \
+                patch.object(HELPER, "identity", return_value="original"):
+            (self.base / "fixture").mkdir()
+            HELPER.launch(args)
+
+        harness, role, _ = spawn.call_args.args
+        self.assertEqual(role, "server")
+        command = shlex.split(tmux.call_args_list[0].args[-1])
+        for name, path in [("JCODE_DEBUG_CMD_PATH", "debug.cmd"),
+                           ("JCODE_DEBUG_RESPONSE_PATH", "debug.response")]:
+            self.assertNotIn(name, harness.env)
+            self.assertIn(f"{name}={harness.root / path}", command)
 
     def test_cleanup_preserves_proof_and_sessions_and_is_idempotent(self):
         sessions = self.root / "data/sessions"
