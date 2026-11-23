@@ -78,8 +78,8 @@ impl Default for Instant_ {
 }
 
 impl Pending {
-    pub fn connection_age(&self) -> Duration {
-        self.started.0.elapsed()
+    pub fn connection_age_at(&self, at: Instant) -> Duration {
+        at.saturating_duration_since(self.started.0)
     }
 
     /// Note a request; `translate` is the synchronous bridge time spent on it.
@@ -99,7 +99,7 @@ impl Pending {
                 "req {kind} id={reply_to} total={:.1}ms translate={:.1}ms reply={event} bytes={bytes} via={source} conn_age={:.0}ms",
                 ms(received.elapsed()),
                 ms(translate),
-                ms(self.connection_age()),
+                ms(self.connection_age_at(Instant::now())),
             ));
         }
     }

@@ -492,7 +492,7 @@ where
     let mut legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
-    let daemon_connected = hello_at.elapsed();
+    let daemon_connected_at = std::time::Instant::now();
     let mut control = DaemonControl::default();
     let daemon_caps = control
         .capabilities(&legacy_socket)
@@ -534,9 +534,9 @@ where
     }
     timing::log(&format!(
         "hello client={client_name} first_frame={:.1}ms daemon_connect={:.1}ms daemon_caps={:.1}ms",
-        timing::ms(pending.connection_age() - hello_at.elapsed()),
-        timing::ms(daemon_connected),
-        timing::ms(hello_at.elapsed() - daemon_connected),
+        timing::ms(pending.connection_age_at(hello_at)),
+        timing::ms(daemon_connected_at.saturating_duration_since(hello_at)),
+        timing::ms(daemon_connected_at.elapsed()),
     ));
     let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
