@@ -947,42 +947,6 @@ fn acp_subcommand_parses() {
     }
 }
 
-#[test]
-fn run_json_subcommand_parses() {
-    let args = Args::try_parse_from(["jcode", "run", "--json", "hello"]).unwrap();
-    match args.command {
-        Some(Command::Run {
-            json,
-            ndjson,
-            message,
-            ..
-        }) => {
-            assert!(json);
-            assert!(!ndjson);
-            assert_eq!(message.as_deref(), Some("hello"));
-        }
-        other => panic!("unexpected command: {:?}", other),
-    }
-}
-
-#[test]
-fn run_ndjson_subcommand_parses() {
-    let args = Args::try_parse_from(["jcode", "run", "--ndjson", "hello"]).unwrap();
-    match args.command {
-        Some(Command::Run {
-            json,
-            ndjson,
-            message,
-            ..
-        }) => {
-            assert!(!json);
-            assert!(ndjson);
-            assert_eq!(message.as_deref(), Some("hello"));
-        }
-        other => panic!("unexpected command: {:?}", other),
-    }
-}
-
 #[path = "run_tests.rs"]
 mod ci_run;
 
