@@ -14,13 +14,18 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
         return Ok(String::new());
     }
     let mut text = PLAN_PREFIX.to_string();
-    let plan = crate::todo::load_plan(session_id).unwrap_or_default();
+    let plan = crate::todo::load_plan(session_id).unwrap_or_else(|error| {
+        crate::logging::warn(&format!(
+            "Could not load todo plan for compaction of {session_id}: {error:#}"
+        ));
+        Default::default()
+    });
     if let Some(intent) = plan
         .user_intention
         .as_deref()
         .filter(|intent| !intent.trim().is_empty())
     {
-        let _ = writeln!(text, "User intent: {}", truncate_str_boundary(intent, 512));
+        writeln!(text, "User intent: {}", truncate_str_boundary(intent, 512))?;
     }
     const OMITTED: &str = "- … (additional todo entries omitted)\n";
     const END: &str = "</system-reminder>";
@@ -51,16 +56,22 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
         } else {
             ""
         };
-        let _ = write!(text, "- {status} ");
+        write!(text, "- {status} ")?;
         if let Some(phase) = todo.stage {
-            let _ = write!(text, "Phase {phase} ");
+            write!(text, "Phase {phase} ")?;
         }
         if !group.is_empty() {
-            let _ = write!(text, "({group}) ");
+            write!(text, "({group}) ")?;
         }
-        let _ = writeln!(text, "{content}{ellipsis}");
+        writeln!(text, "{content}{ellipsis}")?;
     }
-    for goal in crate::todo::load_goals(session_id).unwrap_or_default() {
+    let goals = crate::todo::load_goals(session_id).unwrap_or_else(|error| {
+        crate::logging::warn(&format!(
+            "Could not load todo goals for compaction of {session_id}: {error:#}"
+        ));
+        Vec::new()
+    });
+    for goal in goals {
         let Some(check) = goal
             .feedback_loop
             .as_deref()
@@ -78,7 +89,7 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
         );
         let check =
             truncate_str_boundary(check, 512.min(remaining.saturating_sub(group.len() + 16)));
-        let _ = writeln!(text, "Goal ({group}): {check}");
+        writeln!(text, "Goal ({group}): {check}")?;
     }
     text.push_str(END);
     Ok(text)

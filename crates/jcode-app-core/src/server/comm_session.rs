@@ -1081,7 +1081,8 @@ pub(super) async fn handle_comm_stop(
                             .is_some_and(|(session_id, _)| session_id == exact_id)
                     })
                 {
-                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                    // A disconnected client no longer needs the acknowledgement.
+                    drop(client_event_tx.send(ServerEvent::Done { id }));
                     return;
                 }
                 let _ = client_event_tx.send(ServerEvent::Error {
@@ -1218,7 +1219,7 @@ pub(super) async fn handle_comm_stop(
                 agent.mark_closed();
             }
             drop(agent);
-            let _ = super::remove_session_entry(sessions, session).await;
+            drop(super::remove_session_entry(sessions, session).await);
             remove_session_interrupt_queue(soft_interrupt_queues, session).await;
             remove_background_tool_signal(session);
 

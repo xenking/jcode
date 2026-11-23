@@ -46,7 +46,9 @@ pub(super) fn render(
                 && !index.is_empty()
                 && index.bytes().all(|ch| ch.is_ascii_digit())
             {
-                if let Some(arg) = index.parse::<usize>().ok().and_then(|i| args.get(i)) {
+                if let Ok(index) = index.parse::<usize>()
+                    && let Some(arg) = args.get(index)
+                {
                     out.push_str(arg);
                 } else {
                     out.push_str("$ARGUMENTS[");
@@ -61,7 +63,9 @@ pub(super) fn render(
             if let Some(arg) = args.get(index) {
                 out.push_str(arg);
             }
-        } else if let Some(arg) = key.parse::<usize>().ok().and_then(|i| args.get(i)) {
+        } else if let Ok(index) = key.parse::<usize>()
+            && let Some(arg) = args.get(index)
+        {
             out.push_str(arg);
         } else {
             out.push('$');

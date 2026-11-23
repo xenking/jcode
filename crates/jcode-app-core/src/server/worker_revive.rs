@@ -29,7 +29,15 @@ pub(super) async fn live_or_revived_agent(
     session_id: &str,
     sessions: &SessionAgents,
 ) -> Option<Arc<Mutex<Agent>>> {
-    let _admission = crate::turn_activity::global().admit(session_id).ok()?;
+    let _admission = match crate::turn_activity::global().admit(session_id) {
+        Ok(admission) => admission,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Skipping worker revival for {session_id}: {error:#}"
+            ));
+            return None;
+        }
+    };
     if let Some(context) = sessions.revive.get()
         && context
             .members

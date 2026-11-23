@@ -4097,8 +4097,12 @@ impl BridgeState {
                 continue;
             };
             remaining -= bytes;
-            let Some(activity) = jcode_session_types::read_legacy_catalog_activity(&path) else {
-                continue;
+            let activity = match jcode_session_types::read_legacy_catalog_activity(&path) {
+                Ok(activity) => activity,
+                Err(error) => {
+                    eprintln!("harness API bridge: read legacy activity for {id}: {error}");
+                    continue;
+                }
             };
             let Some(entry) = indexed.get_mut(id) else {
                 unindexed.insert(id.clone(), activity);
@@ -4107,19 +4111,33 @@ impl BridgeState {
             entry.context.get_or_insert_with(Default::default).activity = Some(activity);
             // Patch just the missing field. A concurrent session save that
             // published fresh activity wins, even if its timestamp didn't change.
-            if connection.is_none() {
-                connection =
-                    Self::recent_session_index_path().and_then(|path| Connection::open(path).ok());
-            }
-            if let Some(connection) = &connection
-                && let Ok(value) = serde_json::to_string(&activity)
+            if connection.is_none()
+                && let Some(path) = Self::recent_session_index_path()
             {
-                let _ = connection.execute(
+                match Connection::open(&path) {
+                    Ok(opened) => connection = Some(opened),
+                    Err(error) => eprintln!(
+                        "harness API bridge: open activity index {}: {error}",
+                        path.display()
+                    ),
+                }
+            }
+            if let Some(connection) = &connection {
+                let value = match serde_json::to_string(&activity) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!("harness API bridge: encode legacy activity for {id}: {error}");
+                        continue;
+                    }
+                };
+                if let Err(error) = connection.execute(
                     "UPDATE recent_sessions
                      SET catalog_context = json_set(COALESCE(catalog_context, '{}'), '$.activity', json(?2))
                      WHERE session_id = ?1 AND json_extract(catalog_context, '$.activity') IS NULL",
                     params![id, value],
-                );
+                ) {
+                    eprintln!("harness API bridge: cache legacy activity for {id}: {error}");
+                }
             }
         }
         unindexed

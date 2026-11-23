@@ -14,7 +14,7 @@ impl SkillInvocation<'_> {
             .trim()
             .strip_prefix('/')
             .and_then(|input| input.strip_prefix(self.name))
-            .unwrap_or_default()
+            .unwrap_or("")
             .trim()
     }
 }

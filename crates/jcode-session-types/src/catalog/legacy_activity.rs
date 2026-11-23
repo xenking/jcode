@@ -5,7 +5,7 @@ use serde::{
 };
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader},
     path::Path,
 };
 
@@ -90,9 +90,9 @@ struct Append {
 
 /// Read old records once to populate the catalog index. Callers budget the
 /// snapshot size before using this path. The journal is size-capped by storage.
-pub fn read_legacy_catalog_activity(path: &Path) -> Option<SessionCatalogActivity> {
-    let file = BufReader::new(File::open(path).ok()?);
-    let snapshot: Snapshot = serde_json::from_reader(file).ok()?;
+pub fn read_legacy_catalog_activity(path: &Path) -> io::Result<SessionCatalogActivity> {
+    let file = BufReader::new(File::open(path)?);
+    let snapshot: Snapshot = serde_json::from_reader(file).map_err(io::Error::other)?;
     let mut facts = snapshot.messages;
     let journal = path.with_extension("journal.jsonl");
     if let Ok(file) = File::open(journal) {
@@ -118,7 +118,7 @@ pub fn read_legacy_catalog_activity(path: &Path) -> Option<SessionCatalogActivit
             snapshot.system_prompt.as_deref(),
         )
         || (has_parent && facts.scheduled.as_ref().is_some_and(belongs_to_session));
-    Some(SessionCatalogActivity {
+    Ok(SessionCatalogActivity {
         origin: if is_agent {
             SessionOrigin::Agent
         } else {

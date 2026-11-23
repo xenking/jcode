@@ -232,18 +232,17 @@ pub(super) async fn clear_stale_serve_sockets(
 pub(super) async fn prepare_serve_replacement(
     path: &std::path::Path,
 ) -> Result<Option<(std::fs::File, std::fs::File)>> {
-    let ServeListener::Live(pid) = serve_listener(path).await? else {
+    let ServeListener::Live(_peer_pid) = serve_listener(path).await? else {
         return Ok(None);
     };
     #[cfg(not(unix))]
     {
-        let _ = pid;
         anyhow::bail!("serve --replace cannot verify the owner of this listener on this platform");
     }
     #[cfg(unix)]
     {
         use anyhow::Context;
-        let pid = pid
+        let pid = _peer_pid
             .filter(|pid| *pid != std::process::id())
             .context("serve --replace could not verify a different live daemon PID")?;
         let gate = super::rollout::guard_serve_replacement(path)?;

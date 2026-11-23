@@ -726,6 +726,18 @@ impl SkillRegistry {
         let name = scalar("name")?;
         let description = scalar("description")?;
         let icon = scalar("icon");
+        let disable_model_invocation = entries
+            .iter()
+            .find(|(key, _)| *key == "disable-model-invocation")
+            .and_then(|(_, lines)| match serde_yaml::from_str(lines[0].trim()) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Ignoring invalid disable-model-invocation for skill {name}: {error}"
+                    ));
+                    None
+                }
+            });
         let mode = scalar("mode").and_then(|value| value.parse().ok());
         let allowed_tools = entries
             .iter()
@@ -754,10 +766,7 @@ impl SkillRegistry {
             allowed_tools,
             command: scalar("command"),
             arguments: scalar("arguments").map(AllowedTools::CommaDelimited),
-            disable_model_invocation: entries
-                .iter()
-                .find(|(key, _)| *key == "disable-model-invocation")
-                .and_then(|(_, lines)| serde_yaml::from_str(lines[0].trim()).ok()),
+            disable_model_invocation,
         })
     }
 

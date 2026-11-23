@@ -1299,7 +1299,7 @@ impl AcpRuntime {
                         text.trim()
                             .trim_start_matches(['/', '$'])
                             .strip_prefix(&name)
-                            .unwrap_or_default()
+                            .unwrap_or("")
                             .trim()
                             .to_owned(),
                     );

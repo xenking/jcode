@@ -67,17 +67,11 @@ fn build_git_status_message_for_dir(repo_dir: PathBuf) -> Result<String, String>
     let status = run_git_command(&repo_dir, &["status", "--short", "--branch"])?;
 
     let repo_root_path = std::path::Path::new(&repo_root);
-    let relative_dir = repo_dir
-        .strip_prefix(repo_root_path)
-        .ok()
-        .and_then(|path| {
-            if path.as_os_str().is_empty() {
-                None
-            } else {
-                Some(path.display().to_string())
-            }
-        })
-        .unwrap_or_else(|| ".".to_string());
+    // Git can resolve a symlink that is still present in the requested path.
+    let relative_dir = match repo_dir.strip_prefix(repo_root_path) {
+        Ok(path) if !path.as_os_str().is_empty() => path.display().to_string(),
+        Ok(_) | Err(_) => ".".to_string(),
+    };
 
     let heading = if relative_dir == "." {
         format!("/git in {}", repo_root)
