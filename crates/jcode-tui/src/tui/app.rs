@@ -28,7 +28,6 @@ use crate::tool::{Registry, ToolContext};
 use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
 use auth::PendingLogin;
-pub(super) use commands::GIT_DIFF_HEADING;
 use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -66,7 +65,7 @@ mod auth_remote;
 mod btw;
 mod cache_diagnostics;
 mod catchup;
-mod commands;
+pub(super) mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
 mod cloud_environment;
@@ -1507,8 +1506,7 @@ pub struct App {
     remote_swarm_members_received_at: Option<std::time::Instant>,
     /// When each swarm agent last sent us a notification, keyed by sender, so
     /// notifications can show time since that agent's previous message.
-    swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
-    pending_cross_swarm_dm_receipts: super::cross_swarm_dm::PendingReceipts,
+    swarm_notifications: super::cross_swarm_dm::SwarmNotifications,
     /// Transcript index and contents of the newest file-activity row, so
     /// consecutive peer edits stack into it instead of adding rows.
     file_activity_stack: Option<(usize, Vec<remote_notifications::FileActivityEdit>)>,

@@ -1,6 +1,23 @@
 use super::*;
 
 impl SessionPicker {
+    /// Standalone picker input follows the main TUI's press/repeat policy.
+    /// Release events must not trigger navigation, editing, or selection.
+    pub(super) fn handle_key_event(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Result<OverlayAction> {
+        if !matches!(
+            key.kind,
+            crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+        ) {
+            return Ok(OverlayAction::Continue);
+        }
+        let key = jcode_tui_core::korean_input::normalize_key_event(key);
+        let key = crate::tui::terminal_events::normalize_ctrl_layout(key);
+        self.handle_overlay_key(key.code, key.modifiers)
+    }
+
     /// Find next selectable item (skip headers)
     fn next_selectable(&self, from: usize) -> Option<usize> {
         ((from + 1)..self.items.len())

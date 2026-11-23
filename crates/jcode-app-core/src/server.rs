@@ -582,9 +582,9 @@ use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_so
 pub use self::lifecycle::{
     configure_persistent_server, configure_private_server, configure_temporary_server,
 };
-use self::socket::signal_ready_fd;
 #[cfg(unix)]
-use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
+use self::socket::mark_close_on_exec;
+use self::socket::signal_ready_fd;
 pub use self::socket::{
     cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
     is_server_ready, is_shared_socket, reap_stale_socket_if_dead, set_socket_path, socket_path,
@@ -2199,15 +2199,7 @@ impl Server {
             None
         };
         #[cfg(unix)]
-        let _daemon_lock = match acquire_daemon_lock_for(&self.socket_path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                socket::reject_live_serve_socket(&self.socket_path).await?;
-                return Err(error.context(
-                    "Use server reload, server stop --force, or serve --replace after startup",
-                ));
-            }
-        };
+        let _daemon_lock = socket::acquire_serve_lock(&self.socket_path).await?;
 
         // Reap zombies and stop orphaned MCP servers left by a previous image
         // of this PID (exec reload). Must run before this image spawns children.

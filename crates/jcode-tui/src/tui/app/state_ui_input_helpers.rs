@@ -817,22 +817,7 @@ impl App {
         }
 
         if prefix_trimmed == "/git" || prefix.starts_with("/git ") {
-            return self.rank_suggestions(
-                input,
-                vec![
-                    ("/git status".into(), "Show branch and working tree status"),
-                    (
-                        "/git diff".into(),
-                        "Show working tree and untracked changes",
-                    ),
-                    ("/git diff staged".into(), "Show changes in the index"),
-                    (
-                        "/git diff unstaged".into(),
-                        "Show tracked changes not in the index",
-                    ),
-                    ("/git diff untracked".into(), "Show untracked files"),
-                ],
-            );
+            return self.rank_suggestions(input, super::commands::git_suggestions());
         }
 
         if prefix.starts_with("/transcript ") {

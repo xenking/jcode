@@ -460,6 +460,9 @@ fn status_target_sessions(
     targets
 }
 
+mod awaited_reports;
+use awaited_reports::fetch_awaited_member_reports;
+
 fn format_awaited_members_with_reports(
     completed: bool,
     summary: &str,
@@ -469,37 +472,6 @@ fn format_awaited_members_with_reports(
     ToolOutput::new(format_comm_awaited_members_with_reports(
         completed, summary, members, reports,
     ))
-}
-
-async fn fetch_awaited_member_reports(
-    ctx: &ToolContext,
-    members: &[AwaitedMemberStatus],
-) -> HashMap<String, String> {
-    let mut reports = HashMap::new();
-    for member in members
-        .iter()
-        .filter(|member| member.done && member.completion_report.is_none())
-    {
-        let request = Request::CommReadContext {
-            id: REQUEST_ID,
-            session_id: ctx.session_id.clone(),
-            target_session: member.session_id.clone(),
-        };
-        match send_request(request).await {
-            Ok(ServerEvent::CommContextHistory { messages, .. }) => {
-                if let Some(report) = latest_assistant_report(&messages) {
-                    reports.insert(member.session_id.clone(), report);
-                }
-            }
-            Ok(response) => {
-                if check_error(&response).is_some() {
-                    continue;
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-    reports
 }
 
 fn default_await_target_statuses() -> Vec<String> {

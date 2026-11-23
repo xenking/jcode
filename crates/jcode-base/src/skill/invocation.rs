@@ -1,4 +1,4 @@
-use super::SkillRegistry;
+use super::{Skill, SkillRegistry};
 
 /// A slash-command skill invocation with an optional trailing prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,14 @@ impl SkillInvocation<'_> {
 }
 
 impl SkillRegistry {
+    /// List skills discoverable by the model.
+    pub fn list_for_model(&self) -> Vec<&Skill> {
+        self.list()
+            .into_iter()
+            .filter(|skill| skill.is_model_invocable())
+            .collect()
+    }
+
     /// Resolve a slash invocation against registered names, including names
     /// containing spaces. The longest registered name wins; unknown names fall
     /// back to the identifier-shaped result from [`Self::parse_invocation`].
@@ -59,7 +67,7 @@ impl SkillRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skill::{Skill, build_skill_search_text};
+    use crate::skill::build_skill_search_text;
     use std::path::PathBuf;
 
     fn registry(names: &[&str]) -> SkillRegistry {

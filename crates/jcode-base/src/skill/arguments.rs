@@ -1,4 +1,68 @@
+use super::{AllowedTools, Skill};
+use anyhow::Result;
 use std::path::Path;
+
+impl Skill {
+    pub fn is_model_invocable(&self) -> bool {
+        !self.disable_model_invocation
+    }
+
+    /// Shell line for an explicit user slash invocation, never for model loads.
+    pub fn command_line(&self, raw_args: &str) -> Result<Option<String>> {
+        let Some(command) = &self.command else {
+            return Ok(None);
+        };
+        anyhow::ensure!(cfg!(unix), "Command skills require a POSIX shell");
+        let args = split(raw_args);
+        // Pass user words as positional parameters to the trusted script, not as source text.
+        let script = format!("{command} \"$@\"");
+        let line = shlex::try_join(
+            ["bash", "-c", &script, "--"]
+                .into_iter()
+                .chain(args.iter().map(String::as_str)),
+        )?;
+        Ok(Some(line))
+    }
+
+    /// Get the full prompt content for this skill
+    pub fn get_prompt(&self) -> String {
+        self.prompt_with_body(&self.content)
+    }
+
+    /// Render once from the original template. Inserted arguments are never expanded.
+    pub fn render_prompt(&self, raw_arguments: &str, project_dir: Option<&Path>) -> String {
+        if !self.content.contains('$') {
+            return self.get_prompt();
+        }
+        self.prompt_with_body(&render(
+            &self.content,
+            raw_arguments,
+            &self.arguments,
+            self.path.parent(),
+            project_dir,
+        ))
+    }
+
+    fn prompt_with_body(&self, body: &str) -> String {
+        format!("# Skill: {}\n\n{}\n\n{}", self.name, self.description, body)
+    }
+}
+
+pub(super) fn names(arguments: Option<AllowedTools>) -> Vec<String> {
+    match arguments {
+        Some(AllowedTools::CommaDelimited(names)) if names.contains(',') => names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Some(AllowedTools::CommaDelimited(names)) => {
+            names.split_whitespace().map(str::to_owned).collect()
+        }
+        Some(AllowedTools::Sequence(names)) => names,
+        None => Vec::new(),
+    }
+}
 
 pub(super) fn split(raw: &str) -> Vec<String> {
     shlex::split(raw).unwrap_or_else(|| raw.split_whitespace().map(str::to_owned).collect())

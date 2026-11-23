@@ -12,7 +12,7 @@ use crate::tui::DisplayMessage;
 #[cfg(test)]
 use crate::tui::markdown;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use jcode_session_types::SessionStatus;
 use ratatui::{
     Frame,
@@ -1474,17 +1474,6 @@ impl SessionPicker {
             _ => {}
         }
         Ok(OverlayAction::Continue)
-    }
-
-    /// Standalone picker input follows the main TUI's press/repeat policy.
-    /// Release events must not trigger navigation, editing, or selection.
-    fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            return Ok(OverlayAction::Continue);
-        }
-        let key = jcode_tui_core::korean_input::normalize_key_event(key);
-        let key = super::terminal_events::normalize_ctrl_layout(key);
-        self.handle_overlay_key(key.code, key.modifiers)
     }
 
     /// Handle a key event when used as an overlay inside the main TUI.

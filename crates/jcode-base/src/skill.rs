@@ -614,19 +614,7 @@ impl SkillRegistry {
             command: command
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
-            arguments: match arguments {
-                Some(AllowedTools::CommaDelimited(names)) if names.contains(',') => names
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                Some(AllowedTools::CommaDelimited(names)) => {
-                    names.split_whitespace().map(str::to_owned).collect()
-                }
-                Some(AllowedTools::Sequence(names)) => names,
-                None => Vec::new(),
-            },
+            arguments: arguments::names(arguments),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -788,14 +776,6 @@ impl SkillRegistry {
         let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
-    }
-
-    /// List skills that may be advertised to the model. User-facing lists use `list`.
-    pub fn list_for_model(&self) -> Vec<&Skill> {
-        self.list()
-            .into_iter()
-            .filter(|skill| skill.is_model_invocable())
-            .collect()
     }
 
     /// Reload a specific skill by name
@@ -1149,50 +1129,6 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
 }
 
 impl Skill {
-    pub fn is_model_invocable(&self) -> bool {
-        !self.disable_model_invocation
-    }
-
-    /// Shell line for an explicit user slash invocation, never for model loads.
-    pub fn command_line(&self, raw_args: &str) -> Result<Option<String>> {
-        let Some(command) = &self.command else {
-            return Ok(None);
-        };
-        anyhow::ensure!(cfg!(unix), "Command skills require a POSIX shell");
-        let args = arguments::split(raw_args);
-        // Pass user words as positional parameters to the trusted script, not as source text.
-        let script = format!("{command} \"$@\"");
-        let line = shlex::try_join(
-            ["bash", "-c", &script, "--"]
-                .into_iter()
-                .chain(args.iter().map(String::as_str)),
-        )?;
-        Ok(Some(line))
-    }
-
-    /// Get the full prompt content for this skill
-    pub fn get_prompt(&self) -> String {
-        self.prompt_with_body(&self.content)
-    }
-
-    /// Render once from the original template. Inserted arguments are never expanded.
-    pub fn render_prompt(&self, raw_arguments: &str, project_dir: Option<&Path>) -> String {
-        if !self.content.contains('$') {
-            return self.get_prompt();
-        }
-        self.prompt_with_body(&arguments::render(
-            &self.content,
-            raw_arguments,
-            &self.arguments,
-            self.path.parent(),
-            project_dir,
-        ))
-    }
-
-    fn prompt_with_body(&self, body: &str) -> String {
-        format!("# Skill: {}\n\n{}\n\n{}", self.name, self.description, body)
-    }
-
     /// Load additional files from the skill directory
     pub fn load_file(&self, filename: &str) -> Result<String> {
         let skill_dir = self

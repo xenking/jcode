@@ -21,6 +21,13 @@ use super::*;
 mod cache_support;
 #[path = "ui_messages/decision.rs"]
 mod decision;
+#[path = "ui_messages/dm_summary.rs"]
+mod dm_summary;
+pub(crate) use dm_summary::render_agent_dm_run;
+#[path = "ui_messages/git_diff.rs"]
+mod git_diff;
+#[path = "ui_messages/todo_header.rs"]
+mod todo_header;
 use crate::message::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     parse_background_task_notification_markdown,
@@ -28,8 +35,10 @@ use crate::message::{
 };
 use cache_support::{centered_wrap_width, left_pad_lines_for_centered_mode};
 pub(super) use cache_support::{get_cached_message_lines, project_cached_message_lines};
+use git_diff::render_git_diff_lines;
 use jcode_tui_style::theme::{error_color, warning_color};
 use std::borrow::Cow;
+pub(super) use todo_header::minimal_pinned_todo_row;
 use unicode_width::UnicodeWidthStr;
 
 const MAX_INLINE_DIFF_LINES: usize = 12;
@@ -86,7 +95,9 @@ fn render_single_line_system_notice(
         Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
-        || msg.content.starts_with(crate::tui::app::GIT_DIFF_HEADING)
+        || msg
+            .content
+            .starts_with(crate::tui::app::commands::GIT_DIFF_HEADING)
         || msg.content.starts_with("/git\n")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
@@ -544,7 +555,10 @@ pub(crate) fn render_system_message(
 
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
-    if msg.content.starts_with(crate::tui::app::GIT_DIFF_HEADING) {
+    if msg
+        .content
+        .starts_with(crate::tui::app::commands::GIT_DIFF_HEADING)
+    {
         let mut lines = render_git_diff_lines(&msg.content, wrap_width);
         if centered {
             left_pad_lines_for_centered_mode(&mut lines, width);
@@ -577,27 +591,6 @@ pub(crate) fn render_system_message(
         }
     }
     lines
-}
-
-fn render_git_diff_lines(content: &str, width: usize) -> Vec<Line<'static>> {
-    content
-        .split('\n')
-        .flat_map(|line| {
-            let color = match line.as_bytes() {
-                [b'+', ..] if !line.starts_with("+++ ") => diff_add_color(),
-                [b'-', ..] if !line.starts_with("--- ") => diff_del_color(),
-                _ => system_message_color(),
-            };
-            let chunks = if line.width() > width {
-                split_by_display_width(line, width.max(1))
-            } else {
-                vec![line.to_owned()]
-            };
-            chunks
-                .into_iter()
-                .map(move |chunk| Line::from(Span::styled(chunk, Style::default().fg(color))))
-        })
-        .collect()
 }
 
 /// Heuristic: does authored system content use markdown formatting that is
@@ -1236,55 +1229,6 @@ pub(super) fn pinned_todo_rows(
         .into_iter()
         .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
         .collect()
-}
-
-pub(super) fn minimal_pinned_todo_row(payload: &str, width: u16) -> Line<'static> {
-    let summary = cached_todo_payload(payload).map_or_else(
-        || "Todos".to_string(),
-        |payload| {
-            let mut todos = payload
-                .todos()
-                .iter()
-                .filter(|todo| !crate::todo::todo_status_is_cancelled(&todo.status));
-            let total = todos.clone().count();
-            if total == 0 {
-                return "Todos: none yet".to_string();
-            }
-            let done = todos
-                .clone()
-                .filter(|todo| todo.status == "completed")
-                .count();
-            let prefix = format!("Todos {done}/{total}");
-            let active = todos
-                .clone()
-                .find(|todo| matches!(todo.status.as_str(), "in_progress" | "in-progress"));
-            let (task, label) = match active {
-                Some(task) => (Some(task), ""),
-                None => (
-                    todos.find(|todo| crate::todo::is_incomplete_todo(todo)),
-                    "next: ",
-                ),
-            };
-            match task {
-                Some(task) => {
-                    let content = task
-                        .content
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{prefix} · {label}{content}")
-                }
-                None => format!("{prefix} done"),
-            }
-        },
-    );
-    super::truncate_line_with_ellipsis_to_width(
-        &Line::styled(
-            format!("  {summary}"),
-            Style::default().fg(todo_meta_color()),
-        ),
-        usize::from(width),
-    )
 }
 
 fn render_todos_message_with_cap(
@@ -3824,58 +3768,6 @@ pub(crate) fn is_collapsed_agent_dm(msg: &DisplayMessage) -> bool {
             .is_some_and(|title| title.starts_with("DM from "))
         && !jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
             .is_some_and(|parsed| parsed.expanded)
-}
-
-fn dm_icon_sender(identity: &str) -> &str {
-    let sender =
-        crate::tui::cross_swarm_dm::split_identity(identity).map_or(identity, |(sender, _)| sender);
-    crate::id::extract_session_name(sender).unwrap_or(sender)
-}
-
-pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Line<'static> {
-    let chrome = Style::default().fg(dim_color());
-    let mut icons = Vec::new();
-    let mut total_tokens = 0usize;
-    for msg in messages {
-        let Some(sender) = msg
-            .title
-            .as_deref()
-            .and_then(|title| title.strip_prefix("DM from "))
-        else {
-            crate::logging::warn("Skipping malformed agent DM in compact message group");
-            continue;
-        };
-        icons.push(crate::id::session_icon(dm_icon_sender(sender)));
-        total_tokens = total_tokens.saturating_add(swarm_notification_token_count(&msg.content));
-    }
-    let label = if icons.len() == 1 { "DM" } else { "DMs" };
-    let prefix = Line::from(Span::styled(
-        format!("{label} · {} · ", icons.join(" ")),
-        chrome,
-    ));
-    let badge = token_badge_for_count(total_tokens);
-    let suffix = vec![
-        Span::styled(badge.label, Style::default().fg(badge.color)),
-        Span::styled(format!(" {SWARM_EXPAND_BADGE}"), chrome),
-    ];
-    let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
-    let suffix_width = suffix
-        .iter()
-        .map(|span| span.content.width())
-        .sum::<usize>();
-    let mut line = if prefix.width() + suffix_width <= max_width {
-        prefix
-    } else {
-        super::truncate_line_with_ellipsis_to_width(&prefix, max_width.saturating_sub(suffix_width))
-    };
-    line.spans.extend(suffix);
-    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
-        &line, max_width,
-    )];
-    if markdown::center_code_blocks() {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines.remove(0)
 }
 
 fn render_compact_agent_notification(

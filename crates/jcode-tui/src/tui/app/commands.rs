@@ -7,6 +7,7 @@ use manual_subagent::launch_manual_subagent;
 #[path = "commands_git_diff.rs"]
 mod git_diff;
 pub(in crate::tui) use git_diff::GIT_DIFF_HEADING;
+pub(super) use git_diff::git_suggestions;
 pub(super) use git_diff::handle_git_command;
 
 pub(super) use super::commands_improve::{

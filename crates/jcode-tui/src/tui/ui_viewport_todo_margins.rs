@@ -4,6 +4,49 @@ use super::*;
 use crate::config::TodoHeaderMode;
 
 /// Use the exact pinned-card identity and context for both drawing and queries.
+pub(crate) fn pinned_todo_band_lines(
+    app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let mode = crate::config::config().display.todo_header_mode();
+    let (mut lines, more) = pinned_todo_band_lines_for_mode(
+        app.pinned_todos_payload(),
+        app.pinned_todos_expanded(),
+        app.diff_mode(),
+        width,
+        viewport_height,
+        mode,
+    );
+    if mode == crate::config::TodoHeaderMode::Full
+        && width > 0
+        && viewport_height >= 3
+        && let Some(status) = app.justrust_status()
+    {
+        let color = match status.tone {
+            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
+            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
+            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
+        };
+        let label_color = if status.own_session {
+            ratatui::style::Color::Cyan
+        } else {
+            ratatui::style::Color::Magenta
+        };
+        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(label_color)),
+            Span::styled(format!(" {rest}"), Style::default().fg(color)),
+        ]);
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &line,
+            width as usize,
+        ));
+    }
+    (lines, more)
+}
+
 fn project_pinned_todo_card<R>(
     payload: Option<&str>,
     diff_mode: crate::config::DiffDisplayMode,

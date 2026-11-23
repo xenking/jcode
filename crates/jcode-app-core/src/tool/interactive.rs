@@ -2,7 +2,19 @@
 //!
 //! A turn may outlive its originating socket. A newly attached client must be
 //! able to answer subsequent questions without waiting for that turn's lock.
-use super::StdinInputRequest;
+use super::{Registry, StdinInputRequest, Tool, applet, panel, user_response};
+use std::sync::Arc;
+
+pub(super) fn register_presentation_tools(
+    tools: &mut HashMap<String, Arc<dyn Tool>>,
+    timings: &mut Vec<(String, u128)>,
+) {
+    Registry::insert_tool_timed(tools, timings, "panel", panel::PanelTool::new);
+    Registry::insert_tool_timed(tools, timings, "applet", applet::AppletTool::new);
+    Registry::insert_tool_timed(tools, timings, "user_response", || {
+        user_response::UserResponseTool
+    });
+}
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};

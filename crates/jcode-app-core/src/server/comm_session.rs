@@ -7,9 +7,8 @@ use super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
-    persist_swarm_state_for, record_swarm_event_for_session, remove_background_tool_signal,
-    remove_session_channel_subscriptions, remove_session_interrupt_queue, set_member_task_label,
-    truncate_detail, update_member_status, update_member_status_with_report,
+    persist_swarm_state_for, record_swarm_event_for_session, remove_session_channel_subscriptions,
+    set_member_task_label, truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
@@ -1066,33 +1065,18 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
-    let target_session =
-        match resolve_stop_target_session(&swarm_id, &target_session, swarm_members).await {
-            Ok(target_session) => target_session,
-            Err(message) => {
-                let exact_id = target_session.trim();
-                // A stop receipt is scoped to this swarm. Never use it to
-                // bypass authorization for a live or reattached target.
-                if let Some(_slot) = sessions.try_reserve(exact_id)
-                    && !sessions.read().await.contains_key(exact_id)
-                    && !swarm_members.read().await.contains_key(exact_id)
-                    && super::run_blocking_io(|| {
-                        super::await_members_state::stopped_member(&swarm_id, exact_id)
-                            .is_some_and(|(session_id, _)| session_id == exact_id)
-                    })
-                {
-                    // A disconnected client no longer needs the acknowledgement.
-                    drop(client_event_tx.send(ServerEvent::Done { id }));
-                    return;
-                }
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message,
-                    retry_after_secs: None,
-                });
-                return;
-            }
-        };
+    let Some(target_session) = stop_cleanup::resolve_or_report_stop(
+        sessions,
+        swarm_members,
+        &swarm_id,
+        &target_session,
+        id,
+        client_event_tx,
+    )
+    .await
+    else {
+        return;
+    };
 
     let stop_allowed = {
         let members = swarm_members.read().await;
@@ -1194,34 +1178,7 @@ pub(super) async fn handle_comm_stop(
         };
         let mut affected_swarms = HashSet::new();
         for session in tree.keys() {
-            let agent = { sessions.read().await.get(session).cloned() };
-            let mut agent = match agent {
-                Some(agent) => Some(
-                    tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock_owned())
-                        .await
-                        .map_err(|_| {
-                            anyhow::anyhow!("Timed out closing stopped session '{session}'")
-                        })?,
-                ),
-                None => None,
-            };
-            let registered_queue = soft_interrupt_queues.read().await.get(session).cloned();
-            let agent_queue = agent.as_ref().map(|agent| agent.soft_interrupt_queue());
-            for queue in registered_queue.into_iter().chain(agent_queue) {
-                queue.lock().map_err(|_| anyhow::anyhow!(
-                    "Cannot clear queued work for stopped session '{session}': queue lock poisoned"
-                ))?.clear();
-            }
-            // mark_closed snapshots the live queue. Empty both sources first,
-            // even for an unloaded worker that has only a persisted queue.
-            crate::soft_interrupt_store::clear(session)?;
-            if let Some(agent) = agent.as_mut() {
-                agent.mark_closed();
-            }
-            drop(agent);
-            drop(super::remove_session_entry(sessions, session).await);
-            remove_session_interrupt_queue(soft_interrupt_queues, session).await;
-            remove_background_tool_signal(session);
+            stop_cleanup::close_stopped_session(sessions, soft_interrupt_queues, session).await?;
 
             super::ask_escalation::withdraw_worker(session);
             super::comm_await::stop_session_awaits(await_members_runtime, session).await;
@@ -1286,6 +1243,8 @@ pub(super) async fn handle_comm_stop(
     };
     let _ = client_event_tx.send(response);
 }
+
+mod stop_cleanup;
 
 #[path = "swarm_stop_target.rs"]
 mod swarm_stop_target;

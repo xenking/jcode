@@ -2,6 +2,7 @@
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
 mod assistant_text;
+mod catalog_activity;
 mod control_replies;
 mod credentials;
 mod search_hooks;
@@ -1101,14 +1102,7 @@ impl BridgeState {
                         .filter(|id| !hidden.contains(*id))
                         .cloned(),
                 );
-                // Titles are deliberately not cached. A rename is persisted
-                // before `SessionRenamed` is broadcast, and every list call
-                // should reflect that newest canonical value even on another
-                // API connection.
-                let mut indexed_metadata: BTreeMap<_, _> = Self::recent_session_index_entries()
-                    .into_iter()
-                    .map(|entry| (entry.session_id.clone(), entry))
-                    .collect();
+                let mut indexed_metadata = Self::indexed_session_metadata();
                 let legacy_activity = Self::backfill_session_activity(&ids, &mut indexed_metadata);
                 let metadata: BTreeMap<String, PersistedSessionMetadata> = ids
                     .iter()
@@ -1172,17 +1166,11 @@ impl BridgeState {
                     .map(|session_id| SessionInfo {
                         user_connected: self.user_connected_sessions.contains(&session_id),
                         edit_stats: None,
-                        context: indexed_metadata
-                            .get(&session_id)
-                            .and_then(|entry| entry.context.clone())
-                            .or_else(|| {
-                                legacy_activity.get(&session_id).map(|activity| {
-                                    jcode_harness_api::SessionCatalogContext {
-                                        activity: Some(*activity),
-                                        ..Default::default()
-                                    }
-                                })
-                            }),
+                        context: catalog_activity::context_for_session(
+                            &session_id,
+                            &indexed_metadata,
+                            &legacy_activity,
+                        ),
                         parent_session_id: None,
                         agent_label: None,
                         swarm_status: None,
@@ -4065,82 +4053,6 @@ impl BridgeState {
 
     fn recent_session_index_path() -> Option<std::path::PathBuf> {
         Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
-    }
-
-    fn backfill_session_activity(
-        ids: &BTreeSet<String>,
-        indexed: &mut BTreeMap<String, RecentSessionIndexEntry>,
-    ) -> BTreeMap<String, jcode_harness_api::SessionCatalogActivity> {
-        let mut pending: Vec<_> = ids
-            .iter()
-            .filter(|id| {
-                indexed
-                    .get(*id)
-                    .and_then(|entry| entry.context.as_ref())
-                    .is_none_or(|context| context.activity.is_none())
-            })
-            .collect();
-        pending
-            .sort_by_key(|id| std::cmp::Reverse(indexed.get(*id).map(|entry| entry.updated_at_ms)));
-        let mut unindexed = BTreeMap::new();
-        let started = std::time::Instant::now();
-        let mut remaining = 16 * 1024 * 1024;
-        let mut connection = None;
-        for id in pending {
-            if started.elapsed() >= std::time::Duration::from_millis(50) {
-                break;
-            }
-            let Some(path) = Self::session_record_path(id) else {
-                continue;
-            };
-            let Some(bytes) = Self::transcript_bytes(id).filter(|bytes| *bytes <= remaining) else {
-                continue;
-            };
-            remaining -= bytes;
-            let activity = match jcode_session_types::read_legacy_catalog_activity(&path) {
-                Ok(activity) => activity,
-                Err(error) => {
-                    eprintln!("harness API bridge: read legacy activity for {id}: {error}");
-                    continue;
-                }
-            };
-            let Some(entry) = indexed.get_mut(id) else {
-                unindexed.insert(id.clone(), activity);
-                continue;
-            };
-            entry.context.get_or_insert_with(Default::default).activity = Some(activity);
-            // Patch just the missing field. A concurrent session save that
-            // published fresh activity wins, even if its timestamp didn't change.
-            if connection.is_none()
-                && let Some(path) = Self::recent_session_index_path()
-            {
-                match Connection::open(&path) {
-                    Ok(opened) => connection = Some(opened),
-                    Err(error) => eprintln!(
-                        "harness API bridge: open activity index {}: {error}",
-                        path.display()
-                    ),
-                }
-            }
-            if let Some(connection) = &connection {
-                let value = match serde_json::to_string(&activity) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        eprintln!("harness API bridge: encode legacy activity for {id}: {error}");
-                        continue;
-                    }
-                };
-                if let Err(error) = connection.execute(
-                    "UPDATE recent_sessions
-                     SET catalog_context = json_set(COALESCE(catalog_context, '{}'), '$.activity', json(?2))
-                     WHERE session_id = ?1 AND json_extract(catalog_context, '$.activity') IS NULL",
-                    params![id, value],
-                ) {
-                    eprintln!("harness API bridge: cache legacy activity for {id}: {error}");
-                }
-            }
-        }
-        unindexed
     }
 
     /// Name sessions recorded before first-prompt titles existed. Each

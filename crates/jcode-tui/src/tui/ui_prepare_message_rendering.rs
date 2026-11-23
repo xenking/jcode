@@ -2,6 +2,15 @@
 
 use super::*;
 
+pub(super) fn todo_header_render_tag() -> u64 {
+    u64::from(
+        crate::config::config()
+            .display
+            .todo_header_mode()
+            .is_visible(),
+    )
+}
+
 /// Render a single transcript message into `acc`. This is the one canonical
 /// per-message renderer; the full and incremental body builders both call it so
 /// their output cannot drift (which previously caused subtle text-selection and

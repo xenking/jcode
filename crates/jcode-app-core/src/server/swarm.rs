@@ -1173,23 +1173,7 @@ pub(super) async fn remove_session_from_swarm(
     remove_plan_participant(swarm_id, session_id, swarm_plans).await;
     super::live_status::forget(session_id);
 
-    let was_member = {
-        let mut swarms = swarms_by_id.write().await;
-        if let Some(swarm) = swarms.get_mut(swarm_id) {
-            let was_member = swarm.remove(session_id);
-            if swarm.is_empty() {
-                swarms.remove(swarm_id);
-            }
-            was_member
-        } else {
-            false
-        }
-    };
-    if was_member {
-        super::run_blocking_io(|| {
-            super::await_members_state::remember_terminal_swarm_departure(swarm_id, session_id);
-        });
-    }
+    membership::remove_member_and_record_departure(swarms_by_id, swarm_id, session_id).await;
 
     let was_coordinator = {
         let coordinators = swarm_coordinators.read().await;
@@ -1556,6 +1540,8 @@ pub(super) async fn set_member_task_label(
         member.task_label = Some(label);
     }
 }
+
+mod membership;
 
 #[path = "swarm_event_history.rs"]
 mod swarm_event_history;

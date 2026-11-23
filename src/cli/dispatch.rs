@@ -23,6 +23,7 @@ use provider_init::ProviderChoice;
 
 #[path = "dispatch_debug_parent.rs"]
 mod debug_parent;
+mod run;
 use debug_parent::*;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     args.validate_run_options()?;
@@ -281,17 +282,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             output_last_message,
             ephemeral,
         }) => {
-            let message = commands::RunInput::from(message).read()?;
-            register_on_demand_server_spawner_for_run(
+            run::run_one_shot(
                 args.provider,
-                args.model.clone(),
-                args.provider_profile.clone(),
-            );
-            commands::run_single_message_command(
-                &args.provider,
                 args.model.as_deref(),
-                commands::RunPersistence::from_args(args.resume.as_deref(), ephemeral),
-                &message,
+                args.provider_profile.as_deref(),
+                args.resume.as_deref(),
+                message,
+                ephemeral,
                 commands::RunOutput {
                     format: if json {
                         commands::RunFormat::Json
@@ -1250,44 +1247,6 @@ pub(crate) async fn spawn_owned_server(
         ServerLifetime::OwnedByThisProcess,
     )
     .await
-}
-
-/// Let a headless one-shot `jcode run` start a server on demand.
-///
-/// `jcode run` hosts its agent in-process, so there is no server for tools
-/// that need one. Registering the spawner here (rather than at startup) keeps
-/// it to the `run` command: interactive and client launches already bootstrap
-/// a daemon through their own paths. Nothing is started by registering. The
-/// first tool that cannot reach a server triggers the spawn, so runs that never
-/// use `swarm` keep their current startup cost.
-///
-/// Which server gets started follows the dialed socket:
-///
-/// - Shared socket (no `--socket`): the long-lived daemon, exactly as
-///   `jcode server start` or a TUI launch would start it. An ephemeral server
-///   here would squat the path every later client uses and then vanish with
-///   this run.
-/// - Custom `--socket`: a server owned by this run. The caller asked for an
-///   isolated socket, so nobody else is waiting on it, and the run must not
-///   leave a daemon behind on a one-off path.
-fn register_on_demand_server_spawner_for_run(
-    provider_choice: ProviderChoice,
-    model: Option<String>,
-    provider_profile: Option<String>,
-) {
-    crate::server_spawn::register_on_demand_server_spawner(Box::new(move || {
-        let model = model.clone();
-        let provider_profile = provider_profile.clone();
-        Box::pin(async move {
-            let model = model.as_deref();
-            let provider_profile = provider_profile.as_deref();
-            if server::socket_path_is_custom() {
-                spawn_owned_server(&provider_choice, model, provider_profile).await
-            } else {
-                spawn_server(&provider_choice, model, provider_profile).await
-            }
-        })
-    }));
 }
 
 /// The `serve` subcommand argv for a spawned server of the given lifetime.

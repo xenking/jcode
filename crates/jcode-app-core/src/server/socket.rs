@@ -229,6 +229,19 @@ pub(super) async fn clear_stale_serve_sockets(
     Ok(())
 }
 
+#[cfg(unix)]
+pub(super) async fn acquire_serve_lock(path: &std::path::Path) -> Result<Vec<DaemonLockGuard>> {
+    match acquire_daemon_lock_for(path) {
+        Ok(lock) => Ok(lock),
+        Err(error) => {
+            reject_live_serve_socket(path).await?;
+            Err(error.context(
+                "Use server reload, server stop --force, or serve --replace after startup",
+            ))
+        }
+    }
+}
+
 pub(super) async fn prepare_serve_replacement(
     path: &std::path::Path,
 ) -> Result<Option<(std::fs::File, std::fs::File)>> {

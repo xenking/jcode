@@ -3229,9 +3229,7 @@ fn handle_server_event_inner(
             } else if let Some(swarm) =
                 super::super::remote_notifications::swarm_delivery_display_message(&content)
             {
-                if crate::tui::cross_swarm_dm::parse(&content).is_none()
-                    || !app.pending_cross_swarm_dm_receipts.consume(&content)
-                {
+                if !app.swarm_notifications.consume_dm_receipt(&content) {
                     app.push_display_message(swarm);
                 }
             } else if let Some(reminder) =
@@ -3515,23 +3513,13 @@ fn handle_server_event_inner(
                 app.set_status_notice(presentation.status_notice);
                 return false;
             }
-            let now = std::time::Instant::now();
-            let since_last = app
-                .swarm_last_message_at
-                .insert(sender.clone(), now)
-                .map(|prev| now.duration_since(prev).as_secs_f32());
+            let since_last = app.swarm_notifications.note_sender(&sender);
             let mut swarm_message =
                 DisplayMessage::swarm(presentation.title.clone(), presentation.message.clone());
             swarm_message.duration_secs = since_last;
             app.push_display_message(swarm_message);
-            if matches!(
-                notification_type,
-                crate::protocol::NotificationType::Message { scope: Some(ref scope), .. }
-                    if scope == "dm"
-            ) && crate::tui::cross_swarm_dm::parse(&message).is_some()
-            {
-                app.pending_cross_swarm_dm_receipts.record(&message);
-            }
+            app.swarm_notifications
+                .record_dm_receipt(&notification_type, &message);
             persist_replay_display_message(
                 app,
                 "swarm",

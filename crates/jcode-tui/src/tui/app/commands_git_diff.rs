@@ -138,6 +138,22 @@ pub(in crate::tui::app) fn handle_git_command(app: &mut App, trimmed: &str) -> b
     true
 }
 
+pub(in crate::tui::app) fn git_suggestions() -> Vec<(String, &'static str)> {
+    vec![
+        ("/git status".into(), "Show branch and working tree status"),
+        (
+            "/git diff".into(),
+            "Show working tree and untracked changes",
+        ),
+        ("/git diff staged".into(), "Show changes in the index"),
+        (
+            "/git diff unstaged".into(),
+            "Show tracked changes not in the index",
+        ),
+        ("/git diff untracked".into(), "Show untracked files"),
+    ]
+}
+
 pub(in crate::tui) const GIT_DIFF_HEADING: &str = "/git diff (";
 const MAX_DIFF_BYTES: usize = 64 * 1024;
 const MAX_UNTRACKED_FILES: usize = 128;

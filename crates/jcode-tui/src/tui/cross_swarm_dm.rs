@@ -1,4 +1,8 @@
-use std::collections::VecDeque;
+use crate::protocol::NotificationType;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 const SWARM_LABEL: &str = " (swarm '";
 
@@ -17,10 +21,10 @@ pub(super) fn parse(message: &str) -> Option<(&str, &str)> {
 }
 
 #[derive(Default)]
-pub(super) struct PendingReceipts(VecDeque<String>);
+struct PendingReceipts(VecDeque<String>);
 
 impl PendingReceipts {
-    pub(super) fn record(&mut self, message: &str) {
+    fn record(&mut self, message: &str) {
         const MAX_RECEIPTS: usize = 32;
         if self.0.len() == MAX_RECEIPTS {
             self.0.pop_front();
@@ -28,11 +32,42 @@ impl PendingReceipts {
         self.0.push_back(message.trim().to_owned());
     }
 
-    pub(super) fn consume(&mut self, message: &str) -> bool {
+    fn consume(&mut self, message: &str) -> bool {
         let Some(index) = self.0.iter().position(|receipt| receipt == message.trim()) else {
             return false;
         };
         self.0.remove(index);
         true
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SwarmNotifications {
+    last_by_sender: HashMap<String, Instant>,
+    receipts: PendingReceipts,
+}
+
+impl SwarmNotifications {
+    pub(super) fn note_sender(&mut self, sender: &str) -> Option<f32> {
+        let now = Instant::now();
+        self.last_by_sender
+            .insert(sender.to_owned(), now)
+            .map(|previous| now.duration_since(previous).as_secs_f32())
+    }
+
+    pub(super) fn clear_receipts(&mut self) {
+        self.receipts = PendingReceipts::default();
+    }
+
+    pub(super) fn record_dm_receipt(&mut self, notification: &NotificationType, message: &str) {
+        if matches!(notification, NotificationType::Message { scope: Some(scope), .. } if scope == "dm")
+            && parse(message).is_some()
+        {
+            self.receipts.record(message);
+        }
+    }
+
+    pub(super) fn consume_dm_receipt(&mut self, message: &str) -> bool {
+        parse(message).is_some() && self.receipts.consume(message)
     }
 }
