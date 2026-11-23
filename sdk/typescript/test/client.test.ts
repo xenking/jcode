@@ -86,6 +86,29 @@ test("replies are correlated by id even when out of order", async () => {
   await server.close();
 });
 
+test("attach reports pending asks without conflating empty and unavailable snapshots", async (t) => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      assert.equal(request.req, "attach_session");
+      const session = { session_id: request.session_id, status: "idle" };
+      const pending = request.session_id === "pending" ? ["ask-1"] : [];
+      send({
+        v: 1, reply_to: request.id, ev: "attached", session,
+        ...(request.session_id === "legacy" ? {} : { pending_ask_ids: pending }),
+      });
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  assert.deepEqual(await client.attachSessionWithPendingAsks("pending"), {
+    session: { session_id: "pending", status: "idle" }, pendingAskIds: ["ask-1"],
+  });
+  assert.deepEqual((await client.attachSessionWithPendingAsks("empty")).pendingAskIds, []);
+  assert.equal((await client.attachSessionWithPendingAsks("legacy")).pendingAskIds, undefined);
+  assert.deepEqual(await client.attachSession("pending"), { session_id: "pending", status: "idle" });
+});
+
 test("error frames reject as HarnessError", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {

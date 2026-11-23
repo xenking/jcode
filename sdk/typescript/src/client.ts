@@ -576,11 +576,16 @@ export class JcodeClient extends EventEmitter {
   }
 
   async attachSession(sessionId: string): Promise<SessionInfo> {
+    return (await this.attachSessionWithPendingAsks(sessionId)).session;
+  }
+
+  /** Attach and read the IDs of questions this connection can answer. Undefined means the runtime cannot provide a snapshot. */
+  async attachSessionWithPendingAsks(sessionId: string): Promise<{ session: SessionInfo; pendingAskIds: string[] | undefined }> {
     const frame = await this.expectReply(
       { req: "attach_session", session_id: sessionId },
       "attached",
     );
-    return frame.session;
+    return { session: frame.session, pendingAskIds: frame.pending_ask_ids };
   }
 
   /** Clone a session's complete persisted context into a new idle session. */
