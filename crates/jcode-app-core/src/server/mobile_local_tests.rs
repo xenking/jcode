@@ -17,7 +17,11 @@ async fn fixture() -> Fixture {
     let provider = Arc::new(StreamingMockProvider::default());
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
-    let session_id = agent.lock().await.session_id().to_string();
+    let session_id = {
+        let mut agent = agent.lock().await;
+        agent.set_debug(true);
+        agent.session_id().to_string()
+    };
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(session_id.clone(), agent.clone())]),
     ));
@@ -48,19 +52,20 @@ async fn fixture() -> Fixture {
 
 /// Events up to and including the terminal `Done`.
 async fn until_done(events: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+    let mut seen = Vec::new();
     timeout(Duration::from_secs(5), async {
-        let mut seen = Vec::new();
         loop {
             let event = unwrap_test_turn_event(events.recv().await.expect("member stream closed"));
             let done = matches!(event, ServerEvent::Done { .. });
             seen.push(event);
             if done {
-                return seen;
+                return;
             }
         }
     })
     .await
-    .expect("turn should finish")
+    .unwrap_or_else(|error| panic!("turn should finish: {error}; observed {seen:?}"));
+    seen
 }
 
 async fn transcript(agent: &Arc<Mutex<Agent>>) -> String {

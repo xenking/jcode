@@ -750,7 +750,11 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     ]);
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
-    let session_id = agent.lock().await.session_id().to_string();
+    let session_id = {
+        let mut agent = agent.lock().await;
+        agent.set_debug(true);
+        agent.session_id().to_string()
+    };
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(session_id.clone(), agent.clone())]),
     ));

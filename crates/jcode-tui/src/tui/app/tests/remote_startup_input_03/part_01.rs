@@ -1109,6 +1109,7 @@ fn test_save_and_restore_startup_submission_preserves_pending_images() {
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     let session_id = format!("test-reload-pending-{}", std::process::id());
 

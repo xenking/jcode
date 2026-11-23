@@ -775,9 +775,22 @@ impl BridgeRetirement for SystemBridgeRetirement<'_> {
 }
 
 fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProcess>> {
-    let listing = output(Command::new("ps").args(["-ww", "-Ao", "uid=,pid=,ppid=,command="]))?;
     #[cfg(target_os = "macos")]
     let shared_state = crate::storage::jcode_dir()?;
+    user_bridge_processes_with_state(
+        home,
+        runtime,
+        #[cfg(target_os = "macos")]
+        &shared_state,
+    )
+}
+
+fn user_bridge_processes_with_state(
+    home: &Path,
+    runtime: &Path,
+    #[cfg(target_os = "macos")] shared_state: &Path,
+) -> Result<Vec<BridgeProcess>> {
+    let listing = output(Command::new("ps").args(["-ww", "-Ao", "uid=,pid=,ppid=,command="]))?;
     #[cfg(unix)]
     let uid = unsafe { libc::geteuid() };
     #[cfg(not(unix))]
@@ -824,7 +837,7 @@ fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProces
         };
         #[cfg(target_os = "macos")]
         {
-            let private_seat = complete && private_seat_bridge(&bridge, &shared_state);
+            let private_seat = complete && private_seat_bridge(&bridge, shared_state);
             if !bridge.is_live()? || private_seat {
                 return Ok(None);
             }
@@ -1793,6 +1806,8 @@ mod tests {
         std::fs::create_dir_all(&runtime).unwrap();
         let seat_state = home.join("seat-state");
         std::fs::create_dir_all(&seat_state).unwrap();
+        let shared_state = home.join("shared-state");
+        std::fs::create_dir_all(&shared_state).unwrap();
         let source = dir.path().join("fixture.c");
         std::fs::write(&source, r#"
 #include <sys/socket.h>
@@ -1858,6 +1873,7 @@ int main(int argc, char **argv) {
         let mut parent = launch
             .env("HOME", &home)
             .env("JCODE_HOME", &seat_state)
+            .env("JCODE_TEST_SESSION", "1")
             .env("JCODE_RUNTIME_DIR", &runtime)
             .env("BRIDGE_EXE", &bridge)
             .env("BRIDGE_SOCKET", &socket)
@@ -1878,10 +1894,11 @@ int main(int argc, char **argv) {
                     "accepted Desktop connection must not look idle"
                 );
                 if role == BridgeFixture::PrivateSeat {
-                    break user_bridge_processes(&home, &runtime)
+                    break user_bridge_processes_with_state(&home, &runtime, &shared_state)
                         .map(|bridges| bridges.iter().all(|bridge| bridge.pid != pid));
                 }
-                let bridges = match user_bridge_processes(&home, &runtime) {
+                let bridges = match user_bridge_processes_with_state(&home, &runtime, &shared_state)
+                {
                     Ok(bridges) => bridges,
                     Err(error) => break Err(error),
                 };

@@ -364,9 +364,11 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
     clear_flicker_frame_history_for_tests();
     let backend = TestBackend::new(width, 18);
     let mut terminal = Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| crate::tui::ui::draw(frame, state))
-        .expect("overscroll frame");
+    crate::tui::ui::header::without_status_usage_accounts(|| {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, state))
+            .expect("overscroll frame");
+    });
     let rows = buffer_rows(&terminal);
     // The status line is pinned directly below the input, so it is the last
     // non-blank row of the frame (rows below it are unused viewport).

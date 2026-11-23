@@ -14,7 +14,28 @@ mod account_router;
 pub(super) fn status_usage_accounts(
     remote: bool,
 ) -> Vec<(&'static str, crate::usage::AccountUsageSnapshot)> {
+    #[cfg(test)]
+    if OMIT_STATUS_USAGE_ACCOUNTS.get() {
+        return Vec::new();
+    }
     account_router::status_usage_accounts(remote)
+}
+
+#[cfg(test)]
+thread_local! {
+    static OMIT_STATUS_USAGE_ACCOUNTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn without_status_usage_accounts<R>(draw: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OMIT_STATUS_USAGE_ACCOUNTS.set(self.0);
+        }
+    }
+    let _restore = Restore(OMIT_STATUS_USAGE_ACCOUNTS.replace(true));
+    draw()
 }
 
 /// UI chrome is single-line. Budget the same trailing cell as the transcript

@@ -1750,6 +1750,7 @@ fn test_local_model_picker_surfaces_antigravity_models_from_multiprovider() {
 
 #[test]
 fn test_local_antigravity_model_picker_selection_preserves_antigravity_provider() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_antigravity_picker_test_app();
     app.open_model_picker();
     wait_for_model_picker_load(&mut app);

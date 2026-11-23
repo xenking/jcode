@@ -187,6 +187,7 @@ fn clean_finish_unlocks_even_if_a_fork_inherited_the_file_description() {
         probe.try_lock().is_ok(),
         "explicit finish must unlock, not just close its own fd"
     );
+    probe.unlock().unwrap();
     drop(probe);
     let (_fresh, counts) = start(home.path(), false);
     assert_eq!(counts.total, 1);

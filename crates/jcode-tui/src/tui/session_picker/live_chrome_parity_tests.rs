@@ -86,11 +86,13 @@ fn picker_overscroll_matches_real_live_status_with_same_session_facts() {
     for width in [1, 4, 12, 40, 100] {
         let mut live = Terminal::new(TestBackend::new(width, 1)).unwrap();
         let mut preview = Terminal::new(TestBackend::new(width, 1)).unwrap();
-        live.draw(|frame| {
-            let area = frame.area();
-            input_ui::draw_overscroll_status(frame, &state, area);
-        })
-        .unwrap();
+        crate::tui::ui::header::without_status_usage_accounts(|| {
+            live.draw(|frame| {
+                let area = frame.area();
+                input_ui::draw_overscroll_status(frame, &state, area);
+            })
+            .unwrap();
+        });
         preview
             .draw(|frame| {
                 frame.render_widget(
