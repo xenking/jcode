@@ -144,17 +144,6 @@ impl Drop for FileLock {
     }
 }
 
-/// Waits in the kernel for the lock instead of polling. Only for background
-/// threads that may wait as long as the current holder needs: `lock_path`
-/// retries every 2ms, which costs hundreds of wakeups per second in every
-/// process that queues behind one slow holder.
-#[cfg_attr(not(test), allow(dead_code))] // delivery is compiled out in this fork
-pub(super) fn lock_path_blocking(path: &Path) -> io::Result<FileLock> {
-    let file = private_file(path, false)?;
-    file.lock()?;
-    Ok(FileLock(file))
-}
-
 pub(super) fn lock_path(path: &Path) -> io::Result<FileLock> {
     let file = private_file(path, false)?;
     let started = Instant::now();

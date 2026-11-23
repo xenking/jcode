@@ -1072,7 +1072,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn unauthorized_host_connect_is_cloud_auth() {
         let (base, _seen) = serve(vec![(
             401,

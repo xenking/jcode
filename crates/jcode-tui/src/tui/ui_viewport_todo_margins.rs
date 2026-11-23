@@ -58,8 +58,7 @@ fn minimal_payload(payload: Option<&str>) -> Option<&str> {
     payload.filter(|payload| !payload.trim().is_empty())
 }
 
-/// Pinned todo band for an arbitrary todo payload. Shared by the live chat
-/// viewport and the `/resume` preview so both render the band identically.
+#[cfg(test)]
 pub(crate) fn pinned_todo_band_lines_for_payload(
     payload: Option<&str>,
     expanded: bool,

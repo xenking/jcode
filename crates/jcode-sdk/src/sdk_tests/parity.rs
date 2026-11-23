@@ -36,7 +36,10 @@ const CAPABILITIES: &[Capability] = &[
     cap("create_session", "createSession"),
     cap("create_session_with_options", "createSession"),
     cap("attach_session", "attachSession"),
-    cap("attach_session_with_pending_asks", "attachSessionWithPendingAsks"),
+    cap(
+        "attach_session_with_pending_asks",
+        "attachSessionWithPendingAsks",
+    ),
     cap("fork_session", "forkSession"),
     cap("fork_side_question", "forkSideQuestion"),
     cap("list_side_questions", "listSideQuestions"),

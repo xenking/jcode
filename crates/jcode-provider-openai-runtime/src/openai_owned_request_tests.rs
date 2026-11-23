@@ -214,6 +214,7 @@ fn old_pipeline(input: Vec<Value>) -> Value {
         None,
     )
 }
+#[cfg(target_os = "linux")]
 fn new_pipeline(input: Vec<Value>) -> Value {
     OpenAIProvider::build_response_request(
         "gpt-5.4",

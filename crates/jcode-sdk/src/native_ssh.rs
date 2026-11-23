@@ -375,11 +375,8 @@ impl Transport for NativeSshTransport {
     fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         let tx = self.outgoing.clone();
         Some(Arc::new(move || {
-            match tx.send(Outgoing::Close) {
-                Ok(()) => {}
-                // The worker has already stopped, which satisfies shutdown.
-                Err(_) => {}
-            }
+            // A closed channel already satisfies shutdown.
+            drop(tx.send(Outgoing::Close));
         }))
     }
 

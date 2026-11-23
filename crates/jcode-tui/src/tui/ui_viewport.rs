@@ -2,6 +2,7 @@ use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
 mod todo_margins;
 pub(crate) use todo_margins::compute_visible_margins;
+#[cfg(test)]
 pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
 
 use std::fmt::Write as _;

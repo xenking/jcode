@@ -306,6 +306,7 @@ mod exec_tests {
     fn exec_with_exited_child() {
         let phase = std::env::var(PHASE).expect("exec probe phase");
         if phase == "spawn" {
+            #[allow(clippy::zombie_processes)] // The next image must reap this child.
             let child = Command::new("/usr/bin/true").spawn().unwrap();
             let pid = child.id();
             // Wait for exit without reaping the child before exec.
