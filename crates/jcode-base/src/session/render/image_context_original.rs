@@ -11,6 +11,7 @@ pub fn render_messages_and_images_with_compacted_history(
     Option<RenderedCompactedHistoryInfo>,
 ) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
+    let image_index = session.image_index();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
     // 0-based ordinal of the next rendered user prompt, used to anchor pasted
@@ -162,6 +163,8 @@ pub fn render_messages_and_images_with_compacted_history(
         }
         let message_role = msg.role.clone();
         let mut text = String::new();
+        let mut text_boundaries = Vec::new();
+        let mut image_ordinal = 0;
         // Reasoning is accumulated separately so it can be rendered *before* the
         // answer text, matching the live streaming order. Providers persist the
         // assistant turn as `[Text, ReasoningTrace, ToolUse]`, so appending
@@ -195,7 +198,11 @@ pub fn render_messages_and_images_with_compacted_history(
                         }
                         continue;
                     }
-                    text.push_str(t);
+                    let body = super::super::strip_reload_interruption_marker(t);
+                    if role == "assistant" && !text.is_empty() && !body.is_empty() {
+                        text_boundaries.push(text.len());
+                    }
+                    text.push_str(body);
                 }
                 ContentBlock::ToolUse {
                     id,
@@ -218,6 +225,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     content,
                     ..
                 } => {
+                    let reasoning_len = reasoning.len();
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
                         if role == "user" && !is_attached_image_label_text(&text) {
@@ -225,18 +233,23 @@ pub fn render_messages_and_images_with_compacted_history(
                         }
                         text.clear();
                         reasoning.clear();
-                        rendered.push(RenderedMessage {
-                            codemode: None,
-                            response_stats: None,
-                            tool_duration_ms: None,
-                            role: role.to_string(),
-                            content: combined,
-                            tool_calls: tool_calls.clone(),
-                            tool_data: None,
-                            stored_index: Some(stored_index),
-                            timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
-                            attachments: Vec::new(),
-                        });
+                        push_text_rows(
+                            &mut rendered,
+                            &mut text_boundaries,
+                            reasoning_len,
+                            RenderedMessage {
+                                codemode: None,
+                                response_stats: None,
+                                tool_duration_ms: None,
+                                role: role.to_string(),
+                                content: combined,
+                                tool_calls: tool_calls.clone(),
+                                tool_data: None,
+                                stored_index: Some(stored_index),
+                                timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                                attachments: Vec::new(),
+                            },
+                        );
                     }
 
                     let tool_data = tool_map.get(tool_use_id).cloned().or_else(|| {
@@ -268,11 +281,21 @@ pub fn render_messages_and_images_with_compacted_history(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
+                    let id = super::super::images::image_id(&session.id, &msg.id, image_ordinal);
+                    image_ordinal += 1;
+                    let session_image = image_index.reference(&id);
+                    if session_image
+                        .as_ref()
+                        .is_some_and(|image| image.image_id != id)
+                    {
+                        last_image_idx = None;
+                        continue;
+                    }
                     let anchor =
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
-                        session_image: None,
+                        session_image,
                         history_message_index: current_tool.as_ref().map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
@@ -311,22 +334,28 @@ pub fn render_messages_and_images_with_compacted_history(
                         continue;
                     };
                     // Flush text streamed before the search so order matches live.
+                    let reasoning_len = reasoning.len();
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
                         text.clear();
                         reasoning.clear();
-                        rendered.push(RenderedMessage {
-                            codemode: None,
-                            response_stats: None,
-                            tool_duration_ms: None,
-                            role: role.to_string(),
-                            content: combined,
-                            tool_calls: std::mem::take(&mut tool_calls),
-                            tool_data: None,
-                            stored_index: Some(stored_index),
-                            timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
-                            attachments: Vec::new(),
-                        });
+                        push_text_rows(
+                            &mut rendered,
+                            &mut text_boundaries,
+                            reasoning_len,
+                            RenderedMessage {
+                                codemode: None,
+                                response_stats: None,
+                                tool_duration_ms: None,
+                                role: role.to_string(),
+                                content: combined,
+                                tool_calls: std::mem::take(&mut tool_calls),
+                                tool_data: None,
+                                stored_index: Some(stored_index),
+                                timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                                attachments: Vec::new(),
+                            },
+                        );
                     }
                     let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
                         let input = display.input.clone().unwrap_or(serde_json::Value::Null);
@@ -362,18 +391,23 @@ pub fn render_messages_and_images_with_compacted_history(
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
-            rendered.push(RenderedMessage {
-                codemode: None,
-                response_stats: None,
-                tool_duration_ms: None,
-                role: role.to_string(),
-                content: combined,
-                tool_calls,
-                tool_data: None,
-                stored_index: Some(stored_index),
-                timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
-                attachments: Vec::new(),
-            });
+            push_text_rows(
+                &mut rendered,
+                &mut text_boundaries,
+                reasoning.len(),
+                RenderedMessage {
+                    codemode: None,
+                    response_stats: None,
+                    tool_duration_ms: None,
+                    role: role.to_string(),
+                    content: combined,
+                    tool_calls,
+                    tool_data: None,
+                    stored_index: Some(stored_index),
+                    timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                    attachments: Vec::new(),
+                },
+            );
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;
             // drop the anchor so these images fall back to the transcript tail
