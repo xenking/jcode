@@ -204,9 +204,8 @@ pub(in crate::provider) fn bound_account_quota_cooldown(
 ) -> Option<String> {
     let key = provider_runtime_scope_key(provider, Some(account_label));
     let entry = runtime_provider_unavailability_for_key(&key)?;
-    (is_quota_failure(&entry.reason)
-        || jcode_provider_core::failover::is_definitive_usage_exhaustion(&entry.reason))
-    .then(|| format_provider_unavailability_detail(entry))
+    jcode_provider_core::failover::usage_limit_details(&entry.reason)
+        .map(|_| format_provider_unavailability_detail(entry))
 }
 
 pub(super) fn format_provider_unavailability_detail(

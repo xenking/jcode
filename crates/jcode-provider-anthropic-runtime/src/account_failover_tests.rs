@@ -404,6 +404,7 @@ fn http_retry_decision_with_policy(
     };
     let (decision, rolled_back) = runtime.block_on(async {
         if let Some(router) = &router {
+            let mut stage = "first account request";
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 let case = router_case.unwrap();
                 let initial_result = if case.split {
@@ -476,6 +477,7 @@ fn http_retry_decision_with_policy(
                     Some(&account_labels[0]),
                     "session-local selection must not rewrite global preference"
                 );
+                stage = "second account request";
                 let result = if case.split {
                     router
                         .complete_split(&[], &[], "Test", "dynamic", None)
@@ -522,6 +524,7 @@ fn http_retry_decision_with_policy(
                     assert!(!jcode_base::provider::has_eligible_alternate_account(
                         "claude"
                     ));
+                    stage = "cached exhaustion";
                     let next_error = if case.split {
                         router
                             .complete_split(&[], &[], "Test", "dynamic", None)
@@ -559,7 +562,9 @@ fn http_retry_decision_with_policy(
                 panic!("working account stream must end with MessageEnd");
             })
             .await
-            .expect("router must switch accounts without 60s sleep")
+            .unwrap_or_else(|error| {
+                panic!("router stalled at {stage} after {} requests: {error}", requests.load(Ordering::SeqCst));
+            })
         } else {
             let (tx, mut rx) = mpsc::channel(64);
             let task = tokio::spawn(run_stream_with_retries(
