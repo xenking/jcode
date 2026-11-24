@@ -60,6 +60,7 @@ pub(super) fn connection_presence_pong(
             "session_connections".into(),
             "openrig_host_identity_v1".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
+            jcode_session_types::routing::ROUTING_CAPABILITY.into(),
         ],
         user_connected_session_ids,
         daemon_identity: jcode_build_support::runtime_generation::serving_identity(

@@ -834,6 +834,11 @@ pub enum Request {
         action: RoutingIntentAction,
     },
 
+    /// Read the routing configuration with live usage, for a settings page.
+    /// Answered with `routing_view`. Needs no attached session.
+    #[serde(rename = "routing_view")]
+    RoutingView { id: u64 },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {

@@ -2781,6 +2781,11 @@ pub(super) async fn handle_client(
                 send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: SplitSideQuestion");
             }
 
+            Request::RoutingView { id } => {
+                let event = super::routing_view_request::reply(id).await;
+                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: routing view");
+            }
+
             request @ (Request::ListSideQuestions { .. } | Request::GetSideQuestionHistory { .. } | Request::PromoteSideQuestion { .. }) => {
                 let event = super::client_lightweight_control::side_question_control::handle_side_question_control(request).await;
                 send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: side question read");

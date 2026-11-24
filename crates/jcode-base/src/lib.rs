@@ -95,6 +95,7 @@ pub mod routing_service;
 pub mod recent_session_index;
 pub mod registry;
 pub mod routing_state;
+pub mod routing_view;
 pub mod runtime_activity;
 pub mod runtime_memory_log;
 pub mod safety;

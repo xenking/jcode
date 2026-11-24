@@ -65,6 +65,14 @@ impl Meters for CachedMeters {
     }
 }
 
+/// One account's readings from the caches alone, for a page that lists
+/// credentials without a routing entry. `None` is unknown.
+pub fn account_readings(account: &AccountId, now: i64) -> Option<Vec<Reading>> {
+    CachedMeters
+        .readings(account, now)
+        .filter(|readings| !readings.is_empty())
+}
+
 /// The measured state of every account and ledger budget in `policy` at `now`
 /// (unix seconds), shared for a few seconds between callers. Availability is
 /// `Ready` for every account: egress and eviction are the caller's to layer on.

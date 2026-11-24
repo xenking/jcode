@@ -418,6 +418,9 @@ pub(super) async fn handle_lightweight_control_request(
     ) {
         return write_direct_event(&writer, &handle_side_question_control(request).await).await;
     }
+    if let Request::RoutingView { id } = request {
+        return write_direct_event(&writer, &super::routing_view_request::reply(id).await).await;
+    }
     if let Request::UpgradeRuntime { id, ref candidate } = request {
         return super::runtime_upgrade::handle(id, candidate, &writer, sessions).await;
     }

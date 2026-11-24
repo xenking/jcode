@@ -993,6 +993,7 @@ impl Request {
             Request::AskUserResponse { id, .. } => *id,
             Request::RoutingGateAnswer { id, .. } => *id,
             Request::RoutingIntent { id, .. } => *id,
+            Request::RoutingView { id } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
@@ -1037,6 +1038,7 @@ impl Request {
                 | Request::OpenrigHostIdentity { .. }
                 | Request::SessionContextBreakdown { .. }
                 | Request::ListSideQuestions { .. }
+                | Request::RoutingView { .. }
                 | Request::GetSideQuestionHistory { .. }
                 | Request::PromoteSideQuestion { .. }
                 | Request::SessionShakeTools { .. }

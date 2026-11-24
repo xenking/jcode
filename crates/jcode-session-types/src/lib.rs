@@ -19,6 +19,7 @@ pub use shake_tools::{
     SHAKE_TOOLS_CAPABILITY, ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
 };
 mod rewind;
+pub mod routing;
 pub use rewind::{RewindAnchor, RewindMessageKey};
 mod title;
 pub use ask::*;

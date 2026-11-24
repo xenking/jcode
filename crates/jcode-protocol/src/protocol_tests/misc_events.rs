@@ -907,3 +907,33 @@ fn routing_intent_request_roundtrips_every_action() -> Result<()> {
     ));
     Ok(())
 }
+
+#[test]
+fn routing_view_request_is_lightweight_and_its_answer_roundtrips() -> Result<()> {
+    let request = parse_request_json(r#"{"type":"routing_view","id":4}"#)?;
+    assert_eq!(request.id(), 4);
+    assert!(
+        request.is_lightweight_control_request(),
+        "a settings page reads the view before any session exists"
+    );
+
+    let event = ServerEvent::RoutingView {
+        id: 4,
+        view: RoutingView {
+            mode: "shadow".into(),
+            paid: "auto".into(),
+            ..RoutingView::default()
+        },
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"routing_view\""));
+    assert!(
+        !json.contains("accounts") && !json.contains("problems"),
+        "empty lists stay off the wire: {json}"
+    );
+    let ServerEvent::RoutingView { id, view } = parse_event_json(json.trim())? else {
+        return Err(anyhow!("expected RoutingView"));
+    };
+    assert_eq!((id, view.mode.as_str()), (4, "shadow"));
+    Ok(())
+}

@@ -1375,6 +1375,10 @@ pub enum ServerEvent {
     #[serde(rename = "routing_status")]
     RoutingStatus { id: u64, text: String },
 
+    /// Answer to `Request::RoutingView`.
+    #[serde(rename = "routing_view")]
+    RoutingView { id: u64, view: RoutingView },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {
