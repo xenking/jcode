@@ -522,6 +522,7 @@ pub struct ReloadSignal {
     pub hash: String,
     pub triggering_session: Option<String>,
     pub prefer_selfdev_binary: bool,
+    pub idle_timeout: Option<std::time::Duration>,
     pub request_id: String,
 }
 
@@ -655,6 +656,7 @@ pub fn send_reload_signal(
         prefer_selfdev_binary,
         target,
         request_id,
+        None,
     )
 }
 
@@ -671,6 +673,23 @@ pub fn send_reload_signal_target(
         prefer_selfdev_binary,
         target,
         crate::id::new_id("reload"),
+        None,
+    ))
+}
+
+pub(super) fn send_idle_reload_signal_target(
+    hash: String,
+    target: jcode_selfdev_types::ImmutableTarget,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    jcode_build_support::runtime_generation::validate_target(&target)?;
+    Ok(publish_reload_signal(
+        hash,
+        None,
+        false,
+        target,
+        crate::id::new_id("reload"),
+        Some(timeout),
     ))
 }
 
@@ -680,6 +699,7 @@ fn publish_reload_signal(
     prefer_selfdev_binary: bool,
     target: jcode_selfdev_types::ImmutableTarget,
     request_id: String,
+    idle_timeout: Option<std::time::Duration>,
 ) -> String {
     let (tx, _) = reload_signal();
     let _ = tx.send(Some(ReloadSignal {
@@ -687,6 +707,7 @@ fn publish_reload_signal(
         hash,
         triggering_session,
         prefer_selfdev_binary,
+        idle_timeout,
         request_id: request_id.clone(),
     }));
     request_id

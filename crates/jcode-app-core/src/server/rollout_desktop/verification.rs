@@ -5,6 +5,64 @@ use super::{
 use anyhow::{Context, Result, bail};
 use std::{path::Path, time::Duration};
 
+fn paired_bundle(app: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && std::process::Command::new("/usr/bin/plutil")
+            .args([
+                "-extract",
+                "JcodePairedRollout",
+                "raw",
+                "-expect",
+                "bool",
+                "-o",
+                "-",
+            ])
+            .arg(app.join("Contents/Info.plist"))
+            .output()
+            .is_ok_and(|result| result.status.success() && result.stdout.trim_ascii() == b"true")
+}
+
+fn matches_requirement(app: &Path, requirement: &str) -> Result<bool> {
+    let status = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(format!("-R={requirement}"))
+        .arg(app)
+        .output()?;
+    Ok(status.status.success())
+}
+
+pub(in crate::server) fn validate_bundle_replacement(
+    candidate: &Path,
+    installed: &Path,
+    reviewed: bool,
+) -> Result<()> {
+    let candidate_is_paired = paired_bundle(candidate);
+    let installed_is_paired = paired_bundle(installed);
+    if !reviewed && !candidate_is_paired && !installed_is_paired {
+        return Ok(());
+    }
+    let apple = "anchor apple generic";
+    if !candidate_is_paired || !matches_requirement(candidate, apple)? {
+        bail!("reviewed rollout requires a paired Desktop bundle signed with an Apple identity");
+    }
+    if installed_is_paired || matches_requirement(installed, apple)? {
+        let result = std::process::Command::new("/usr/bin/codesign")
+            .args(["-d", "-r-"])
+            .arg(installed)
+            .output()?;
+        let requirement = [result.stdout, result.stderr].concat();
+        let requirement = std::str::from_utf8(&requirement)?
+            .lines()
+            .find_map(|line| line.strip_prefix("designated => "))
+            .filter(|_| result.status.success())
+            .context("could not read the installed Desktop's designated signing requirement")?;
+        if !matches_requirement(candidate, requirement)? {
+            bail!("candidate Desktop does not preserve the installed signing identity");
+        }
+    }
+    Ok(())
+}
+
 pub(in crate::server) async fn verify(app: &Path, cli: &str, desktop: &str) -> Result<()> {
     retire_stale_bridges(app, app).await?;
     crate::server::rollout::preflight(&app.join("Contents/MacOS/jcode"), cli).await?;
@@ -19,9 +77,15 @@ pub(in crate::server) async fn verify(app: &Path, cli: &str, desktop: &str) -> R
     {
         bail!("installed Desktop does not report expected commit {desktop}");
     }
-    let plist = std::fs::read_to_string(app.join("Contents/Info.plist"))?;
-    if !plist.contains("SUPublicEDKey") {
-        bail!("bundle has no Sparkle public key");
+    if paired_bundle(app) {
+        if !matches_requirement(app, "anchor apple generic")? {
+            bail!("installed paired Desktop bundle has no valid Apple signature");
+        }
+    } else {
+        let plist = std::fs::read_to_string(app.join("Contents/Info.plist"))?;
+        if !plist.contains("SUPublicEDKey") {
+            bail!("bundle has neither paired rollout metadata nor a Sparkle public key");
+        }
     }
     let app = app.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {

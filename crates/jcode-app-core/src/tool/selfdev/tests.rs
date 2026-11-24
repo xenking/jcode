@@ -501,6 +501,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
         hash: "direct-hash".to_string(),
         triggering_session: None,
         prefer_selfdev_binary: true,
+        idle_timeout: None,
         request_id: "ignored".to_string(),
     });
 
@@ -510,6 +511,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
         hash: "direct-hash".to_string(),
         triggering_session: None,
         prefer_selfdev_binary: true,
+        idle_timeout: None,
         request_id,
     });
 

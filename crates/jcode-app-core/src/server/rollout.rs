@@ -24,6 +24,8 @@ pub struct Intent {
     pub bundle: Option<PathBuf>,
     pub app: PathBuf,
     pub now: bool,
+    #[serde(default)]
+    pub reviewed: bool,
     pub drain_timeout_secs: u64,
     pub triggering_session: Option<String>,
 }
@@ -303,8 +305,13 @@ impl Store {
     }
 }
 
+fn is_capability_probe(command: &str) -> bool {
+    matches!(command, "rollout_preparation_v1" | "rollout_reviewed_v1")
+}
+
 pub(super) fn is_control_command(command: &str) -> bool {
-    matches!(command, "rollout_status" | "rollout_preparation_v1")
+    command == "rollout_status"
+        || is_capability_probe(command)
         || command.starts_with("rollout_submit:")
 }
 
@@ -324,7 +331,7 @@ pub(super) fn control(command: &str) -> Result<String> {
         value["blockers"] = serde_json::to_value(blockers)?;
         return Ok(value.to_string());
     }
-    if command == "rollout_preparation_v1" {
+    if is_capability_probe(command) {
         return Ok("true".into());
     }
     let raw = command
@@ -339,6 +346,14 @@ pub(super) fn control(command: &str) -> Result<String> {
 pub(super) fn submit(intent: Intent) -> Result<Journal> {
     if intent.app != app_path() {
         bail!("rollout app path differs from daemon JCODE_ROLLOUT_APP");
+    }
+    if intent.reviewed
+        && (intent.now || intent.triggering_session.is_some() || intent.bundle.is_none())
+    {
+        bail!("reviewed rollout requires a paired bundle, normal drain and no triggering session");
+    }
+    if let Some(bundle) = intent.bundle.as_deref() {
+        super::rollout_desktop::validate_bundle_replacement(bundle, &intent.app, intent.reviewed)?;
     }
     validate_label(&intent.cli)?;
     if let Some(sha) = &intent.cli_sha
@@ -508,6 +523,7 @@ pub(super) fn reconcile_on_startup() -> Result<()> {
 }
 
 async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
+    let timeout = Duration::from_secs(journal.intent.drain_timeout_secs);
     if matches!(journal.phase, Phase::Submitted | Phase::Staging) {
         store.phase(journal, Phase::Staging)?;
         preflight(&journal.intent.binary, &journal.intent.cli).await?;
@@ -525,8 +541,7 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         store.phase(journal, Phase::Draining)?;
     }
     if journal.phase == Phase::Draining {
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let snapshot = crate::turn_activity::global().snapshot();
             let busy = drain_blockers(&snapshot, journal, jcode_build_meta::git_hash());
@@ -554,12 +569,20 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
             let target = jcode_build_support::runtime_generation::resolve(
                 jcode_selfdev_types::DesiredSelection::InstalledVersion(journal.intent.cli.clone()),
             )?;
-            let request = super::send_reload_signal_target(
-                journal.intent.cli.clone(),
-                journal.intent.triggering_session.clone(),
-                false,
-                target,
-            )?;
+            let request = if journal.intent.reviewed {
+                super::reload_state::send_idle_reload_signal_target(
+                    journal.intent.cli.clone(),
+                    target,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                )?
+            } else {
+                super::send_reload_signal_target(
+                    journal.intent.cli.clone(),
+                    journal.intent.triggering_session.clone(),
+                    false,
+                    target,
+                )?
+            };
             journal.reload_id = Some(request);
             store.save(journal)?;
             // Keep the transaction lock until exec, not just until the request
@@ -578,6 +601,19 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
             }
         }
     }
+    let _admission = if journal.intent.reviewed
+        && matches!(
+            journal.phase,
+            Phase::Serving | Phase::DesktopSwap | Phase::Verifying
+        ) {
+        Some(
+            crate::turn_activity::global()
+                .wait_for_quiescence(timeout)
+                .await?,
+        )
+    } else {
+        None
+    };
     if matches!(journal.phase, Phase::Serving | Phase::DesktopSwap) {
         if journal.intent.bundle.is_some() {
             store.phase(journal, Phase::DesktopSwap)?;
@@ -636,6 +672,13 @@ fn drain_blockers<'a>(
     journal: &Journal,
     serving: &str,
 ) -> Vec<&'a SessionActivity> {
+    if journal.intent.reviewed {
+        return snapshot
+            .sessions
+            .iter()
+            .filter(|session| session.is_busy())
+            .collect();
+    }
     if journal.intent.now || same_commit(serving, &journal.intent.cli) {
         return Vec::new();
     }
@@ -773,6 +816,15 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
     let installed_incoming = journal.incoming_inode.is_some_and(|incoming| {
         inode(&journal.intent.app).is_ok_and(|installed| installed == incoming)
     });
+    let _admission = if journal.intent.reviewed && (journal.backup_ready || installed_incoming) {
+        Some(
+            crate::turn_activity::global()
+                .wait_for_quiescence(Duration::from_secs(journal.intent.drain_timeout_secs))
+                .await?,
+        )
+    } else {
+        None
+    };
     if journal.backup_ready && (journal.desktop_swapped || installed_incoming) {
         let pids = super::rollout_desktop::stage_windows(&journal.intent.app, &rollback_handoff)?;
         store.before(journal, "quit_failed_desktop")?;
@@ -796,7 +848,15 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
                 journal.previous_shared.clone(),
             ),
         )?;
-        super::send_reload_signal_target(journal.previous_shared.clone(), None, false, target)?;
+        if journal.intent.reviewed {
+            super::reload_state::send_idle_reload_signal_target(
+                journal.previous_shared.clone(),
+                target,
+                Duration::from_secs(journal.intent.drain_timeout_secs),
+            )?;
+        } else {
+            super::send_reload_signal_target(journal.previous_shared.clone(), None, false, target)?;
+        }
     }
     Ok(())
 }

@@ -22,6 +22,7 @@ pub const PHASES: [&str; 8] = [
 #[derive(Debug, Clone)]
 pub struct RolloutOptions {
     pub dry_run: bool,
+    pub reviewed: bool,
     pub now: bool,
     pub drain_timeout: Duration,
     pub jcode_ref: String,
@@ -33,6 +34,7 @@ impl Default for RolloutOptions {
     fn default() -> Self {
         Self {
             dry_run: false,
+            reviewed: false,
             now: false,
             drain_timeout: Duration::from_secs(900),
             jcode_ref: "origin/master".into(),
@@ -420,7 +422,7 @@ fn dry_run_plan<H: Host, W: Write>(
     run.say(
         "verify",
         "plan",
-        "daemon + current + bundle report the pair; bridge answers search_sessions; SUPublicEDKey set; rollback on failure",
+        "daemon + current + bundle report the pair; bridge answers search_sessions; update channel verified; rollback on failure",
     )?;
     Ok(Outcome::Planned)
 }

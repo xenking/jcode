@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+mod reviewed;
+
 const TARGET: &str = "aarch64-apple-darwin";
 const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 
@@ -17,8 +19,19 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rollout_status()?)?);
         return Ok(());
     }
+    if args.check_update {
+        return tokio::task::block_in_place(|| MacHost::new()?.preview());
+    }
+    if args.apply_reviewed
+        && ![&args.jcode_ref, &args.desktop_ref]
+            .into_iter()
+            .all(|sha| reviewed::full_sha(sha))
+    {
+        anyhow::bail!("reviewed rollout requires two full commit SHAs");
+    }
     let options = super::rollout::RolloutOptions {
         dry_run: args.dry_run,
+        reviewed: args.apply_reviewed,
         now: args.now,
         drain_timeout: Duration::from_secs(args.drain_timeout),
         jcode_ref: args.jcode_ref,
@@ -376,6 +389,11 @@ impl Host for MacHost {
                 }
             },
         )? {
+            Admission::Join(_) if options.reviewed => {
+                bail!(
+                    "another rollout owns the installation; check for updates again when it finishes"
+                );
+            }
             Admission::Join(id) => Ok(Some(id)),
             Admission::Prepare(lease) => {
                 self.ensure_rollout_daemon()?;
@@ -383,6 +401,18 @@ impl Host for MacHost {
                     .context("daemon lacks rollout preparation ownership; update it before running rollout")? != true
                 {
                     bail!("daemon lacks rollout preparation ownership; update it before running rollout");
+                }
+                if options.reviewed {
+                    if self.own_session.is_some() {
+                        bail!("a reviewed rollout must start outside an agent turn");
+                    }
+                    if daemon_control(&self.control_socket()?, "server:rollout_reviewed_v1")
+                        .context("the running daemon does not support reviewed updates")?
+                        != true
+                    {
+                        bail!("the running daemon does not support reviewed updates");
+                    }
+                    self.require_reviewed_update(pair)?;
                 }
                 self.preparation = Some(lease);
                 Ok(None)
@@ -581,6 +611,7 @@ impl Host for MacHost {
             bundle: bundle.map(Path::to_path_buf),
             app: self.layout.app.clone(),
             now: options.now,
+            reviewed: options.reviewed,
             drain_timeout_secs: options.drain_timeout.as_secs(),
             triggering_session: self.own_session.clone(),
         };

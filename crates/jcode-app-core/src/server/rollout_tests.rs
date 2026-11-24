@@ -2,6 +2,13 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[test]
+fn reviewed_update_capability_is_routed_to_the_daemon_handler() {
+    let command = "rollout_reviewed_v1";
+    assert!(is_control_command(command));
+    assert_eq!(control(command).unwrap(), "true");
+}
+
 fn fixture() -> (tempfile::TempDir, Store, Journal) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -26,6 +33,7 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
             bundle: Some(bundle),
             app,
             now: false,
+            reviewed: false,
             drain_timeout_secs: 1,
             triggering_session: None,
         },
@@ -278,4 +286,15 @@ fn drain_skips_unchanged_daemon_and_never_waits_on_initiator() {
     );
     journal.intent.now = true;
     assert!(drain_blockers(&snapshot, &journal, "0000000").is_empty());
+
+    journal.intent.now = false;
+    journal.intent.reviewed = true;
+    journal.intent.triggering_session = None;
+    assert_eq!(
+        drain_blockers(&snapshot, &journal, "abcdef123456")
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["initiator", "wait-1", "wait-2", "wait-other", "worker"]
+    );
 }

@@ -249,7 +249,12 @@ pub(super) async fn await_reload_signal(
         // Close admission before capturing recovery. A turn admitted after an
         // earlier observation is included, and later requests get a retryable
         // rejection rather than disappearing between capture and exec.
-        let _admission = match crate::turn_activity::global().close_admission() {
+        let activity = crate::turn_activity::global();
+        let admission = match signal.idle_timeout {
+            Some(timeout) => activity.wait_for_quiescence(timeout).await,
+            None => activity.close_admission(),
+        };
+        let _admission = match admission {
             Ok(fence) => fence,
             Err(error) => {
                 crate::logging::warn(&format!("Server: reload admission deferred: {error}"));
@@ -257,7 +262,7 @@ pub(super) async fn await_reload_signal(
                     &signal.request_id,
                     &signal.hash,
                     crate::server::ReloadPhase::Failed,
-                    signal.triggering_session.clone(),
+                    Some(format!("reload admission deferred: {error:#}")),
                 );
                 continue;
             }

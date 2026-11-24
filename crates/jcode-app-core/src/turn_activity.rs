@@ -471,6 +471,21 @@ impl ActivityRegistry {
         self.fence(true)
     }
 
+    pub async fn wait_for_quiescence(&self, timeout: Duration) -> Result<AdmissionFence> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.try_quiescent() {
+                Ok(fence) => return Ok(fence),
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => {}
+            }
+            let _ = tokio::time::timeout_at(deadline, notified).await;
+        }
+    }
+
     fn fence(&self, require_idle: bool) -> Result<AdmissionFence> {
         let mut state = self.lock();
         ensure!(state.fence.is_none(), "turn admission already fenced");

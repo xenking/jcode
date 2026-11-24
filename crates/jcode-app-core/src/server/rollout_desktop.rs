@@ -363,7 +363,7 @@ fn clear_runtime_pin(command: &mut Command) {
 }
 
 mod verification;
-pub(super) use verification::verify;
+pub(super) use verification::{validate_bundle_replacement, verify};
 
 fn same_path(a: &Path, b: &Path) -> bool {
     // Failed resolution must never prove that a foreign executable is owned.

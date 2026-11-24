@@ -97,6 +97,18 @@ fn admitted_lease_is_busy_before_any_execution_or_streaming() {
 }
 
 #[tokio::test]
+async fn reviewed_restart_waits_for_turns_and_then_fences_new_admission() {
+    let activity = ActivityRegistry::default();
+    let turn = activity.admit("reviewed-active-turn").unwrap();
+    assert!(activity.wait_for_quiescence(Duration::ZERO).await.is_err());
+    drop(turn);
+    let fence = activity.wait_for_quiescence(Duration::ZERO).await.unwrap();
+    assert!(activity.admit("reviewed-new-turn").is_err());
+    drop(fence);
+    assert!(activity.admit("reviewed-new-turn").is_ok());
+}
+
+#[tokio::test]
 async fn capture_includes_initiator_but_wait_policy_excludes_it() {
     let activity = ActivityRegistry::default();
     let _initiator = activity.admit("initiator").unwrap();

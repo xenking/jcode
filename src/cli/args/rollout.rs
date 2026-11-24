@@ -9,6 +9,12 @@ pub(crate) struct RolloutArgs {
     /// Print the plan for this machine and change nothing
     #[arg(long)]
     pub dry_run: bool,
+    /// Refresh fork heads and print a paired update preview as JSON (no installation)
+    #[arg(long, conflicts_with_all = ["dry_run", "status", "now", "no_desktop", "apply_reviewed"])]
+    pub check_update: bool,
+    /// Apply only the explicitly reviewed full CLI and Desktop commits, while idle
+    #[arg(long, conflicts_with_all = ["dry_run", "status", "now", "no_desktop"])]
+    pub apply_reviewed: bool,
     /// Reload without waiting for mid-turn sessions; reload recovery resumes them
     #[arg(long)]
     pub now: bool,
@@ -30,6 +36,24 @@ pub(crate) struct RolloutArgs {
 mod tests {
     use super::super::{Args, Command};
     use clap::Parser;
+
+    #[test]
+    fn reviewed_updates_cannot_force_or_omit_desktop() {
+        for flag in [
+            "--now",
+            "--no-desktop",
+            "--status",
+            "--dry-run",
+            "--check-update",
+        ] {
+            assert!(
+                Args::try_parse_from(["jcode", "rollout", "--apply-reviewed", flag]).is_err(),
+                "{flag}"
+            );
+        }
+        let args = Args::try_parse_from(["jcode", "rollout", "--check-update"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Rollout(rollout)) if rollout.check_update));
+    }
 
     #[test]
     fn rollout_parses_flags_and_defaults() {
