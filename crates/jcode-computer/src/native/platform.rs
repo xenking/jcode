@@ -6,6 +6,9 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::window::{copy_window_info, kCGWindowListExcludeDesktopElements};
+use objc2::rc::autoreleasepool;
+use objc2_app_kit::NSRunningApplication;
+use objc2_foundation::ns_string;
 use std::ffi::c_void;
 use std::ptr;
 
@@ -48,6 +51,26 @@ pub(crate) fn capture_trusted() -> bool {
 
 pub(crate) fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+pub(crate) fn probe_accessibility() -> Option<i32> {
+    // Unlike the focused-app query, this doesn't depend on which app has focus.
+    let pid = autoreleasepool(|_| {
+        [ns_string!("com.apple.finder"), ns_string!("com.apple.dock")]
+            .into_iter()
+            .find_map(|id| {
+                let pid = NSRunningApplication::runningApplicationsWithBundleIdentifier(id)
+                    .firstObject()?
+                    .processIdentifier();
+                (pid > 0).then_some(pid)
+            })
+    })?;
+    let code = match Element::application(pid).and_then(|app| app.copy_attr("AXRole")) {
+        Ok(Some(_)) => 0,
+        Ok(None) => -25212, // kAXErrorNoValue
+        Err(err) => err.0,
+    };
+    Some(code)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,16 +133,23 @@ impl Element {
         self.0.as_CFTypeRef()
     }
 
-    fn attr(&self, attr: &str) -> Result<Option<CFType>> {
+    fn copy_attr(&self, attr: &str) -> Result<Option<CFType>> {
         let attr = CFString::new(attr);
         let mut out = ptr::null();
-        let status = unsafe {
+        // SAFETY: The element and attribute are live, and out is writable.
+        success(unsafe {
             AXUIElementCopyAttributeValue(self.raw(), attr.as_concrete_TypeRef(), &mut out)
-        };
-        match success(status) {
-            Ok(()) => Ok((!out.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(out) })),
+        })?;
+        Ok((!out.is_null()).then(|| {
+            // SAFETY: A successful Copy returns a retained value when non-null.
+            unsafe { CFType::wrap_under_create_rule(out) }
+        }))
+    }
+
+    fn attr(&self, attr: &str) -> Result<Option<CFType>> {
+        match self.copy_attr(attr) {
             Err(e) if e.optional() => Ok(None),
-            Err(e) => Err(e),
+            result => result,
         }
     }
 

@@ -1,7 +1,7 @@
 //! Permission setup: check, request, deep-link, and poll the macOS TCC grants
 //! needed for desktop control.
 
-use super::native::{capture_trusted as screen_recording_ok, trusted as accessibility_ok};
+use super::native::{capture_trusted as screen_recording_ok, probe_accessibility, trusted};
 use anyhow::Result;
 use jcode_tool_types::ToolOutput;
 use serde_json::json;
@@ -13,9 +13,32 @@ fn yes_no(b: bool) -> &'static str {
     if b { "granted" } else { "NOT granted" }
 }
 
+const ACCESSIBILITY_REGRANT: &str =
+    "Re-add Jcode in System Settings > Privacy & Security > Accessibility and enable it.";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Accessibility {
+    Granted,
+    NeedsRegrant,
+    Unverified,
+}
+
+fn accessibility_status(ax_code: Option<i32>) -> Accessibility {
+    match ax_code {
+        Some(0) => Accessibility::Granted,
+        Some(-25200 | -25211) => Accessibility::NeedsRegrant,
+        _ => Accessibility::Unverified,
+    }
+}
+
+fn accessibility_ok() -> bool {
+    accessibility_status(probe_accessibility()) == Accessibility::Granted
+}
+
 /// Report status only.
 pub fn check_permissions() -> Result<ToolOutput> {
-    let ax = accessibility_ok();
+    let ax_code = probe_accessibility();
+    let ax = accessibility_status(ax_code);
     let screen = screen_recording_ok();
     let swift = std::path::Path::new("/usr/bin/swift").exists()
         || Command::new("/usr/bin/which")
@@ -24,19 +47,34 @@ pub fn check_permissions() -> Result<ToolOutput> {
             .map(|s| s.success())
             .unwrap_or(false);
 
+    let ax_label = match ax {
+        Accessibility::Granted => "granted",
+        Accessibility::NeedsRegrant => "NOT granted",
+        Accessibility::Unverified => "not verified",
+    };
     let mut lines = vec![
-        format!("Accessibility (input + AX control): {}", yes_no(ax)),
-        format!("Screen Recording (screenshots/OCR): {}", yes_no(screen)),
+        format!("Accessibility (input + AX control): {ax_label}"),
+        format!(
+            "Screen Recording (screenshots/OCR): {} (macOS preflight only, capture not tested)",
+            yes_no(screen)
+        ),
         format!(
             "Swift toolchain (for OCR):          {}",
             if swift { "present" } else { "missing" }
         ),
     ];
-    if !ax || !screen {
-        lines.push("Run action='setup' to request these and open the right settings pane.".into());
+    match ax {
+        Accessibility::Granted => {}
+        Accessibility::NeedsRegrant => lines.push(ACCESSIBILITY_REGRANT.into()),
+        Accessibility::Unverified => lines.push("Retry with an unlocked macOS desktop.".into()),
+    }
+    if !screen {
+        lines.push("Run action='setup' to open the Screen Recording settings pane.".into());
     }
     Ok(ToolOutput::new(lines.join("\n")).with_metadata(json!({
-        "accessibility": ax, "screen_recording": screen, "swift": swift,
+        "accessibility": ax == Accessibility::Granted,
+        "accessibility_ax_code": ax_code, "accessibility_trusted": trusted(),
+        "screen_recording": screen, "swift": swift,
     })))
 }
 
@@ -47,7 +85,7 @@ pub fn setup() -> Result<ToolOutput> {
     let ax0 = accessibility_ok();
     let screen0 = screen_recording_ok();
     log.push(format!(
-        "Initial: accessibility={}, screen_recording={}",
+        "Initial: accessibility={}, screen_recording_preflight={}",
         ax0, screen0
     ));
 
@@ -87,7 +125,7 @@ pub fn setup() -> Result<ToolOutput> {
             if granted {
                 "granted"
             } else {
-                "still not granted (toggle it, then re-run check_permissions)"
+                "still not verified (re-run check_permissions for details)"
             }
         ));
     }
@@ -95,7 +133,7 @@ pub fn setup() -> Result<ToolOutput> {
     let ax = accessibility_ok();
     let screen = screen_recording_ok();
     log.push(format!(
-        "Final: accessibility={}, screen_recording={}",
+        "Final: accessibility={}, screen_recording_preflight={}",
         ax, screen
     ));
     if !ax {
@@ -109,4 +147,23 @@ pub fn setup() -> Result<ToolOutput> {
     Ok(ToolOutput::new(log.join("\n")).with_metadata(json!({
         "accessibility": ax, "screen_recording": screen,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Accessibility, accessibility_status};
+
+    #[test]
+    fn only_ax_success_grants_accessibility() {
+        assert_eq!(accessibility_status(Some(0)), Accessibility::Granted);
+        for code in [-25200, -25211] {
+            assert_eq!(
+                accessibility_status(Some(code)),
+                Accessibility::NeedsRegrant
+            );
+        }
+        for code in [Some(-25204), Some(-25212), None] {
+            assert_eq!(accessibility_status(code), Accessibility::Unverified);
+        }
+    }
 }

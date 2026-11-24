@@ -5,7 +5,7 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
-pub(super) use platform::{capture_trusted, trusted};
+pub(super) use platform::{capture_trusted, probe_accessibility, trusted};
 
 use super::{ToolOutput, screen};
 use anyhow::ensure;

@@ -116,7 +116,18 @@ async fn live_check_permissions() {
         .await
         .unwrap();
     eprintln!("{}", out.output);
-    assert!(out.metadata.is_some());
+    let metadata = out.metadata.unwrap();
+    let granted = metadata["accessibility"].as_bool().unwrap();
+    assert_eq!(granted, metadata["accessibility_ax_code"] == 0);
+    assert_eq!(
+        granted,
+        out.output
+            .contains("Accessibility (input + AX control): granted")
+    );
+    assert!(
+        out.output
+            .contains("macOS preflight only, capture not tested")
+    );
 }
 
 #[tokio::test]
