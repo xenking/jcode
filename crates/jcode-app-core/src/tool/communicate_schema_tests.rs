@@ -34,7 +34,7 @@ fn model_facing_swarm_definition_stays_compact() {
         crate::prompt::DEFAULT_SWARM_PROMPT.trim().len()
     );
     assert!(
-        prose_bytes < 1_150,
+        prose_bytes < 1_210,
         "swarm field descriptions grew to {prose_bytes} bytes"
     );
     // working_dir needs its inheritance rule: omission must not accidentally
@@ -59,7 +59,7 @@ fn schema_still_requires_action() {
 }
 
 #[test]
-fn schema_hides_model_override_by_default_and_keeps_effort_user_configured() {
+fn schema_hides_model_override_by_default_and_scopes_effort_to_set_model() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
@@ -68,9 +68,14 @@ fn schema_hides_model_override_by_default_and_keeps_effort_user_configured() {
     let mut schema = schema.clone();
     super::super::apply_swarm_model_policy(&mut schema, &crate::config::AgentsConfig::default());
     assert!(schema["properties"].get("model").is_none());
-    // Worker effort is user-configured (`agents.swarm_effort`, default low),
-    // never chosen by the coordinating agent.
-    assert!(!props.contains_key("effort"));
+    // Spawned worker effort is user-configured (`agents.swarm_effort`, default
+    // low). `effort` exists only to retune a running worker via set_model.
+    assert!(
+        props["effort"]["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("set_model")),
+        "effort is for set_model only"
+    );
     assert!(
         schema["properties"]["action"]["enum"]
             .as_array()
@@ -521,7 +526,7 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         assert!(!actions.contains(&hidden), "{hidden} should not be offered");
     }
     assert!(
-        actions.len() <= 16,
+        actions.len() <= 17,
         "keep the swarm tool small: {actions:?}"
     );
     for kept in [

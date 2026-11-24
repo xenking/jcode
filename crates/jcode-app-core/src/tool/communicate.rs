@@ -897,7 +897,7 @@ impl Tool for CommunicateTool {
                 },
                 "effort": {
                     "type": "string",
-                    "description": "Optional reasoning effort for set_model. Subject to the worker's provider, swarm pool, and configured caps."
+                    "description": "Reasoning effort for set_model, within configured caps."
                 },
                 "to_swarm": {
                     "type": "string",
