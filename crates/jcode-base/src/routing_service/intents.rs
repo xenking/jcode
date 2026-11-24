@@ -35,7 +35,9 @@ impl RoutingService {
             }
             RoutingIntentAction::Switch { account } => {
                 let account = self.known_account_opt(account.as_deref())?;
-                self.update(now, |state| state.set_switch(session, account.as_ref(), now))?;
+                self.update(now, |state| {
+                    state.set_switch(session, account.as_ref(), now)
+                })?;
                 Ok(match account {
                     Some(account) => format!("this session moves to {account}"),
                     None => "switch cleared".into(),
@@ -49,14 +51,20 @@ impl RoutingService {
                 let minutes = minutes.unwrap_or(DEFAULT_HOLD_MINUTES).max(1);
                 let until = now + i64::from(minutes) * 60;
                 self.update(now, |state| state.set_hold(Some((&account, until))))?;
-                Ok(format!("holding interactive sessions on {account} for {}", span(minutes)))
+                Ok(format!(
+                    "holding interactive sessions on {account} for {}",
+                    span(minutes)
+                ))
             }
             RoutingIntentAction::Ack { account, minutes } => {
                 let account = self.known_account(&account)?;
                 let minutes = minutes.unwrap_or(DEFAULT_ACK_MINUTES).max(1);
                 let until = now + i64::from(minutes) * 60;
                 self.update(now, |state| state.ack(&account, until))?;
-                Ok(format!("spending past ask limits on {account} for {}", span(minutes)))
+                Ok(format!(
+                    "spending past ask limits on {account} for {}",
+                    span(minutes)
+                ))
             }
             RoutingIntentAction::Paid { mode } => {
                 let entry = match mode.trim() {
@@ -64,9 +72,9 @@ impl RoutingService {
                     "off" => PaidEntry::Off,
                     raw => PaidEntry::Allow {
                         until: now
-                            + parse_duration_secs(raw)
-                                .ok_or_else(|| format!("`{raw}` is not auto, off or a duration like 30m or 2h"))?
-                                as i64,
+                            + parse_duration_secs(raw).ok_or_else(|| {
+                                format!("`{raw}` is not auto, off or a duration like 30m or 2h")
+                            })? as i64,
                     },
                 };
                 self.update(now, |state| state.set_paid(Some(entry)))?;
@@ -74,7 +82,10 @@ impl RoutingService {
                     PaidEntry::Auto => "paid accounts: auto".into(),
                     PaidEntry::Off => "paid accounts: off".into(),
                     PaidEntry::Allow { until } => {
-                        format!("paid accounts allowed for {}", span(((until - now + 59) / 60) as u32))
+                        format!(
+                            "paid accounts allowed for {}",
+                            span(((until - now + 59) / 60) as u32)
+                        )
                     }
                 })
             }
@@ -118,7 +129,9 @@ impl RoutingService {
         let mut out = String::new();
         let mode = match routing.mode {
             jcode_routing_policy::config::RoutingMode::Off => "off",
-            jcode_routing_policy::config::RoutingMode::Shadow => "shadow (decisions logged, not applied)",
+            jcode_routing_policy::config::RoutingMode::Shadow => {
+                "shadow (decisions logged, not applied)"
+            }
             jcode_routing_policy::config::RoutingMode::Auto => "auto",
         };
         let _ = writeln!(out, "routing: {mode}");
@@ -136,7 +149,11 @@ impl RoutingService {
         if let Some(current) = current {
             let _ = writeln!(out, "this session: {current}");
         }
-        let default_paid = if policy.paid == PaidMode::Auto { "auto" } else { "off" };
+        let default_paid = if policy.paid == PaidMode::Auto {
+            "auto"
+        } else {
+            "off"
+        };
         let _ = match state.paid {
             Some(PaidEntry::Allow { until }) => writeln!(
                 out,
@@ -148,10 +165,20 @@ impl RoutingService {
             None => writeln!(out, "paid: {default_paid}"),
         };
         if let Some(hold) = &state.hold {
-            let _ = writeln!(out, "hold: {} for {}", hold.account, span(minutes_left(hold.until, now)));
+            let _ = writeln!(
+                out,
+                "hold: {} for {}",
+                hold.account,
+                span(minutes_left(hold.until, now))
+            );
         }
         for ack in &state.acks {
-            let _ = writeln!(out, "ack: {} for {}", ack.account, span(minutes_left(ack.until, now)));
+            let _ = writeln!(
+                out,
+                "ack: {} for {}",
+                ack.account,
+                span(minutes_left(ack.until, now))
+            );
         }
         if let Some(entry) = state.sessions.get(session) {
             if let Some(pin) = &entry.pin {
@@ -161,10 +188,18 @@ impl RoutingService {
                 let _ = writeln!(out, "switch: {switch}");
             }
         }
-        let ids: Vec<AccountId> = policy.accounts.iter().map(|account| account.id.clone()).collect();
+        let ids: Vec<AccountId> = policy
+            .accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect();
         let evicted = evictions(self, &ids, now);
         for account in &policy.accounts {
-            let marker = if current == Some(&account.id) { "*" } else { " " };
+            let marker = if current == Some(&account.id) {
+                "*"
+            } else {
+                " "
+            };
             let mut line = format!(
                 "{marker} {}  {}  priority {}",
                 account.id,

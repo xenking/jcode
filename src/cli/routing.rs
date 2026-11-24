@@ -264,7 +264,9 @@ fn import_pool(dry_run: bool) -> Result<()> {
         println!("skipped {}: {}", skipped.key, skipped.reason);
     }
     if plan.add.is_empty() {
-        println!("nothing to import: every account in account-pool.json is already routed or excluded");
+        println!(
+            "nothing to import: every account in account-pool.json is already routed or excluded"
+        );
         return Ok(());
     }
     for account in &plan.add {
@@ -274,8 +276,7 @@ fn import_pool(dry_run: bool) -> Result<()> {
             account.id,
             account.kind,
             account.priority
-        )
-        ;
+        );
     }
     if dry_run {
         println!("dry run: config.toml was not changed");

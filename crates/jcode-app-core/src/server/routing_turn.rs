@@ -34,8 +34,12 @@ fn routing_enabled() -> bool {
 /// The account `agent` serves requests with now.
 pub(super) fn current_account(agent: &Agent) -> Option<AccountId> {
     let provider = agent.provider_handle();
-    let from_route = agent
-        .session_route_api_method()
+    let method = agent.session_route_api_method().or_else(|| {
+        provider
+            .direct_openai_compatible_route_parts()
+            .map(|(_, api_method, _)| api_method)
+    });
+    let from_route = method
         .as_deref()
         .and_then(jcode_provider_core::route_pool_key);
     match from_route.as_deref() {
@@ -121,7 +125,9 @@ fn bind(
         }
         (provider, label) => {
             if !crate::provider_catalog::api_key_provider_takes_labels(provider) {
-                anyhow::bail!("{provider} does not take account labels, cannot move onto {account}");
+                anyhow::bail!(
+                    "{provider} does not take account labels, cannot move onto {account}"
+                );
             }
             crate::provider_catalog::set_active_api_key_account(provider, label)?;
             agent.reset_provider_session();
@@ -151,6 +157,14 @@ pub(super) async fn before_turn(
     Ok(())
 }
 
+/// The routing decision for a turn that runs in this process with no daemon
+/// session, such as `jcode run`. Nobody can answer a gate there, so a reached
+/// limit blocks the turn with its reason.
+pub async fn route_unattached_turn(agent: &mut Agent) -> anyhow::Result<()> {
+    let (tx, _events) = mpsc::unbounded_channel();
+    before_turn(agent, &tx).await
+}
+
 fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
     match plan {
         Plan::Stay(outcome) => {
@@ -163,7 +177,9 @@ fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerE
                     agent.session_id(),
                     outcome.account
                 ));
-                outcome.warnings.push(format!("could not move to {}: {error}", outcome.account));
+                outcome
+                    .warnings
+                    .push(format!("could not move to {}: {error}", outcome.account));
                 if let Some(current) = current_account(agent) {
                     outcome.pending = Some(std::mem::replace(&mut outcome.account, current));
                 }
@@ -226,7 +242,9 @@ pub(super) async fn on_failure(
         Ok(Plan::Move(outcome)) => {
             let target = outcome.account.clone();
             if let Err(error) = bind(agent, &target, event_tx) {
-                crate::logging::warn(&format!("routing: could not fail over to {target}: {error}"));
+                crate::logging::warn(&format!(
+                    "routing: could not fail over to {target}: {error}"
+                ));
                 return Some(FailureRoute::Surface(Some(format!(
                     "routing could not move to {target}: {error}"
                 ))));

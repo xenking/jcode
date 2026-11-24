@@ -64,7 +64,10 @@ impl Learned {
     }
 
     pub(super) fn ring(&self, account: &AccountId) -> BurnRing {
-        self.rings.get(account.as_str()).cloned().unwrap_or_default()
+        self.rings
+            .get(account.as_str())
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn availability(&self, account: &AccountId, now: i64) -> Availability {
@@ -111,7 +114,11 @@ impl Learned {
 
     /// Serialized state when it changed and is due, so the caller writes the
     /// file without holding the lock.
-    pub(super) fn take_save(&mut self, home: Option<&Path>, now: i64) -> Option<(PathBuf, Vec<u8>)> {
+    pub(super) fn take_save(
+        &mut self,
+        home: Option<&Path>,
+        now: i64,
+    ) -> Option<(PathBuf, Vec<u8>)> {
         if !self.dirty || now - self.saved_at < SAVE_INTERVAL_SECS {
             return None;
         }

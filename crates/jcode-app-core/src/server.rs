@@ -64,6 +64,7 @@ mod provider_control;
 mod reload;
 mod routing_requests;
 mod routing_turn;
+pub use routing_turn::route_unattached_turn;
 pub(crate) mod reload_recovery;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
 pub(crate) mod ask_escalation;

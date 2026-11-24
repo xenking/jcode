@@ -375,33 +375,38 @@ impl RoutingService {
     }
 
     fn record(&self, active: &Active, input: &TurnInput, plan: &Plan, now: i64) {
-        let (decision, account, reason, warnings, pending): (_, Option<&AccountId>, &str, &[String], _) =
-            match plan {
-                Plan::Stay(outcome) if outcome.pending.is_some() => (
-                    "pending",
-                    Some(&outcome.account),
-                    outcome.reason.as_str(),
-                    outcome.warnings.as_slice(),
-                    outcome.pending.as_ref(),
-                ),
-                Plan::Stay(outcome) => (
-                    "stay",
-                    Some(&outcome.account),
-                    outcome.reason.as_str(),
-                    outcome.warnings.as_slice(),
-                    None,
-                ),
-                Plan::Move(outcome) => (
-                    "move",
-                    Some(&outcome.account),
-                    outcome.reason.as_str(),
-                    outcome.warnings.as_slice(),
-                    None,
-                ),
-                Plan::Gate(request) => ("gate", None, request.reason.as_str(), &[][..], None),
-                Plan::Block { reason } => ("block", None, reason.as_str(), &[][..], None),
-                Plan::Inactive | Plan::Observed => return,
-            };
+        let (decision, account, reason, warnings, pending): (
+            _,
+            Option<&AccountId>,
+            &str,
+            &[String],
+            _,
+        ) = match plan {
+            Plan::Stay(outcome) if outcome.pending.is_some() => (
+                "pending",
+                Some(&outcome.account),
+                outcome.reason.as_str(),
+                outcome.warnings.as_slice(),
+                outcome.pending.as_ref(),
+            ),
+            Plan::Stay(outcome) => (
+                "stay",
+                Some(&outcome.account),
+                outcome.reason.as_str(),
+                outcome.warnings.as_slice(),
+                None,
+            ),
+            Plan::Move(outcome) => (
+                "move",
+                Some(&outcome.account),
+                outcome.reason.as_str(),
+                outcome.warnings.as_slice(),
+                None,
+            ),
+            Plan::Gate(request) => ("gate", None, request.reason.as_str(), &[][..], None),
+            Plan::Block { reason } => ("block", None, reason.as_str(), &[][..], None),
+            Plan::Inactive | Plan::Observed => return,
+        };
         let auto = active.mode == RoutingMode::Auto;
         let account_text = account.map(AccountId::as_str);
         let pending_text = pending.map(AccountId::as_str);
@@ -532,7 +537,11 @@ fn evictions(service: &RoutingService, accounts: &[AccountId], now: i64) -> BTre
     let learned = service.learned();
     accounts
         .iter()
-        .filter_map(|id| learned.evicted_until(id, now).map(|until| (id.to_string(), until)))
+        .filter_map(|id| {
+            learned
+                .evicted_until(id, now)
+                .map(|until| (id.to_string(), until))
+        })
         .collect()
 }
 

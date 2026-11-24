@@ -53,7 +53,9 @@ enum Applied {
     /// An intent was written. Decide again.
     Decided,
     /// The human waits for the window to reset.
-    Waiting { until_unix: i64 },
+    Waiting {
+        until_unix: i64,
+    },
     Cancelled,
     /// Not one of the offered options. The gate stays open.
     Ignored,
@@ -140,7 +142,9 @@ impl RoutingService {
                     GateOption::WaitUntil { resets_at } => Some(*resets_at),
                     _ => None,
                 })
-                .map_or(Applied::Ignored, |until_unix| Applied::Waiting { until_unix }),
+                .map_or(Applied::Ignored, |until_unix| Applied::Waiting {
+                    until_unix,
+                }),
             RoutingGateChoice::Switch { account } => {
                 let Some(account) = AccountId::parse(&account).filter(|account| {
                     request.options.iter().any(
@@ -172,7 +176,9 @@ impl RoutingService {
         match self.env.update_state(now, &mut change) {
             Ok(()) => Applied::Decided,
             Err(error) => {
-                crate::logging::warn(&format!("routing: could not store the gate answer: {error}"));
+                crate::logging::warn(&format!(
+                    "routing: could not store the gate answer: {error}"
+                ));
                 Applied::Ignored
             }
         }

@@ -133,7 +133,9 @@ pub fn append_accounts(config: &str, add: &[Imported]) -> Result<String> {
         .get_mut("accounts")
         .and_then(|item| item.as_array_of_tables_mut())
     else {
-        bail!("routing.accounts in config.toml is not written as [[routing.accounts]] tables, nothing was written");
+        bail!(
+            "routing.accounts in config.toml is not written as [[routing.accounts]] tables, nothing was written"
+        );
     };
     for account in add {
         let mut table = toml_edit::Table::new();
@@ -158,9 +160,12 @@ mod tests {
                 "opencode-go".into(),
             ],
             excluded: vec!["openai:fox".into()],
-            priorities: [("claude:old".to_string(), 3), ("claude:team".to_string(), 0)]
-                .into_iter()
-                .collect(),
+            priorities: [
+                ("claude:old".to_string(), 3),
+                ("claude:team".to_string(), 0),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -245,8 +250,14 @@ mod tests {
         let out = append_accounts("", &add).unwrap();
 
         let parsed: toml::Value = toml::from_str(&out).unwrap();
-        assert!(parsed["routing"].get("mode").is_none(), "mode stays default");
-        assert_eq!(parsed["routing"]["accounts"][0]["id"].as_str(), Some("claude:a"));
+        assert!(
+            parsed["routing"].get("mode").is_none(),
+            "mode stays default"
+        );
+        assert_eq!(
+            parsed["routing"]["accounts"][0]["id"].as_str(),
+            Some("claude:a")
+        );
     }
 
     #[test]

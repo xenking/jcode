@@ -228,7 +228,11 @@ async fn shadow_logs_the_decision_and_changes_nothing() {
     assert_eq!(line["applied"], false);
     assert!(line["reason"].as_str().unwrap().contains("claude:b"));
     assert!(line["time"].as_str().unwrap().starts_with("2027-"));
-    assert_eq!(env.state(), RoutingState::default(), "no intent was written");
+    assert_eq!(
+        env.state(),
+        RoutingState::default(),
+        "no intent was written"
+    );
 }
 
 #[tokio::test]
@@ -424,7 +428,10 @@ async fn gate_ignores_an_account_it_did_not_offer() {
     service.answer_gate("session-1", &gate_id, RoutingGateChoice::Cancel);
 
     assert!(routed.await.unwrap().is_err());
-    assert!(env.state().sessions.is_empty(), "the bogus switch wrote nothing");
+    assert!(
+        env.state().sessions.is_empty(),
+        "the bogus switch wrote nothing"
+    );
 }
 
 #[tokio::test]
@@ -554,7 +561,10 @@ async fn intents_are_validated_and_reported() {
     assert!(text.contains("routing: auto"), "{text}");
     assert!(text.contains("pin: claude:b"), "{text}");
     assert!(text.contains("paid: allowed for 2h"), "{text}");
-    assert!(text.contains("* claude:a"), "current account is marked: {text}");
+    assert!(
+        text.contains("* claude:a"),
+        "current account is marked: {text}"
+    );
 
     let pinned = service
         .plan(&input("claude:a", Seam::Cold, Role::Interactive))

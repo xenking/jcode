@@ -2620,6 +2620,7 @@ async fn run_single_message_with_agent(
     // run_once's nested read reservations are deliberately safe.
     let result: Result<()> = async {
         let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        crate::server::route_unattached_turn(agent).await?;
         let start_index = agent.message_count();
         match output.format {
             RunFormat::Json => {
