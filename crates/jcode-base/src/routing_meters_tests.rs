@@ -71,6 +71,7 @@ fn priced_spend_reaches_both_the_activity_totals_and_the_routing_ledger() {
 
     record_priced_spend("openai-compatible:huggingface", "meta/llama", 1.25, 900);
     record_priced_spend("openai-compatible:huggingface", "meta/llama", 0.75, 100);
+    // A free call adds tokens to the ledger but no dollars and no activity spend.
     record_priced_spend("openai-compatible:huggingface", "meta/llama", 0.0, 100);
     record_priced_spend("claude:api-key", "claude-x", 3.0, 10);
 
@@ -82,7 +83,7 @@ fn priced_spend_reaches_both_the_activity_totals_and_the_routing_ledger() {
     assert_eq!(ledger.sum(&scope, Unit::Usd, now - 60, now + 60), Some(2.0));
     assert_eq!(
         ledger.sum(&scope, Unit::Tokens, now - 60, now + 60),
-        Some(1_000.0)
+        Some(1_100.0)
     );
     let claude = jcode_routing_policy::Scope::Account(id("claude"));
     assert_eq!(
