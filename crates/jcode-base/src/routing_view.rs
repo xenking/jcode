@@ -162,10 +162,11 @@ pub fn build(
     measured: &dyn Measured,
     keys: &[ProviderKeys],
 ) -> RoutingView {
-    let (policy, problems) = match Policy::from_config(routing, egress) {
+    let (policy, mut problems) = match Policy::from_config(routing, egress) {
         Ok(policy) => (Some(policy), Vec::new()),
         Err(errors) => (None, errors.into_iter().map(|error| error.0).collect()),
     };
+    problems.extend(routing.retired_keys());
     let snapshot = policy.as_ref().map(measure).unwrap_or_default();
     let routed_readings = |id: &str| {
         AccountId::parse(id)

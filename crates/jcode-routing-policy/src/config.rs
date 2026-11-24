@@ -66,6 +66,28 @@ impl RoutingConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
+
+    /// One line per retired key the config still sets. They are ignored, never
+    /// a load error, and each line names what replaced the key.
+    pub fn retired_keys(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for account in &self.accounts {
+            let id = &account.id;
+            if account.drain_before_reset_h.is_some() || account.drain_limit_pct.is_some() {
+                lines.push(format!(
+                    "routing.accounts `{id}`: drain_before_reset_h and drain_limit_pct are ignored. \
+                     Room that would be lost at a reset now drains first on its own"
+                ));
+            }
+            if account.pacing.is_some() {
+                lines.push(format!(
+                    "routing.accounts `{id}`: pacing is ignored. Every pool lost at a reset is \
+                     paced to its own reset (pacing_slack_pct still applies)"
+                ));
+            }
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +132,17 @@ pub struct AccountConfig {
     pub pacing_slack_pct: f64,
     /// Multiplies the money price of a credits or metered account.
     pub weight: f64,
+    /// Retired: pools behind their pace line drain first on their own.
+    /// Still accepted so older configs load; [`RoutingConfig::retired_keys`]
+    /// names it.
+    #[serde(default, skip_serializing)]
+    pub drain_before_reset_h: Option<f64>,
+    /// Retired with `drain_before_reset_h`.
+    #[serde(default, skip_serializing)]
+    pub drain_limit_pct: Option<f64>,
+    /// Retired: every pool lost at a reset is paced to its own reset.
+    #[serde(default, skip_serializing)]
+    pub pacing: Option<String>,
 }
 
 impl Default for AccountConfig {
@@ -123,6 +156,9 @@ impl Default for AccountConfig {
             on_limit: OnLimit::Switch,
             pacing_slack_pct: 0.0,
             weight: 1.0,
+            drain_before_reset_h: None,
+            drain_limit_pct: None,
+            pacing: None,
         }
     }
 }

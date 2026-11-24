@@ -41,6 +41,13 @@ pub struct Config {
     pub allow_5m: bool,
     pub min_cached_tokens: u64,
     pub max_daily_usd_micros: u64,
+    /// Retired: blocking `ask` waits no longer ping. Accepted so older
+    /// configs load; [`Config::retired_keys`] names it.
+    #[serde(default, skip_serializing)]
+    pub allow_human_wait: Option<bool>,
+    /// Retired: pings run while they cost less than a rebuild.
+    #[serde(default, skip_serializing)]
+    pub max_pings_per_wait: Option<u32>,
 }
 
 impl Default for Config {
@@ -50,11 +57,31 @@ impl Default for Config {
             allow_5m: false,
             min_cached_tokens: 100_000,
             max_daily_usd_micros: 10_000_000,
+            allow_human_wait: None,
+            max_pings_per_wait: None,
         }
     }
 }
 
 impl Config {
+    /// One line per retired `[cache]` key still set, naming its replacement.
+    pub fn retired_keys(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.allow_human_wait.is_some() {
+            lines.push(
+                "cache.allow_human_wait is ignored. Pings run only while waiting on swarm workers"
+                    .to_string(),
+            );
+        }
+        if self.max_pings_per_wait.is_some() {
+            lines.push(
+                "cache.max_pings_per_wait is ignored. Pings run while they cost less than a rebuild"
+                    .to_string(),
+            );
+        }
+        lines
+    }
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }

@@ -135,6 +135,10 @@ impl RoutingService {
             jcode_routing_policy::config::RoutingMode::Auto => "auto",
         };
         let _ = writeln!(out, "routing: {mode}");
+        let cache = crate::config::config().cache.retired_keys();
+        for note in routing.retired_keys().into_iter().chain(cache) {
+            let _ = writeln!(out, "  config note: {note}");
+        }
         let policy = match Policy::from_config(&routing, &egress) {
             Ok(policy) => policy,
             Err(errors) => {

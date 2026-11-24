@@ -1837,3 +1837,65 @@ fn invalid_routing_section_does_not_break_config_loading() {
 
 #[path = "config_tests_additional_tests.rs"]
 mod additional_hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values;
+
+// Retired routing and cache keys still load: they are ignored and named in a
+// note, never a parse error.
+#[test]
+fn retired_routing_and_cache_keys_still_load() {
+    let config = toml::from_str::<Config>(
+        r#"
+        [cache]
+        allow_human_wait = true
+        max_pings_per_wait = 3
+
+        [routing]
+        mode = "auto"
+
+        [[routing.accounts]]
+        id = "claude:team"
+        drain_before_reset_h = 12
+        drain_limit_pct = 98
+
+        [[routing.accounts]]
+        id = "openai:codex"
+        kind = "credits"
+        pacing = "month-line"
+        pacing_slack_pct = 2
+
+        [[routing.budgets]]
+        name = "codex-month"
+        account = "openai:codex"
+        meter = "ledger"
+        window = "calendar-month"
+        unit = "usd"
+        limit = 600
+        "#,
+    )
+    .expect("a config with retired keys loads");
+    let policy = jcode_routing_policy::Policy::from_config(&config.routing, &config.egress)
+        .expect("the routing section stays valid");
+    assert_eq!(policy.accounts[1].pacing_slack_pct, 2.0);
+    assert_eq!(
+        policy.budgets[0].window,
+        jcode_routing_policy::Window::CALENDAR_MONTH
+    );
+    let notes = config.routing.retired_keys();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[0].contains("drain_before_reset_h") && notes[0].contains("drains first"));
+    assert!(notes[1].contains("pacing is ignored") && notes[1].contains("paced to its own reset"));
+    let cache = config.cache.retired_keys();
+    assert_eq!(cache.len(), 2, "{cache:?}");
+    assert!(
+        cache
+            .iter()
+            .any(|note| note.contains("allow_human_wait") && note.contains("swarm"))
+    );
+    assert!(
+        cache
+            .iter()
+            .any(|note| note.contains("max_pings_per_wait") && note.contains("rebuild"))
+    );
+    // Retired keys are never written back.
+    let text = toml::to_string(&config).unwrap();
+    assert!(!text.contains("drain_before_reset_h") && !text.contains("max_pings_per_wait"));
+}
