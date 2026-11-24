@@ -988,7 +988,11 @@ fn login_openai_compatible_flow(
     eprintln!(
         "Stored at {}",
         crate::storage::app_config_dir()?
-            .join(&resolved.env_file)
+            .join(if account_label.is_some() {
+                "api-key-accounts.json"
+            } else {
+                resolved.env_file.as_str()
+            })
             .display()
     );
     if let Some(default_model) = resolved.default_model {

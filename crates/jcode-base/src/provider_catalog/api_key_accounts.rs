@@ -521,6 +521,7 @@ pub fn api_key_credential_for_account(account: &AccountId) -> Result<Option<ApiK
     credential_with(crate::config::config(), &load_store(), account)
 }
 
+#[cfg(test)]
 pub(crate) fn api_key_credential_for_account_with(
     config: &Config,
     account: &AccountId,
