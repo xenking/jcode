@@ -71,6 +71,30 @@ impl Agent {
         ))
     }
 
+    /// Compacts on the account the session runs on now, while its prompt
+    /// cache is warm, and waits for the summary. Routing calls this right
+    /// before it moves the session, so the move rewrites only the summary.
+    /// Returns the context size before and after, in tokens.
+    pub(crate) async fn compact_on_current_account(&mut self) -> Result<(u64, u64)> {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        let before = manager.effective_token_count_with(self.session.provider_messages());
+        let provider = self.provider.fork();
+        manager
+            .force_compact_with_policy(
+                self.session.provider_messages(),
+                provider,
+                crate::compaction::ManualCompactionPolicy::Standard,
+            )
+            .map_err(|reason| anyhow::anyhow!("cannot compact before the move: {reason}"))?;
+        self.wait_for_request_compaction(&mut manager).await?;
+        if let Some(error) = manager.take_compaction_error() {
+            anyhow::bail!("compaction before the move failed: {error}");
+        }
+        let after = manager.effective_token_count_with(self.session.provider_messages());
+        Ok((before as u64, after as u64))
+    }
+
     pub(super) async fn wait_for_request_compaction(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,

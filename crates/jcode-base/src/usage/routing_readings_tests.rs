@@ -177,7 +177,7 @@ fn opencode_payload_maps_rolling_weekly_and_monthly() {
     assert_eq!(find(&readings, Window::hours(5), None).used, 23.0);
     assert_eq!(find(&readings, Window::hours(5), None).resets_at, Some(FAR));
     assert_eq!(find(&readings, Window::days(7), None).used, 9.0);
-    assert_eq!(find(&readings, Window::CalendarMonth, None).used, 4.0);
+    assert_eq!(find(&readings, Window::CALENDAR_MONTH, None).used, 4.0);
 }
 
 #[test]
@@ -204,14 +204,14 @@ fn cursor_payload_maps_the_billing_cycle_pools() {
     let report = provider_fetch::cursor_plan_usage_report(&json);
     let readings = cursor_readings(&report.limits, NOW);
     assert_eq!(readings.len(), 3);
-    let included = find(&readings, Window::CalendarMonth, None);
+    let included = find(&readings, Window::CALENDAR_MONTH, None);
     assert_eq!((included.used, included.resets_at), (27.0, Some(FAR)));
     assert_eq!(
-        find(&readings, Window::CalendarMonth, Some("auto")).used,
+        find(&readings, Window::CALENDAR_MONTH, Some("auto")).used,
         29.0
     );
     assert_eq!(
-        find(&readings, Window::CalendarMonth, Some("api")).used,
+        find(&readings, Window::CALENDAR_MONTH, Some("api")).used,
         100.0
     );
     // No usage fields: nothing to report, not zero.

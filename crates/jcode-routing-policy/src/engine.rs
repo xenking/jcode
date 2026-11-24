@@ -3,8 +3,12 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::config::{AccountKind, BudgetAction, MeterSource, OnLimit, Pacing, PaidMode, Unit};
-use crate::policy::{Account, AccountId, Budget, Policy, Window};
+use crate::config::{BudgetAction, MeterSource, OnLimit, PaidMode, Unit};
+use crate::economics::{
+    CacheContext, Grant, Leave, Options, Outlook, Pool, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+    grant_wastes,
+};
+use crate::policy::{Account, AccountId, Budget, Policy, Scope, Window};
 use crate::strategy::BurnRing;
 
 /// One usage window an account reports right now.
@@ -38,6 +42,8 @@ pub struct AccountState {
     pub availability: Availability,
     /// Recent meter samples the daemon feeds and persists for burn-rate limits.
     pub burn: BurnRing,
+    /// Reset grants not yet redeemed.
+    pub grants: Vec<Grant>,
 }
 
 /// Everything measured, gathered by the daemon before each decision. Accounts
@@ -47,9 +53,9 @@ pub struct Snapshot {
     pub accounts: BTreeMap<AccountId, AccountState>,
     /// Ledger usage per budget name, in the budget's unit and current window.
     pub ledger: BTreeMap<String, f64>,
-    /// Elapsed fraction of the local calendar month (0..=1), passed by the
-    /// caller so `decide` stays free of calendar knowledge.
-    pub month_fraction: f64,
+    /// When each ledger budget's window resets next (unix seconds), passed by
+    /// the caller so `decide` stays free of calendar knowledge.
+    pub resets: BTreeMap<String, i64>,
 }
 
 /// An account chosen until a deadline (unix seconds).
@@ -84,27 +90,49 @@ pub struct Intents {
     pub paid: PaidIntent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Role {
+    #[default]
     Interactive,
     Subagent,
     Headless,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Request<'a> {
     pub model: &'a str,
     pub model_class: Option<&'a str>,
     pub role: Role,
     /// The account the session runs on now.
     pub current: Option<&'a AccountId>,
+    /// The account the parent session runs on. A child's first turn starts
+    /// there when it can serve, so both share the cached prefix.
+    pub parent: Option<&'a AccountId>,
+    pub cache: CacheContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GateOption {
-    Switch { account: AccountId, detail: String },
-    WaitUntil { resets_at: i64 },
-    Ack { account: AccountId },
+    Switch {
+        account: AccountId,
+        detail: String,
+    },
+    /// Compact on the warm current account, then move to `account`.
+    CompactSwitch {
+        account: AccountId,
+        detail: String,
+    },
+    /// Redeem a reset grant on `account` and stay there.
+    RedeemReset {
+        account: AccountId,
+        expires_at: i64,
+    },
+    WaitUntil {
+        resets_at: i64,
+    },
+    Ack {
+        account: AccountId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +141,21 @@ pub enum Decision {
         account: AccountId,
         reason: String,
         warnings: Vec<String>,
+        /// A better account a warm session moves to at its next cold seam.
+        pending: Option<AccountId>,
+    },
+    /// Compact on the warm current account, then move to `account`.
+    CompactThenMove {
+        account: AccountId,
+        reason: String,
+        warnings: Vec<String>,
+    },
+    /// Redeem the reset grant on `account` (the current one) and stay, so the
+    /// cache survives.
+    Redeem {
+        account: AccountId,
+        expires_at: i64,
+        reason: String,
     },
     /// Ask the human. Only for interactive sessions.
     Gate {
@@ -137,13 +180,37 @@ struct Standing<'p> {
     /// Highest relevant percent reading, for balancing within a priority.
     load: Option<f64>,
     resets_at: Option<i64>,
-    /// 0 drain candidate, 1 subscription, 2 paced credits, 3 last resort.
-    tier: u8,
+    /// Every pool is behind its pace line, so its room would be lost at the
+    /// reset: the soonest such reset (or wasting grant expiry).
+    lost_room: Option<i64>,
+    /// `λ`: what one unit of its quota is worth now.
+    price: f64,
+    /// A reset grant that would lapse unused makes its room free.
+    free_grant: bool,
+    /// The grant that clears every limit the account reached, as its expiry
+    /// and whether it would otherwise expire unused.
+    redeemable: Option<(i64, bool)>,
 }
 
 impl Standing<'_> {
     fn usable(&self) -> bool {
         self.ready && self.spent.is_none()
+    }
+
+    /// Rule 4, first step: at the wall, a reset that would expire unused is
+    /// free and keeps the cache.
+    fn redeem_at_wall(&self) -> Option<Decision> {
+        match (self.ready, &self.spent, self.redeemable) {
+            (true, Some(_), Some((expires_at, true))) => Some(Decision::Redeem {
+                account: self.account.id.clone(),
+                expires_at,
+                reason: format!(
+                    "{} at its limit, redeeming a reset that would expire unused",
+                    self.account.id
+                ),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -200,13 +267,16 @@ pub fn decide(
             }
             continue;
         }
+        if let Some(redeem) = standing.redeem_at_wall() {
+            return redeem;
+        }
         return match &standing.spent {
-            None => use_account(standing, format!("{how} to {id}")),
+            None => use_account(standing, format!("{how} to {id}"), None),
             Some((OnLimit::Block, reasons)) => Decision::Block {
                 reason: reasons.join("; "),
             },
             // A human chose this account; spending past its limit is a question, not a switch.
-            Some((_, reasons)) => gate(&standings, Some(standing), reasons, request.role),
+            Some((_, reasons)) => gate(policy, &standings, Some(standing), reasons, request),
         };
     }
 
@@ -216,40 +286,61 @@ pub fn decide(
         PaidIntent::AllowUntil(until) => until > now,
         PaidIntent::Default => policy.paid == PaidMode::Auto,
     };
-    let mut ranked: Vec<&Standing<'_>> = standings
-        .iter()
-        .filter(|s| s.usable() && (paid_allowed || !s.account.kind.is_paid()))
-        .collect();
+    let allowed = |s: &Standing<'_>| s.usable() && (paid_allowed || !s.account.kind.is_paid());
+    let mut ranked: Vec<&Standing<'_>> = standings.iter().filter(|s| allowed(s)).collect();
     ranked.sort_by(|a, b| rank(a, b, request));
 
-    if let Some(current) = request.current.and_then(find)
+    // Rule 7: a child starts where its parent runs, sharing the cached prefix.
+    if request.cache.seam == Seam::Start
+        && let Some(parent) = request.parent.and_then(find)
+        && allowed(parent)
+    {
+        return use_account(
+            parent,
+            format!("parent session's account {}", parent.account.id),
+            None,
+        );
+    }
+
+    let current = request.current.and_then(find);
+    if let Some(current) = current
         && let Some((action, reasons)) = &current.spent
     {
+        if let Some(redeem) = current.redeem_at_wall() {
+            return redeem;
+        }
         match action {
             OnLimit::Block => {
                 return Decision::Block {
                     reason: reasons.join("; "),
                 };
             }
-            OnLimit::Ask => return gate(&standings, Some(current), reasons, request.role),
+            OnLimit::Ask => return gate(policy, &standings, Some(current), reasons, request),
             OnLimit::Switch => {}
         }
     }
 
     match ranked.first() {
-        Some(best) => {
-            let reason = match request.current {
-                Some(current) if current != &best.account.id => {
-                    format!(
-                        "{current} outranked by {} ({})",
-                        best.account.id,
-                        tier_label(best, request)
-                    )
-                }
-                _ => tier_label(best, request),
-            };
-            use_account(best, reason)
-        }
+        Some(best) => match current {
+            Some(current)
+                if current.account.id != best.account.id && request.cache.seam == Seam::Warm =>
+            {
+                leave_warm(policy, request, current, allowed(current), best)
+            }
+            _ => {
+                let reason = match request.current {
+                    Some(current) if current != &best.account.id => {
+                        format!(
+                            "{current} outranked by {} ({})",
+                            best.account.id,
+                            tier_label(best, request)
+                        )
+                    }
+                    _ => tier_label(best, request),
+                };
+                use_account(best, reason, None)
+            }
+        },
         None => {
             let mut reasons: Vec<String> = standings
                 .iter()
@@ -273,33 +364,95 @@ pub fn decide(
                 };
             }
             let current = request.current.and_then(find);
-            gate(&standings, current, &reasons, request.role)
+            gate(policy, &standings, current, &reasons, request)
         }
     }
 }
 
-fn use_account(standing: &Standing<'_>, reason: String) -> Decision {
+fn use_account(standing: &Standing<'_>, reason: String, pending: Option<AccountId>) -> Decision {
     Decision::Use {
         account: standing.account.id.clone(),
         reason,
         warnings: standing.warnings.clone(),
+        pending,
     }
 }
 
-/// Tier first (drain, subscription, paced credits, last resort), then priority
-/// for the request's class, then the current account, then lighter load, then
-/// config order. Unknown load sorts after known load.
+/// The option table for a warm session whose preferred account is not the
+/// current one: stay, move, or compact on the warm account and then move.
+fn leave_warm(
+    policy: &Policy,
+    request: Request<'_>,
+    current: &Standing<'_>,
+    current_serves: bool,
+    best: &Standing<'_>,
+) -> Decision {
+    let options = warm_options(policy, request, current, current_serves, best);
+    let to = &best.account.id;
+    let from = &current.account.id;
+    let leave = if current_serves {
+        options.leave(policy.move_margin)
+    } else {
+        Some(options.cheapest_move().0)
+    };
+    match leave {
+        Some(Leave::Move) => use_account(
+            best,
+            if current_serves {
+                format!("{from} to {to}: the move pays for its cache miss")
+            } else {
+                format!("{from} cannot serve, moving to {to}")
+            },
+            None,
+        ),
+        Some(Leave::CompactThenMove) => Decision::CompactThenMove {
+            account: to.clone(),
+            reason: format!(
+                "compacting on warm {from}, then moving to {to}: cheaper than a full move"
+            ),
+            warnings: best.warnings.clone(),
+        },
+        None => use_account(
+            current,
+            format!("staying on warm {from}: moving to {to} does not pay for its cache miss"),
+            Some(to.clone()),
+        ),
+    }
+}
+
+fn warm_options(
+    policy: &Policy,
+    request: Request<'_>,
+    current: &Standing<'_>,
+    current_serves: bool,
+    target: &Standing<'_>,
+) -> Options {
+    Options::price(
+        &request.cache,
+        policy.horizon_turns,
+        current.ready.then_some(current.price),
+        current_serves,
+        target.price,
+    )
+}
+
+/// The order of choice: room that would be lost (soonest reset first), then
+/// priority for the request's class, then the lowest `λ`, then the current
+/// account, then lighter load, then config order. Unknown load sorts after
+/// known load.
 fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
     let class = request.model_class;
     let is_current = |s: &Standing<'_>| request.current == Some(&s.account.id);
-    a.tier
-        .cmp(&b.tier)
+    let lost = |s: &Standing<'_>| s.lost_room.map_or((1, 0), |at| (0, at));
+    lost(a)
+        .cmp(&lost(b))
         .then_with(|| {
             a.account
                 .priority
                 .for_class(class)
                 .cmp(&b.account.priority.for_class(class))
         })
+        .then_with(|| a.price.total_cmp(&b.price))
         .then_with(|| is_current(b).cmp(&is_current(a)))
         .then_with(|| match (a.load, b.load) {
             (Some(x), Some(y)) => x.total_cmp(&y),
@@ -311,10 +464,10 @@ fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
 }
 
 fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
-    match standing.tier {
-        0 => "draining before reset".to_string(),
-        2 => "behind the month line".to_string(),
-        _ => format!(
+    match standing.lost_room {
+        Some(_) if standing.free_grant => "a reset grant would expire unused".to_string(),
+        Some(_) => "behind pace, room would be lost at the reset".to_string(),
+        None => format!(
             "priority {}",
             standing.account.priority.for_class(request.model_class)
         ),
@@ -322,24 +475,49 @@ fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
 }
 
 fn gate(
+    policy: &Policy,
     standings: &[Standing<'_>],
     current: Option<&Standing<'_>>,
     reasons: &[String],
-    role: Role,
+    request: Request<'_>,
 ) -> Decision {
     let reason = reasons.join("; ");
-    if role != Role::Interactive {
+    if request.role != Role::Interactive {
         return Decision::Block { reason };
     }
     let current_id = current.map(|s| &s.account.id);
-    let mut options: Vec<GateOption> = standings
+    let mut options: Vec<GateOption> = Vec::new();
+    if let Some(current) = current
+        && current.ready
+        && let Some((expires_at, _)) = current.redeemable
+    {
+        options.push(GateOption::RedeemReset {
+            account: current.account.id.clone(),
+            expires_at,
+        });
+    }
+    let warm = current.filter(|_| request.cache.seam == Seam::Warm);
+    for target in standings
         .iter()
         .filter(|s| s.usable() && Some(&s.account.id) != current_id)
-        .map(|s| GateOption::Switch {
-            account: s.account.id.clone(),
-            detail: describe(s),
-        })
-        .collect();
+    {
+        options.push(GateOption::Switch {
+            account: target.account.id.clone(),
+            detail: describe(target),
+        });
+        let compacts = warm.is_some_and(|current| {
+            warm_options(policy, request, current, false, target)
+                .cheapest_move()
+                .0
+                == Leave::CompactThenMove
+        });
+        if compacts {
+            options.push(GateOption::CompactSwitch {
+                account: target.account.id.clone(),
+                detail: format!("{}, compacted first", describe(target)),
+            });
+        }
+    }
     if let Some(resets_at) = current
         .and_then(|s| s.resets_at)
         .or_else(|| standings.iter().filter_map(|s| s.resets_at).min())
@@ -385,61 +563,6 @@ fn adaptive_limit(policy: &Policy, burn: Option<f64>) -> f64 {
     }
 }
 
-fn resets_within(resets_at: i64, now: i64, horizon_h: f64) -> bool {
-    let remaining_h = (resets_at - now) as f64 / 3_600.0;
-    remaining_h > 0.0 && remaining_h <= horizon_h
-}
-
-/// True when the weekly window will not consume its spare room before the
-/// reset, so the room is wasted unless the account drains now.
-fn drains_before_reset(reading: &Reading, now: i64, burn: Option<f64>, drain_limit: f64) -> bool {
-    let Some(resets_at) = reading.resets_at else {
-        return false;
-    };
-    let remaining_h = (resets_at - now) as f64 / 3_600.0;
-    let room = drain_limit - reading.used;
-    if room <= 0.0 {
-        return false;
-    }
-    match burn {
-        Some(rate) if rate.is_finite() && rate >= 0.0 => {
-            reading.used + rate * remaining_h < drain_limit
-        }
-        _ => false,
-    }
-}
-
-fn month_spent_fraction(
-    readings: &[&Reading],
-    budgets: &[&Budget],
-    snapshot: &Snapshot,
-) -> Option<f64> {
-    let from_readings = readings
-        .iter()
-        .filter(|r| r.window == Window::CalendarMonth)
-        .filter_map(|r| r.limit.map(|limit| r.used / limit))
-        .reduce(f64::max);
-    let from_budgets = budgets
-        .iter()
-        .filter(|b| b.window == Window::CalendarMonth)
-        .filter_map(|b| {
-            let used = match b.meter {
-                MeterSource::Ledger => snapshot.ledger.get(&b.name).copied(),
-                MeterSource::Provider => readings
-                    .iter()
-                    .filter(|r| r.window == b.window && r.unit == b.unit)
-                    .map(|r| r.used)
-                    .reduce(f64::max),
-            };
-            used.map(|used| used / b.limit)
-        })
-        .reduce(f64::max);
-    match (from_readings, from_budgets) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    }
-}
-
 fn stand<'p>(
     policy: &Policy,
     snapshot: &Snapshot,
@@ -478,38 +601,92 @@ fn stand<'p>(
         .filter(|b| b.scope.covers(&account.id, request.model))
         .collect();
     let burn_rate = state.and_then(|state| state.burn.burn_rate(now));
-
-    let drain_weekly = account.drain_before_reset_h.is_some_and(|horizon_h| {
-        readings.iter().any(|r| {
-            r.unit == Unit::Percent
-                && r.window == Window::days(7)
-                && r.resets_at
-                    .is_some_and(|at| resets_within(at, now, horizon_h))
-                && drains_before_reset(r, now, burn_rate, account.drain_limit_pct)
+    let ceiling = (adaptive_limit(policy, burn_rate) - subagent_reserve).max(0.0);
+    let provider_budget = |reading: &Reading| {
+        budgets.iter().copied().find(|b| {
+            b.meter == MeterSource::Provider && b.window == reading.window && b.unit == reading.unit
         })
-    });
-    let pacing_behind = account.kind == AccountKind::Credits
-        && account.pacing == Pacing::MonthLine
-        && snapshot.month_fraction.is_finite()
-        && month_spent_fraction(&readings, &budgets, snapshot).is_some_and(|spent| {
-            let slack = account.pacing_slack_pct / 100.0;
-            if is_current {
-                spent <= snapshot.month_fraction + slack
-            } else {
-                spent < snapshot.month_fraction
-            }
-        });
-    let tier: u8 = if drain_weekly {
-        0
-    } else if account.kind == AccountKind::Subscription {
-        1
-    } else if pacing_behind {
-        2
+    };
+
+    // Every pool the account spends from: its windows and credit grants as
+    // the meter reports them, and ledger budgets on this account.
+    let mut pools: Vec<Pool> = readings
+        .iter()
+        .filter_map(|r| {
+            let budget = provider_budget(r).map(|b| b.limit);
+            let (capacity, wall, burn) = match r.unit {
+                Unit::Percent => (100.0, budget.unwrap_or(ceiling), burn_rate),
+                _ => {
+                    let capacity = budget.or(r.limit)?;
+                    (capacity, capacity, None)
+                }
+            };
+            Some(Pool {
+                used: r.used,
+                capacity,
+                wall,
+                resets_at: r.resets_at,
+                window: r.window,
+                burn,
+            })
+        })
+        .collect();
+    pools.extend(
+        budgets
+            .iter()
+            .filter(|b| {
+                b.meter == MeterSource::Ledger && b.scope == Scope::Account(account.id.clone())
+            })
+            .filter_map(|b| {
+                Some(Pool {
+                    used: *snapshot.ledger.get(&b.name)?,
+                    capacity: b.limit,
+                    wall: b.limit,
+                    resets_at: snapshot.resets.get(&b.name).copied(),
+                    window: b.window,
+                    burn: None,
+                })
+            }),
+    );
+    let grants: Vec<(&Grant, bool)> = state
+        .map(|state| {
+            state
+                .grants
+                .iter()
+                .filter(|g| {
+                    g.model_class.is_none() || g.model_class.as_deref() == request.model_class
+                })
+                .map(|g| (g, grant_wastes(g, &pools, now)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let free_grant = grants
+        .iter()
+        .filter(|(_, wastes)| *wastes)
+        .map(|(grant, _)| grant.expires_at)
+        .min();
+    // The current account stays behind pace a little longer, so the boundary
+    // does not flap.
+    let slack = if is_current {
+        account.pacing_slack_pct / 100.0
     } else {
-        3
+        0.0
+    };
+    let behind = !pools.is_empty() && pools.iter().all(|pool| pool.behind_pace(now, slack));
+    let lost_room = if behind {
+        pools.iter().filter_map(|pool| pool.resets_at).min()
+    } else {
+        None
+    };
+    let lost_room = match (lost_room, free_grant) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     };
 
     let mut hits: Vec<(OnLimit, String)> = Vec::new();
+    // The percent windows at their wall. A reset grant can only clear these.
+    let mut walls: Vec<Window> = Vec::new();
+    let mut clearable = true;
     let mut warnings = Vec::new();
     let mut resets_at: Option<i64> = None;
     let mut note_reset = |reading: &Reading| {
@@ -520,19 +697,11 @@ fn stand<'p>(
 
     // Windows the provider reports, judged against their own ceiling unless a budget names them.
     for reading in &readings {
-        let budgeted = budgets.iter().any(|b| {
-            b.meter == MeterSource::Provider && b.window == reading.window && b.unit == reading.unit
-        });
-        if budgeted {
+        if provider_budget(reading).is_some() {
             continue;
         }
         let (spent, limit) = match reading.unit {
             Unit::Percent => {
-                let base = if drain_weekly && reading.window == Window::days(7) {
-                    account.drain_limit_pct
-                } else {
-                    adaptive_limit(policy, burn_rate)
-                };
                 // Hysteresis only shapes the default ceiling: a non-current
                 // account needs more room than the current one needs to stay.
                 let hysteresis = if is_current {
@@ -540,7 +709,7 @@ fn stand<'p>(
                 } else {
                     policy.hysteresis_pct
                 };
-                let limit = (base - subagent_reserve - hysteresis).max(0.0);
+                let limit = (ceiling - hysteresis).max(0.0);
                 (reading.used >= limit, format!("{limit:.0}%"))
             }
             _ => match reading.limit {
@@ -550,6 +719,11 @@ fn stand<'p>(
         };
         if spent {
             note_reset(reading);
+            if reading.unit == Unit::Percent {
+                walls.push(reading.window);
+            } else {
+                clearable = false;
+            }
             hits.push((
                 account.on_limit,
                 format!(
@@ -591,6 +765,9 @@ fn stand<'p>(
             amount(budget.unit, budget.limit)
         );
         if used >= limit {
+            if budget.action != BudgetAction::Audit {
+                clearable = false;
+            }
             match budget.action {
                 BudgetAction::Audit => warnings.push(line),
                 BudgetAction::Switch => hits.push((OnLimit::Switch.max(account.on_limit), line)),
@@ -621,6 +798,24 @@ fn stand<'p>(
         .filter(|r| r.unit == Unit::Percent)
         .map(|r| r.used)
         .reduce(f64::max);
+    // Prefer a grant that would lapse unused, then the one expiring first.
+    let redeemable = grants
+        .iter()
+        .filter(|_| spent.is_some() && clearable && !walls.is_empty())
+        .filter(|(grant, _)| grant.expires_at > now)
+        .filter(|(grant, _)| walls.iter().all(|wall| grant.windows.contains(wall)))
+        .map(|(grant, wastes)| (grant.expires_at, *wastes))
+        .min_by_key(|(expires_at, wastes)| (!wastes, *expires_at));
+    let price = if lost_room.is_some() {
+        0.0
+    } else if let Some(scarcity) = pools.iter().map(|pool| pool.scarcity(now)).reduce(f64::max) {
+        scarcity
+    } else if account.kind.is_paid() {
+        account.weight
+    } else {
+        // Unreadable meters are neither free nor scarce.
+        1.0
+    };
 
     Standing {
         account,
@@ -630,8 +825,81 @@ fn stand<'p>(
         warnings,
         load,
         resets_at,
-        tier,
+        lost_room,
+        price,
+        free_grant: free_grant.is_some(),
+        redeemable,
     }
+}
+
+/// Rule 5: grants due within [`SWEEP_BEFORE_EXPIRY_SECS`] whose redemption
+/// restores used quota on one of the windows they clear.
+pub fn sweep(policy: &Policy, snapshot: &Snapshot, now: i64) -> Vec<Redemption> {
+    policy
+        .accounts
+        .iter()
+        .filter_map(|account| Some((account, snapshot.accounts.get(&account.id)?)))
+        .flat_map(|(account, state)| {
+            state
+                .grants
+                .iter()
+                .filter(move |grant| {
+                    grant.expires_at > now
+                        && grant.expires_at - now <= SWEEP_BEFORE_EXPIRY_SECS
+                        && state.readings.iter().any(|reading| {
+                            reading.unit == Unit::Percent
+                                && reading.used > 0.0
+                                && grant.windows.contains(&reading.window)
+                                && (grant.model_class.is_none()
+                                    || reading.model_class.is_none()
+                                    || grant.model_class == reading.model_class)
+                        })
+                })
+                .map(|grant| Redemption {
+                    account: account.id.clone(),
+                    grant: grant.clone(),
+                })
+        })
+        .collect()
+}
+
+/// Rule 6 inputs for a session waiting on swarm workers: its current
+/// account's price and the move it would make once the cache is cold.
+/// `None` when the current account is not in the policy.
+pub fn outlook(
+    policy: &Policy,
+    snapshot: &Snapshot,
+    request: Request<'_>,
+    pending: Option<&AccountId>,
+    now: i64,
+) -> Option<Outlook> {
+    let standing = |id: &AccountId| {
+        let (index, account) = policy
+            .accounts
+            .iter()
+            .enumerate()
+            .find(|(_, account)| &account.id == id)?;
+        Some(stand(policy, snapshot, account, index, request, false, now))
+    };
+    let current = standing(request.current?)?;
+    let target = pending.and_then(standing);
+    let cache = &request.cache;
+    let stay = cache.horizon(policy.horizon_turns) * current.price;
+    Some(Outlook {
+        free_room: current.price == 0.0,
+        stay,
+        pending_move: target.map(|target| {
+            Options::price(
+                cache,
+                policy.horizon_turns,
+                Some(current.price),
+                true,
+                target.price,
+            )
+            .moved
+        }),
+        ping: cache.context_tokens * cache.factors.read * current.price,
+    })
 }
 
 fn amount(unit: Unit, value: f64) -> String {

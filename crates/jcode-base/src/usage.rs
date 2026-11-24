@@ -10,7 +10,7 @@ mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
 mod omp_banked;
-pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
+pub(crate) use anthropic_fable_reset::{auto_reset_fable_usage, auto_reset_fable_usage_with};
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
 pub use anthropic_response::record_anthropic_response_limits;
@@ -27,7 +27,17 @@ mod openai_helpers;
 mod openai_response;
 pub use openai_response::{openai_response_generation, record_openai_response_limits};
 mod openai_reset;
-pub(crate) use openai_reset::auto_reset_weekly_usage;
+pub(crate) use openai_reset::{auto_reset_weekly_usage, auto_reset_weekly_usage_with};
+
+/// Why an earned reset is spent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// The account is at its limit: the provider's own exhaustion checks apply.
+    AtWall,
+    /// A grant lapses within this many seconds and its window has used quota.
+    /// Redeeming now restores that quota instead of losing the grant.
+    Expiring { within_secs: i64 },
+}
 #[cfg(test)]
 mod egress_tests;
 mod provider_fetch;
@@ -68,7 +78,8 @@ pub use remote_accounts::{
     remote_account_usage_received, set_remote_account_usage,
 };
 pub(crate) use routing_readings::{
-    anthropic_account_readings, cursor_readings, openai_account_readings, opencode_readings,
+    account_grants, anthropic_account_readings, cursor_readings, openai_account_readings,
+    opencode_readings,
 };
 pub use startup_snapshot::{
     AccountUsageStartupPublisher, hydrate_remote_account_usage,

@@ -55,7 +55,7 @@ fn window_labels_state_their_own_length() {
     assert_eq!(window_from_label("Weekly window"), Some(Window::days(7)));
     assert_eq!(
         window_from_label("Monthly window"),
-        Some(Window::CalendarMonth)
+        Some(Window::CALENDAR_MONTH)
     );
     assert_eq!(window_from_label("5-hour window"), Some(Window::hours(5)));
     assert_eq!(window_from_label("7-day window"), Some(Window::days(7)));
@@ -87,17 +87,45 @@ fn calendar_month_starts_at_local_midnight() {
     // 2026-12-01 00:30 in UTC+11 is still 2026-11-30 in UTC.
     let now = utc(2026, 11, 30, 13, 30);
     assert_eq!(
-        window_start(Window::CalendarMonth, now, &east),
+        window_start(Window::CALENDAR_MONTH, now, &east),
         Some(utc(2026, 11, 30, 13, 0))
     );
     assert_eq!(
-        window_start(Window::CalendarMonth, now, &west),
+        window_start(Window::CALENDAR_MONTH, now, &west),
         Some(utc(2026, 11, 1, 8, 0))
     );
     assert_eq!(
         window_start(Window::days(7), now, &Utc),
         Some(now - 7 * 86_400)
     );
+}
+
+#[test]
+fn anchored_month_starts_and_resets_on_its_day() {
+    let fifteenth = Window::Month { day: 15 };
+    // Before the 15th the period began on the 15th of last month.
+    let early = utc(2026, 1, 10, 12, 0);
+    assert_eq!(
+        window_start(fifteenth, early, &Utc),
+        Some(utc(2025, 12, 15, 0, 0))
+    );
+    assert_eq!(
+        window_reset(fifteenth, early, &Utc),
+        Some(utc(2026, 1, 15, 0, 0))
+    );
+    // On the 15th itself a new period has begun.
+    let on = utc(2026, 12, 15, 0, 0);
+    assert_eq!(window_start(fifteenth, on, &Utc), Some(on));
+    assert_eq!(
+        window_reset(fifteenth, on, &Utc),
+        Some(utc(2027, 1, 15, 0, 0))
+    );
+    assert_eq!(
+        window_reset(Window::CALENDAR_MONTH, early, &Utc),
+        Some(utc(2026, 2, 1, 0, 0))
+    );
+    // A rolling span loses nothing at one moment.
+    assert_eq!(window_reset(Window::days(7), early, &Utc), None);
 }
 
 #[test]
@@ -150,9 +178,9 @@ fn ledger_month_total_follows_the_local_month_boundary() {
     let now = utc(2026, 11, 30, 13, 30);
     let scope = Scope::Account(id("huggingface"));
     let east = FixedOffset::east_opt(11 * 3600).unwrap();
-    let from = window_start(Window::CalendarMonth, now, &east).unwrap();
+    let from = window_start(Window::CALENDAR_MONTH, now, &east).unwrap();
     assert_eq!(ledger.sum(&scope, Unit::Usd, from, now), Some(7.0));
-    let from = window_start(Window::CalendarMonth, now, &Utc).unwrap();
+    let from = window_start(Window::CALENDAR_MONTH, now, &Utc).unwrap();
     assert_eq!(ledger.sum(&scope, Unit::Usd, from, now), Some(12.0));
 }
 
@@ -305,6 +333,7 @@ fn ledger_crossing_a_budget_flips_the_verdict_from_use_to_gate_and_block() {
                 model_class: None,
                 role,
                 current: Some(&hf),
+                ..Request::default()
             },
             now,
         )
@@ -374,6 +403,7 @@ fn readings_reach_the_engine_through_the_snapshot() {
             model_class: None,
             role: Role::Interactive,
             current: Some(&team),
+            ..Request::default()
         },
         NOW,
     );

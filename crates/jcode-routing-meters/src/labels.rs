@@ -37,7 +37,7 @@ pub fn window_from_label(label: &str) -> Option<Window> {
             // OpenCode's rolling window is five hours.
             "rolling" => return Some(Window::hours(5)),
             "weekly" => return Some(Window::days(7)),
-            "monthly" => return Some(Window::CalendarMonth),
+            "monthly" => return Some(Window::CALENDAR_MONTH),
             _ => {}
         }
         if let Some(window) = Window::parse(token) {

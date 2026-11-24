@@ -21,8 +21,8 @@ egress proxies, account priorities, and usage/spend limits, all described in
 - **Model globs.** An account serves only the models it lists, so routing never sends a model to an account that cannot run it.
 - **Model-scoped windows.** A per-family weekly window only counts for that family.
 - **Adaptive limit.** Leave an account when what is left no longer covers the measured burn rate over a horizon, bounded by a ceiling and a floor. Unknown rate falls back to the ceiling.
-- **Drain before reset.** A subscription whose weekly window resets soon, with room the measured burn will not use, goes ahead of priority.
-- **Month-line pacing.** A credits account is used while its spend is behind the elapsed fraction of the calendar month, with hysteresis so the boundary does not flap.
+- **Drain before reset.** Falls out of the order of choice: a pool whose room the measured burn will not use before its reset goes ahead of priority (see Pools).
+- **Pacing.** Every pool lost at a reset, including a credit grant, is paced to be spent by its own reset, with `pacing_slack_pct` as hysteresis for the current account so the boundary does not flap.
 - **Subagent reserve.** Subagents leave an account a few points earlier than the interactive session.
 - **Paid intent.** `auto` (pacing and last-resort fallback), `off` (paid accounts only by explicit choice), `allow <duration>`.
 - **Intents.** `pin` (session and its children), `switch` (this session), `hold` (all interactive sessions until expiry), `unstick`, `ack` (keep spending here for a while).
@@ -194,8 +194,10 @@ above 100, `warn` above `limit`.
 
 The effective action at a limit is the strictest of the account's `on_limit` and
 the budget's `action`. `ack` clears `ask` limits for a while, never `block`.
-Phase 6 adds `drain_before_reset_h`, `pacing = "month-line"`, hysteresis and
-eviction settings. Phase 3 adds `key_command`.
+Phase 6 added hysteresis and eviction settings. The economics add
+`move_margin_pct` (default 20), `horizon_turns` (default 10), an account
+`weight` (default 1) and month windows anchored on a day (`month@15`). Phase 3
+adds `key_command`.
 
 ## Engine
 
@@ -213,10 +215,11 @@ accounts are skipped.
 
 ## What exists today
 
-- Multi-account OAuth for Claude and OpenAI (`auth/account_pool.rs`), one priority per account, failover within a tier (`provider/account_failover.rs`).
-- Usage windows for Claude, OpenAI and OpenCode Go (`usage/`). Local spend per API-key source (`provider_activity.rs`).
-- Named OpenAI-compatible providers with custom `headers`.
-- Missing: per-provider and per-account proxy, several keys per API-key provider, budgets and gates, per-model-class priority, model globs, key from a command, per-model cost overrides on named providers.
+- `jcode-routing-policy`: validated policy, pure `decide`, pools with pace lines, shadow prices, the option table (stay, redeem, move, compact-then-move) with a move margin, the ten-minute grant sweep and the keepalive outlook. Time-stepped tests per rule, and `scripts/mutate_routing_economics.py` mutation-checks one assertion per rule.
+- Routing service in the daemon: shadow and auto modes, gates (switch, compact + switch, redeem reset, wait, ack), headless block, health eviction, burn persistence. Reset grants come from cached Claude and OpenAI reset metadata. A wall or sweep redemption reuses the provider's claim code and its cross-agent lock, and a claim is tried once per grant. Children start on the parent's account. A compact-then-move compacts on the warm account first and says so in the move's transcript line.
+- Cache keepalive pings only while a session waits on swarm workers, gated by rule 6 (`docs/prompt-cache-keepalive.md`).
+- Multi-account OAuth for Claude and OpenAI (`auth/account_pool.rs`), labelled API keys, egress proxies, budgets and the spend ledger, usage windows for Claude, OpenAI, OpenCode Go and Cursor.
+- Missing: a fixture source for reset grants in the daemon acceptance script (real grants only come from provider reset metadata), Codex credit and Cursor pool endpoints.
 
 ## Phases
 

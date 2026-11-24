@@ -6,14 +6,18 @@
 //! the measured [`Snapshot`], the human [`Intents`] and the [`Request`].
 
 pub mod config;
+mod economics;
 mod engine;
 mod policy;
 pub mod state;
 mod strategy;
 
+pub use economics::{
+    CacheContext, CacheFactors, Grant, Outlook, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+};
 pub use engine::{
     AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Reading, Request, Role,
-    Snapshot, Timed, decide,
+    Snapshot, Timed, decide, outlook, sweep,
 };
 pub use policy::{
     Account, AccountId, Budget, Egress, ModelGlob, Policy, PolicyError, Priority, Scope, UNRANKED,
@@ -21,8 +25,8 @@ pub use policy::{
 };
 pub use strategy::{BurnRing, BurnSample, HealthTracker};
 
-pub use config::Pacing;
-
+#[cfg(test)]
+mod economics_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]

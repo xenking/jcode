@@ -52,6 +52,15 @@ impl Drop for Registered<'_> {
 enum Applied {
     /// An intent was written. Decide again.
     Decided,
+    /// The human chose to redeem the offered reset grant.
+    Redeem {
+        account: AccountId,
+        expires_at: i64,
+    },
+    /// The human chose to compact, then move to `account`.
+    CompactSwitch {
+        account: AccountId,
+    },
     /// The human waits for the window to reset.
     Waiting {
         until_unix: i64,
@@ -59,6 +68,16 @@ enum Applied {
     Cancelled,
     /// Not one of the offered options. The gate stays open.
     Ignored,
+}
+
+/// What the gate's answer asks of the turn.
+pub(super) enum Answer {
+    /// Intents changed. Decide again.
+    Decided,
+    /// Redeem this grant, then decide again.
+    Redeem { account: AccountId, expires_at: i64 },
+    /// Compact on the current account, then move to `account`.
+    CompactSwitch { account: AccountId },
 }
 
 impl RoutingService {
@@ -69,7 +88,7 @@ impl RoutingService {
         input: &TurnInput,
         request: GateRequest,
         sink: &dyn GateSink,
-    ) -> Result<(), String> {
+    ) -> Result<Answer, String> {
         let gate_id = self.next_gate_id();
         let (tx, mut answers) = mpsc::unbounded_channel();
         self.gates
@@ -101,7 +120,9 @@ impl RoutingService {
                         return Err("routing gate closed without an answer".into());
                     };
                     match self.apply_choice(input, &request, choice) {
-                        Applied::Decided => return Ok(()),
+                        Applied::Decided => return Ok(Answer::Decided),
+                        Applied::Redeem { account, expires_at } => return Ok(Answer::Redeem { account, expires_at }),
+                        Applied::CompactSwitch { account } => return Ok(Answer::CompactSwitch { account }),
                         Applied::Cancelled => return Err("turn cancelled at the routing gate".into()),
                         Applied::Ignored => {}
                         Applied::Waiting { until_unix } => {
@@ -116,7 +137,7 @@ impl RoutingService {
                 }
                 () = tokio::time::sleep_until(deadline) => {
                     return if waiting {
-                        Ok(())
+                        Ok(Answer::Decided)
                     } else {
                         Err("routing gate timed out without an answer".into())
                     };
@@ -155,6 +176,35 @@ impl RoutingService {
                 };
                 self.write_intent(now, |state| state.set_switch(session, Some(&account), now))
             }
+            RoutingGateChoice::CompactSwitch { account } => {
+                let Some(account) = AccountId::parse(&account).filter(|account| {
+                    request.options.iter().any(
+                        |option| matches!(option, GateOption::CompactSwitch { account: offered, .. } if offered == account),
+                    )
+                }) else {
+                    return Applied::Ignored;
+                };
+                // Later turns stay on the chosen account, like a switch.
+                match self.write_intent(now, |state| state.set_switch(session, Some(&account), now))
+                {
+                    Applied::Decided => Applied::CompactSwitch { account },
+                    other => other,
+                }
+            }
+            RoutingGateChoice::RedeemReset => request
+                .options
+                .iter()
+                .find_map(|option| match option {
+                    GateOption::RedeemReset {
+                        account,
+                        expires_at,
+                    } => Some(Applied::Redeem {
+                        account: account.clone(),
+                        expires_at: *expires_at,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(Applied::Ignored),
             RoutingGateChoice::Ack { minutes } => {
                 let Some(account) = request.options.iter().find_map(|option| match option {
                     GateOption::Ack { account } => Some(account.clone()),

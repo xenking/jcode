@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 pub enum RoutingGateOption {
     /// Move this session to `account`. `detail` says why it is a fit.
     Switch { account: String, detail: String },
+    /// Compact on the current account while its cache is warm, then move to
+    /// `account` with the smaller context.
+    CompactSwitch { account: String, detail: String },
+    /// Redeem a reset grant on `account` (the current one) and stay there.
+    /// `expires_at` is when the grant lapses (unix seconds).
+    RedeemReset { account: String, expires_at: i64 },
     /// Wait for the limit window to reset (unix seconds).
     WaitUntil { resets_at: i64 },
     /// Keep spending on `account` past its limit for a while.
@@ -24,6 +30,10 @@ pub enum RoutingGateOption {
 pub enum RoutingGateChoice {
     /// Move this session to `account` and run the turn there.
     Switch { account: String },
+    /// Compact on the current account, then move to `account`.
+    CompactSwitch { account: String },
+    /// Redeem the offered reset grant and run the turn where it is.
+    RedeemReset,
     /// Hold the turn until the reset offered by `WaitUntil`.
     Wait,
     /// Keep spending on the current account for `minutes`.
@@ -61,7 +71,9 @@ pub enum RoutingIntentAction {
         minutes: Option<u32>,
     },
     /// `auto`, `off`, or a duration such as `2h`.
-    Paid { mode: String },
+    Paid {
+        mode: String,
+    },
     Unstick,
 }
 

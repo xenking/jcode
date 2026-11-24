@@ -19,7 +19,7 @@ mod learned;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -27,32 +27,20 @@ use jcode_routing_policy::config::RoutingMode;
 use jcode_routing_policy::{
     AccountId, Availability, Decision, GateOption, Intents, Policy, Request, Role, Snapshot, decide,
 };
+pub use jcode_routing_policy::{CacheContext, CacheFactors, Outlook, Seam};
 
 use crate::protocol::{RoutingGateChoice, RoutingGateOption, ServerEvent};
+use crate::usage::ResetMode;
 
 pub use env::{DaemonEnv, RoutingEnv};
 pub use gate::GateSink;
 use learned::Learned;
 
-/// How far a session is from losing its prompt cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Seam {
-    /// The session has no history. Any account is free to pick.
-    Start,
-    /// The prompt cache is cold, so moving costs nothing extra.
-    Cold,
-    /// The cache is warm. A move is only recorded as pending, unless the
-    /// current account can no longer serve or the user asked for the move.
-    Warm,
-}
-
-impl Seam {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Cold => "cold",
-            Self::Warm => "warm",
-        }
+fn seam_label(seam: Seam) -> &'static str {
+    match seam {
+        Seam::Start => "start",
+        Seam::Cold => "cold",
+        Seam::Warm => "warm",
     }
 }
 
@@ -69,6 +57,9 @@ pub struct TurnInput {
     /// The account the session runs on now.
     pub current: Option<AccountId>,
     pub seam: Seam,
+    /// The prompt cache a move would leave behind. Its own `seam` is ignored:
+    /// [`TurnInput::seam`] is the one source.
+    pub cache: CacheContext,
 }
 
 /// The chosen account and why, for the header chip and the log.
@@ -113,6 +104,16 @@ pub enum Plan {
     Stay(Outcome),
     /// Bind `outcome.account` first, then run the turn.
     Move(Outcome),
+    /// Compact on the current account while its cache is warm, then bind
+    /// `outcome.account` and run the turn with the smaller context.
+    CompactThenMove(Outcome),
+    /// Redeem the reset grant on `account`, then decide again.
+    /// [`RoutingService::route`] resolves this itself.
+    Redeem {
+        account: AccountId,
+        expires_at: i64,
+        reason: String,
+    },
     /// Ask the human. [`RoutingService::route`] resolves this itself.
     Gate(GateRequest),
     /// Fail the turn with this reason. Do not retry elsewhere.
@@ -128,6 +129,17 @@ pub struct RoutingService {
     gates: Mutex<HashMap<String, gate::Slot>>,
     gate_seq: AtomicU64,
     warmed: tokio::sync::OnceCell<()>,
+    /// Reset grants already claimed once, by account and expiry. A failed or
+    /// uncertain claim is never retried into a second grant.
+    claimed: Mutex<HashSet<(AccountId, i64)>>,
+    /// The account each session last ran on and its keepalive outlook.
+    sessions: Mutex<HashMap<String, SessionMemo>>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionMemo {
+    account: AccountId,
+    outlook: Option<Outlook>,
 }
 
 static GLOBAL: OnceLock<RoutingService> = OnceLock::new();
@@ -155,6 +167,8 @@ struct Evaluation {
     decision: Decision,
     intents: Intents,
     snapshot: Snapshot,
+    /// The account the parent session last ran on.
+    parent: Option<AccountId>,
 }
 
 impl RoutingService {
@@ -165,6 +179,8 @@ impl RoutingService {
             gates: Mutex::new(HashMap::new()),
             gate_seq: AtomicU64::new(1),
             warmed: tokio::sync::OnceCell::new(),
+            claimed: Mutex::new(HashSet::new()),
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -246,6 +262,14 @@ impl RoutingService {
                 state.burn = ring;
             }
         }
+        {
+            let claimed = lock(&self.claimed);
+            for (id, state) in &mut snapshot.accounts {
+                state
+                    .grants
+                    .retain(|grant| !claimed.contains(&(id.clone(), grant.expires_at)));
+            }
+        }
         self.flush(now);
         snapshot
     }
@@ -259,16 +283,29 @@ impl RoutingService {
             now,
         );
         let snapshot = self.snapshot(&active.policy, now).await;
-        let decision = decide_with(&active.policy, &snapshot, &intents, input, now);
+        let parent = input.parent_session.as_deref().and_then(|parent| {
+            lock(&self.sessions)
+                .get(parent)
+                .map(|memo| memo.account.clone())
+        });
+        let decision = decide_with(
+            &active.policy,
+            &snapshot,
+            &intents,
+            input,
+            parent.as_ref(),
+            now,
+        );
         Evaluation {
             decision,
             intents,
             snapshot,
+            parent,
         }
     }
 
-    /// One decision for the turn. A gate in the result is for the caller to
-    /// resolve with [`RoutingService::route`].
+    /// One decision for the turn. A gate or a redemption in the result is for
+    /// the caller to resolve with [`RoutingService::route`].
     pub async fn plan(&self, input: &TurnInput) -> Plan {
         let Some(active) = self.active(&input.provider, &input.model) else {
             return Plan::Inactive;
@@ -277,33 +314,44 @@ impl RoutingService {
         let now = self.env.now();
         let evaluation = self.evaluate(&active, input, now).await;
         let auto = active.mode == RoutingMode::Auto;
+        let outcome = |account: &AccountId, reason: &str, warnings: &[String]| Outcome {
+            account: account.clone(),
+            reason: reason.to_string(),
+            warnings: warnings.to_vec(),
+            pending: None,
+            alternative: self.alternative_exists(&active, input, &evaluation, account, now),
+        };
         let plan = match &evaluation.decision {
             Decision::Use {
                 account,
                 reason,
                 warnings,
+                pending,
             } => {
-                let mut outcome = Outcome {
-                    account: account.clone(),
-                    reason: reason.clone(),
-                    warnings: warnings.clone(),
-                    pending: None,
-                    alternative: false,
+                let outcome = Outcome {
+                    pending: pending.clone(),
+                    ..outcome(account, reason, warnings)
                 };
                 if input.current.as_ref() == Some(account) {
                     Plan::Stay(outcome)
-                } else if self.move_now(&active, input, &evaluation, account, now) {
-                    Plan::Move(outcome)
                 } else {
-                    // Moving now would throw the warm cache away for a
-                    // preference. Keep serving and report the move.
-                    outcome.pending = Some(account.clone());
-                    if let Some(current) = &input.current {
-                        outcome.account = current.clone();
-                    }
-                    Plan::Stay(outcome)
+                    Plan::Move(outcome)
                 }
             }
+            Decision::CompactThenMove {
+                account,
+                reason,
+                warnings,
+            } => Plan::CompactThenMove(outcome(account, reason, warnings)),
+            Decision::Redeem {
+                account,
+                expires_at,
+                reason,
+            } => Plan::Redeem {
+                account: account.clone(),
+                expires_at: *expires_at,
+                reason: reason.clone(),
+            },
             Decision::Gate {
                 reason, options, ..
             } => Plan::Gate(GateRequest {
@@ -314,21 +362,54 @@ impl RoutingService {
                 reason: reason.clone(),
             },
         };
-        let plan = match plan {
-            Plan::Stay(mut outcome) => {
-                outcome.alternative =
-                    self.alternative_exists(&active, input, &evaluation, &outcome.account, now);
-                Plan::Stay(outcome)
-            }
-            Plan::Move(mut outcome) => {
-                outcome.alternative =
-                    self.alternative_exists(&active, input, &evaluation, &outcome.account, now);
-                Plan::Move(outcome)
-            }
-            other => other,
-        };
+        self.remember(&active, input, &evaluation, &plan, now);
         self.record(&active, input, &plan, now);
         if auto { plan } else { Plan::Observed }
+    }
+
+    /// Keeps the account a session runs on, for its children's first turn, and
+    /// the keepalive outlook of a session that stays on a warm cache.
+    fn remember(
+        &self,
+        active: &Active,
+        input: &TurnInput,
+        evaluation: &Evaluation,
+        plan: &Plan,
+        now: i64,
+    ) {
+        let (account, pending) = match plan {
+            Plan::Stay(outcome) => (&outcome.account, outcome.pending.as_ref()),
+            Plan::Move(outcome) | Plan::CompactThenMove(outcome) => (&outcome.account, None),
+            _ => return,
+        };
+        let outlook = matches!(plan, Plan::Stay(_))
+            .then(|| {
+                let class = jcode_routing_meters::model_class(&input.model);
+                jcode_routing_policy::outlook(
+                    &active.policy,
+                    &evaluation.snapshot,
+                    request(input, class.as_deref(), evaluation.parent.as_ref()),
+                    pending,
+                    now,
+                )
+            })
+            .flatten();
+        lock(&self.sessions).insert(
+            input.session_id.clone(),
+            SessionMemo {
+                account: account.clone(),
+                outlook,
+            },
+        );
+    }
+
+    /// Rule 6 inputs for a session that waits on swarm workers: what pinging
+    /// costs on its account and whether its pending move pays for a cold cache.
+    /// `None` when routing has not decided for the session.
+    pub fn keepalive_outlook(&self, session: &str) -> Option<Outlook> {
+        lock(&self.sessions)
+            .get(session)
+            .and_then(|memo| memo.outlook)
     }
 
     /// Whether the policy would pick another account for this turn if
@@ -349,63 +430,108 @@ impl RoutingService {
             .or_default()
             .availability = Availability::Evicted { until: now + 3600 };
         matches!(
-            decide_with(&active.policy, &snapshot, &evaluation.intents, input, now),
-            Decision::Use { account, .. } if &account != serving
+            decide_with(
+                &active.policy,
+                &snapshot,
+                &evaluation.intents,
+                input,
+                evaluation.parent.as_ref(),
+                now,
+            ),
+            Decision::Use { account, .. } | Decision::CompactThenMove { account, .. }
+                if &account != serving
         )
     }
 
-    /// Whether leaving the current account right now is right: at a cold seam
-    /// always, in a warm session only when the current account cannot serve
-    /// the turn or a human asked for the target.
-    fn move_now(
-        &self,
-        active: &Active,
-        input: &TurnInput,
-        evaluation: &Evaluation,
-        target: &AccountId,
-        now: i64,
-    ) -> bool {
-        if input.seam != Seam::Warm {
-            return true;
-        }
-        let Some(current) = &input.current else {
-            return true;
-        };
-        let intents = &evaluation.intents;
-        let asked = intents.pin.as_ref() == Some(target)
-            || intents.switch.as_ref() == Some(target)
-            || intents
-                .hold
-                .as_ref()
-                .is_some_and(|hold| &hold.account == target && input.role == Role::Interactive);
-        if asked {
-            return true;
-        }
-        // Ask the engine whether the current account would still be chosen if
-        // the session stayed where it is.
-        let staying = Intents {
-            pin: Some(current.clone()),
-            switch: None,
-            hold: None,
-            ..intents.clone()
-        };
-        !matches!(
-            decide_with(&active.policy, &evaluation.snapshot, &staying, input, now),
-            Decision::Use { account, .. } if &account == current
-        )
-    }
-
-    /// Decides, resolving gates with the human through `sink`, until the turn
-    /// can run or must fail. `Err` carries the reason to fail the turn with.
+    /// Decides, resolving gates with the human through `sink` and redeeming
+    /// reset grants, until the turn can run or must fail. `Err` carries the
+    /// reason to fail the turn with.
     pub async fn route(&self, input: &TurnInput, sink: &dyn GateSink) -> Result<Plan, String> {
         for _ in 0..MAX_GATE_ROUNDS {
             match self.plan(input).await {
-                Plan::Gate(request) => self.ask(input, request, sink).await?,
+                Plan::Gate(request) => match self.ask(input, request, sink).await? {
+                    gate::Answer::Decided => {}
+                    gate::Answer::Redeem {
+                        account,
+                        expires_at,
+                    } => {
+                        self.redeem(&account, expires_at, ResetMode::AtWall).await;
+                    }
+                    gate::Answer::CompactSwitch { account } => {
+                        return Ok(Plan::CompactThenMove(Outcome {
+                            account: account.clone(),
+                            reason: format!(
+                                "compacting, then switching to {account}, chosen at the gate"
+                            ),
+                            warnings: Vec::new(),
+                            pending: None,
+                            alternative: true,
+                        }));
+                    }
+                },
+                Plan::Redeem {
+                    account,
+                    expires_at,
+                    ..
+                } => {
+                    self.redeem(&account, expires_at, ResetMode::AtWall).await;
+                }
                 Plan::Block { reason } => return Err(reason),
                 other => return Ok(other),
             }
         }
         Err("routing gate was answered but the limit is still reached".into())
+    }
+
+    /// Claims the grant on `account` that lapses at `expires_at` once. Whatever
+    /// the outcome, that grant is never claimed again by this daemon, and the
+    /// redemption code's own cross-agent lock and receipt guard other agents.
+    async fn redeem(&self, account: &AccountId, expires_at: i64, mode: ResetMode) -> bool {
+        if !lock(&self.claimed).insert((account.clone(), expires_at)) {
+            return false;
+        }
+        let restored = match self.env.redeem(account, mode).await {
+            Ok(restored) => restored,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "routing: reset on {account} not confirmed, not retrying: {error:#}"
+                ));
+                false
+            }
+        };
+        crate::logging::info(&format!(
+            "routing: {} reset on {account} expiring at {expires_at}: {}",
+            match mode {
+                ResetMode::AtWall => "wall",
+                ResetMode::Expiring { .. } => "sweep",
+            },
+            if restored { "restored" } else { "not restored" }
+        ));
+        restored
+    }
+
+    /// Rule 5: redeem every grant due within ten minutes whose window has used
+    /// quota to restore. Runs on the daemon's meter refresh in `auto` mode.
+    pub async fn sweep(&self) {
+        let (routing, egress) = self.env.routing();
+        if routing.mode != RoutingMode::Auto {
+            return;
+        }
+        let Ok(policy) = Policy::from_config(&routing, &egress) else {
+            return;
+        };
+        let now = self.env.now();
+        let snapshot = self.snapshot(&policy, now).await;
+        for due in jcode_routing_policy::sweep(&policy, &snapshot, now) {
+            self.redeem(
+                &due.account,
+                due.grant.expires_at,
+                ResetMode::Expiring {
+                    within_secs: jcode_routing_policy::SWEEP_BEFORE_EXPIRY_SECS,
+                },
+            )
+            .await;
+        }
     }
 
     /// The first call of a daemon's life fetches the meters once, so the first
@@ -444,6 +570,16 @@ impl RoutingService {
                 None,
             ),
             Plan::Gate(request) => ("gate", None, request.reason.as_str(), &[][..], None),
+            Plan::CompactThenMove(outcome) => (
+                "compact",
+                Some(&outcome.account),
+                outcome.reason.as_str(),
+                outcome.warnings.as_slice(),
+                None,
+            ),
+            Plan::Redeem {
+                account, reason, ..
+            } => ("redeem", Some(account), reason.as_str(), &[][..], None),
             Plan::Block { reason } => ("block", None, reason.as_str(), &[][..], None),
             Plan::Inactive | Plan::Observed => return,
         };
@@ -470,7 +606,7 @@ impl RoutingService {
                 session: &input.session_id,
                 model: &input.model,
                 role: role_label(input.role),
-                seam: input.seam.label(),
+                seam: seam_label(input.seam),
                 current,
                 decision,
                 account: account_text,
@@ -517,6 +653,7 @@ fn decide_with(
     snapshot: &Snapshot,
     intents: &Intents,
     input: &TurnInput,
+    parent: Option<&AccountId>,
     now: i64,
 ) -> Decision {
     let class = jcode_routing_meters::model_class(&input.model);
@@ -524,14 +661,33 @@ fn decide_with(
         policy,
         snapshot,
         intents,
-        Request {
-            model: &input.model,
-            model_class: class.as_deref(),
-            role: input.role,
-            current: input.current.as_ref(),
-        },
+        request(input, class.as_deref(), parent),
         now,
     )
+}
+
+fn request<'a>(
+    input: &'a TurnInput,
+    class: Option<&'a str>,
+    parent: Option<&'a AccountId>,
+) -> Request<'a> {
+    Request {
+        model: &input.model,
+        model_class: class,
+        role: input.role,
+        current: input.current.as_ref(),
+        parent,
+        cache: CacheContext {
+            seam: input.seam,
+            ..input.cache
+        },
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn role_label(role: Role) -> &'static str {
@@ -547,6 +703,17 @@ fn wire_option(option: &GateOption) -> RoutingGateOption {
         GateOption::Switch { account, detail } => RoutingGateOption::Switch {
             account: account.to_string(),
             detail: detail.clone(),
+        },
+        GateOption::CompactSwitch { account, detail } => RoutingGateOption::CompactSwitch {
+            account: account.to_string(),
+            detail: detail.clone(),
+        },
+        GateOption::RedeemReset {
+            account,
+            expires_at,
+        } => RoutingGateOption::RedeemReset {
+            account: account.to_string(),
+            expires_at: *expires_at,
         },
         GateOption::WaitUntil { resets_at } => RoutingGateOption::WaitUntil {
             resets_at: *resets_at,

@@ -25,6 +25,10 @@ struct FakeEnv {
     now: AtomicI64,
     routing: Mutex<RoutingConfig>,
     readings: Mutex<BTreeMap<AccountId, Vec<Reading>>>,
+    grants: Mutex<BTreeMap<AccountId, Vec<jcode_routing_policy::Grant>>>,
+    /// Every redemption asked for, and whether it restores the quota.
+    redeemed: Mutex<Vec<(AccountId, ResetMode)>>,
+    redeem_restores: std::sync::atomic::AtomicBool,
     availability: Mutex<BTreeMap<AccountId, Availability>>,
     state: Mutex<RoutingState>,
     home: tempfile::TempDir,
@@ -49,6 +53,9 @@ impl FakeEnv {
             now: AtomicI64::new(NOW),
             routing: Mutex::new(routing),
             readings: Mutex::default(),
+            grants: Mutex::default(),
+            redeemed: Mutex::default(),
+            redeem_restores: std::sync::atomic::AtomicBool::new(true),
             availability: Mutex::default(),
             state: Mutex::default(),
             home: tempfile::tempdir().unwrap(),
@@ -68,6 +75,21 @@ impl FakeEnv {
             .lock()
             .unwrap()
             .insert(AccountId::parse(account).unwrap(), vec![reading]);
+    }
+
+    fn grant(&self, account: &str, expires_at: i64) {
+        self.grants.lock().unwrap().insert(
+            AccountId::parse(account).unwrap(),
+            vec![jcode_routing_policy::Grant {
+                expires_at,
+                windows: vec![Window::hours(5)],
+                model_class: None,
+            }],
+        );
+    }
+
+    fn redeemed(&self) -> Vec<(AccountId, ResetMode)> {
+        self.redeemed.lock().unwrap().clone()
     }
 
     fn on_limit(&self, account: &str, on_limit: OnLimit) {
@@ -108,6 +130,13 @@ impl RoutingEnv for FakeEnv {
                     id.clone(),
                     AccountState {
                         readings: readings.clone(),
+                        grants: self
+                            .grants
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_default(),
                         ..Default::default()
                     },
                 )
@@ -146,6 +175,16 @@ impl RoutingEnv for FakeEnv {
     fn home(&self) -> Option<PathBuf> {
         Some(self.home.path().to_path_buf())
     }
+
+    async fn redeem(&self, account: &AccountId, mode: ResetMode) -> anyhow::Result<bool> {
+        self.redeemed.lock().unwrap().push((account.clone(), mode));
+        let restores = self.redeem_restores.load(Ordering::SeqCst);
+        if restores {
+            self.set_used(account.as_str(), 0.0);
+            self.grants.lock().unwrap().remove(account);
+        }
+        Ok(restores)
+    }
 }
 
 struct Sink(mpsc::UnboundedSender<ServerEvent>);
@@ -170,6 +209,7 @@ fn input(current: &str, seam: Seam, role: Role) -> TurnInput {
         role,
         current: AccountId::parse(current),
         seam,
+        cache: CacheContext::default(),
     }
 }
 
@@ -630,4 +670,145 @@ async fn a_single_account_has_no_alternative() {
         panic!("expected to stay, got {plan:?}");
     };
     assert!(!outcome.alternative);
+}
+
+// Rule 4: at the wall a grant that would lapse unused is redeemed through the
+// provider's claim code and the warm session stays where its cache is.
+#[tokio::test]
+async fn wall_redeems_a_wasting_grant_and_the_session_stays() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    env.set_used("claude:b", 10.0);
+    // The 5h window resets in an hour and refills over five more, so a grant
+    // lapsing in 30 minutes can only be used now.
+    env.grant("claude:a", NOW + 1_800);
+    let service = RoutingService::new(env.clone());
+    let (tx, _events) = mpsc::unbounded_channel();
+
+    let plan = service
+        .route(&input("claude:a", Seam::Warm, Role::Interactive), &Sink(tx))
+        .await
+        .unwrap();
+
+    assert!(matches!(plan, Plan::Stay(ref outcome) if outcome.account == account("claude:a")));
+    assert_eq!(
+        env.redeemed(),
+        vec![(account("claude:a"), ResetMode::AtWall)]
+    );
+    let decisions: Vec<_> = env
+        .log_lines()
+        .iter()
+        .map(|line| line["decision"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(decisions, ["redeem", "stay"]);
+}
+
+// A failed or uncertain claim is never retried into a second grant: the next
+// decision treats the grant as gone and moves on.
+#[tokio::test]
+async fn a_failed_redeem_is_never_retried() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    env.set_used("claude:b", 10.0);
+    env.grant("claude:a", NOW + 1_800);
+    env.redeem_restores.store(false, Ordering::SeqCst);
+    let service = RoutingService::new(env.clone());
+
+    for _ in 0..2 {
+        let (tx, _events) = mpsc::unbounded_channel();
+        let plan = service
+            .route(&input("claude:a", Seam::Warm, Role::Interactive), &Sink(tx))
+            .await
+            .unwrap();
+        assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+    }
+    assert_eq!(env.redeemed().len(), 1);
+}
+
+// Rule 5: the sweep redeems a grant ten minutes before it lapses when that
+// restores used quota, once, and leaves later grants alone.
+#[tokio::test]
+async fn sweep_redeems_grants_due_within_ten_minutes_once() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 40.0);
+    env.set_used("claude:b", 40.0);
+    env.grant("claude:a", NOW + 500);
+    env.grant("claude:b", NOW + 3_600);
+    env.redeem_restores.store(false, Ordering::SeqCst);
+    let service = RoutingService::new(env.clone());
+
+    service.sweep().await;
+    service.sweep().await;
+
+    assert_eq!(
+        env.redeemed(),
+        vec![(
+            account("claude:a"),
+            ResetMode::Expiring {
+                within_secs: jcode_routing_policy::SWEEP_BEFORE_EXPIRY_SECS
+            }
+        )]
+    );
+}
+
+// Rule 7: a child's first turn starts on the account its parent runs on.
+#[tokio::test]
+async fn a_child_starts_on_its_parent_account() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 20.0);
+    env.set_used("claude:b", 20.0);
+    let service = RoutingService::new(env.clone());
+    // The parent stays on its warm cache on claude:b.
+    let parent = service
+        .plan(&input("claude:b", Seam::Warm, Role::Interactive))
+        .await;
+    assert!(matches!(parent, Plan::Stay(ref outcome) if outcome.account == account("claude:b")));
+    assert!(service.keepalive_outlook("session-1").is_some());
+
+    let child = TurnInput {
+        session_id: "child-1".into(),
+        parent_session: Some("session-1".into()),
+        ..input("claude:a", Seam::Start, Role::Subagent)
+    };
+    let plan = service.plan(&child).await;
+    assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+// Gate: a grant with later use is offered, and answering it redeems.
+#[tokio::test]
+async fn gate_redeem_answer_claims_the_offered_grant() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.on_limit("claude:a", OnLimit::Ask);
+    env.set_used("claude:a", 99.0);
+    env.set_used("claude:b", 10.0);
+    // Lapses well after the next wall: not free, so a human decides.
+    env.grant("claude:a", NOW + 30 * 86_400);
+    let service = Arc::new(RoutingService::new(env.clone()));
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let turn = input("claude:a", Seam::Warm, Role::Interactive);
+    let routed = {
+        let service = service.clone();
+        tokio::spawn(async move { service.route(&turn, &Sink(tx)).await })
+    };
+    let gate_id = loop {
+        match events.recv().await.unwrap() {
+            ServerEvent::RoutingGate {
+                gate_id, options, ..
+            } => {
+                assert!(options.iter().any(|option| matches!(
+                    option,
+                    RoutingGateOption::RedeemReset { account, .. } if account == "claude:a"
+                )));
+                break gate_id;
+            }
+            _ => continue,
+        }
+    };
+    assert!(service.answer_gate("session-1", &gate_id, RoutingGateChoice::RedeemReset));
+    let plan = routed.await.unwrap().unwrap();
+    assert!(matches!(plan, Plan::Stay(ref outcome) if outcome.account == account("claude:a")));
+    assert_eq!(
+        env.redeemed(),
+        vec![(account("claude:a"), ResetMode::AtWall)]
+    );
 }

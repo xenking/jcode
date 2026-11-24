@@ -29,6 +29,11 @@ pub struct RoutingConfig {
     /// Moving onto a non-current account needs this many percent points more
     /// room below its limit than staying on the current one.
     pub hysteresis_pct: f64,
+    /// A warm session leaves its cache only when staying costs this many
+    /// percent more than the cheapest move.
+    pub move_margin_pct: f64,
+    /// Turns until the next natural cold seam, for the `H` of the economics.
+    pub horizon_turns: f64,
     /// Consecutive failures that evict an account.
     pub evict_after: u32,
     /// How long an eviction lasts, as a duration like `30m`, `5h` or `7d`.
@@ -47,6 +52,8 @@ impl Default for RoutingConfig {
             reserve_floor_pct: 0.0,
             reserve_horizon_min: 60.0,
             hysteresis_pct: 0.0,
+            move_margin_pct: 20.0,
+            horizon_turns: 10.0,
             evict_after: 3,
             evict_for: "30m".into(),
             accounts: Vec::new(),
@@ -83,17 +90,6 @@ pub enum PaidMode {
     Off,
 }
 
-/// How a paid account is preferred within the paid tier.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Pacing {
-    /// No pacing preference; the account is a plain last resort.
-    #[default]
-    Off,
-    /// Prefer while the spend fraction is behind the elapsed month fraction.
-    MonthLine,
-}
-
 /// `[[routing.accounts]]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -109,16 +105,11 @@ pub struct AccountConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress: Option<String>,
     pub on_limit: OnLimit,
-    /// Treat a weekly window that resets within this many hours as a drain
-    /// candidate. `None` disables drain-before-reset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drain_before_reset_h: Option<f64>,
-    /// The percent ceiling a drain candidate may run to (default 99).
-    pub drain_limit_pct: f64,
-    /// Pacing strategy for a credits account.
-    pub pacing: Pacing,
-    /// Hysteresis slack above the month line before a paced account is dropped.
+    /// Slack in percent of capacity above the pace line before the current
+    /// account's expiring room stops counting as room that would be lost.
     pub pacing_slack_pct: f64,
+    /// Multiplies the money price of a credits or metered account.
+    pub weight: f64,
 }
 
 impl Default for AccountConfig {
@@ -130,10 +121,8 @@ impl Default for AccountConfig {
             models: Vec::new(),
             egress: None,
             on_limit: OnLimit::Switch,
-            drain_before_reset_h: None,
-            drain_limit_pct: 99.0,
-            pacing: Pacing::Off,
             pacing_slack_pct: 0.0,
+            weight: 1.0,
         }
     }
 }

@@ -111,22 +111,52 @@ impl Ledger {
     }
 }
 
-/// Unix second a window that ends at `now` began. A calendar month starts at
-/// midnight of the first day in `tz`, so a spend limit follows the user's own
-/// month rather than UTC's.
+/// Unix second a window that ends at `now` began. A month starts at local
+/// midnight of its anchor day in `tz` (the 1st for a calendar month), so a
+/// spend limit follows the user's own month rather than UTC's.
 pub fn window_start<Tz: TimeZone>(window: Window, now: i64, tz: &Tz) -> Option<i64> {
     match window {
         Window::Span { secs } => now.checked_sub(i64::try_from(secs).ok()?),
-        Window::CalendarMonth => {
+        Window::Month { day } => {
             let local = tz.timestamp_opt(now, 0).single()?;
-            let first = NaiveDate::from_ymd_opt(local.year(), local.month(), 1)?;
-            // A zone can skip local midnight on the 1st; take the first hour that exists.
-            (0..4).find_map(|hour| {
-                let naive = first.and_hms_opt(hour, 0, 0)?;
-                tz.from_local_datetime(&naive)
-                    .earliest()
-                    .map(|start| start.timestamp())
-            })
+            let (year, month) = if local.day() >= u32::from(day) {
+                (local.year(), local.month())
+            } else if local.month() == 1 {
+                (local.year() - 1, 12)
+            } else {
+                (local.year(), local.month() - 1)
+            };
+            local_midnight(tz, year, month, day)
         }
     }
+}
+
+/// Unix second the window running at `now` resets: the next anchor day for a
+/// month. A rolling span never resets at one moment, so it has none.
+pub fn window_reset<Tz: TimeZone>(window: Window, now: i64, tz: &Tz) -> Option<i64> {
+    match window {
+        Window::Span { .. } => None,
+        Window::Month { day } => {
+            let start = tz
+                .timestamp_opt(window_start(window, now, tz)?, 0)
+                .single()?;
+            let (year, month) = if start.month() == 12 {
+                (start.year() + 1, 1)
+            } else {
+                (start.year(), start.month() + 1)
+            };
+            local_midnight(tz, year, month, day)
+        }
+    }
+}
+
+fn local_midnight<Tz: TimeZone>(tz: &Tz, year: i32, month: u32, day: u8) -> Option<i64> {
+    let date = NaiveDate::from_ymd_opt(year, month, u32::from(day))?;
+    // A zone can skip local midnight; take the first hour that exists.
+    (0..4).find_map(|hour| {
+        let naive = date.and_hms_opt(hour, 0, 0)?;
+        tz.from_local_datetime(&naive)
+            .earliest()
+            .map(|start| start.timestamp())
+    })
 }

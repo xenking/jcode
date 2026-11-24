@@ -170,6 +170,7 @@ fn snapshot_joins_published_meters_and_the_ledger_for_the_engine() {
             model_class: None,
             role: Role::Interactive,
             current: Some(&hf),
+            ..Request::default()
         },
         now,
     );

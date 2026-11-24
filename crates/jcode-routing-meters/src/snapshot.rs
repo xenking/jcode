@@ -2,14 +2,18 @@
 
 use chrono::TimeZone;
 use jcode_routing_policy::config::MeterSource;
-use jcode_routing_policy::{AccountId, AccountState, Policy, Reading, Snapshot};
+use jcode_routing_policy::{AccountId, AccountState, Grant, Policy, Reading, Snapshot};
 
-use crate::ledger::{Ledger, window_start};
+use crate::ledger::{Ledger, window_reset, window_start};
 
 /// Where live provider readings come from. Implementations read caches only:
 /// `None` means unknown, and a call never waits on the network.
 pub trait Meters {
     fn readings(&self, account: &AccountId, now: i64) -> Option<Vec<Reading>>;
+    /// Reset grants the account holds, from cached metadata only.
+    fn grants(&self, _account: &AccountId, _now: i64) -> Vec<Grant> {
+        Vec::new()
+    }
 }
 
 /// The measured state of every account and ledger budget in `policy` at `now`
@@ -36,6 +40,7 @@ pub fn build<Tz: TimeZone>(
                 account.id.clone(),
                 AccountState {
                     readings,
+                    grants: meters.grants(&account.id, now),
                     ..AccountState::default()
                 },
             );
@@ -52,6 +57,9 @@ pub fn build<Tz: TimeZone>(
             };
             if let Some(used) = ledger.sum(&budget.scope, budget.unit, from, now) {
                 snapshot.ledger.insert(budget.name.clone(), used);
+            }
+            if let Some(at) = window_reset(budget.window, now, tz) {
+                snapshot.resets.insert(budget.name.clone(), at);
             }
         }
     }

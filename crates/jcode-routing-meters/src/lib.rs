@@ -15,7 +15,7 @@ mod snapshot;
 
 pub use cache::SnapshotCache;
 pub use labels::{model_class, parse_rfc3339_unix, percent_reading, window_from_label};
-pub use ledger::{Ledger, SpendRow, window_start};
+pub use ledger::{Ledger, SpendRow, window_reset, window_start};
 pub use published::Published;
 pub use snapshot::{Meters, build};
 

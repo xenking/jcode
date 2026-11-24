@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    AccountConfig, AccountKind, BudgetAction, BudgetConfig, MeterSource, OnLimit, Pacing, PaidMode,
+    AccountConfig, AccountKind, BudgetAction, BudgetConfig, MeterSource, OnLimit, PaidMode,
     PriorityConfig, RoutingConfig, Unit,
 };
 use crate::{
@@ -55,12 +55,12 @@ fn snapshot(entries: Vec<(&str, Vec<Reading>)>) -> Snapshot {
                         readings,
                         availability: Availability::Ready,
                         burn: BurnRing::default(),
+                        grants: Vec::new(),
                     },
                 )
             })
             .collect(),
-        ledger: BTreeMap::new(),
-        month_fraction: 0.0,
+        ..Snapshot::default()
     }
 }
 
@@ -70,6 +70,7 @@ fn interactive(model: &str) -> Request<'_> {
         model_class: None,
         role: Role::Interactive,
         current: None,
+        ..Request::default()
     }
 }
 
@@ -422,7 +423,7 @@ fn ack_clears_an_ask_budget_until_it_expires() {
     let snap = snapshot(vec![(
         "openai:codex",
         vec![Reading {
-            window: Window::CalendarMonth,
+            window: Window::CALENDAR_MONTH,
             unit: Unit::Credits,
             used: 1_200.0,
             limit: Some(5_000.0),
@@ -481,6 +482,7 @@ fn pin_wins_over_priority_and_blocks_when_unavailable() {
             readings: vec![],
             availability: Availability::EgressDown,
             burn: BurnRing::default(),
+            grants: Vec::new(),
         },
     );
     assert!(matches!(
@@ -586,6 +588,7 @@ fn eviction_expires_and_egress_down_skips() {
             readings: vec![],
             availability: Availability::Evicted { until: NOW + 30 },
             burn: BurnRing::default(),
+            grants: Vec::new(),
         },
     );
     assert_eq!(
@@ -691,13 +694,14 @@ fn pct_at(window: Window, used: f64, resets_at: i64) -> Reading {
     }
 }
 
-fn month_credits(used: f64, limit: f64) -> Reading {
+/// A monthly credit grant with `month` of its period elapsed.
+fn month_credits(used: f64, limit: f64, month: f64) -> Reading {
     Reading {
-        window: Window::CalendarMonth,
+        window: Window::CALENDAR_MONTH,
         unit: Unit::Credits,
         used,
         limit: Some(limit),
-        resets_at: None,
+        resets_at: Some(NOW + ((1.0 - month) * 30.0 * 86_400.0) as i64),
         model_class: None,
     }
 }
@@ -709,6 +713,7 @@ fn ready(account: AccountId, readings: Vec<Reading>) -> (AccountId, AccountState
             readings,
             availability: Availability::Ready,
             burn: BurnRing::default(),
+            grants: Vec::new(),
         },
     )
 }
@@ -729,6 +734,7 @@ fn burst_lowers_the_adaptive_limit_and_moves_fanout_earlier() {
             readings: vec![pct(Window::hours(5), 60.0)],
             availability: Availability::Ready,
             burn: burn(&[(NOW - 3_600, 20.0), (NOW, 60.0)]), // 40 pct/h
+            grants: Vec::new(),
         },
     );
     snap.accounts.insert(
@@ -762,6 +768,7 @@ fn quiet_account_rides_to_the_ceiling() {
             readings: vec![pct(Window::hours(5), 90.0)],
             availability: Availability::Ready,
             burn: burn(&[(NOW - 3_600, 90.0), (NOW, 90.0)]), // flat
+            grants: Vec::new(),
         },
     );
     // No burn means no extra reserve, so the ceiling stays 95 and 90% is usable.
@@ -777,58 +784,74 @@ fn quiet_account_rides_to_the_ceiling() {
     );
 }
 
+// Order of choice: room that would be lost beats priority, and only while
+// the pool is behind its pace line.
 #[test]
-fn weekly_window_resetting_soon_drains_ahead_of_priority() {
-    let mut low = account("claude:low", AccountKind::Subscription, 5);
-    low.drain_before_reset_h = Some(12.0);
+fn expiring_room_behind_pace_beats_priority_only_while_behind() {
     let policy = policy(
-        vec![low, account("claude:high", AccountKind::Subscription, 1)],
+        vec![
+            account("claude:low", AccountKind::Subscription, 5),
+            account("claude:high", AccountKind::Subscription, 1),
+        ],
+        vec![],
+    );
+    let snap = |burn_ring: BurnRing| {
+        let mut snap = Snapshot::default();
+        snap.accounts.insert(
+            id("claude:low"),
+            AccountState {
+                readings: vec![pct_at(Window::days(7), 60.0, NOW + 36_000)], // 10h left, 40% spare
+                availability: Availability::Ready,
+                burn: burn_ring,
+                grants: Vec::new(),
+            },
+        );
+        // 90% used with 80% of the 5h window gone: ahead of pace.
+        snap.accounts.insert(
+            id("claude:high"),
+            ready(id("claude:high"), vec![pct(Window::hours(5), 90.0)]).1,
+        );
+        snap
+    };
+    let choose = |snap: &Snapshot| {
+        used(&decide(
+            &policy,
+            snap,
+            &Intents::default(),
+            interactive("m"),
+            NOW,
+        ))
+        .to_string()
+    };
+    // Flat burn: the 40% spare is lost at the reset, so it drains first.
+    let flat = snap(burn(&[(NOW - 3_600, 60.0), (NOW, 60.0)]));
+    assert_eq!(choose(&flat), "claude:low");
+    // 5 points an hour uses the room before the reset: ahead of pace.
+    let busy = snap(burn(&[(NOW - 3_600, 55.0), (NOW, 60.0)]));
+    assert_eq!(choose(&busy), "claude:high");
+}
+
+#[test]
+fn credits_behind_their_pace_line_are_preferred() {
+    let policy = policy(
+        vec![
+            account("openai:behind", AccountKind::Credits, 1),
+            account("openai:ahead", AccountKind::Credits, 1),
+        ],
         vec![],
     );
     let mut snap = Snapshot::default();
     snap.accounts.insert(
-        id("claude:low"),
-        AccountState {
-            readings: vec![pct_at(Window::days(7), 60.0, NOW + 36_000)], // 10h left, 40% spare
-            availability: Availability::Ready,
-            burn: burn(&[(NOW - 3_600, 60.0), (NOW, 60.0)]),
-        },
-    );
-    snap.accounts.insert(
-        id("claude:high"),
-        ready(id("claude:high"), vec![pct(Window::hours(5), 10.0)]).1,
-    );
-    assert_eq!(
-        used(&decide(
-            &policy,
-            &snap,
-            &Intents::default(),
-            interactive("m"),
-            NOW
-        )),
-        "claude:low"
-    );
-}
-
-#[test]
-fn credits_behind_the_month_line_are_preferred() {
-    let mut behind = account("openai:behind", AccountKind::Credits, 1);
-    behind.pacing = Pacing::MonthLine;
-    let mut ahead = account("openai:ahead", AccountKind::Credits, 1);
-    ahead.pacing = Pacing::MonthLine;
-    let policy = policy(vec![behind, ahead], vec![]);
-    let mut snap = Snapshot {
-        accounts: BTreeMap::new(),
-        ledger: BTreeMap::new(),
-        month_fraction: 0.5,
-    };
-    snap.accounts.insert(
         id("openai:behind"),
-        ready(id("openai:behind"), vec![month_credits(400.0, 1_000.0)]).1,
+        ready(
+            id("openai:behind"),
+            vec![month_credits(400.0, 1_000.0, 0.5)],
+        )
+        .1,
     );
     snap.accounts.insert(
         id("openai:ahead"),
-        ready(id("openai:ahead"), vec![month_credits(700.0, 1_000.0)]).1,
+        ready(id("openai:ahead"), vec![month_credits(700.0, 1_000.0, 0.5)]).1,
     );
     assert_eq!(
         used(&decide(
@@ -845,25 +868,19 @@ fn credits_behind_the_month_line_are_preferred() {
 #[test]
 fn pacing_slack_keeps_a_current_account_from_flapping() {
     let mut one = account("openai:one", AccountKind::Credits, 1);
-    one.pacing = Pacing::MonthLine;
     one.pacing_slack_pct = 5.0;
     let mut two = account("openai:two", AccountKind::Credits, 1);
-    two.pacing = Pacing::MonthLine;
     two.pacing_slack_pct = 5.0;
     let policy = policy(vec![one, two], vec![]);
     let snap = |month: f64| {
-        let mut snap = Snapshot {
-            accounts: BTreeMap::new(),
-            ledger: BTreeMap::new(),
-            month_fraction: month,
-        };
+        let mut snap = Snapshot::default();
         snap.accounts.insert(
             id("openai:one"),
-            ready(id("openai:one"), vec![month_credits(520.0, 1_000.0)]).1,
+            ready(id("openai:one"), vec![month_credits(520.0, 1_000.0, month)]).1,
         );
         snap.accounts.insert(
             id("openai:two"),
-            ready(id("openai:two"), vec![month_credits(400.0, 1_000.0)]).1,
+            ready(id("openai:two"), vec![month_credits(400.0, 1_000.0, month)]).1,
         );
         snap
     };

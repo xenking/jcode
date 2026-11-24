@@ -35,6 +35,10 @@ export interface CacheKeepaliveUsage {
 /** One way out of a routing gate. */
 export type RoutingGateOption =
   | { kind: "switch"; account: string; detail: string }
+  /** Compact on the warm current account, then move to `account`. */
+  | { kind: "compact_switch"; account: string; detail: string }
+  /** Redeem a reset grant on `account` and stay; it lapses at `expires_at`. */
+  | { kind: "redeem_reset"; account: string; expires_at: number }
   /** Wait for the limit window to reset (unix seconds). */
   | { kind: "wait_until"; resets_at: number }
   | { kind: "ack"; account: string };
@@ -42,6 +46,8 @@ export type RoutingGateOption =
 /** The answer to a gate: move, hold the turn, keep spending, or drop it. */
 export type RoutingGateChoice =
   | { kind: "switch"; account: string }
+  | { kind: "compact_switch"; account: string }
+  | { kind: "redeem_reset" }
   | { kind: "wait" }
   | { kind: "ack"; minutes: number }
   | { kind: "cancel" };

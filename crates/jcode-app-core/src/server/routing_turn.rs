@@ -105,6 +105,7 @@ fn turn_input(agent: &Agent, seam: Seam) -> Option<TurnInput> {
         session_id: agent.session_id().to_string(),
         parent_session: agent.routing_parent_id(),
         model: agent.provider_handle().model(),
+        cache: agent.routing_cache(&provider),
         provider,
         role: role_of(agent),
         current,
@@ -171,7 +172,7 @@ pub(super) async fn before_turn(
         .route(&input, &EventSink(event_tx))
         .await
         .map_err(|reason| anyhow::anyhow!("Routing blocked this turn: {reason}"))?;
-    apply(agent, plan, event_tx);
+    apply(agent, plan, event_tx).await;
     Ok(())
 }
 
@@ -187,34 +188,74 @@ pub async fn route_unattached_turn(agent: &mut Agent) -> anyhow::Result<()> {
     routed
 }
 
-fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+async fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
     // A limit reaches routing at once only while another account can serve.
     agent.set_routing_fail_fast_limits(match &plan {
-        Plan::Stay(outcome) | Plan::Move(outcome) => outcome.alternative,
+        Plan::Stay(outcome) | Plan::Move(outcome) | Plan::CompactThenMove(outcome) => {
+            outcome.alternative
+        }
         _ => false,
     });
     match plan {
         Plan::Stay(outcome) => {
             let _ = event_tx.send(outcome.event());
         }
-        Plan::Move(mut outcome) => {
-            if let Err(error) = bind(agent, &outcome.account, event_tx) {
-                crate::logging::warn(&format!(
-                    "routing: could not move {} to {}: {error}",
-                    agent.session_id(),
-                    outcome.account
-                ));
-                outcome
-                    .warnings
-                    .push(format!("could not move to {}: {error}", outcome.account));
-                if let Some(current) = current_account(agent) {
-                    outcome.pending = Some(std::mem::replace(&mut outcome.account, current));
+        Plan::Move(outcome) => move_to(agent, outcome, event_tx),
+        Plan::CompactThenMove(mut outcome) => {
+            // Compact while the cache on the current account is still warm,
+            // so the move rewrites only the summary.
+            let from = current_account(agent)
+                .map_or_else(|| "the current account".to_string(), |id| id.to_string());
+            match agent.compact_on_current_account().await {
+                Ok((before, after)) => {
+                    outcome.reason = format!(
+                        "compacted ~{}K to ~{}K on warm {from} first, then {}",
+                        before / 1000,
+                        after / 1000,
+                        outcome.reason
+                    );
+                }
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "routing: compaction before moving {} failed: {error}",
+                        agent.session_id()
+                    ));
+                    outcome
+                        .warnings
+                        .push(format!("moved without compacting first: {error}"));
                 }
             }
-            let _ = event_tx.send(outcome.event());
+            move_to(agent, outcome, event_tx);
         }
-        Plan::Inactive | Plan::Observed | Plan::Gate(_) | Plan::Block { .. } => {}
+        Plan::Inactive
+        | Plan::Observed
+        | Plan::Gate(_)
+        | Plan::Redeem { .. }
+        | Plan::Block { .. } => {}
     }
+}
+
+/// Binds `outcome.account` and reports the decision. A bind that fails keeps
+/// the session where it is and reports the move as pending.
+fn move_to(
+    agent: &mut Agent,
+    mut outcome: routing_service::Outcome,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Err(error) = bind(agent, &outcome.account, event_tx) {
+        crate::logging::warn(&format!(
+            "routing: could not move {} to {}: {error}",
+            agent.session_id(),
+            outcome.account
+        ));
+        outcome
+            .warnings
+            .push(format!("could not move to {}: {error}", outcome.account));
+        if let Some(current) = current_account(agent) {
+            outcome.pending = Some(std::mem::replace(&mut outcome.account, current));
+        }
+    }
+    let _ = event_tx.send(outcome.event());
 }
 
 /// A completed turn clears the account's failure streak.
@@ -268,7 +309,8 @@ pub(super) async fn on_failure(
         service.record_failure(current, definitive);
     }
     match service.route(&input, &EventSink(event_tx)).await {
-        Ok(Plan::Move(outcome)) => {
+        // A failed turn is a cold seam, so there is no warm cache to compact.
+        Ok(Plan::Move(outcome) | Plan::CompactThenMove(outcome)) => {
             let target = outcome.account.clone();
             if let Err(error) = bind(agent, &target, event_tx) {
                 crate::logging::warn(&format!(

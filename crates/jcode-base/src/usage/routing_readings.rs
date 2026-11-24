@@ -179,7 +179,7 @@ pub(crate) fn cursor_readings(limits: &[UsageLimit], now: i64) -> Vec<Reading> {
                 _ => return None,
             };
             pct(
-                Window::CalendarMonth,
+                Window::CALENDAR_MONTH,
                 f64::from(limit.usage_percent),
                 limit.resets_at.as_deref(),
                 class,
@@ -194,6 +194,34 @@ pub(crate) fn anthropic_account_readings(label: &str, now: i64) -> Option<Vec<Re
     let usage = super::cached_anthropic_usage_for_label(label)?;
     let readings = anthropic_readings(&usage, now);
     (!readings.is_empty()).then_some(readings)
+}
+
+/// Reset grants a saved login holds, from cached metadata only: the soonest
+/// expiring one, which restores the weekly window. An imported observation
+/// is never authority to spend, so it yields none.
+pub(crate) fn account_grants(
+    kind: super::MultiAccountProviderKind,
+    label: &str,
+    now: i64,
+) -> Vec<jcode_routing_policy::Grant> {
+    let Some(resets) = super::cached_account_banked_resets(kind, label) else {
+        return Vec::new();
+    };
+    if resets.available == 0 || resets.cached_source.is_some() {
+        return Vec::new();
+    }
+    resets
+        .expires_at
+        .as_deref()
+        .and_then(parse_rfc3339_unix)
+        .filter(|at| *at > now)
+        .map(|expires_at| jcode_routing_policy::Grant {
+            expires_at,
+            windows: vec![Window::days(7)],
+            model_class: None,
+        })
+        .into_iter()
+        .collect()
 }
 
 /// Last cached OpenAI readings for a saved login, without waiting for the cache.

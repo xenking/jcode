@@ -415,11 +415,39 @@ def check_concurrent_sessions(binary, port):
         daemon.stop()
 
 
+def check_warm_session_stays(binary, port):
+    Fixture.used["key-main"], Fixture.used["key-second"] = 10, 10
+    Fixture.limited, Fixture.spent, Fixture.throttled = set(), set(), {}
+    daemon = scenario(binary, port, "auto")
+    daemon.start()
+    try:
+        client = daemon.session()
+        # A human switch puts the session on key-second; the first turn warms
+        # its cache there.
+        client.send(type="routing_intent", id=8, action={"action": "switch", "account": "opencode-go:second"})
+        client.until(lambda e: e.get("type") == "routing_status")
+        assert turn(client, 2)["type"] == "done"
+        # Clearing the switch makes key-main the preferred account again, but
+        # moving would throw the warm cache away for a preference.
+        client.send(type="routing_intent", id=9, action={"action": "unstick"})
+        client.until(lambda e: e.get("type") == "routing_status")
+        assert turn(client, 3)["type"] == "done"
+        assert Fixture.seen == ["key-second", "key-second"], f"the warm session stays: {Fixture.seen}"
+        line = daemon.decisions()[-1]
+        assert line["seam"] == "warm" and line["decision"] == "pending", line
+        assert line["account"] == "opencode-go:second" and line["pending"] == "opencode-go", line
+        decision = [e for e in client.events if e.get("type") == "routing_decision"][-1]
+        assert decision["account"] == "opencode-go:second" and decision.get("pending") == "opencode-go", decision
+        print("ok warm: no move on preference, key-second kept its cache, key-main reported as pending")
+    finally:
+        daemon.stop()
+
+
 def main(binary):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_port
-    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides, check_concurrent_sessions, check_throttle_stays_on_the_account, check_spent_window_reaches_routing_first):
+    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides, check_concurrent_sessions, check_throttle_stays_on_the_account, check_spent_window_reaches_routing_first, check_warm_session_stays):
         check(binary, port)
     print("routing daemon acceptance: PASS")
 

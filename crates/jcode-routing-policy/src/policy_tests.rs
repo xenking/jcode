@@ -66,7 +66,7 @@ fn full_example_validates() {
     assert_eq!(team.priority.for_class(Some("fable")), 1);
     assert_eq!(team.priority.for_class(Some("sonnet")), 2);
     assert!(team.serves("claude-opus-5-5") && !team.serves("gpt-6.2-sol"));
-    assert_eq!(policy.budgets[0].window, Window::CalendarMonth);
+    assert_eq!(policy.budgets[0].window, Window::CALENDAR_MONTH);
     assert_eq!(
         policy.budgets[0].scope,
         Scope::Provider("huggingface".into())
@@ -150,8 +150,16 @@ fn windows_parse_and_print() {
             Some(shown)
         );
     }
-    assert_eq!(Window::parse("calendar-month"), Some(Window::CalendarMonth));
-    for bad in ["", "h", "0h", "5x", "-1d"] {
+    assert_eq!(
+        Window::parse("calendar-month"),
+        Some(Window::CALENDAR_MONTH)
+    );
+    assert_eq!(Window::parse("month@1"), Some(Window::CALENDAR_MONTH));
+    assert_eq!(Window::parse("month@15"), Some(Window::Month { day: 15 }));
+    assert_eq!(Window::Month { day: 15 }.to_string(), "month@15");
+    for bad in [
+        "", "h", "0h", "5x", "-1d", "month@0", "month@29", "month@", "month",
+    ] {
         assert_eq!(Window::parse(bad), None, "{bad}");
     }
 }
@@ -198,14 +206,20 @@ fn strategy_fields_validate_and_land() {
 
         [[routing.accounts]]
         id = "claude:a"
-        drain_before_reset_h = 12
-        drain_limit_pct = 98
 
         [[routing.accounts]]
         id = "openai:codex"
         kind = "credits"
-        pacing = "month-line"
         pacing_slack_pct = 2
+        weight = 1.5
+
+        [[routing.budgets]]
+        name = "codex-grant"
+        account = "openai:codex"
+        meter = "ledger"
+        window = "month@15"
+        unit = "usd"
+        limit = 600
         "#,
     )
     .expect("valid");
@@ -214,10 +228,9 @@ fn strategy_fields_validate_and_land() {
     assert_eq!(policy.hysteresis_pct, 3.0);
     assert_eq!(policy.evict_after, 5);
     assert_eq!(policy.evict_for_secs, 45 * 60);
-    assert_eq!(policy.accounts[0].drain_before_reset_h, Some(12.0));
-    assert_eq!(policy.accounts[0].drain_limit_pct, 98.0);
-    assert_eq!(policy.accounts[1].pacing, crate::Pacing::MonthLine);
     assert_eq!(policy.accounts[1].pacing_slack_pct, 2.0);
+    assert_eq!(policy.accounts[1].weight, 1.5);
+    assert_eq!(policy.budgets[0].window, Window::Month { day: 15 });
 }
 
 #[test]
@@ -230,24 +243,26 @@ fn strategy_fields_report_every_problem_at_once() {
         hysteresis_pct = 100
         evict_after = 0
         evict_for = "calendar-month"
-
-        [[routing.accounts]]
-        id = "claude:bad-drain-h"
-        drain_before_reset_h = -1
-
-        [[routing.accounts]]
-        id = "claude:bad-drain-limit"
-        drain_limit_pct = 101
-
-        [[routing.accounts]]
-        id = "claude:bad-pacing"
-        pacing = "month-line"
+        move_margin_pct = 100
+        horizon_turns = -1
 
         [[routing.accounts]]
         id = "openai:x"
         kind = "credits"
-        pacing = "month-line"
         pacing_slack_pct = 100
+
+        [[routing.accounts]]
+        id = "openai:y"
+        kind = "credits"
+        weight = 0
+
+        [[routing.budgets]]
+        name = "bad-anchor"
+        provider = "openai"
+        meter = "ledger"
+        window = "month@31"
+        unit = "usd"
+        limit = 10
         "#,
     )
     .expect_err("invalid");
@@ -258,10 +273,11 @@ fn strategy_fields_report_every_problem_at_once() {
         "hysteresis_pct",
         "evict_after",
         "evict_for",
-        "drain_before_reset_h",
-        "drain_limit_pct",
-        "pacing month-line is only for credits",
+        "move_margin_pct",
+        "horizon_turns",
         "pacing_slack_pct",
+        "weight must be positive",
+        "month@15 (day 1..=28)",
     ] {
         assert!(joined.contains(needle), "missing `{needle}` in:\n{joined}");
     }

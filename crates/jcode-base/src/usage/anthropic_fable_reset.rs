@@ -1,6 +1,7 @@
 //! Fable earned resets using Claude Code 2.1.322's `cedar_ember` contract.
 //! See docs/anthropic-fable-resets.md for primary-source evidence.
 
+use super::ResetMode;
 #[cfg(test)]
 use super::anthropic_reset::reset_client;
 use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client_for};
@@ -122,6 +123,15 @@ async fn status(client: &reqwest::Client, base: &str, token: &str) -> Result<Opt
 /// `None` is deliberately unsupported: background retry must pin a named login.
 /// This never purchases usage credits or redeems the `juniper_tide` program.
 pub(crate) async fn auto_reset_fable_usage(account_label: Option<String>) -> Result<bool> {
+    auto_reset_fable_usage_with(account_label, ResetMode::AtWall).await
+}
+
+/// [`auto_reset_fable_usage`] for either reason in [`ResetMode`]. The same
+/// account lock and pending marker guard both.
+pub(crate) async fn auto_reset_fable_usage_with(
+    account_label: Option<String>,
+    mode: ResetMode,
+) -> Result<bool> {
     if !crate::config::Config::load()
         .provider
         .anthropic_auto_fable_reset
@@ -133,22 +143,61 @@ pub(crate) async fn auto_reset_fable_usage(account_label: Option<String>) -> Res
     };
     let token = fresh_access_token(Some(&label)).await?;
     let client = reset_client_for(Some(&label)).await?;
-    redeem(
+    redeem_with(
         &client,
         BASE,
         &token,
         &label,
         &crate::storage::jcode_dir()?.join("fable-resets"),
+        mode,
     )
     .await
 }
 
+/// A usable grant that lapses within `within_secs`. The provider's own
+/// `usable_now` decides whether it may be spent before the wall.
+fn expiring_grant(
+    status: &Status,
+    now: chrono::DateTime<chrono::Utc>,
+    within_secs: i64,
+) -> Option<&Grant> {
+    if !status.eligible {
+        return None;
+    }
+    status.grants.iter().find(|grant| {
+        grant.gives_back_weekly
+            && valid_id(&grant.id)
+            && grant.resets_left > 0
+            && !grant.paused
+            && grant.usable_now
+            && grant.blocking.is_empty()
+            && grant.ends_at.as_deref().is_some_and(|at| {
+                chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| {
+                    let left = at.timestamp() - now.timestamp();
+                    left > 0 && left <= within_secs
+                })
+            })
+    })
+}
+
+#[cfg(test)]
 async fn redeem(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     label: &str,
     root: &std::path::Path,
+) -> Result<bool> {
+    redeem_with(client, base, token, label, root, ResetMode::AtWall).await
+}
+
+async fn redeem_with(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    label: &str,
+    root: &std::path::Path,
+    mode: ResetMode,
 ) -> Result<bool> {
     // The profile and usage requests use the exact same pinned token.
     let profile = get_json(client, &format!("{base}/api/oauth/profile"), token).await?;
@@ -185,7 +234,7 @@ async fn redeem(
     };
     // A concurrent claimant cleared the quota. Retry is safe without spending
     // anything or erasing its possibly uncertain durable journal.
-    if waited && !before.at_limit && before.exhausted.is_empty() {
+    if mode == ResetMode::AtWall && waited && !before.at_limit && before.exhausted.is_empty() {
         super::anthropic_reset::invalidate_anthropic_usage_reset_state(Some(label));
         return Ok(true);
     }
@@ -195,7 +244,12 @@ async fn redeem(
     if marker.exists() {
         return Ok(false);
     }
-    let Some(grant) = eligible_grant(&before, chrono::Utc::now()) else {
+    let now = chrono::Utc::now();
+    let grant = match mode {
+        ResetMode::AtWall => eligible_grant(&before, now),
+        ResetMode::Expiring { within_secs } => expiring_grant(&before, now, within_secs),
+    };
+    let Some(grant) = grant else {
         return Ok(false);
     };
     let grant_id = grant.id.clone();
@@ -285,6 +339,24 @@ mod tests {
                 "ends_at":"2027-03-09T07:59:00Z","clears":["five_hour","seven_day_overage_included"],
                 "paused":false,"usable_now":true,"gives_back_weekly":true,"blocking":[]}]
         })).unwrap()
+    }
+    #[test]
+    fn expiring_mode_takes_a_usable_grant_due_soon_without_the_wall() {
+        let now = chrono::DateTime::parse_from_rfc3339("2027-03-09T07:50:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut value = fixture();
+        value.at_limit = false;
+        value.exhausted.clear();
+        // Nine minutes left: inside the ten-minute sweep.
+        assert!(expiring_grant(&value, now, 600).is_some());
+        assert!(eligible_grant(&value, now).is_none(), "not at the wall");
+        // Eleven minutes left: not yet.
+        let early = now - chrono::Duration::minutes(2);
+        assert!(expiring_grant(&value, early, 600).is_none());
+        // The provider's own `usable_now` still decides.
+        value.grants[0].usable_now = false;
+        assert!(expiring_grant(&value, now, 600).is_none());
     }
     #[test]
     fn actual_cli_schema_selects_fable_not_session_grants() {

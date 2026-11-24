@@ -183,7 +183,10 @@ Requests:
 {"v":1,"id":9,"req":"get_routing_view"}
 ```
 
-`choice` is `switch {account}`, `wait`, `ack {minutes}` or `cancel`. An answer
+`choice` is `switch {account}`, `compact_switch {account}`, `redeem_reset`,
+`wait`, `ack {minutes}` or `cancel`. Gate options are `switch`, `compact_switch`
+(compact on the warm current account, then move), `redeem_reset {account,
+expires_at}` (spend a reset grant and stay), `wait_until` and `ack`. An answer
 replies `ok`, or an error when no such gate is waiting, for example because another
 client answered first. `action` is `status`, `pin`, `switch`, `hold`, `ack`, `paid`
 or `unstick`, with the same arguments as the TUI's `/acct`. An omitted `account`

@@ -62,6 +62,12 @@ impl RoutingGateModel {
             Some(RoutingGateOption::Switch { account, .. }) => RoutingGateChoice::Switch {
                 account: account.clone(),
             },
+            Some(RoutingGateOption::CompactSwitch { account, .. }) => {
+                RoutingGateChoice::CompactSwitch {
+                    account: account.clone(),
+                }
+            }
+            Some(RoutingGateOption::RedeemReset { .. }) => RoutingGateChoice::RedeemReset,
             Some(RoutingGateOption::WaitUntil { .. }) => RoutingGateChoice::Wait,
             Some(RoutingGateOption::Ack { .. }) => RoutingGateChoice::Ack {
                 minutes: GATE_ACK_MINUTES,
@@ -106,6 +112,21 @@ pub fn option_text(option: &RoutingGateOption) -> String {
         }
         RoutingGateOption::Switch { account, detail } => {
             format!("Switch to {account} · {}", detail.trim())
+        }
+        RoutingGateOption::CompactSwitch { account, detail } if detail.trim().is_empty() => {
+            format!("Compact, then switch to {account}")
+        }
+        RoutingGateOption::CompactSwitch { account, detail } => {
+            format!("Compact, then switch to {account} · {}", detail.trim())
+        }
+        RoutingGateOption::RedeemReset {
+            account,
+            expires_at,
+        } => {
+            format!(
+                "Redeem a reset on {account} (expires {})",
+                reset_clock(*expires_at)
+            )
         }
         RoutingGateOption::WaitUntil { resets_at } => {
             format!("Wait until {}", reset_clock(*resets_at))
