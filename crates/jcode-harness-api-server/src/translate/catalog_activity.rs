@@ -39,8 +39,8 @@ impl BridgeState {
             .filter(|id| {
                 indexed
                     .get(*id)
-                    .and_then(|entry| entry.context.as_ref())
-                    .is_none_or(|context| context.activity.is_none())
+                    .and_then(|entry| entry.context.as_ref()?.activity?.last_message_at_ms)
+                    .is_none()
             })
             .collect();
         pending
@@ -71,9 +71,11 @@ impl BridgeState {
                 unindexed.insert(id.clone(), activity);
                 continue;
             };
-            entry.context.get_or_insert_with(Default::default).activity = Some(activity);
-            // Patch just the missing field. A concurrent session save that
-            // published fresh activity wins, even if its timestamp didn't change.
+            let context = entry.context.get_or_insert_with(Default::default);
+            context.activity.get_or_insert(activity).last_message_at_ms =
+                activity.last_message_at_ms;
+            // Only fill absent activity. A concurrent save that already wrote
+            // the new field, including an explicit null, wins.
             if connection.is_none()
                 && let Some(path) = Self::recent_session_index_path()
             {
@@ -94,9 +96,15 @@ impl BridgeState {
                     }
                 };
                 if let Err(error) = connection.execute(
-                    "UPDATE recent_sessions
-                     SET catalog_context = json_set(COALESCE(catalog_context, '{}'), '$.activity', json(?2))
-                     WHERE session_id = ?1 AND json_extract(catalog_context, '$.activity') IS NULL",
+                    "UPDATE recent_sessions SET catalog_context = CASE
+                         WHEN NOT json_valid(catalog_context) THEN json_object('activity', json(?2))
+                         WHEN json_type(catalog_context, '$.activity') IS NOT 'object'
+                         THEN json_set(catalog_context, '$.activity', json(?2))
+                         ELSE json_set(catalog_context, '$.activity.last_message_at_ms',
+                                       json_extract(?2, '$.last_message_at_ms')) END
+                     WHERE session_id = ?1 AND (CASE WHEN json_valid(catalog_context)
+                         THEN json_type(catalog_context, '$.activity.last_message_at_ms') IS NULL
+                         ELSE 1 END)",
                     params![id, value],
                 ) {
                     eprintln!("harness API bridge: cache legacy activity for {id}: {error}");

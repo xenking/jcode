@@ -34,6 +34,15 @@ impl Session {
                 .filter_map(|message| message.timestamp)
                 .find(|time| belongs_to_session(*time))
                 .map(|time| time.timestamp_millis()),
+            last_message_at_ms: Some(
+                self.messages
+                    .iter()
+                    .filter(|message| message.counts_as_catalog_message())
+                    .filter_map(|message| message.timestamp)
+                    .filter(|time| belongs_to_session(*time))
+                    .max()
+                    .map(|time| time.timestamp_millis()),
+            ),
         }
     }
 }

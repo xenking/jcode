@@ -875,6 +875,22 @@ impl SessionInfo {
     pub fn last_agent_activity_at_ms(&self) -> Option<i64> {
         self.context.as_ref()?.activity?.last_agent_activity_at_ms
     }
+
+    pub fn last_message_at_ms(&self) -> Option<i64> {
+        self.context
+            .as_ref()?
+            .activity?
+            .last_message_at_ms
+            .flatten()
+    }
+
+    /// True when the source explicitly supplied message activity, even if it found none.
+    pub fn has_message_activity(&self) -> bool {
+        self.context
+            .as_ref()
+            .and_then(|context| context.activity)
+            .is_some_and(|activity| activity.last_message_at_ms.is_some())
+    }
 }
 
 /// Live ownership and lifecycle facts. Transcript metadata cannot establish

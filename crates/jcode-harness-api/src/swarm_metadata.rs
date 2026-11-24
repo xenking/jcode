@@ -167,6 +167,9 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
                 last_agent_activity_at_ms: context
                     .activity
                     .and_then(|activity| activity.last_agent_activity_at_ms),
+                last_message_at_ms: context
+                    .activity
+                    .and_then(|activity| activity.last_message_at_ms),
             });
         }
         if session.agent_label.is_none() {

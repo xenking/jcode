@@ -9,10 +9,12 @@ use std::{
     path::Path,
 };
 
-use super::{SessionCatalogActivity, SessionOrigin, legacy_agent_session};
+use super::{SessionCatalogActivity, SessionOrigin, counts_as_catalog_text, legacy_agent_session};
 
 #[derive(Deserialize)]
 struct Block {
+    #[serde(rename = "type")]
+    kind: Option<String>,
     #[serde(default)]
     text: Option<String>,
 }
@@ -20,6 +22,7 @@ struct Block {
 #[derive(Deserialize)]
 struct Message {
     role: String,
+    display_role: Option<String>,
     timestamp: Option<DateTime<Utc>>,
     #[serde(default)]
     content: Vec<Block>,
@@ -28,6 +31,7 @@ struct Message {
 #[derive(Default)]
 struct MessageFacts {
     reply: Option<DateTime<Utc>>,
+    last_message: Option<DateTime<Utc>>,
     scheduled: Option<DateTime<Utc>>,
 }
 
@@ -44,7 +48,23 @@ impl<'de> Deserialize<'de> for MessageFacts {
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut facts = MessageFacts::default();
                 while let Some(message) = seq.next_element::<Message>()? {
-                    match message.role.as_str() {
+                    let role = message.role.as_str();
+                    if matches!(role, "user" | "assistant")
+                        && matches!(message.display_role.as_deref(), None | Some("jarvis_user"))
+                        && message
+                            .content
+                            .iter()
+                            .any(|block| match block.kind.as_deref() {
+                                Some("image") => true,
+                                Some("text") | None => block.text.as_deref().is_some_and(|text| {
+                                    counts_as_catalog_text(role == "user", text)
+                                }),
+                                _ => false,
+                            })
+                    {
+                        facts.last_message = facts.last_message.max(message.timestamp);
+                    }
+                    match role {
                         "assistant" => facts.reply = facts.reply.max(message.timestamp),
                         "user"
                             if message.content.iter().any(|block| {
@@ -100,6 +120,7 @@ pub fn read_legacy_catalog_activity(path: &Path) -> io::Result<SessionCatalogAct
             // Ignore an incomplete final append while a writer is active.
             if let Ok(append) = serde_json::from_str::<Append>(&line) {
                 facts.reply = facts.reply.max(append.append_messages.reply);
+                facts.last_message = facts.last_message.max(append.append_messages.last_message);
                 facts.scheduled = facts.scheduled.max(append.append_messages.scheduled);
             }
         }
@@ -128,5 +149,11 @@ pub fn read_legacy_catalog_activity(path: &Path) -> io::Result<SessionCatalogAct
             .reply
             .filter(belongs_to_session)
             .map(|time| time.timestamp_millis()),
+        last_message_at_ms: Some(
+            facts
+                .last_message
+                .filter(belongs_to_session)
+                .map(|time| time.timestamp_millis()),
+        ),
     })
 }
