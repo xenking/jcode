@@ -1,71 +1,52 @@
 # Routing policy: accounts, egress, budgets (plan)
 
-Fork-only. Goal: jcode replaces the work laptop's omp setup (`xenking/pi-o-my-work`)
-without losing any routing behaviour, and the features stay general: any user can
-describe accounts, proxies and spend limits in config, nothing names the employer.
-Work-specific values live in a separate private repo, `xenking/jcode-work`.
+Fork-only. Multi-account routing across providers, per-provider and per-account
+egress proxies, account priorities, and usage/spend limits, all described in
+`config.toml`. The daemon decides which credential serves each session.
 
-## Decisions (owner, 2026-11-24)
+## Design decisions
 
 | Question | Decision |
 | --- | --- |
-| Where routing runs | Natively in the jcode daemon. agentgateway is a source of concepts, not a dependency. |
-| Limit reached | Configurable per account and budget. Default as omp: ask in an interactive session (own inline view, like `ask`), block with a reason in headless and subagents. Automatic switch is a per-account setting. |
-| Egress proxy down | Per proxy: `required = true` fails closed (account unavailable, routing picks the next), `false` goes direct. |
-| Non-routing customizations | After routing: typed tools to MCP in `work-connectors`, gates to `pre_tool` hooks, skills copied as they are. |
-| Work config | New private repo `jcode-work`. |
-| Upstream | Fork-only. Record in `docs/FORK_LEDGER.md`. |
-| Config format | `[routing]`, `[egress.*]`, `[[routing.accounts]]`, `[[routing.budgets]]` in `config.toml`. Mutable state in a daemon store. `account-pool.json` is migrated and deleted. |
-| Scope of smart spending | Claude subscriptions and credits, OpenAI/Codex credits, Cursor dollar pool, OpenCode Go (several keys), Hugging Face resource group. OpenCode Zen is out. |
+| Where routing runs | Natively in the daemon. One process sees every session, so intents, meter samples and the spend ledger have one owner. |
+| Limit reached | Configurable per account and per budget: `switch`, `ask` or `block`. Default: ask in an interactive session through an inline view like `ask`, block with a reason in headless sessions and subagents. |
+| Egress proxy down | Per proxy. `required = true` fails closed (the account is unavailable and routing picks the next), `false` goes direct. |
+| Config format | `[routing]`, `[egress.*]`, `[[routing.accounts]]`, `[[routing.budgets]]` in `config.toml`. Mutable state lives in a daemon store. `account-pool.json` is migrated and deleted. |
+| Providers covered | Claude subscriptions and API credits, OpenAI subscriptions and Codex credits, Cursor dollar pool, OpenCode Go (several keys), Hugging Face Inference Providers billed to an organization, named OpenAI-compatible providers. |
 
-## What omp work does today
+## Behaviour
 
-Read from `pi-o-my-work` at `49fca80`.
-
-| omp piece | Behaviour to keep |
-| --- | --- |
-| `acct-policy.ts` | Slots `sub`/`credits`; priority per model class (`{ fable = 1, default = 2 }`); model globs per account; adaptive limit from measured burn rate (`threshold`, `reserveFloorPct`, `reserveHorizonMin`); drain a subscription whose weekly window resets within `drainHorizonHours`; credits paced against the calendar-month line with slack; hysteresis on moving in; subagents stop `weeklyFloorSubagents` points earlier; gate at `gateAt` with switch/wait/ack options built from live meters; intents `hold`, `pin`, `switch`, `unstick`, `ack`, `paid auto/off/allow <dur>`; grant probe and login TTL warning; moves only at a cache-cold seam; account chip in the status line. |
-| `account-egress` patch | `PI_PROXY_ORGS=<orgId>=<proxy>`: only corp-allowlisted orgs go through tinyproxy over VPN. |
-| `acct-policy-fallback` patch | A gated session hands off through the native model fallback chain (opus to sol, sonnet to terra). |
-| `codex-gate.ts` | Monthly Codex credit pool, warn/limit, meter may be unreadable (shown as `?`, never zero). |
-| `hf-gate.ts` | Local dollar ledger for `huggingface/*`, calendar month, warn $450, limit $500. HF bills the resource group and shows no usage to the member. |
-| `models.yml` HF block | `X-HF-Bill-To` header, key from Keychain, per-model cost and compat overrides. |
-| `config.d/cursor.yml` | Cursor $600/month pool as the manual post-gate profile. |
-| `omp-credits`, `omp-acct` | CLI status and intents from outside a session, SwiftBar output. |
-| review-session profile | Per-role models for review panes (orchestrator, subagent cap, consultant). |
-
-## What jcode has
-
-- Multi-account OAuth for Claude and OpenAI only (`auth/account_pool.rs`). One priority per account, failover within a tier on exhaustion (`provider/account_failover.rs`).
-- Usage windows for Claude, OpenAI and OpenCode Go (`usage/`, `usage/api_keys.rs`). Local spend per API-key source (`provider_activity.rs`).
-- Named OpenAI-compatible providers with `headers`, so the HF bill-to header already works.
-- Cross-provider failover (`cross_provider_failover`), swarm allowlists and fallbacks.
-- Missing: proxy per provider or account (only global `HTTPS_PROXY`), several keys per API-key provider, budgets and gates, per-model-class priority, model globs per account, key from a command, per-model cost override on named providers.
-
-## Borrowed from agentgateway
-
-- Priority groups: ordered groups, load balancing inside a group (`ai.groups[].providers`).
-- Health eviction: N consecutive unhealthy responses evict a backend for a duration, then it returns with a restored score.
-- Budgets: USD or tokens, fixed windows, `Audit` or `Block`, charged after the response from reported usage.
-- Token buckets keyed by an expression (per account, per model).
+- **Account kinds.** `subscription` (rate windows such as 5h and 7d), `credits` (a prepaid or monthly grant), `metered` (pay per token).
+- **Priority.** A number, or a map by model class (`{ fable = 1, default = 2 }`), so sessions on different model families can prefer different accounts. Lower wins. Accounts in one priority group are load balanced.
+- **Model globs.** An account serves only the models it lists, so routing never sends a model to an account that cannot run it.
+- **Model-scoped windows.** A per-family weekly window only counts for that family.
+- **Adaptive limit.** Leave an account when what is left no longer covers the measured burn rate over a horizon, bounded by a ceiling and a floor. Unknown rate falls back to the ceiling.
+- **Drain before reset.** A subscription whose weekly window resets soon, with room the measured burn will not use, goes ahead of priority.
+- **Month-line pacing.** A credits account is used while its spend is behind the elapsed fraction of the calendar month, with hysteresis so the boundary does not flap.
+- **Subagent reserve.** Subagents leave an account a few points earlier than the interactive session.
+- **Paid intent.** `auto` (pacing and last-resort fallback), `off` (paid accounts only by explicit choice), `allow <duration>`.
+- **Intents.** `pin` (session and its children), `switch` (this session), `hold` (all interactive sessions until expiry), `unstick`, `ack` (keep spending here for a while).
+- **Health eviction.** N consecutive failures evict an account for a duration. A `required` egress that is down evicts its accounts.
+- **Unreadable meters never disqualify** and are shown as unknown, never as zero.
+- **Cache seams.** Moves happen at session start and at cache-cold seams. Warm triggers only report a pending move.
+- **Grant health.** Idle OAuth accounts get a periodic refresh probe, and an approaching login expiry warns ahead of time.
 
 ## Data model
 
 ```toml
 [egress.corp]
 url = "http://127.0.0.1:8899"
-required = true                 # fail closed while the VPN is down
-probe = "tcp"                   # health check before use
+required = true
+probe = "tcp"
 
 [routing]
 mode = "auto"                   # auto | shadow (log decisions, act on none) | off
-paid = "off"                    # default paid intent: auto | off
-switch_at = "cold-seam"         # never move a warm session mid-cache
+paid = "off"                    # auto | off
 subagent_reserve_pct = 5
 
 [[routing.accounts]]
-id = "claude:team"              # provider:label, same key as the account pool
-kind = "subscription"           # subscription | credits | metered
+id = "claude:team"              # provider:label
+kind = "subscription"
 priority = { fable = 1, default = 2 }
 models = ["claude-*"]
 egress = "corp"
@@ -73,7 +54,7 @@ on_limit = "switch"             # switch | ask | block
 drain_before_reset_h = 24
 
 [[routing.accounts]]
-id = "opencode-go:a"            # several keys per API-key provider
+id = "opencode-go:second"
 kind = "subscription"
 priority = 3
 
@@ -88,15 +69,15 @@ scope = "huggingface"           # account id, provider:*, or model glob
 meter = "ledger"                # provider (live meter) | ledger (local priced usage)
 window = "calendar-month"       # 5h | 7d | calendar-month | rolling:<dur>
 unit = "usd"                    # percent | usd | credits | tokens
-warn = 450
-limit = 500
+warn = 90
+limit = 100
 action = "ask"                  # ask | block | audit
-pacing = "none"                 # none | month-line (credits)
+pacing = "none"                 # none | month-line
 ```
 
-Types live in `jcode-config-types`. Illegal combinations are rejected at parse:
-`pacing = "month-line"` needs `unit` in `usd | credits`, `meter = "provider"` needs a
-provider that reports that unit, `egress` must name a defined proxy.
+Parse-time validation rejects illegal combinations: `pacing = "month-line"` needs
+`unit` in `usd | credits`, `meter = "provider"` needs a provider that reports that
+unit, `egress` must name a defined proxy.
 
 ## Engine
 
@@ -107,33 +88,32 @@ decide(policy, meters, intents, request { model, role, session }, now) -> Decisi
 Decision = Use { account, reason } | Gate { options, reason } | Block { reason }
 ```
 
-Ordering, highest first: `pin` (session and children), `switch` (session only),
-`hold` (all interactive sessions until expiry), drain-before-reset candidates,
-subscriptions by priority for the request's model class below their adaptive limit,
-credits below their month line, then credits as last resort if `paid` allows,
-then the account's `on_limit`. Unreadable meters never disqualify an account.
-Evicted accounts (health or `required` egress down) are skipped.
+Order: `pin`, `switch`, `hold`, drain candidates, subscriptions by priority for the
+request's model class below their adaptive limit, credits behind their month line,
+credits as last resort if `paid` allows, then the account's `on_limit`. Evicted
+accounts are skipped.
 
-The daemon owns state: intents, meter samples for burn rate, ledger, health scores.
-One process sees every session, so omp's shared `acct-policy.state.json` races go away.
-The decision is applied at session start and at cache-cold seams. Warm triggers only
-evaluate and report a pending move.
+## What exists today
+
+- Multi-account OAuth for Claude and OpenAI (`auth/account_pool.rs`), one priority per account, failover within a tier (`provider/account_failover.rs`).
+- Usage windows for Claude, OpenAI and OpenCode Go (`usage/`). Local spend per API-key source (`provider_activity.rs`).
+- Named OpenAI-compatible providers with custom `headers`.
+- Missing: per-provider and per-account proxy, several keys per API-key provider, budgets and gates, per-model-class priority, model globs, key from a command, per-model cost overrides on named providers.
 
 ## Phases
 
-Each phase ends in a check that runs without the work laptop.
+Each phase ends in a check that runs on fixtures.
 
-1. **Types and engine.** Config types with parse-time validation, `jcode-routing-policy` crate, table tests ported from `research/acct-policy/acct-fallback.test.ts` and `acct-policy.test.ts` scenarios. Check: `justrust test -p jcode-routing-policy`.
-2. **Egress.** Named proxies, one shared `reqwest::Client` per egress, assignment per provider, named provider and account, `required` fail-closed, TCP probe. Check: loopback CONNECT proxy fixture sees only the assigned account's requests; with the proxy down a required account is skipped.
-3. **Several credentials per API-key provider.** `opencode-go`, Hugging Face and named providers get labelled keys like OAuth accounts, `key_command` source, per-model cost and compat overrides. Check: two OpenCode Go fixture keys with different `/usage` payloads both appear in `/account` and `/usage`.
-4. **Meters, ledger, budgets.** One meter view over provider windows (Claude, OpenAI, OpenCode, Codex credits, Cursor pool) and the local priced ledger. Budget evaluation with warn/limit/action. Check: HF fixture spend crosses `warn` then `limit` and the verdict changes.
-5. **Engine in the daemon.** Account choice for new sessions and seams, failover through the engine instead of tier rotation, gates (inline TUI view, headless block), intents via `/acct` and `jcode acct status|paid|prefer|pin|unstick --json`, account chip in the header. Migrate `account-pool.json` priorities and delete the old path. Check: isolated daemon with fixture providers, `/verify-jcode` drive of the gate view.
-6. **Strategies.** Burn-rate adaptive limit, drain before weekly reset, month-line pacing with hysteresis, subagent reserve, health eviction. Check: time-stepped engine tests on recorded meter series.
-7. **`jcode-work` repo.** Work config (three Claude accounts, Codex credits, Cursor pool, HF resource group, OpenCode Go keys, oMLX local), review-session profile, skills, rules, agents, installer. Then xdev-bindings as MCP in `work-connectors`, slack-send-gate and review-ask-guard as `pre_tool` hooks, gastown hooks.
-8. **Shadow and cutover.** `routing.mode = "shadow"` on the work laptop next to omp: log jcode's decision per turn and compare with acct-policy's. Switch to `auto` after a clean week, then retire the omp overlay.
+1. **Types and engine.** Config types with parse-time validation, `jcode-routing-policy` with table tests. Check: `justrust test -p jcode-routing-policy`.
+2. **Egress.** Named proxies, one shared client per egress, assignment per provider and account, fail-closed, probe. Check: a loopback CONNECT proxy fixture sees only the assigned account's requests, and a required account is skipped while the proxy is down.
+3. **Several credentials per API-key provider.** Labelled keys for OpenCode Go, Hugging Face and named providers, `key_command`, per-model cost and compat overrides. Check: two OpenCode Go fixture keys with different `/usage` payloads both appear in `/account` and `/usage`.
+4. **Meters, ledger, budgets.** One meter view over provider windows (Claude, OpenAI, OpenCode, Codex credits, Cursor pool) and the local priced ledger. Check: fixture spend crosses `warn`, then `limit`, and the verdict changes.
+5. **Engine in the daemon.** Account choice at session start and seams, failover through the engine, gate view in the TUI and headless block, `/acct` and `jcode acct status|paid|prefer|pin|unstick --json`, account chip in the header, `account-pool.json` migration. Check: isolated daemon with fixture providers and a driven gate view.
+6. **Strategies.** Adaptive limit, drain, month-line pacing, subagent reserve, health eviction. Check: time-stepped engine tests on recorded meter series.
+7. **Shadow rollout.** `routing.mode = "shadow"` logs the decision per turn without acting, then `auto`.
 
 ## Open items
 
-- Cursor pool and Codex credit meters: confirm which endpoints report them in jcode today (omp read Codex credits through `codexbar`).
-- Profiles: jcode needs a per-pane config overlay for the review-session profile (omp used `PI_CONFIG_FILES`).
+- Which endpoints report the Cursor pool and Codex credits.
+- A per-pane config overlay, so one pane can run a different role-model profile.
 - Burn-rate samples must survive daemon reload.

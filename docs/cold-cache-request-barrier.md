@@ -48,7 +48,7 @@ Installed implementation is in `~/.bun/install/global/node_modules/@oh-my-pi/pi-
 - `#onCompactionDue` rechecks settled/blocked state and tokens before calling `runIdleCompaction`.
 - `agent-session.ts::runIdleCompaction` defers while an asynchronous wake is pending and delegates to session maintenance.
 
-The checkout `~/projects/github.com/xenking/pi-o-my/docs/context-and-compaction.md` documents profile-specific thresholds and its separate cache-expiry shake integration. Jcode's pre-request expiry hook is not the same as omp's idle scheduler: a background task alone cannot guarantee a small next request.
+omp documents profile-specific thresholds and a separate cache-expiry shake integration. Jcode's pre-request expiry hook is not the same as omp's idle scheduler: a background task alone cannot guarantee a small next request.
 
 ## Acceptance
 

@@ -7,7 +7,7 @@ Sources compared:
 
 - omp 18.16.0 / CLI 18.20.0 as installed in
   `~/.bun/install/global/node_modules/@oh-my-pi/{snapcompact,pi-agent-core,pi-coding-agent}`.
-- User config: `~/.omp/agent/config.yml`, `~/projects/github.com/xenking/pi-o-my/omp/config.d/*.yml`.
+- User config: `~/.omp/agent/config.yml` and its `config.d/*.yml` overlays.
 - jcode: this tree.
 
 ## 1. Tool calls and results inside the snapshot
@@ -38,7 +38,7 @@ used to fall back to the LLM summarizer every time; now it archives.
 | Presets | aggressive 4000/0, rescue 0/0 (`shake.ts:61-76`) | none | `ShakeConfig::aggressive()` / `::rescue()` (`shake.rs:80-95`) |
 | Savings accounting | `tokens - 16` per region (`shake.ts:355`) | `tokens - placeholder tokens` | `tokens - 16` |
 | Order vs snapcompact | `methodOrder: [remote, snapcompact, handoff, shake, soft]` (`~/.omp/agent/config.yml:187-192`); shake is a fallback method after a failed snapcompact (`session-maintenance.ts:5255-5290`) | pre-compaction shake ran before snapcompact and pre-elided the history the archive would have imaged | `plan_shake_with(.., snapcompact_preferred)` suppresses pre-compaction shake whenever snapcompact can archive the session (`compaction.rs:1024`) |
-| Cache-expiry shake | first user turn after the prompt-cache TTL lapsed, never for persistent caches (`pi-o-my` patch `cache-expiry-shake-18.16.0.patch`) | gated on `shake_cache_expiry` + TTL | unchanged, but the warm-cache guard now only gates this reason |
+| Cache-expiry shake | first user turn after the prompt-cache TTL lapsed, never for persistent caches (local omp patch) | gated on `shake_cache_expiry` + TTL | unchanged, but the warm-cache guard now only gates this reason |
 | Pre-compaction shake vs warm cache | n/a (omp has no such guard) | **unreachable**: the warm-cache guard returned before the threshold branch, and Anthropic's 1h TTL made "warm" the normal case | threshold branch first, guard only for `CacheExpiry` (`compaction.rs:1024-1060`) |
 
 ## 3. Snapshot fonts and rendering
@@ -59,7 +59,7 @@ non-Latin) and the shape table decides cell geometry per reader
 
 ## 4. Per-provider / per-model thresholds and budgets
 
-omp (`~/.omp/agent/config.yml:182-194`, `pi-o-my/omp/config.d/*.yml`):
+omp (`~/.omp/agent/config.yml:182-194` and its `config.d/*.yml` overlays):
 `thresholdTokens 550000` (Claude), `280000` (Google), `-1` = native (Codex,
 Arch), `idleThresholdTokens 550000`, `methodOrder` as above, `dropUseless`.
 

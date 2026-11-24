@@ -5,7 +5,7 @@ Status: research only, 2026-11-15. No code changes.
 ## Sources
 
 - omp user config: `~/.omp/agent/config.yml:182-194` (`compaction.methodOrder: [remote, snapcompact, handoff, shake, soft]`, `idleEnabled`, `thresholdTokens: 550000`, `dropUseless: true`).
-- pi-o-my notes: `pi-o-my/docs/context-and-compaction.md:26-30` (cache-expiry shake, upstream omp PR #11190, patch `omp/patches/cache-expiry-shake-18.16.0.patch`), `pi-o-my/omp/config.d/codex.yml:60-62`.
+- omp cache-expiry shake: upstream omp PR #11190.
 - oxicode (https://github.com/project-oxi/oxicode, MIT, branch `main`), a Rust port of omp (`can1357/oh-my-pi`, MIT):
   - `oxicode-agent/src/agent_loop/compaction/shake.rs` (717 lines). Ported from omp `packages/agent/src/compaction/shake.ts`.
   - `oxicode-snapcompact/src/lib.rs` (896 lines, shape table at :100-214), `src/renderer/snapcompact_render.rs` (2013 lines, ported from omp `pi-natives/src/snapcompact.rs`), `NOTICE.md` (fonts).
