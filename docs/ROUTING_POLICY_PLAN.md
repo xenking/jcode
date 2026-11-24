@@ -38,19 +38,48 @@ cache can go cold between turns. Evaluation is local and costs nothing.
 Applying a move is rare, because leaving a warm cache rewrites the whole
 context on the new account.
 
+### Pools
+
+Every account spends from one or more pools. A pool has a capacity, what is
+used, a reset time, and whether its unused room is lost at the reset.
+
+- Subscription windows (5h, 7d, model-scoped), read from the provider's meter.
+- Credit grants: a monthly cash or credits allowance (for example $600 or 150
+  credits a month) with its own reset date. The provider's meter supplies used
+  and capacity when it can; otherwise a budget on that account supplies the
+  capacity, and the person can set the reset anchor (`month@15` resets on the
+  15th). These grants are lost at their reset, exactly like a window.
+- Reset grants (weekly limit resets, banked resets) with their expiry.
+- Metered API money has no reset and loses nothing when unused.
+
+Every pool whose room is lost at a reset is paced to be spent fully by that
+reset. Two credit accounts of $600 and $150 with different reset dates both
+run, each at the rate its own room and time left allow.
+
+### Order of choice
+
+The cheapest account means, in order:
+
+1. **Room that would be lost.** A pool behind its pace line (the measured burn
+   will not use its room before the reset) goes first, soonest reset first.
+   This is the only thing that beats priority, because the alternative is
+   throwing quota away.
+2. **Priority.** The person's order, per model class.
+3. **Price.** Within one priority, the lowest `λ`.
+
+The same order picks the target of every move and every cold seam.
+
 ### Prices
 
 Every account has a shadow price `λ`: what one unit of its quota is worth right
 now. All costs below are tokens times a factor times `λ`.
 
-- **Free room.** Room that would expire unused has `λ = 0`: window room the
+- **Free room.** Room that would expire unused has `λ = 0`: pool room the
   measured burn will not reach before the reset, plus any reset grant that would
-  expire before the account could hit its wall again. Routing fills free room
-  first, because unused quota at a reset is lost.
-- **Subscription.** Otherwise `λ` is scarcity: projected demand until the reset
-  divided by the room left. It rises as the account runs out.
-- **Credits and metered.** `λ` is the money price times the account's weight,
-  raised while a credits account is ahead of its month line.
+  expire before the account could hit its wall again.
+- **Expiring pools ahead of pace.** `λ` is scarcity: projected demand until the
+  reset divided by the room left. It rises as the pool runs out.
+- **Metered.** `λ` is the money price times the account's weight.
 - **Cache factors** per provider and tier: Anthropic writes cost 1.25x (5m) or
   2x (1h) of input and reads 0.1x. OpenAI-style caches have no write premium
   and read at the catalog's cached-input ratio. A move pays `context x write`
@@ -99,7 +128,7 @@ it is the cheapest option, and the transcript records it.
 flowchart TD
     T[Turn or swarm wait tick] --> E["Evaluate: prices λ per account, local"]
     E --> S{Seam}
-    S -->|"start, TTL expired, compaction, model switch, failed turn"| PICK[Use the cheapest account]
+    S -->|"start, TTL expired, compaction, model switch, failed turn"| PICK[Best by the order of choice]
     S -->|warm| CAN{Current account can serve?}
     CAN -->|yes| CMP{"Cheapest move beats staying by the margin?"}
     CMP -->|no| STAY[Stay, report pending if any]
