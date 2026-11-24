@@ -275,18 +275,25 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
 struct AccountFailoverProvider {
     calls: Arc<AtomicUsize>,
     account: Arc<std::sync::Mutex<String>>,
+    sizes: Arc<std::sync::Mutex<Vec<usize>>>,
 }
 
 #[async_trait]
 impl Provider for AccountFailoverProvider {
     async fn complete(
         &self,
-        _: &[Message],
+        messages: &[Message],
         _: &[ToolDefinition],
         _: &str,
         _: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sizes.lock().unwrap().push(
+            messages
+                .iter()
+                .map(crate::compaction::message_char_count)
+                .sum(),
+        );
         let (read, write) = if call == 0 { (33_000, 96) } else { (0, 39_721) };
         Ok(Box::pin(futures::stream::iter(vec![
             Ok(StreamEvent::TokenUsage {
@@ -328,6 +335,7 @@ async fn run_account_turns(switch_account: bool) -> Vec<ServerEvent> {
     let provider: Arc<dyn Provider> = Arc::new(AccountFailoverProvider {
         calls: Arc::new(AtomicUsize::new(0)),
         account: account.clone(),
+        sizes: Arc::default(),
     });
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -354,6 +362,48 @@ async fn run_account_turns(switch_account: bool) -> Vec<ServerEvent> {
         }
     }
     misses
+}
+
+#[tokio::test]
+async fn cold_route_switch_compacts_when_only_the_oauth_account_changes() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let account = Arc::new(std::sync::Mutex::new("claude-fox".to_string()));
+    let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = Arc::new(AccountFailoverProvider {
+        calls: Arc::new(AtomicUsize::new(0)),
+        account: account.clone(),
+        sizes: sizes.clone(),
+    });
+    let mut agent = Agent::new(provider, Registry::empty());
+    for i in 0..24 {
+        agent.add_message(
+            if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            Message::user(&format!("Turn {i}: {}", "old context ".repeat(3_000)))
+                .content
+                .to_vec(),
+        );
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx.clone()).await.unwrap();
+    *account.lock().unwrap() = "claude-otter".into();
+    agent.session.route_api_method = Some("claude-oauth@claude-otter".into());
+    agent.reset_provider_session();
+    agent.add_message(Role::User, Message::user("continue").content.to_vec());
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    let sizes = sizes.lock().unwrap();
+    assert_eq!(
+        sizes.len(),
+        2,
+        "compaction must not send a provider request"
+    );
+    assert!(sizes[0] > 800_000 && sizes[1] < 600_000, "{sizes:?}");
+    assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(event,
+        ServerEvent::Compaction { divider: Some(copy), .. } if copy.contains("cache is not shared across accounts")
+    )));
 }
 
 #[tokio::test]

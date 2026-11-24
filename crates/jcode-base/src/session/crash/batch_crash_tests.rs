@@ -40,11 +40,24 @@ fn write_amp_unchanged_saves_leave_journal_and_recency_alone() -> anyhow::Result
     assert_eq!(session.updated_at, updated_at);
     assert_eq!(std::fs::metadata(&wal)?.len(), wal_before);
     session.last_provider_request_at = Some(Utc::now());
+    session.last_provider_cache_domain = Some(crate::kv_cache_monitor::RequestCacheDomain {
+        provider: "Claude".into(),
+        model: "claude-opus-5-5".into(),
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        account: Some("source-account".into()),
+    });
+    session.model = Some("gpt-6.1-sol".into());
     session.save()?;
+    let restored = Session::load(&session.id)?;
     assert_eq!(
-        Session::load(&session.id)?.last_provider_request_at,
+        restored.last_provider_request_at,
         session.last_provider_request_at
     );
+    assert_eq!(
+        restored.last_provider_cache_domain,
+        session.last_provider_cache_domain
+    );
+    assert_eq!(restored.model.as_deref(), Some("gpt-6.1-sol"));
     Ok(())
 }
 

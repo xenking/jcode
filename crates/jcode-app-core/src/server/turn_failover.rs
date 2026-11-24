@@ -1004,6 +1004,7 @@ mod tests {
         calls: Arc<StdMutex<Vec<(bool, usize)>>>,
         input_chars: Arc<StdMutex<Vec<usize>>>,
         allow_claude_success: bool,
+        target_window: Option<usize>,
         claude_failure: Option<(&'static str, String)>,
     }
 
@@ -1065,6 +1066,14 @@ mod tests {
         fn supports_image_input(&self) -> bool {
             true
         }
+        fn context_window(&self) -> usize {
+            if let Some(window) = self.target_window
+                && *self.on_openai.lock().unwrap()
+            {
+                return window;
+            }
+            1_000_000
+        }
         fn set_model(&self, model: &str) -> anyhow::Result<()> {
             *self.on_openai.lock().unwrap() = model.starts_with("openai-api:");
             Ok(())
@@ -1110,19 +1119,42 @@ mod tests {
 
     #[tokio::test]
     async fn cold_route_switch_compacts_before_first_provider_request() {
-        check_cold_route_switch(false).await;
+        check_cold_route_switch(false, None, None).await;
     }
 
     #[tokio::test]
     async fn cold_route_switch_compacts_before_failover_retry() {
-        check_cold_route_switch(true).await;
+        check_cold_route_switch(true, None, None).await;
     }
 
-    async fn check_cold_route_switch(failover: bool) {
+    #[tokio::test]
+    async fn cold_route_switch_compacts_to_the_target_model_window() {
+        check_cold_route_switch(false, Some(64_000), None).await;
+    }
+
+    #[tokio::test]
+    async fn cold_route_switch_compacts_at_the_target_model_override() {
+        check_cold_route_switch(false, None, Some(90_000)).await;
+    }
+
+    async fn check_cold_route_switch(
+        failover: bool,
+        target_window: Option<usize>,
+        target_threshold: Option<usize>,
+    ) {
         let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         let mut config = crate::config::Config::load();
         config.compaction.snapcompact = true;
         config.compaction.snapcompact_decisions_model = "off".into();
+        if let Some(threshold) = target_threshold {
+            config
+                .compaction
+                .models
+                .entry("gpt-6.1-sol".into())
+                .or_default()
+                .reactive_threshold_tokens = Some(threshold);
+        }
+        let expected_bound = target_window.or(target_threshold);
         config.save().unwrap();
         crate::auth::account_pool::AccountPool {
             members: vec!["anthropic-api".into(), "openai-api".into()],
@@ -1133,6 +1165,7 @@ mod tests {
 
         let provider = TwoAccountProvider {
             allow_claude_success: !failover,
+            target_window,
             ..Default::default()
         };
         let mut agent = Agent::new(Arc::new(provider.clone()), crate::tool::Registry::empty());
@@ -1145,7 +1178,14 @@ mod tests {
                     Role::Assistant
                 },
                 vec![ContentBlock::Text {
-                    text: format!("Archived turn {i}: {}", "history ".repeat(4_500)),
+                    text: format!(
+                        "Archived turn {i}: {}",
+                        "history ".repeat(if expected_bound.is_some() {
+                            2_500
+                        } else {
+                            4_500
+                        }),
+                    ),
                     cache_control: None,
                 }],
             );
@@ -1177,12 +1217,13 @@ mod tests {
             [false, true]
         );
         let sizes = provider.input_chars.lock().unwrap();
+        eprintln!("first source / first target request sizes: {sizes:?} estimated chars");
         assert!(
-            sizes[0] > 800_000,
+            sizes[0] > 400_000,
             "initial provider requests should be large: {sizes:?}"
         );
         assert!(
-            sizes[1] < 600_000,
+            sizes[1] < expected_bound.unwrap_or(150_000) * 4,
             "first request on the target route was not compacted: {sizes:?}"
         );
         let mut events = Vec::new();
@@ -1195,6 +1236,12 @@ mod tests {
             .iter()
             .rposition(|event| matches!(event, ServerEvent::KvCacheRequest { .. }));
         assert!(matches!((notice, request), (Some(notice), Some(request)) if notice < request));
+        let divider = events.iter().position(|event| matches!(event,
+            ServerEvent::Compaction { divider: Some(copy), pre_tokens: Some(before), post_tokens: Some(after), .. }
+            if before > after && copy.starts_with("Switching to gpt-6.1-sol: compacting")
+                && copy.contains("→") && copy.contains("before sending (cache is not shared across providers)")
+        ));
+        assert!(matches!((divider, request), (Some(divider), Some(request)) if divider < request));
         assert!(
             !events
                 .iter()

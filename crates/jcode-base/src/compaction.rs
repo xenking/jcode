@@ -380,6 +380,14 @@ pub struct CompactionManager {
 
 /// Trigger label for snapcompact started by an expired prompt cache.
 pub const CACHE_EXPIRY_COMPACTION_TRIGGER: &str = "snapcompact_cache_expiry";
+pub const ROUTE_SWITCH_COMPACTION_TRIGGER: &str = "route_switch";
+
+#[derive(Clone, Copy)]
+enum AutomaticCompaction {
+    Standard,
+    PreferLocal,
+    RouteSwitch { target: usize },
+}
 
 /// Trigger label for compaction started while the session was idle but still
 /// waiting (swarm members, `bg` wait, `await_members` dependency).
@@ -1697,9 +1705,44 @@ impl CompactionManager {
             all_messages,
             provider,
             CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
-            prefer_local,
+            if prefer_local {
+                AutomaticCompaction::PreferLocal
+            } else {
+                AutomaticCompaction::Standard
+            },
         );
         self.pending_task.is_some()
+    }
+
+    /// The next provider must not receive the oversized history through a
+    /// summarizer either. Only a local archive may run at this boundary.
+    pub fn start_route_switch_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+        target: usize,
+    ) {
+        self.cancel_pending_compaction();
+        if self.compaction_config.snapcompact {
+            self.start_background_compaction_with(
+                all_messages,
+                provider,
+                ROUTE_SWITCH_COMPACTION_TRIGGER.into(),
+                AutomaticCompaction::RouteSwitch { target },
+            );
+        }
+    }
+
+    fn cancel_pending_compaction(&mut self) {
+        if let Some(task) = self.pending_task.take() {
+            task.abort();
+            crate::logging::warn(&format!(
+                "[compaction] Aborting superseded background compaction (pending_cutoff={}, trigger={:?})",
+                self.pending_cutoff, self.pending_trigger,
+            ));
+            self.pending_cutoff = 0;
+            self.pending_trigger = None;
+        }
     }
 
     /// Resolved reactive trigger in tokens for the active model, regardless of
@@ -1804,7 +1847,12 @@ impl CompactionManager {
         provider: Arc<dyn Provider>,
         mode_label: String,
     ) {
-        self.start_background_compaction_with(all_messages, provider, mode_label, false);
+        self.start_background_compaction_with(
+            all_messages,
+            provider,
+            mode_label,
+            AutomaticCompaction::Standard,
+        );
     }
 
     fn start_background_compaction_with(
@@ -1812,7 +1860,7 @@ impl CompactionManager {
         all_messages: &[Message],
         provider: Arc<dyn Provider>,
         mode_label: String,
-        prefer_local: bool,
+        execution: AutomaticCompaction,
     ) {
         let active = self.active_messages(all_messages);
 
@@ -1892,29 +1940,54 @@ impl CompactionManager {
         let decisions_count = self.compacted_count.saturating_add(cutoff);
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_effective_compaction_artifact(
-                provider,
-                messages_to_summarize,
-                archive_history,
-                existing_summary,
-                snapcompact_enabled,
-                snapcompact_shape,
-                shake_config,
-                remaining_chars,
-                token_budget,
-                prefer_local,
-            )
-            .await;
-            let result = match result {
-                // Automatic enrichment is optional; don't make a provider
-                // call just because an idle archive was rendered locally.
-                Ok(result) if prefer_local && decisions_model.eq_ignore_ascii_case("auto") => {
-                    Ok(result)
+            let result = match execution {
+                AutomaticCompaction::RouteSwitch { target } => {
+                    let options = summary_generation::snapcompact_options(
+                        provider.as_ref(),
+                        snapcompact_shape.as_deref(),
+                    );
+                    summary_generation::generate_local_snapcompact(
+                        ManualCompactionInput {
+                            prefix: messages_to_summarize,
+                            archive_history,
+                            previous: existing_summary,
+                            remaining_chars,
+                            token_budget,
+                            snapcompact_shape,
+                        },
+                        options,
+                        target,
+                    )
+                    .await
                 }
-                Ok(result) => {
-                    Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
+                AutomaticCompaction::Standard | AutomaticCompaction::PreferLocal => {
+                    let prefer_local = matches!(execution, AutomaticCompaction::PreferLocal);
+                    let result = generate_effective_compaction_artifact(
+                        provider,
+                        messages_to_summarize,
+                        archive_history,
+                        existing_summary,
+                        snapcompact_enabled,
+                        snapcompact_shape,
+                        shake_config,
+                        remaining_chars,
+                        token_budget,
+                        prefer_local,
+                    )
+                    .await;
+                    match result {
+                        // Don't make a provider call just because an idle archive was rendered.
+                        Ok(result)
+                            if !(prefer_local && decisions_model.eq_ignore_ascii_case("auto")) =>
+                        {
+                            Ok(
+                                snap_decisions::prepare(result, decisions_model, decisions_count)
+                                    .await,
+                            )
+                        }
+                        result => result,
+                    }
                 }
-                Err(error) => Err(error),
             };
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
@@ -2722,6 +2795,24 @@ impl CompactionManager {
     /// exceed the token budget, progressively keeps fewer turns down to
     /// `MIN_TURNS_TO_KEEP`.
     pub fn hard_compact_with(&mut self, all_messages: &[Message]) -> Result<usize, String> {
+        self.hard_compact_to(all_messages, self.token_budget, "hard_compact")
+    }
+
+    pub fn hard_compact_for_route_switch(
+        &mut self,
+        all_messages: &[Message],
+        target: usize,
+    ) -> Result<usize, String> {
+        // Leave room for the emergency summary and prompt overhead.
+        self.hard_compact_to(all_messages, target / 2, ROUTE_SWITCH_COMPACTION_TRIGGER)
+    }
+
+    fn hard_compact_to(
+        &mut self,
+        all_messages: &[Message],
+        tail_budget: usize,
+        trigger: &str,
+    ) -> Result<usize, String> {
         if self.clamp_compacted_count_to_messages(all_messages, "hard_compact_start") {
             self.log_compaction_state("hard_compact_clamped", "hard_compact", all_messages);
         }
@@ -2737,7 +2828,7 @@ impl CompactionManager {
         }
 
         let pre_tokens = self.effective_token_count_with(all_messages) as u64;
-        self.log_compaction_state("hard_compact_start", "hard_compact", all_messages);
+        self.log_compaction_state("hard_compact_start", trigger, all_messages);
         let active_char_counts: Vec<usize> = active.iter().map(message_char_count).collect();
         let mut remaining_suffix_chars = vec![0usize; active_char_counts.len() + 1];
         for idx in (0..active_char_counts.len()).rev() {
@@ -2753,7 +2844,7 @@ impl CompactionManager {
 
             if cutoff > 0 {
                 let remaining_tokens = remaining_suffix_chars[cutoff] / CHARS_PER_TOKEN;
-                if remaining_tokens <= self.token_budget {
+                if remaining_tokens <= tail_budget {
                     break;
                 }
             }
@@ -2778,15 +2869,7 @@ impl CompactionManager {
         // `compacted_count`, double-compacting and wiping out all live messages
         // (observed as "kept 0 recent messages"). Abort and discard it now that
         // we're committed to the hard compact.
-        if let Some(task) = self.pending_task.take() {
-            task.abort();
-            crate::logging::warn(&format!(
-                "[compaction] Aborting in-flight background compaction (pending_cutoff={}, trigger={:?}) — superseded by hard compact",
-                self.pending_cutoff, self.pending_trigger,
-            ));
-            self.pending_cutoff = 0;
-            self.pending_trigger = None;
-        }
+        self.cancel_pending_compaction();
 
         let dropped_count = cutoff;
         let summary_text = build_emergency_summary_text(
@@ -2822,7 +2905,7 @@ impl CompactionManager {
         self.observed_estimate_tokens = None;
         let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
-            trigger: "hard_compact".to_string(),
+            trigger: trigger.into(),
             method: Some("drop".to_string()),
             pre_tokens: Some(pre_tokens),
             post_tokens: Some(post_tokens),
@@ -2837,7 +2920,7 @@ impl CompactionManager {
             active_messages: Some(self.active_messages_count()),
         });
         self.log_compaction_outcome(CompactionOutcomeLog {
-            trigger: "hard_compact",
+            trigger,
             pre_tokens,
             post_tokens,
             messages_compacted: dropped_count,

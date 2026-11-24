@@ -253,6 +253,50 @@ pub struct RequestRoute {
     pub reasoning_effort: Option<String>,
 }
 
+/// Cache domain known before dispatch. Unlike the usage baseline, this also
+/// records attempts that failed before reporting cache usage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestCacheDomain {
+    pub provider: String,
+    pub model: String,
+    pub credential: Option<jcode_provider_core::ResolvedCredential>,
+    pub account: Option<String>,
+}
+
+impl RequestCacheDomain {
+    pub fn switch_from(&self, previous: &Self) -> Option<MissReason> {
+        if !self.provider.eq_ignore_ascii_case(&previous.provider)
+            || matches!((self.credential, previous.credential), (Some(a), Some(b)) if a != b)
+        {
+            Some(MissReason::ProviderSwitch)
+        } else if matches!((&self.account, &previous.account), (Some(a), Some(b)) if a != b) {
+            Some(MissReason::AccountSwitch)
+        } else if self.model != previous.model {
+            Some(MissReason::ModelSwitch)
+        } else {
+            None
+        }
+    }
+
+    fn from_legacy_route(route: &RequestRoute) -> Self {
+        use jcode_provider_core::ResolvedCredential;
+        let (provider, credential) = match route.provider.to_ascii_lowercase().as_str() {
+            "openai-oauth" => ("openai", Some(ResolvedCredential::Oauth)),
+            "openai-api" => ("openai", Some(ResolvedCredential::ApiKey)),
+            _ => (
+                route.provider.as_str(),
+                route.account.as_ref().map(|_| ResolvedCredential::Oauth),
+            ),
+        };
+        Self {
+            provider: provider.into(),
+            model: route.model.clone(),
+            credential,
+            account: route.account.clone(),
+        }
+    }
+}
+
 /// Why a request missed the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissReason {
@@ -641,6 +685,13 @@ pub struct KvCacheMonitor {
 impl KvCacheMonitor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Fallback for sessions saved before the last attempted route was stored.
+    pub fn checkpoint_cache_domain(&self) -> Option<RequestCacheDomain> {
+        self.baseline
+            .as_ref()
+            .map(|baseline| RequestCacheDomain::from_legacy_route(&baseline.route))
     }
 
     pub fn reset(&mut self) {

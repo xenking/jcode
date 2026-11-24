@@ -1,6 +1,151 @@
 use super::*;
 
+use crate::kv_cache_monitor::{MissReason, RequestCacheDomain};
+
+const SWITCHED_ROUTE_COLD_LIMIT: usize = 150_000;
+
+pub(super) struct SwitchedRouteBudget {
+    pub(super) limit: usize,
+    pub(super) reduction: Option<(u64, u64)>,
+}
+
+fn switch_compaction_detail(
+    model: &str,
+    reason: MissReason,
+    before: u64,
+    after: Option<u64>,
+) -> String {
+    let size = match after {
+        Some(after) => format!("~{}K→~{}K", before / 1000, after / 1000),
+        None => format!("~{}K", before / 1000),
+    };
+    let domain = match reason {
+        MissReason::ProviderSwitch => "providers",
+        MissReason::AccountSwitch => "accounts",
+        _ => "models",
+    };
+    format!(
+        "Switching to {model}: compacting {size} before sending (cache is not shared across {domain})"
+    )
+}
+
 impl Agent {
+    pub(super) fn request_cache_domain(&self) -> RequestCacheDomain {
+        RequestCacheDomain {
+            provider: self.provider.name().into(),
+            model: self.provider.model(),
+            credential: self.provider.active_resolved_credential(),
+            account: self.kv_cache_account_identity(),
+        }
+    }
+
+    pub(super) fn request_cache_domain_switch(&self) -> Option<MissReason> {
+        let legacy;
+        let previous = if let Some(domain) = &self.session.last_provider_cache_domain {
+            domain
+        } else {
+            legacy = self.kv_cache_monitor.checkpoint_cache_domain()?;
+            &legacy
+        };
+        // We have no proof a different domain still has this transcript cached.
+        self.request_cache_domain().switch_from(previous)
+    }
+
+    pub(super) fn route_switch_compaction_notice(&self, event: &CompactionEvent) -> Option<String> {
+        if event.trigger != crate::compaction::ROUTE_SWITCH_COMPACTION_TRIGGER {
+            return None;
+        }
+        Some(switch_compaction_detail(
+            &self.provider.model(),
+            self.request_cache_domain_switch()?,
+            event.pre_tokens?,
+            event.post_tokens,
+        ))
+    }
+
+    pub(super) async fn wait_for_request_compaction(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) -> Result<()> {
+        let started = Instant::now();
+        while manager.is_compacting() {
+            manager.check_and_apply_compaction_with(self.session.provider_messages());
+            if !manager.is_compacting() {
+                break;
+            }
+            anyhow::ensure!(
+                !self.is_graceful_shutdown(),
+                "Cancelled while reducing cold-cache context"
+            );
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(120),
+                "Cold-cache compaction timed out; refusing to resend the oversized prompt"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn compact_before_route_switch(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+        model: &str,
+        reason: MissReason,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) -> Result<SwitchedRouteBudget> {
+        let target = manager.token_budget().min(SWITCHED_ROUTE_COLD_LIMIT).min(
+            manager
+                .resolved_compaction_threshold_tokens()
+                .unwrap_or(usize::MAX),
+        );
+        let messages = self.session.provider_messages();
+        let before = manager.effective_token_count_with(messages);
+        if before < target {
+            return Ok(SwitchedRouteBudget {
+                limit: target,
+                reduction: None,
+            });
+        }
+
+        let detail = switch_compaction_detail(model, reason, before as u64, None);
+        logging::info(&detail);
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ServerEvent::StatusDetail { detail });
+        }
+
+        // Reuse any completed fold first, even if it had been waiting for the
+        // next turn to apply. Don't start a remote summarizer on the cold route.
+        manager.check_and_apply_compaction_with(messages);
+        if manager.effective_token_count_with(messages) >= target {
+            manager.start_route_switch_compaction(messages, self.provider.clone(), target);
+            self.wait_for_request_compaction(manager).await?;
+        }
+        let messages = self.session.provider_messages();
+        if manager.effective_token_count_with(messages) >= target {
+            if let Some(error) = manager.take_compaction_error() {
+                logging::warn(&format!("Route-switch snapcompact failed: {error}"));
+            }
+            manager
+                .hard_compact_for_route_switch(messages, target)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Cannot fit the cold request to {model}; refusing to send it: {error}"
+                    )
+                })?;
+        }
+        let after = manager.effective_token_count_with(messages);
+        anyhow::ensure!(
+            after < target,
+            "Cold request to {model} is still ~{}K tokens (target <{}K); refusing to send it",
+            after / 1000,
+            target / 1000,
+        );
+        Ok(SwitchedRouteBudget {
+            limit: target,
+            reduction: Some((before as u64, after as u64)),
+        })
+    }
+
     pub(super) fn warn_missing_native_compaction_summary(
         &mut self,
         event_tx: Option<&crate::stream_batching::BatchingSender>,

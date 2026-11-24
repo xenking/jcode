@@ -193,11 +193,14 @@ impl Agent {
                 .await;
             let (messages, compaction_event) = self.messages_for_provider(None).await?;
             if let Some(event) = compaction_event {
+                let route_switch_notice = self.route_switch_compaction_notice(&event);
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
                 self.kv_cache_monitor.reset();
                 self.locked_tools = None;
-                if print_output {
+                if print_output && let Some(notice) = route_switch_notice {
+                    crate::terminal_println!("{notice}");
+                } else if print_output {
                     let tokens_str = event
                         .pre_tokens
                         .map(|t| format!(" ({} tokens)", t))

@@ -224,6 +224,9 @@ pub struct Session {
     /// or session resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_provider_request_at: Option<DateTime<Utc>>,
+    /// Route at dispatch, not the latest selection (which can change between turns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_provider_cache_domain: Option<crate::kv_cache_monitor::RequestCacheDomain>,
     /// Cache touch already handled by a completed cold-cache compaction.
     /// Unfinished work can be retried after reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -770,6 +773,7 @@ impl Session {
             last_pid: self.last_pid,
             last_active_at: self.last_active_at,
             last_provider_request_at: self.last_provider_request_at,
+            last_provider_cache_domain: self.last_provider_cache_domain.clone(),
             last_cache_expiry_compaction_for: self.last_cache_expiry_compaction_for,
             is_debug: self.is_debug,
             hidden: self.hidden,
@@ -993,6 +997,9 @@ impl Session {
         self.last_provider_request_at = meta
             .last_provider_request_at
             .or(self.last_provider_request_at);
+        if let Some(domain) = meta.last_provider_cache_domain {
+            self.last_provider_cache_domain = Some(domain);
+        }
         self.last_cache_expiry_compaction_for = meta
             .last_cache_expiry_compaction_for
             .or(self.last_cache_expiry_compaction_for);
@@ -1052,6 +1059,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             last_provider_request_at: None,
+            last_provider_cache_domain: None,
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
@@ -1126,6 +1134,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             last_provider_request_at: None,
+            last_provider_cache_domain: None,
             last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,

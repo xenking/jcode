@@ -1,5 +1,49 @@
 use super::*;
 
+pub(super) async fn generate_local_snapcompact(
+    input: ManualCompactionInput,
+    options: jcode_compaction_core::snapcompact::CompactOptions,
+    target: usize,
+) -> Result<CompactionResult> {
+    let count = input.prefix.len();
+    let (text, archive) = tokio::task::spawn_blocking(move || {
+        let (text, archive) = render_snapcompact(
+            &input.prefix,
+            &input.archive_history,
+            input.previous.as_ref(),
+            &options,
+            true,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let summary = Summary {
+            text,
+            openai_encrypted_content: None,
+            snapcompact: Some(archive),
+            covers_up_to_turn: count,
+            original_turn_count: count,
+        };
+        let after =
+            estimate_compaction_tokens(Some(&summary), input.remaining_chars, input.token_budget);
+        anyhow::ensure!(
+            after < target,
+            "Local snapcompact leaves {after} tokens (target <{target})"
+        );
+        Ok::<_, anyhow::Error>((summary.text, summary.snapcompact))
+    })
+    .await??;
+    Ok(CompactionResult {
+        completed_at: Instant::now(),
+        decisions_job: None,
+        pending_decisions: None,
+        summary_text: text,
+        openai_encrypted_content: None,
+        snapcompact: archive,
+        covers_up_to_turn: count,
+        duration_ms: 0,
+        summarized_messages: count,
+    })
+}
+
 /// Best-effort LLM extraction, never a replacement for the verbatim index.
 pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index: &str) -> String {
     if index.is_empty() {

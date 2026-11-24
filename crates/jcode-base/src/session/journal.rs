@@ -72,6 +72,8 @@ pub(super) struct SessionJournalMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) last_provider_request_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_provider_cache_domain: Option<crate::kv_cache_monitor::RequestCacheDomain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
     pub(super) is_debug: bool,
     /// `/btw` side-question forks stay off the session list until promoted.

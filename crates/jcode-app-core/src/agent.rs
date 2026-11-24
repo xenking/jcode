@@ -1316,6 +1316,7 @@ impl Agent {
     /// the persisted session is the only place that timestamp can come from.
     fn note_provider_request_sent(&mut self) {
         self.session.last_provider_request_at = Some(chrono::Utc::now());
+        self.session.last_provider_cache_domain = Some(self.request_cache_domain());
     }
 
     /// The last provider request time, from the session file when possible.
@@ -1351,7 +1352,11 @@ impl Agent {
         event_tx: Option<&crate::stream_batching::BatchingSender>,
     ) -> Result<(Vec<Message>, Option<CompactionEvent>)> {
         self.announce_prompt_file_changes()?;
-        if self.provider.supports_compaction() || self.session.compaction.is_some() {
+        let route_switch = self.request_cache_domain_switch();
+        if route_switch.is_some()
+            || self.provider.supports_compaction()
+            || self.session.compaction.is_some()
+        {
             let compaction = self.registry.compaction();
             {
                 // Never fall back to the full transcript if a diagnostics
@@ -1360,23 +1365,43 @@ impl Agent {
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
                 let model = self.provider.model();
+                if route_switch.is_some() {
+                    // Route changes can refresh the budget only opportunistically.
+                    // Budget this request against the target under the held lock.
+                    manager.set_budget_for_model(
+                        self.provider.context_window(),
+                        self.provider.name(),
+                        &model,
+                    );
+                }
                 let accepts_native =
                     crate::compaction::openai_native_replay_route(self.provider.name(), &model);
                 let supports_archive = crate::compaction::snapcompact_pages_usable(
                     self.provider.supports_image_input(),
                     &model,
                 );
-                let recovered_native =
-                    manager.recover_native_text(self.session.provider_messages(), accepts_native);
+                let recovered_native = manager.recover_native_text(
+                    self.session.provider_messages(),
+                    accepts_native && route_switch.is_none(),
+                );
                 if manager.take_missing_native_summary_warning(accepts_native) {
                     self.warn_missing_native_compaction_summary(event_tx);
                 }
                 let now = std::time::SystemTime::now();
                 let ttl = self.cache_expiry_ttl_secs(&manager);
+                let switched_route_budget = if let Some(reason) = route_switch {
+                    Some(
+                        self.compact_before_route_switch(&mut manager, &model, reason, event_tx)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 // A completed cold reduction covers the old prefix. A large
                 // new user message is handled by the normal context cap, not
                 // by paying for a second reduction of the same cold cache.
-                if !self.is_swarm_worker()
+                if route_switch.is_none()
+                    && !self.is_swarm_worker()
                     && self.provider.uses_jcode_compaction()
                     && !self.cache_expiry_already_compacted(&manager, now, ttl)
                 {
@@ -1434,23 +1459,7 @@ impl Agent {
                         )
                     });
                     if let Some(target) = target {
-                        let started = Instant::now();
-                        while manager.is_compacting() {
-                            manager
-                                .check_and_apply_compaction_with(self.session.provider_messages());
-                            if !manager.is_compacting() {
-                                break;
-                            }
-                            anyhow::ensure!(
-                                !self.is_graceful_shutdown(),
-                                "Cancelled while reducing cold-cache context"
-                            );
-                            anyhow::ensure!(
-                                started.elapsed() < Duration::from_secs(120),
-                                "Cold-cache compaction timed out; refusing to resend the oversized prompt"
-                            );
-                            tokio::time::sleep(Duration::from_millis(25)).await;
-                        }
+                        self.wait_for_request_compaction(&mut manager).await?;
                         let after =
                             manager.effective_token_count_with(self.session.provider_messages());
                         anyhow::ensure!(
@@ -1504,7 +1513,17 @@ impl Agent {
                     self.persist_compaction_checkpoint(&manager)?;
                     manager.take_decisions_updated();
                 }
-                let event = manager.take_compaction_event();
+                let mut event = manager.take_compaction_event();
+                if let Some(event) = event.as_mut()
+                    && let Some((before, after)) = switched_route_budget
+                        .as_ref()
+                        .and_then(|budget| budget.reduction)
+                {
+                    event.trigger = crate::compaction::ROUTE_SWITCH_COMPACTION_TRIGGER.into();
+                    event.pre_tokens = Some(before);
+                    event.post_tokens = Some(after);
+                    event.tokens_saved = Some(before.saturating_sub(after));
+                }
                 if replay.warn_missing_native_summary {
                     self.warn_missing_native_compaction_summary(event_tx);
                 }
@@ -1526,7 +1545,26 @@ impl Agent {
                     }
                 }
                 Self::log_provider_message_count("compaction", &messages);
-                return Ok((Self::bounded_outbound_images(messages), event));
+                let messages = Self::bounded_outbound_images(messages);
+                if let Some(budget) = switched_route_budget {
+                    let target = budget.limit;
+                    let chars = messages
+                        .iter()
+                        .map(crate::compaction::message_char_count)
+                        .sum();
+                    let projected = crate::compaction::estimate_compaction_tokens(
+                        None,
+                        chars,
+                        manager.token_budget(),
+                    );
+                    anyhow::ensure!(
+                        projected < target,
+                        "The projected request to {model} still needs ~{}K tokens (target <{}K); refusing to send it",
+                        projected / 1000,
+                        target / 1000,
+                    );
+                }
+                return Ok((messages, event));
             }
         }
 
