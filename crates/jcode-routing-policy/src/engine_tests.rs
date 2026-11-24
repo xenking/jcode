@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    AccountConfig, AccountKind, BudgetAction, BudgetConfig, MeterSource, OnLimit, PaidMode,
-    PriorityConfig, RoutingConfig, Unit,
+    AccountConfig, AccountKind, BudgetAction, BudgetConfig, MeterSource, OnLimit, Pacing,
+    PaidMode, PriorityConfig, RoutingConfig, Unit,
 };
 use crate::{
-    AccountId, AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Policy,
-    Reading, Request, Role, Snapshot, Timed, Window, decide,
+    AccountId, AccountState, Availability, BurnRing, Decision, GateOption, Intents, PaidIntent,
+    Policy, Reading, Request, Role, Snapshot, Timed, Window, decide,
 };
 
 const NOW: i64 = 1_800_000_000;
@@ -54,11 +54,13 @@ fn snapshot(entries: Vec<(&str, Vec<Reading>)>) -> Snapshot {
                     AccountState {
                         readings,
                         availability: Availability::Ready,
+                        burn: BurnRing::default(),
                     },
                 )
             })
             .collect(),
         ledger: BTreeMap::new(),
+        month_fraction: 0.0,
     }
 }
 
@@ -381,6 +383,7 @@ fn pin_wins_over_priority_and_blocks_when_unavailable() {
         AccountState {
             readings: vec![],
             availability: Availability::EgressDown,
+            burn: BurnRing::default(),
         },
     );
     assert!(matches!(
@@ -458,6 +461,7 @@ fn eviction_expires_and_egress_down_skips() {
         AccountState {
             readings: vec![],
             availability: Availability::Evicted { until: NOW + 30 },
+            burn: BurnRing::default(),
         },
     );
     assert_eq!(used(&decide(&policy, &snap, &Intents::default(), interactive("m"), NOW)), "claude:b");
@@ -497,5 +501,235 @@ fn no_account_serves_the_model() {
     assert!(matches!(
         decide(&policy, &Snapshot::default(), &Intents::default(), interactive("gpt-6.2-sol"), NOW),
         Decision::Block { .. }
+    ));
+}
+
+fn policy_custom(
+    accounts: Vec<AccountConfig>,
+    budgets: Vec<BudgetConfig>,
+    tweak: impl FnOnce(&mut RoutingConfig),
+) -> Policy {
+    let mut routing = RoutingConfig {
+        accounts,
+        budgets,
+        ..RoutingConfig::default()
+    };
+    tweak(&mut routing);
+    Policy::from_config(&routing, &BTreeMap::new()).expect("valid policy")
+}
+
+fn burn(samples: &[(i64, f64)]) -> BurnRing {
+    let mut ring = BurnRing::default();
+    for &(at, used) in samples {
+        ring.record(at, used);
+    }
+    ring
+}
+
+fn pct_at(window: Window, used: f64, resets_at: i64) -> Reading {
+    Reading {
+        window,
+        unit: Unit::Percent,
+        used,
+        limit: None,
+        resets_at: Some(resets_at),
+        model_class: None,
+    }
+}
+
+fn month_credits(used: f64, limit: f64) -> Reading {
+    Reading {
+        window: Window::CalendarMonth,
+        unit: Unit::Credits,
+        used,
+        limit: Some(limit),
+        resets_at: None,
+        model_class: None,
+    }
+}
+
+fn ready(account: AccountId, readings: Vec<Reading>) -> (AccountId, AccountState) {
+    (
+        account,
+        AccountState {
+            readings,
+            availability: Availability::Ready,
+            burn: BurnRing::default(),
+        },
+    )
+}
+
+#[test]
+fn burst_lowers_the_adaptive_limit_and_moves_fanout_earlier() {
+    let policy = policy(
+        vec![
+            account("claude:a", AccountKind::Subscription, 1),
+            account("claude:b", AccountKind::Subscription, 2),
+        ],
+        vec![],
+    );
+    let mut snap = Snapshot::default();
+    snap.accounts.insert(
+        id("claude:a"),
+        AccountState {
+            readings: vec![pct(Window::hours(5), 60.0)],
+            availability: Availability::Ready,
+            burn: burn(&[(NOW - 3_600, 20.0), (NOW, 60.0)]), // 40 pct/h
+        },
+    );
+    snap.accounts.insert(
+        id("claude:b"),
+        ready(id("claude:b"), vec![pct(Window::hours(5), 10.0)]).1,
+    );
+    // 40 pct/h over a 60 min horizon reserves 40 points, lowering the ceiling
+    // from 95 to 55; the burst account at 60% is left, so the fan-out moves.
+    assert_eq!(
+        used(&decide(&policy, &snap, &Intents::default(), interactive("m"), NOW)),
+        "claude:b"
+    );
+}
+
+#[test]
+fn quiet_account_rides_to_the_ceiling() {
+    let policy = policy(vec![account("claude:a", AccountKind::Subscription, 1)], vec![]);
+    let mut snap = Snapshot::default();
+    snap.accounts.insert(
+        id("claude:a"),
+        AccountState {
+            readings: vec![pct(Window::hours(5), 90.0)],
+            availability: Availability::Ready,
+            burn: burn(&[(NOW - 3_600, 90.0), (NOW, 90.0)]), // flat
+        },
+    );
+    // No burn means no extra reserve, so the ceiling stays 95 and 90% is usable.
+    assert_eq!(
+        used(&decide(&policy, &snap, &Intents::default(), interactive("m"), NOW)),
+        "claude:a"
+    );
+}
+
+#[test]
+fn weekly_window_resetting_soon_drains_ahead_of_priority() {
+    let mut low = account("claude:low", AccountKind::Subscription, 5);
+    low.drain_before_reset_h = Some(12.0);
+    let policy = policy(
+        vec![
+            low,
+            account("claude:high", AccountKind::Subscription, 1),
+        ],
+        vec![],
+    );
+    let mut snap = Snapshot::default();
+    snap.accounts.insert(
+        id("claude:low"),
+        AccountState {
+            readings: vec![pct_at(Window::days(7), 60.0, NOW + 36_000)], // 10h left, 40% spare
+            availability: Availability::Ready,
+            burn: burn(&[(NOW - 3_600, 60.0), (NOW, 60.0)]),
+        },
+    );
+    snap.accounts.insert(id("claude:high"), ready(id("claude:high"), vec![pct(Window::hours(5), 10.0)]).1);
+    assert_eq!(
+        used(&decide(&policy, &snap, &Intents::default(), interactive("m"), NOW)),
+        "claude:low"
+    );
+}
+
+#[test]
+fn credits_behind_the_month_line_are_preferred() {
+    let mut behind = account("openai:behind", AccountKind::Credits, 1);
+    behind.pacing = Pacing::MonthLine;
+    let mut ahead = account("openai:ahead", AccountKind::Credits, 1);
+    ahead.pacing = Pacing::MonthLine;
+    let policy = policy(vec![behind, ahead], vec![]);
+    let mut snap = Snapshot {
+        accounts: BTreeMap::new(),
+        ledger: BTreeMap::new(),
+        month_fraction: 0.5,
+    };
+    snap.accounts
+        .insert(id("openai:behind"), ready(id("openai:behind"), vec![month_credits(400.0, 1_000.0)]).1);
+    snap.accounts
+        .insert(id("openai:ahead"), ready(id("openai:ahead"), vec![month_credits(700.0, 1_000.0)]).1);
+    assert_eq!(
+        used(&decide(&policy, &snap, &Intents::default(), interactive("gpt-6.2-sol"), NOW)),
+        "openai:behind"
+    );
+}
+
+#[test]
+fn pacing_slack_keeps_a_current_account_from_flapping() {
+    let mut one = account("openai:one", AccountKind::Credits, 1);
+    one.pacing = Pacing::MonthLine;
+    one.pacing_slack_pct = 5.0;
+    let mut two = account("openai:two", AccountKind::Credits, 1);
+    two.pacing = Pacing::MonthLine;
+    two.pacing_slack_pct = 5.0;
+    let policy = policy(vec![one, two], vec![]);
+    let snap = |month: f64| {
+        let mut snap = Snapshot {
+            accounts: BTreeMap::new(),
+            ledger: BTreeMap::new(),
+            month_fraction: month,
+        };
+        snap.accounts
+            .insert(id("openai:one"), ready(id("openai:one"), vec![month_credits(520.0, 1_000.0)]).1);
+        snap.accounts
+            .insert(id("openai:two"), ready(id("openai:two"), vec![month_credits(400.0, 1_000.0)]).1);
+        snap
+    };
+    let current = id("openai:one");
+    let request = Request {
+        current: Some(&current),
+        ..interactive("gpt-6.2-sol")
+    };
+    // 0.52 is above the 0.5 line but inside the 5% slack, so the current stays.
+    assert_eq!(
+        used(&decide(&policy, &snap(0.5), &Intents::default(), request, NOW)),
+        "openai:one"
+    );
+    // Without slack the same reading is ahead, so the behind account takes over.
+    let mut strict = policy.clone();
+    strict.accounts[0].pacing_slack_pct = 0.0;
+    strict.accounts[1].pacing_slack_pct = 0.0;
+    assert_eq!(
+        used(&decide(&strict, &snap(0.5), &Intents::default(), request, NOW)),
+        "openai:two"
+    );
+}
+
+#[test]
+fn hysteresis_blocks_a_flip_to_a_nearly_full_account() {
+    let without = policy(
+        vec![
+            account("claude:a", AccountKind::Subscription, 1),
+            account("claude:b", AccountKind::Subscription, 2),
+        ],
+        vec![],
+    );
+    let with = policy_custom(
+        vec![
+            account("claude:a", AccountKind::Subscription, 1),
+            account("claude:b", AccountKind::Subscription, 2),
+        ],
+        vec![],
+        |r| r.hysteresis_pct = 5.0,
+    );
+    let snap = snapshot(vec![
+        ("claude:a", vec![pct(Window::hours(5), 96.0)]),
+        ("claude:b", vec![pct(Window::hours(5), 92.0)]),
+    ]);
+    let current = id("claude:a");
+    let request = Request {
+        current: Some(&current),
+        ..interactive("m")
+    };
+    assert_eq!(
+        used(&decide(&without, &snap, &Intents::default(), request, NOW)),
+        "claude:b"
+    );
+    assert!(matches!(
+        decide(&with, &snap, &Intents::default(), request, NOW),
+        Decision::Gate { .. }
     ));
 }

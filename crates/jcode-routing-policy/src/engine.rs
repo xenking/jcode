@@ -3,8 +3,9 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::config::{BudgetAction, MeterSource, OnLimit, PaidMode, Unit};
+use crate::config::{AccountKind, BudgetAction, MeterSource, OnLimit, Pacing, PaidMode, Unit};
 use crate::policy::{Account, AccountId, Budget, Policy, Window};
+use crate::strategy::BurnRing;
 
 /// One usage window an account reports right now.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +36,8 @@ pub enum Availability {
 pub struct AccountState {
     pub readings: Vec<Reading>,
     pub availability: Availability,
+    /// Recent meter samples the daemon feeds and persists for burn-rate limits.
+    pub burn: BurnRing,
 }
 
 /// Everything measured, gathered by the daemon before each decision. Accounts
@@ -44,6 +47,9 @@ pub struct Snapshot {
     pub accounts: BTreeMap<AccountId, AccountState>,
     /// Ledger usage per budget name, in the budget's unit and current window.
     pub ledger: BTreeMap<String, f64>,
+    /// Elapsed fraction of the local calendar month (0..=1), passed by the
+    /// caller so `decide` stays free of calendar knowledge.
+    pub month_fraction: f64,
 }
 
 /// An account chosen until a deadline (unix seconds).
@@ -131,6 +137,8 @@ struct Standing<'p> {
     /// Highest relevant percent reading, for balancing within a priority.
     load: Option<f64>,
     resets_at: Option<i64>,
+    /// 0 drain candidate, 1 subscription, 2 paced credits, 3 last resort.
+    tier: u8,
 }
 
 impl Standing<'_> {
@@ -230,12 +238,11 @@ pub fn decide(
 
     match ranked.first() {
         Some(best) => {
-            let tier = best.account.priority.for_class(request.model_class);
             let reason = match request.current {
                 Some(current) if current != &best.account.id => {
-                    format!("{current} spent or outranked, priority {tier}")
+                    format!("{current} outranked by {} ({})", best.account.id, tier_label(best, request))
                 }
-                _ => format!("priority {tier}"),
+                _ => tier_label(best, request),
             };
             use_account(best, reason)
         }
@@ -275,15 +282,20 @@ fn use_account(standing: &Standing<'_>, reason: String) -> Decision {
     }
 }
 
-/// Priority for the request's class, then the current account, then lighter load,
-/// then config order. Unknown load sorts after known load.
+/// Tier first (drain, subscription, paced credits, last resort), then priority
+/// for the request's class, then the current account, then lighter load, then
+/// config order. Unknown load sorts after known load.
 fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
     let class = request.model_class;
     let is_current = |s: &Standing<'_>| request.current == Some(&s.account.id);
-    a.account
-        .priority
-        .for_class(class)
-        .cmp(&b.account.priority.for_class(class))
+    a.tier
+        .cmp(&b.tier)
+        .then_with(|| {
+            a.account
+                .priority
+                .for_class(class)
+                .cmp(&b.account.priority.for_class(class))
+        })
         .then_with(|| is_current(b).cmp(&is_current(a)))
         .then_with(|| match (a.load, b.load) {
             (Some(x), Some(y)) => x.total_cmp(&y),
@@ -292,6 +304,14 @@ fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
             (None, None) => Ordering::Equal,
         })
         .then_with(|| a.index.cmp(&b.index))
+}
+
+fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
+    match standing.tier {
+        0 => "draining before reset".to_string(),
+        2 => "behind the month line".to_string(),
+        _ => format!("priority {}", standing.account.priority.for_class(request.model_class)),
+    }
 }
 
 fn gate(
@@ -342,6 +362,77 @@ fn describe(standing: &Standing<'_>) -> String {
     }
 }
 
+/// The percent ceiling after reserving for the measured burn rate over the
+/// projection horizon. Unknown or absent rate falls back to the ceiling, so a
+/// fresh or quiet account is never penalized for what we cannot measure.
+fn adaptive_limit(policy: &Policy, burn: Option<f64>) -> f64 {
+    match burn {
+        Some(rate) if rate.is_finite() && rate >= 0.0 => {
+            let horizon_h = policy.reserve_horizon_min / 60.0;
+            let reserve = (rate * horizon_h)
+                .max(policy.reserve_floor_pct)
+                .min(policy.limit_pct);
+            (policy.limit_pct - reserve).max(0.0)
+        }
+        _ => policy.limit_pct,
+    }
+}
+
+fn resets_within(resets_at: i64, now: i64, horizon_h: f64) -> bool {
+    let remaining_h = (resets_at - now) as f64 / 3_600.0;
+    remaining_h > 0.0 && remaining_h <= horizon_h
+}
+
+/// True when the weekly window will not consume its spare room before the
+/// reset, so the room is wasted unless the account drains now.
+fn drains_before_reset(reading: &Reading, now: i64, burn: Option<f64>, drain_limit: f64) -> bool {
+    let Some(resets_at) = reading.resets_at else {
+        return false;
+    };
+    let remaining_h = (resets_at - now) as f64 / 3_600.0;
+    let room = drain_limit - reading.used;
+    if room <= 0.0 {
+        return false;
+    }
+    match burn {
+        Some(rate) if rate.is_finite() && rate >= 0.0 => {
+            reading.used + rate * remaining_h < drain_limit
+        }
+        _ => false,
+    }
+}
+
+fn month_spent_fraction(
+    readings: &[&Reading],
+    budgets: &[&Budget],
+    snapshot: &Snapshot,
+) -> Option<f64> {
+    let from_readings = readings
+        .iter()
+        .filter(|r| r.window == Window::CalendarMonth)
+        .filter_map(|r| r.limit.map(|limit| r.used / limit))
+        .reduce(f64::max);
+    let from_budgets = budgets
+        .iter()
+        .filter(|b| b.window == Window::CalendarMonth)
+        .filter_map(|b| {
+            let used = match b.meter {
+                MeterSource::Ledger => snapshot.ledger.get(&b.name).copied(),
+                MeterSource::Provider => readings
+                    .iter()
+                    .filter(|r| r.window == b.window && r.unit == b.unit)
+                    .map(|r| r.used)
+                    .reduce(f64::max),
+            };
+            used.map(|used| used / b.limit)
+        })
+        .reduce(f64::max);
+    match (from_readings, from_budgets) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 fn stand<'p>(
     policy: &Policy,
     snapshot: &Snapshot,
@@ -366,7 +457,8 @@ fn stand<'p>(
                 .collect()
         })
         .unwrap_or_default();
-    let reserve = if request.role == Role::Subagent {
+    let is_current = request.current == Some(&account.id);
+    let subagent_reserve = if request.role == Role::Subagent {
         policy.subagent_reserve_pct
     } else {
         0.0
@@ -376,6 +468,36 @@ fn stand<'p>(
         .iter()
         .filter(|b| b.scope.covers(&account.id, request.model))
         .collect();
+    let burn_rate = state.and_then(|state| state.burn.burn_rate(now));
+
+    let drain_weekly = account.drain_before_reset_h.is_some_and(|horizon_h| {
+        readings.iter().any(|r| {
+            r.unit == Unit::Percent
+                && r.window == Window::days(7)
+                && r.resets_at.is_some_and(|at| resets_within(at, now, horizon_h))
+                && drains_before_reset(r, now, burn_rate, account.drain_limit_pct)
+        })
+    });
+    let pacing_behind = account.kind == AccountKind::Credits
+        && account.pacing == Pacing::MonthLine
+        && snapshot.month_fraction.is_finite()
+        && month_spent_fraction(&readings, &budgets, snapshot).is_some_and(|spent| {
+            let slack = account.pacing_slack_pct / 100.0;
+            if is_current {
+                spent <= snapshot.month_fraction + slack
+            } else {
+                spent < snapshot.month_fraction
+            }
+        });
+    let tier: u8 = if drain_weekly {
+        0
+    } else if account.kind == AccountKind::Subscription {
+        1
+    } else if pacing_behind {
+        2
+    } else {
+        3
+    };
 
     let mut hits: Vec<(OnLimit, String)> = Vec::new();
     let mut warnings = Vec::new();
@@ -396,7 +518,15 @@ fn stand<'p>(
         }
         let (spent, limit) = match reading.unit {
             Unit::Percent => {
-                let limit = policy.limit_pct - reserve;
+                let base = if drain_weekly && reading.window == Window::days(7) {
+                    account.drain_limit_pct
+                } else {
+                    adaptive_limit(policy, burn_rate)
+                };
+                // Hysteresis only shapes the default ceiling: a non-current
+                // account needs more room than the current one needs to stay.
+                let hysteresis = if is_current { 0.0 } else { policy.hysteresis_pct };
+                let limit = (base - subagent_reserve - hysteresis).max(0.0);
                 (reading.used >= limit, format!("{limit:.0}%"))
             }
             _ => match reading.limit {
@@ -436,7 +566,7 @@ fn stand<'p>(
         // Unreadable meters never disqualify.
         let Some(used) = used else { continue };
         let limit = if budget.unit == Unit::Percent {
-            budget.limit - reserve
+            budget.limit - subagent_reserve
         } else {
             budget.limit
         };
@@ -481,6 +611,7 @@ fn stand<'p>(
         warnings,
         load,
         resets_at,
+        tier,
     }
 }
 
