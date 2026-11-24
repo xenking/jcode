@@ -15,7 +15,7 @@
 
 use super::{ToolContext, ask_client};
 use crate::protocol::{AskOption, AskQuestion};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +25,28 @@ const DENY: &str = "Deny";
 
 /// Request ids carry this prefix after the `ask-` the transport adds.
 pub(crate) const REQUEST_PREFIX: &str = "mcp-approval-";
+
+/// Why the gate refused a call. It rides in the error chain so the codemode
+/// receipt can show a safe category without echoing the message.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) category: &'static str,
+    message: String,
+}
+
+impl Refusal {
+    fn new(category: &'static str, message: String) -> anyhow::Error {
+        anyhow::Error::new(Self { category, message })
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refusal {}
 
 /// Longest rendering of the arguments shown to the user.
 const MAX_ARGUMENT_CHARS: usize = 800;
@@ -47,12 +69,15 @@ pub(crate) async fn require(
     let route = super::interactive::sender(&ctx.session_id)
         .or_else(|| ctx.stdin_request_tx.clone().filter(|tx| !tx.is_closed()));
     let Some(route) = route else {
-        bail!(
-            "MCP tool '{tool}' on server '{server}' needs a human yes (approval = \"annotations\") \
-             but this session has no interactive user (headless run or swarm worker), so the call \
-             was refused. List the tool in `approve_free` for that server, or set \
-             `approval = \"off\"`, to run it unattended."
-        );
+        return Err(Refusal::new(
+            "Needs a human yes",
+            format!(
+                "MCP tool '{tool}' on server '{server}' needs a human yes (approval = \"annotations\") \
+                 but this session has no interactive user (headless run or swarm worker), so the call \
+                 was refused. List the tool in `approve_free` for that server, or set \
+                 `approval = \"off\"`, to run it unattended."
+            ),
+        ));
     };
     let questions = [AskQuestion {
         question: format!(
@@ -86,19 +111,27 @@ pub(crate) async fn require(
     let _ = HUMAN_WAIT.try_with(|clock| clock.add(waited));
     let response = match response {
         Ok(response) => response,
-        Err(error) => bail!(
-            "MCP tool '{tool}' on server '{server}' was not approved: no answer ({error:#}). \
-             The call did not run."
-        ),
+        Err(error) => {
+            return Err(Refusal::new(
+                "No answer to the prompt",
+                format!(
+                    "MCP tool '{tool}' on server '{server}' was not approved: no answer ({error:#}). \
+                     The call did not run."
+                ),
+            ));
+        }
     };
     let allowed = response.answers.is_some_and(|answers| {
         matches!(answers.as_slice(), [answer] if answer.selected == [ALLOW] && answer.other.is_none())
     });
     if !allowed {
-        bail!(
-            "MCP tool '{tool}' on server '{server}' was denied by the user. The call did not run; \
-             do not retry it unless the user asks."
-        );
+        return Err(Refusal::new(
+            "Denied by the user",
+            format!(
+                "MCP tool '{tool}' on server '{server}' was denied by the user. The call did not run; \
+                 do not retry it unless the user asks."
+            ),
+        ));
     }
     Ok(())
 }
@@ -116,10 +149,7 @@ fn render_arguments(input: &Value) -> String {
         return text;
     }
     let cut: String = text.chars().take(MAX_ARGUMENT_CHARS).collect();
-    format!(
-        "{cut}... (truncated, {} chars total)",
-        text.chars().count()
-    )
+    format!("{cut}... (truncated, {} chars total)", text.chars().count())
 }
 
 #[cfg(test)]

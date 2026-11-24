@@ -182,6 +182,9 @@ fn message_preview(message: &str) -> Option<String> {
 fn safe_diagnostic(error: &anyhow::Error) -> &'static str {
     use std::io::ErrorKind;
     for source in error.chain() {
+        if let Some(refusal) = source.downcast_ref::<super::mcp_approval::Refusal>() {
+            return refusal.category;
+        }
         if let Some(error) = source.downcast_ref::<std::io::Error>() {
             return match error.kind() {
                 ErrorKind::PermissionDenied => "Permission denied",

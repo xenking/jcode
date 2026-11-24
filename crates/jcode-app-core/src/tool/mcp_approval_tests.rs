@@ -453,6 +453,51 @@ async fn codemode_calls_meet_the_same_gate() {
     assert_eq!(f.writes().len(), 2);
 }
 
+/// A call the gate refuses never reaches the server, but the run's receipt must
+/// still list it, as failed with a safe category, so the transcript shows what
+/// the user denied or what no one could approve.
+#[tokio::test(flavor = "multi_thread")]
+async fn codemode_receipt_lists_calls_the_gate_refused() {
+    use jcode_session_types::CodemodeCallStatus::{Error, Success};
+    let Some(f) = Fixture::new(json!("annotations"), &[]).await else {
+        return;
+    };
+    let script = r#"
+        await tools.mcp__fake__read_item({ n: 1 });
+        try { await tools.mcp__fake__write_item({ n: 2 }); } catch (e) {}
+        return 'done';
+    "#;
+    for (session, ui, category) in [
+        ("receipt-headless", None, "Needs a human yes"),
+        ("receipt-deny", Some("Deny"), "Denied by the user"),
+    ] {
+        let _ui = ui.map(|answer| attach_ui(session, answer));
+        let output = f
+            .registry
+            .execute("codemode", json!({ "code": script }), ctx(session))
+            .await
+            .unwrap();
+        let summary = crate::tool::codemode_ledger::output_summary("codemode", &output).unwrap();
+        let tools: Vec<_> = summary
+            .calls
+            .iter()
+            .map(|call| call.tool.as_str())
+            .collect();
+        assert_eq!(
+            tools,
+            ["mcp__fake__read_item", "mcp__fake__write_item"],
+            "{session}"
+        );
+        assert_eq!(summary.calls[0].status, Success);
+        assert_eq!(summary.calls[1].status, Error);
+        assert_eq!(summary.calls[1].diagnostic.as_deref(), Some(category));
+        let receipt = serde_json::to_string(&summary).unwrap();
+        assert!(!receipt.contains("denied by the user."), "{receipt}");
+        assert!(!receipt.contains("approve_free"), "{receipt}");
+    }
+    assert!(f.writes().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_unified_mcp_call_surface_meets_the_same_gate() {
     let Some(f) = Fixture::new(json!("annotations"), &[]).await else {

@@ -1211,6 +1211,15 @@ impl Registry {
                 Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
             fields.push(("block_reason".to_string(), format!("{error:#}")));
             crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+            // A refusal at the human gate is the outcome of this call, so a
+            // codemode run lists it (as failed) next to the calls that ran.
+            if let Some((ledger, seq)) = codemode {
+                let refused: Result<ToolOutput> = Err(error);
+                let now = std::time::Instant::now();
+                ledger.dispatched(seq, resolved_name, &input, &ctx.session_id, now, !is_custom);
+                ledger.finished(seq, 0, &input, &refused);
+                return refused;
+            }
             return Err(error);
         }
 
