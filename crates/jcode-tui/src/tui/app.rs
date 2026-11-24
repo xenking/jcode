@@ -61,6 +61,8 @@ pub enum AppRuntimeMode {
 mod ask_picker;
 mod routing_acct;
 mod routing_gate;
+#[cfg(test)]
+pub(crate) use routing_gate::routing_gate_view_for_tests;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;

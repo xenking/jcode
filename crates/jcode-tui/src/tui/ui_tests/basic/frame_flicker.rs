@@ -1186,3 +1186,41 @@ fn test_reset_expiry_notification_full_frame_uses_one_row() {
         );
     }
 }
+
+#[test]
+fn routing_gate_card_never_wraps_and_ellipsizes_at_narrow_widths() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let gate = crate::tui::app::routing_gate_view_for_tests();
+    let state = TestState {
+        inline_view_state: Some(gate),
+        ..Default::default()
+    };
+    for width in [18u16, 30, 48, 80] {
+        let backend = TestBackend::new(width, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_inline_ui(frame, &state, frame.area()))
+            .unwrap();
+        let text = buffer_to_text(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        assert!(
+            text.contains("4. Cancel"),
+            "every option keeps its own row at width={width}:\n{text}"
+        );
+        for row in &rows {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(*row) <= usize::from(width),
+                "width={width}: {row:?}"
+            );
+        }
+        if width <= 30 {
+            assert!(text.contains('…'), "width={width} must ellipsize:\n{text}");
+        } else if width == 80 {
+            assert!(
+                text.contains("Switch to claude:spare · 40% used"),
+                "wide card shows live detail:\n{text}"
+            );
+        }
+        println!("--- width {width} ---\n{text}");
+    }
+}

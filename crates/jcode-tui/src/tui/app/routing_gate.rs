@@ -178,3 +178,25 @@ impl super::App {
 #[cfg(test)]
 #[path = "routing_gate_tests.rs"]
 mod tests;
+
+/// A representative gate card for render tests elsewhere in the TUI.
+#[cfg(test)]
+pub(crate) fn routing_gate_view_for_tests() -> crate::tui::InlineViewState {
+    RoutingGateState::new(
+        "g1".into(),
+        "claude:team reached its 5h limit".into(),
+        vec![
+            RoutingGateOption::Switch {
+                account: "claude:spare".into(),
+                detail: "40% used".into(),
+            },
+            RoutingGateOption::WaitUntil {
+                resets_at: 1_900_000_000,
+            },
+            RoutingGateOption::Ack {
+                account: "claude:team".into(),
+            },
+        ],
+    )
+    .view()
+}

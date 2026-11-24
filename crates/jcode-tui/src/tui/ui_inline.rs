@@ -60,7 +60,8 @@ fn draw_inline_view(
 
     let mut content_width = inline_view_display_width(view.title.as_str());
     if let Some(status) = view.status.as_ref() {
-        content_width = content_width.max(inline_view_display_width(status.as_str()) + 2);
+        // The header row carries the title and the status side by side.
+        content_width += inline_view_display_width(status.as_str()) + 2;
     }
     for line in &view.lines {
         content_width = content_width.max(inline_view_display_width(line.as_str()));
