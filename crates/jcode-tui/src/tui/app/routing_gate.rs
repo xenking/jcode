@@ -6,98 +6,39 @@
 //! healthy account is the answer a person almost always wants.
 use crate::protocol::{RoutingGateChoice, RoutingGateOption};
 use crossterm::event::KeyCode;
+use jcode_session_types::routing_gate::{GateKey, RoutingGateModel};
 
-/// How long "keep spending here" lasts when the answer carries no duration.
-pub(crate) const GATE_ACK_MINUTES: u32 = 30;
+pub(crate) use jcode_session_types::routing_gate::GateOutcome as GateKeyOutcome;
+#[cfg(test)]
+pub(crate) use jcode_session_types::routing_gate::GATE_ACK_MINUTES;
 
-#[derive(Debug, Clone)]
-pub(crate) struct RoutingGateState {
-    pub gate_id: String,
-    pub reason: String,
-    pub options: Vec<RoutingGateOption>,
-    /// Focused row. `options.len()` is the Cancel row.
-    pub cursor: usize,
+/// The gate's state machine is shared with every other client. This module
+/// maps terminal keys onto it and renders it as an inline view.
+pub(crate) type RoutingGateState = RoutingGateModel;
+
+pub(crate) trait GateTerminal {
+    fn handle_key(&mut self, code: KeyCode) -> GateKeyOutcome;
+    fn view(&self) -> crate::tui::InlineViewState;
 }
 
-pub(crate) enum GateKeyOutcome {
-    Pending,
-    Done(RoutingGateChoice),
-}
-
-impl RoutingGateState {
-    pub fn new(gate_id: String, reason: String, options: Vec<RoutingGateOption>) -> Self {
-        let cursor = options
-            .iter()
-            .position(|option| matches!(option, RoutingGateOption::Switch { .. }))
-            .unwrap_or(0);
-        Self {
-            gate_id,
-            reason,
-            options,
-            cursor,
-        }
-    }
-
-    fn rows(&self) -> usize {
-        self.options.len() + 1
-    }
-
-    fn choice_at(&self, row: usize) -> RoutingGateChoice {
-        match self.options.get(row) {
-            Some(RoutingGateOption::Switch { account, .. }) => RoutingGateChoice::Switch {
-                account: account.clone(),
-            },
-            Some(RoutingGateOption::WaitUntil { .. }) => RoutingGateChoice::Wait,
-            Some(RoutingGateOption::Ack { .. }) => RoutingGateChoice::Ack {
-                minutes: GATE_ACK_MINUTES,
-            },
-            None => RoutingGateChoice::Cancel,
-        }
-    }
-
-    pub fn handle_key(&mut self, code: KeyCode) -> GateKeyOutcome {
-        match code {
-            KeyCode::Esc => return GateKeyOutcome::Done(RoutingGateChoice::Cancel),
-            KeyCode::Up => self.cursor = (self.cursor + self.rows() - 1) % self.rows(),
-            KeyCode::Down | KeyCode::Tab => self.cursor = (self.cursor + 1) % self.rows(),
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let row = (c as u8 - b'1') as usize;
-                if row < self.rows() {
-                    return GateKeyOutcome::Done(self.choice_at(row));
-                }
-            }
-            KeyCode::Enter => return GateKeyOutcome::Done(self.choice_at(self.cursor)),
-            _ => {}
-        }
-        GateKeyOutcome::Pending
-    }
-
-    fn row_text(option: &RoutingGateOption) -> String {
-        match option {
-            RoutingGateOption::Switch { account, detail } if detail.trim().is_empty() => {
-                format!("Switch to {account}")
-            }
-            RoutingGateOption::Switch { account, detail } => {
-                format!("Switch to {account} · {}", detail.trim())
-            }
-            RoutingGateOption::WaitUntil { resets_at } => {
-                format!("Wait until {}", reset_clock(*resets_at))
-            }
-            RoutingGateOption::Ack { account } => {
-                format!("Keep spending on {account} for {GATE_ACK_MINUTES}m")
-            }
-        }
+impl GateTerminal for RoutingGateModel {
+    fn handle_key(&mut self, code: KeyCode) -> GateKeyOutcome {
+        let key = match code {
+            KeyCode::Esc => GateKey::Esc,
+            KeyCode::Up => GateKey::Up,
+            KeyCode::Down => GateKey::Down,
+            KeyCode::Tab => GateKey::Tab,
+            KeyCode::Enter => GateKey::Enter,
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => GateKey::Digit(c as u8 - b'0'),
+            _ => return GateKeyOutcome::Pending,
+        };
+        self.press(key)
     }
 
     /// The inline card: reason, then one numbered row per option and Cancel.
-    pub fn view(&self) -> crate::tui::InlineViewState {
+    fn view(&self) -> crate::tui::InlineViewState {
         let mut lines = vec![self.reason.clone()];
-        let texts = self
-            .options
-            .iter()
-            .map(Self::row_text)
-            .chain(std::iter::once("Cancel".to_string()));
-        for (i, text) in texts.enumerate() {
+        for (i, text) in self.rows().into_iter().enumerate() {
             let pointer = if i == self.cursor { '›' } else { ' ' };
             lines.push(format!("{pointer} {}. {text}", i + 1));
         }
@@ -106,19 +47,6 @@ impl RoutingGateState {
             status: Some("↑↓ move · Enter choose · Esc cancel".to_string()),
             lines,
         }
-    }
-}
-
-/// Local wall-clock `HH:MM` of a reset time, with the date when it is not today.
-fn reset_clock(resets_at: i64) -> String {
-    use chrono::TimeZone;
-    let Some(when) = chrono::Local.timestamp_opt(resets_at, 0).single() else {
-        return "reset".to_string();
-    };
-    if when.date_naive() == chrono::Local::now().date_naive() {
-        when.format("%H:%M").to_string()
-    } else {
-        when.format("%a %H:%M").to_string()
     }
 }
 
