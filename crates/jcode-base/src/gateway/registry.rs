@@ -32,6 +32,16 @@ pub struct DeviceRegistry {
 }
 
 impl DeviceRegistry {
+    pub fn lock_for_update() -> Result<std::fs::File> {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(storage::jcode_dir()?.join("devices.lock"))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
     /// Load from ~/.jcode/devices.json
     pub fn load() -> Self {
         let path = match storage::jcode_dir() {
