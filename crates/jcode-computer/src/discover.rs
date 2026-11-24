@@ -35,6 +35,8 @@ accessibility actions. Prefer native AX, which never falls back to shared input:
   in each row is an element_ref for that snapshot. Query matches role/label/value (keeps ancestors).
   Budget is encoded tree bytes, default 4500. Use ax (default) unless you need an image.
 - act {snapshot_id, element_ref, verb:press|set_value|type|menu_path, value?, text?, menu_path?}
+  press uses AXPress when available; otherwise it selects an AXRow or AXCell through its
+  owning table, outline, or list when AXSelectedRows is writable. Selection replaces the prior selection.
   type replaces the AX selection; it does not send keys. For menu_path use a window row and
   exact menu titles. Menus are supported only when that window is the app's sole focused window.
   Read delivery/effect. A stale_ref has not acted. Observe or use next_state and choose again.

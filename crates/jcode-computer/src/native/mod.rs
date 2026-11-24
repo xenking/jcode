@@ -347,6 +347,41 @@ fn act(request: Act, slots: &mut Snapshots) -> ToolOutput {
 
 fn press(element: &Element, before: Option<String>) -> NativeResult<Delivery> {
     if !element.actions()?.iter().any(|action| action == "AXPress") {
+        let role = element.string("AXRole")?;
+        if !matches!(role.as_deref(), Some("AXRow" | "AXCell")) {
+            return Err(Failure::new("background_unavailable"));
+        }
+        let mut current = element.clone();
+        let mut row = None;
+        for _ in 0..20 {
+            match current.string("AXRole")?.as_deref() {
+                Some("AXRow") if row.is_none() => row = Some(current.clone()),
+                Some("AXTable" | "AXOutline" | "AXList") => {
+                    let row = row.ok_or_else(|| Failure::new("background_unavailable"))?;
+                    if !current.settable("AXSelectedRows")? {
+                        return Err(Failure::new("background_unavailable"));
+                    }
+                    return Ok(deliver(current.select_row(&row), || {
+                        let deadline = Instant::now() + Duration::from_millis(400);
+                        loop {
+                            if row.boolean("AXSelected").ok().flatten() == Some(true) {
+                                return true;
+                            }
+                            if Instant::now() >= deadline {
+                                return false;
+                            }
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }));
+                }
+                Some("AXWindow") => break,
+                _ => {}
+            }
+            let Some(parent) = current.element("AXParent")? else {
+                break;
+            };
+            current = parent;
+        }
         return Err(Failure::new("background_unavailable"));
     }
     Ok(deliver(element.press(), || {

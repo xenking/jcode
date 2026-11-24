@@ -133,6 +133,72 @@ async fn live_reddy_observe() {
 }
 
 #[tokio::test]
+#[ignore = "requires a running target app and Accessibility permission"]
+async fn live_background_row() {
+    let app = std::env::var("JCODE_AX_TARGET_APP").unwrap();
+    let engine = Engine::default();
+    let snapshot = state(
+        execute(
+            &engine,
+            json!({"action":"observe", "app":app, "budget":12000}),
+        )
+        .await,
+    );
+    assert!(
+        snapshot["tree"].is_array(),
+        "observe failed: {}",
+        snapshot["reason"]
+    );
+    let role = std::env::var("JCODE_AX_TARGET_ROLE").unwrap_or_else(|_| "AXRow".into());
+    let (row, row_element) = {
+        let slots = engine.snapshots.lock().unwrap();
+        let refs = &slots.0.as_ref().unwrap().refs;
+        refs.iter()
+            .filter(|(_, bound)| {
+                bound.identity.role == role
+                    && !bound
+                        .element
+                        .actions()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|action| action == "AXPress")
+            })
+            .find_map(|(id, bound)| {
+                let mut candidate = bound.element.clone();
+                for _ in 0..10 {
+                    if candidate.string("AXRole").ok().flatten().as_deref() == Some("AXRow") {
+                        return candidate
+                            .boolean("AXSelected")
+                            .ok()
+                            .flatten()
+                            .map(|_| (id.clone(), candidate));
+                    }
+                    candidate = candidate.element("AXParent").ok().flatten()?;
+                }
+                None
+            })
+            .expect("no selectable row or cell without AXPress")
+    };
+    let frontmost = || {
+        let output = Command::new("/usr/bin/swift")
+            .args(["-e", "import AppKit; print(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)"])
+            .output().unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let before = frontmost();
+    let result = state(execute(&engine, json!({"action":"act", "snapshot_id":snapshot["snapshot_id"], "element_ref":row, "verb":"press"})).await);
+    assert_eq!(frontmost(), before, "frontmost application changed");
+    eprintln!(
+        "delivery={} effect={} reason={}",
+        result["delivery"], result["effect"], result["reason"]
+    );
+    assert_eq!(row_element.boolean("AXSelected").ok().flatten(), Some(true));
+    assert_eq!(result["delivery"], "sent");
+    assert_eq!(result["effect"], "verified");
+}
+
+#[tokio::test]
 #[ignore = "requires a GUI session and Accessibility permission"]
 async fn background_press_selects_table_row() {
     assert!(

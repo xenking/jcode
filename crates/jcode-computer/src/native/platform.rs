@@ -253,6 +253,18 @@ impl Element {
         }
     }
 
+    pub(super) fn select_row(&self, row: &Self) -> Result<()> {
+        let attr = CFString::new("AXSelectedRows");
+        let rows = CFArray::from_CFTypes(&[row.0.clone()]);
+        success(unsafe {
+            AXUIElementSetAttributeValue(
+                self.raw(),
+                attr.as_concrete_TypeRef(),
+                rows.as_CFTypeRef(),
+            )
+        })
+    }
+
     pub(super) fn set(&self, attr: &str, text: &str) -> Result<()> {
         let attr = CFString::new(attr);
         let value = CFString::new(text);
