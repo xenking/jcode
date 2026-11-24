@@ -511,6 +511,18 @@ impl Agent {
             let mut provider_native_tracker =
                 jcode_message_types::provider_native::ProviderNativeTracker::default();
             let mut openai_native_compaction: Option<(String, usize, Option<u64>, String)> = None;
+            // The previous request's input plus output is what the provider
+            // last measured. jcode's local estimate can overcount it by a
+            // third on long OpenAI sessions, so prefer the measured size when the
+            // provider compacts this request.
+            let provider_context_before_request = (self.last_usage.input_tokens > 0).then(|| {
+                self.effective_context_tokens_from_usage(
+                    self.last_usage.input_tokens,
+                    self.last_usage.cache_read_input_tokens,
+                    self.last_usage.cache_creation_input_tokens,
+                )
+                .saturating_add(self.last_usage.output_tokens)
+            });
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
@@ -1614,10 +1626,13 @@ impl Agent {
                 // The FIFO event ordering lets the TUI invalidate its old
                 // append-only baseline before seeing the compacted signature.
                 //
-                // Prefer a provider-supplied pre-compaction count. Otherwise use
-                // jcode's own context estimate, never the response's input usage,
-                // which is not the pre-compaction context size (#1178).
-                let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
+                // Prefer a provider-supplied pre-compaction count, then the
+                // previous request's measured size, then jcode's own estimate.
+                // Never use this response's input usage, which is not the
+                // pre-compaction context size (#1178).
+                let pre_tokens = native_pre_tokens
+                    .or(provider_context_before_request)
+                    .or(estimated_pre_tokens);
                 let post_tokens = estimated_post_tokens;
                 let _ = event_tx.send(crate::compaction::compaction_server_event(
                     &crate::compaction::CompactionEvent {

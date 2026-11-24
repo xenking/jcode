@@ -242,9 +242,11 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
                     ..
                 } => {
                     assert_eq!(trigger, "openai_native_auto");
-                    // Counts come from jcode's local context estimate. The
-                    // response's input usage is not a pre-compaction count.
-                    let pre = pre_tokens.expect("local pre-compaction estimate");
+                    // The previous request's measured input plus output is the
+                    // pre-compaction size. The compacting response's input
+                    // usage is not a pre-compaction count.
+                    let pre = pre_tokens.expect("measured pre-compaction size");
+                    assert_eq!(pre, 216_517 + 5);
                     let post = post_tokens.expect("local post-compaction estimate");
                     assert_ne!(pre, 216_000, "response input is not a pre-compaction count");
                     assert_eq!(tokens_saved, Some(pre.saturating_sub(post)));
