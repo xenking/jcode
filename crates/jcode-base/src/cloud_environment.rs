@@ -521,6 +521,16 @@ fn replace_private(base: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
     }
 }
 
+/// The jcode home with its own symlinks resolved. [`checked_path`] rejects a
+/// symlink at any component, which is meant for what lives under the home. The
+/// home itself is chosen by the owner (`JCODE_HOME`, a symlinked `~/.jcode`, or
+/// macOS's `/var` temp dir), so rejecting it made every bash call fail with
+/// "could not load saved cloud environment".
+fn resolved_home() -> Result<PathBuf> {
+    let home = crate::storage::jcode_dir()?;
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
 fn environment_relative(root: &Path) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let canonical = root.canonicalize()?;
@@ -541,12 +551,12 @@ fn environment_relative(root: &Path) -> Result<PathBuf> {
 /// is bounded to five seconds; dropping it (including process exit) releases it.
 /// This is separate from the map locks acquired during publication.
 pub fn lock_workspace_hydration(root: &Path) -> Result<std::fs::File> {
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?.with_extension("hydrate.lock");
     lock_private(&home, &relative)
 }
 pub fn load_environment(root: &Path) -> Result<BTreeMap<String, String>> {
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?;
     if !checked_path(&home, &relative)?.exists() {
         return Ok(BTreeMap::new());
@@ -571,7 +581,7 @@ pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
         name: name.to_owned(),
     })?;
     validate_environment_value(value)?;
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?;
     let _lock = lock_private(&home, &relative.with_extension("lock"))?;
     let mut vars = load_environment(root)?;
@@ -581,11 +591,7 @@ pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
     vars.insert(name.to_owned(), value.to_owned());
     let bytes = serde_json::to_vec(&vars)?;
     ensure!(bytes.len() <= MAX_PAYLOAD_BYTES, "environment too large");
-    replace_private(
-        &crate::storage::jcode_dir()?,
-        &environment_relative(root)?,
-        &bytes,
-    )?;
+    replace_private(&resolved_home()?, &environment_relative(root)?, &bytes)?;
     Ok(true)
 }
 
@@ -713,6 +719,25 @@ mod tests {
         )
         .unwrap();
         assert!(load_environment(&subdirectory).is_err());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_jcode_home_still_loads_and_saves_the_environment() {
+        let _guard = crate::storage::lock_test_env();
+        let real = tempfile::tempdir().unwrap();
+        let link = real.path().with_extension("link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let _home = HomeGuard::set(&link);
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        assert!(load_environment(project.path()).unwrap().is_empty());
+        assert!(save_environment(project.path(), "TEST_TOKEN", "opaque-test-value").unwrap());
+        assert_eq!(
+            load_environment(project.path()).unwrap().len(),
+            1,
+            "the saved environment must be readable back through the symlinked home"
+        );
+        std::fs::remove_file(link).unwrap();
     }
     #[test]
     fn concurrent_manifest_and_environment_updates_are_not_lost() {

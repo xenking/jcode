@@ -541,7 +541,10 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
         error.to_string().contains("no secrets"),
         "hook stderr should surface in the error: {error}"
     );
-    assert!(allowed.is_ok(), "non-matching input should pass the gate");
+    assert!(
+        allowed.is_ok(),
+        "non-matching input should pass the gate: {allowed:?}"
+    );
 }
 
 #[tokio::test]
