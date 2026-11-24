@@ -1,8 +1,24 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::io::Write;
 
 use crate::storage;
 use jcode_gateway_types::{DeviceScope, PairedDevice, PairingCode};
+
+fn scoped_hash(scope: DeviceScope, value: &str) -> String {
+    let prefix = match scope {
+        DeviceScope::Phone => "sha256:",
+        DeviceScope::Harness => "harness-sha256:",
+    };
+    format!("{prefix}{}", hex::encode(Sha256::digest(value.as_bytes())))
+}
+
+fn stored_code(scope: DeviceScope, code: &str) -> String {
+    match scope {
+        DeviceScope::Phone => code.to_owned(),
+        DeviceScope::Harness => scoped_hash(scope, code),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Device registry (persisted to ~/.jcode/devices.json)
@@ -33,9 +49,11 @@ impl DeviceRegistry {
 
     /// Save to ~/.jcode/devices.json
     pub fn save(&self) -> Result<()> {
-        let path = storage::jcode_dir()?.join("devices.json");
-        let contents = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, contents)?;
+        let dir = storage::jcode_dir()?;
+        let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer_pretty(&mut file, self)?;
+        file.flush()?;
+        file.persist(dir.join("devices.json"))?;
         Ok(())
     }
 
@@ -54,11 +72,15 @@ impl DeviceRegistry {
         self.pending_codes.retain(|c| c.expires_at > now_str);
 
         let code = loop {
-            let candidate = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+            let candidate = match scope {
+                DeviceScope::Phone => format!("{:06}", rand::rng().random_range(0..1_000_000u32)),
+                DeviceScope::Harness => hex::encode(rand::rng().random::<[u8; 16]>()),
+            };
+            let stored = stored_code(scope, &candidate);
             if self
                 .pending_codes
                 .iter()
-                .all(|pending| pending.code != candidate)
+                .all(|pending| pending.code != stored)
             {
                 break candidate;
             }
@@ -66,7 +88,7 @@ impl DeviceRegistry {
 
         self.pending_codes.push(PairingCode {
             scope,
-            code: code.clone(),
+            code: stored_code(scope, &code),
             created_at: now.to_rfc3339(),
             expires_at: expires.to_rfc3339(),
         });
@@ -82,10 +104,11 @@ impl DeviceRegistry {
 
     pub fn validate_code_scoped(&mut self, code: &str, scope: DeviceScope) -> bool {
         let now = chrono::Utc::now().to_rfc3339();
+        let stored = stored_code(scope, code);
         if let Some(idx) = self
             .pending_codes
             .iter()
-            .position(|c| c.code == code && c.scope == scope && c.expires_at > now)
+            .position(|c| c.code == stored && c.scope == scope && c.expires_at > now)
         {
             self.pending_codes.remove(idx);
             let _ = self.save();
@@ -118,14 +141,13 @@ impl DeviceRegistry {
         let token = hex::encode(token_bytes);
 
         // Store hash of token, not the token itself
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let token_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let token_hash = scoped_hash(scope, &token);
 
         let now = chrono::Utc::now().to_rfc3339();
 
         // Remove existing device with same ID (re-pairing)
-        self.devices.retain(|d| d.id != device_id);
+        self.devices
+            .retain(|d| d.id != device_id || d.scope != scope);
 
         self.devices.push(PairedDevice {
             scope,
@@ -143,22 +165,24 @@ impl DeviceRegistry {
 
     /// Validate an auth token. Returns the device if valid.
     pub fn validate_token(&self, token: &str) -> Option<&PairedDevice> {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let token_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
-
-        self.devices.iter().find(|d| d.token_hash == token_hash)
+        let phone = scoped_hash(DeviceScope::Phone, token);
+        let harness = scoped_hash(DeviceScope::Harness, token);
+        self.devices.iter().find(|d| match d.scope {
+            DeviceScope::Phone => d.token_hash == phone,
+            DeviceScope::Harness => d.token_hash == harness,
+        })
     }
 
     /// Update last_seen for a device
     pub fn touch_device(&mut self, token: &str) {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let token_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
-        let now = chrono::Utc::now().to_rfc3339();
-
-        if let Some(device) = self.devices.iter_mut().find(|d| d.token_hash == token_hash) {
-            device.last_seen = now;
+        let Some(hash) = self
+            .validate_token(token)
+            .map(|device| device.token_hash.clone())
+        else {
+            return;
+        };
+        if let Some(device) = self.devices.iter_mut().find(|d| d.token_hash == hash) {
+            device.last_seen = chrono::Utc::now().to_rfc3339();
             let _ = self.save();
         }
     }

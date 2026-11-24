@@ -559,6 +559,7 @@ async fn handle_http(
                 "status": "ok",
                 "version": jcode_build_meta::version(),
                 "gateway": true,
+                "harness_v1": harness_enabled,
                 "working_dir": default_client_working_dir(),
             });
             http_response(200, "OK", &body.to_string())

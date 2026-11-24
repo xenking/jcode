@@ -1,5 +1,6 @@
 use super::*;
 use futures::{SinkExt, StreamExt};
+use sha2::Digest;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 #[tokio::test]
@@ -9,6 +10,11 @@ async fn scoped_pairing_loopback_and_revocation() {
     let attempts: PairAttempts = Arc::default();
     let mut initial = DeviceRegistry::default();
     let code = initial.generate_pairing_code_scoped(DeviceScope::Harness);
+    assert_eq!(code.len(), 32);
+    assert_ne!(
+        initial.pending_codes[0].code, code,
+        "invite must not be stored verbatim"
+    );
     let body = serde_json::json!({"code": code, "device_id":"desktop", "device_name":"Desktop", "scope":"harness"}).to_string();
     let wrong_scope =
         serde_json::json!({"code": code, "device_id":"desktop", "device_name":"Desktop"})
@@ -31,6 +37,11 @@ async fn scoped_pairing_loopback_and_revocation() {
             .unwrap()
             .to_string();
     let mut stored = DeviceRegistry::load();
+    let legacy_hash = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(token.as_bytes()))
+    );
+    assert_ne!(stored.devices[0].token_hash, legacy_hash);
     let phone = stored.pair_device("phone".into(), "Phone".into(), None);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
