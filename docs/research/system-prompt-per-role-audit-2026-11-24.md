@@ -288,13 +288,72 @@ append = "~/.jcode/prompts/models/gpt.md"
 
 ## Что делать в каком порядке
 
-| # | Шаг | Ожидаемый эффект по данным | Стоимость |
-| --- | --- | --- | --- |
-| 1 | Сократить результат `todo` до сводки и diff | До 32% накопленного вывода у frontier root, около 8% всех его prompt-токенов | Малая, без новой конфигурации |
-| 2 | Роль `orchestrator` с allowlist инструментов для root в swarm-режиме | Основной рычаг для 47% бюджета | Средняя |
-| 3 | `[prompt.roles.*]` с `mode`, `file`, `tools`, `skills`, `effort` | Позволяет ставить эксперименты без пересборки | Средняя |
-| 4 | `[[prompt.models]]` с glob-сопоставлением | Тонкая настройка стиля, несколько процентов префикса | Малая |
-| 5 | Advisor с дельтами и выселением, как в omp | Дорогая модель без шума инструментов | Большая |
+Дополнено после разбора ещё трёх harness'ов (см. раздел ниже): `Dicklesworthstone/pi_agent_rust`
+`7aae3036`, `deepseek-ai/deepseek-harness` (dsh) `4b399c39`, `Hmbown/DeepSeek-TUI`
+`62765f2`.
+
+| Приоритет | Шаг | Основание | У кого взято | Стоимость |
+| --- | --- | --- | --- | --- |
+| P0 | Результат `todo` сократить до сводки и diff | `tool/todo.rs:1153` при каждом вызове печатает pretty JSON всего списка, плана и целей. Это 32% накопленного вывода у frontier root | Собственные данные | Малая |
+| P0 | Руководство по инструментам выводить только для включённых инструментов | `system_prompt.md:27-28` жёстко упоминает `agentgrep`, `codemode`, `batch`. Без этого любой allowlist роли оставит в промпте ссылки на скрытые инструменты | opencode `SessionSystemPrompt.render(tools)`, dsh `PromptSection` на инструмент, pi `default_system_prompt(enabled_tools)` | Малая |
+| P1 | Пресеты ролей для swarm-воркеров: `scout`, `task`, `sonic`, `reviewer` | Сейчас воркер получает полный промпт и все 23 инструмента, 55% его промпта занимает старый вывод | pi bundled, DeepSeek-TUI `FleetRolePreset`, dsh agent preset, opencode `explore` | Средняя |
+| P1 | Роль `orchestrator` для root с allowlist | 47% бюджета, 54% вызовов в `bash` | omp `/vibe` director, Claude Code coordinator | Средняя |
+| P2 | Надстройка по семейству модели по glob ID, не применяется, если у роли свой `replace` | Стиль, не бюджет | opencode `optimize.ts`, Codex `models.json` | Малая |
+| P3 | Advisor или consultant по компактному дайджесту хода, только чтение, effort high | Дорогая модель без вывода инструментов | pi `advisor.rs` `TurnDigest`, DeepSeek-TUI `Consultant`, omp дельты и выселение | Большая |
+
+Не берём:
+
+- Полные шаблоны на каждую модель, как в Codex и VS Code. Их авторы сами делают модели. У нас каталог открытый, и поддерживать N копий промпта без eval не окупится.
+- Coordinator из Claude Code целиком (5921 tks). Director из omp (444 o200k) даёт тот же контракт за двадцатую часть.
+- Advisor из Claude Code, которому пересылается вся история. Это противоположность цели.
+- Plugin-архитектуру dsh (Cordis). Из неё берём только модель данных секций.
+
+## Дополнение: opencode, pi_agent_rust, DeepSeek Harness, DeepSeek-TUI
+
+### opencode: агент старше модели
+
+- `Agent.Info` (`packages/schema/src/agent.ts`): `model`, `system` (замена), `instructions` (добавление, форма `{selected, unselected}` сообщает модели, что инструкции перестали действовать), `mode` (`primary`, `subagent`, `all`), `steps`, `permissions`.
+- Встроенные агенты (`plugin/agent.ts`): `build` (по умолчанию), `general` (субагент без вопросов и вложенных субагентов), `explore` (запрещено всё, кроме shell, grep, glob, read, webfetch, websearch), а также служебные `compaction`, `title` и `summary`, у которых запрещены все инструменты.
+- Промпт по модели (`plugin/optimize.ts`) подбирается по подстроке ID. Для `gpt`, `astra`, `kimi`, `trinity` и `muse` база **заменяется**, для `claude` **дописывается** 59 токенов. Первой строкой стоит `if (agent.system) return`: свой промпт агента отключает промпт модели. Хук срабатывает на `context`, `compaction` и `generate`.
+- Руководство по инструментам (`session/system-prompt.ts`) выводится по списку фактически включённых инструментов: строки про shell, write и edit появляются, только если инструмент есть.
+- `plugin/verbosity.ts` ставит `textVerbosity = "low"` для gpt-6 и gpt-5.x, если пользователь не задал другое. Это тоже настройка по семейству, только не в тексте.
+- Автовычистки старого вывода нет: `compaction.prune` помечен как unsupported. Компакция ступенчатая: сначала обрезаются выводы до 2000 символов, потом удаляются, потом остаётся только текст пользователя.
+
+### pi_agent_rust: роль выбирает модель, профиль выбирает инструменты
+
+- `ModelRole` (`models.rs`): `default`, `smol`, `slow`, `plan`, `commit`, `vision`, `designer`, `task`, `advisor`, `tiny`. Роль задаётся только явно (`{role: "smol"}`) и никогда не выводится из ID модели. Если роль не настроена, запуск падает с ошибкой, молчаливого отката на default нет (`subagents/model_selection.rs`).
+- Встроенные профили (`subagents/bundled.rs`) названы как в omp. Это один абзац промпта и список инструментов:
+  - `task` и `sonic`: `read,bash,edit,write,grep,find,ls,hashline_edit,jobs`;
+  - `scout`, `reviewer` и `security-reviewer`: `read,grep,find,ls`;
+  - у всех запрещено делегировать дальше и коммитить без просьбы;
+  - финальный ответ должен содержать outcome, изменённые файлы, выполненную проверку и риски.
+- Базовый промпт (`app.rs: build_system_prompt`) перечисляет только включённые инструменты. Остальные доступны через диспетчер `xdev`: из 36 инструментов в схеме всегда 14. Это тот же принцип, что наш `load_tools`. Есть `--system-prompt` и `--append-system-prompt`.
+- Advisor (`advisor.rs`) работает на своём провайдере и в своём контексте. После каждого хода ему отправляется `TurnDigest`, а не история: до 25 затронутых файлов, до 15 команд, до 10 ошибок инструментов и до 2000 символов финального ответа, с редакцией секретов. Тривиальные ходы пропускаются, после трёх ошибок подряд advisor отключается. Ответ структурирован: `note`, `concern` или `blocker`. Уровень, с которого законченный ход возобновляется, задаёт `ContinueSeverity`. Для сценария «дорогая модель без шума» это самая дешёвая схема из всех изученных.
+
+### DeepSeek Harness (dsh): промпт как набор именованных секций
+
+- `PromptSection {name, order, text, complete, replacement, retirement}` (`docs/subsystems/system-prompt.md`). Из секций с одинаковым именем побеждает ближайшая по scope, так что пресет агента переопределяет только свои секции. Секция с `complete` заменяет весь промпт.
+- Персона вынесена в отдельные секции `persona-prefix` и `persona-suffix` с шаблоном `{{model}}`. Пресет субагента меняет одну строку («You are a file reviewer…»), всё остальное переиспользуется.
+- У каждого инструмента своя секция с порядком (`TOOL_EDIT` 1300, `TOOL_APPLY_PATCH` 1350, `TOOL_GLOB` 1400), и в промпт она попадает только вместе с инструментом. Замер по snapshot-тестам репозитория (o200k): обычная сессия 737, субагент с фильтром инструментов 460, все инструменты отложены 337, минимальный пресет 8. У jcode только системная часть занимает 4008.
+- Изменения промпта посреди сессии идут дельтой: `systemUpdates()` дописывает системное сообщение в историю (`<!-- system/message change N -->` в snapshot'ах team-режима). Полная пересборка бывает только после компакции. У нас так работает `<system-reminder>`, и туда же ложится смена модели или роли.
+
+### DeepSeek-TUI: закрытый набор ролей и открытые пресеты
+
+- `FleetRole` (`agent-contract/src/role.rs`): `worker`, `scout`, `planner`, `reviewer`, `builder`, `verifier`, `consultant`, `custom`. Права заданы кодом (`worker_profile.rs`). Consultant может читать файлы и сеть, shell у него нет, `reasoning_effort = high` по умолчанию, а число шагов ограничено как у read-only ролей.
+- Пресеты пользователя (`config/src/fleet.rs: FleetRolePreset`): `tool_profile` (`read-only`, `read-write`, `custom`), `tools`, `capabilities`, `timeout_seconds` и при желании `instructions` как добавка к промпту. Свои пресеты ищутся раньше встроенных.
+- Роли workflow (`workflow/src/model_policy.rs`) связаны с моделью через требования к возможностям (`tool_calls`, `json_mode`, `prompt_cache`, `large_context`): модель, не подходящая роли, не назначается.
+- Системный промпт в golden-файлах занимает 1251 токен и одинаков в режимах agent и plan. Режим в системный промпт не зашит, так что префикс кэша не ломается.
+
+### Итоговая модель для jcode
+
+Во всех трёх Rust-реализациях и в opencode роль устроена одинаково: **персона плюс список инструментов, права, effort и лимит шагов**. Общий промпт собирается из секций включённых инструментов. Модель влияет на промпт слабее роли и отключается ею. Для jcode это означает:
+
+1. `system_prompt.md` разбить на секции с `name` и `order`, строки про инструменты привязать к самим инструментам (P0).
+2. `[agents.roles.<name>]` с полями `persona` или `instructions`, `tools` (или `tool_profile`), `effort`, `max_steps`, `skills`. Встроенные роли: `scout`, `task`, `sonic`, `reviewer`, `orchestrator`, `consultant`. Выбор роли всегда явный, как в pi: через параметр `swarm spawn` или свойство todo lane, без догадок по ID модели (P1).
+3. `[[agents.model_prompts]]` с `match` и `append` или `replace`. Не применяется, если у роли своя персона с `replace`, как в opencode (P2).
+4. Consultant по `TurnDigest`, как в pi, без shell и с effort high, как в DeepSeek-TUI. Ответ уровня `note`, `concern` или `blocker` приходит в сессию как `<system-reminder>` (P3).
+
+Ранее предложенная секция `[prompt.roles.*]` заменяется на `[agents.roles.*]`, потому что роль управляет не только промптом, а `agents.*` уже содержит выбор модели и effort.
 
 ## Как проверять
 
