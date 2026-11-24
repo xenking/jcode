@@ -46,29 +46,7 @@ const WEBSOCKET_KEEPALIVE_INTERVAL_SECS: u64 = 20;
 const MAX_HARNESS_CONNECTIONS: usize = 16;
 type PairAttempts = Arc<tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>;
 
-/// Gateway configuration
-#[derive(Debug, Clone)]
-pub struct GatewayConfig {
-    /// TCP port to listen on
-    pub port: u16,
-    /// Bind address (default: 0.0.0.0 for Tailscale access)
-    pub bind_addr: String,
-    /// Whether gateway is enabled
-    pub enabled: bool,
-    /// Enable the full Harness API on a loopback-only listener.
-    pub harness_enabled: bool,
-}
-
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            port: DEFAULT_PORT,
-            bind_addr: "0.0.0.0".to_string(),
-            enabled: false,
-            harness_enabled: false,
-        }
-    }
-}
+pub use crate::config::GatewayConfig;
 
 // ---------------------------------------------------------------------------
 // Gateway listener
