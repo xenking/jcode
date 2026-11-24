@@ -1639,7 +1639,7 @@ impl OpenRouterProvider {
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let auth: AuthResolver = Arc::new(|_| Self::resolve_auth());
+        let auth: AuthResolver = Arc::new(Self::resolve_auth);
         let auth_start = std::time::Instant::now();
         auth(&ApiKeyBinding::Follow)?;
         jcode_base::logging::info(&format!(
@@ -2530,9 +2530,34 @@ impl OpenRouterProvider {
         Self::get_api_key().is_some()
     }
 
-    fn resolve_auth() -> Result<ProviderAuth> {
-        let auth = Self::resolve_env_auth()?;
-        let headers = Self::env_profile_headers();
+    fn resolve_auth(binding: &ApiKeyBinding) -> Result<ProviderAuth> {
+        let mut auth = Self::resolve_env_auth()?;
+        let mut headers = Self::env_profile_headers();
+        // A runtime bound to one key of its provider sends that key, whatever
+        // the global active key is.
+        if matches!(binding, ApiKeyBinding::Account(_))
+            && let Some(profile_id) = jcode_base::provider_catalog::api_key_profile_id_for_env(
+                &configured_api_key_name(),
+                &configured_env_file_name(),
+            )
+            && let Some(credential) =
+                jcode_base::provider_catalog::bound_api_key_credential(profile_id, binding)?
+        {
+            let label = credential.account_id.to_string();
+            auth = match auth {
+                ProviderAuth::AuthorizationBearer { .. } => ProviderAuth::AuthorizationBearer {
+                    token: credential.api_key,
+                    label,
+                },
+                ProviderAuth::HeaderValue { header_name, .. } => ProviderAuth::HeaderValue {
+                    header_name,
+                    value: credential.api_key,
+                    label,
+                },
+                other => other,
+            };
+            headers = credential.headers;
+        }
         auth.with_extra_headers(&headers)
     }
 

@@ -228,3 +228,52 @@ fn runtimes_bound_to_different_keys_serve_concurrently_without_moving_the_global
 
     jcode_base::config::invalidate_config_cache();
 }
+
+/// `--provider opencode-go` runs on the env-configured runtime, not the
+/// profile constructor. A session bound to a key must send that key there too.
+#[test]
+fn an_env_configured_runtime_sends_its_bound_key() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (base, requests) = serve_chat();
+    write_config(&format!(
+        r#"
+        [api_key_profiles.opencode-go]
+        base_url = "{base}/v1"
+        "#
+    ));
+    sandbox
+        .write_openai_compatible_api_key(OPENCODE_GO_PROFILE, "sk-default")
+        .unwrap();
+    save_labelled_api_key("opencode-go", "second", "sk-second").unwrap();
+    let resolved =
+        jcode_base::provider_catalog::resolve_openai_compatible_profile(OPENCODE_GO_PROFILE);
+    let vars = [
+        ("JCODE_OPENROUTER_API_BASE", format!("{base}/v1")),
+        (
+            "JCODE_OPENROUTER_API_KEY_NAME",
+            resolved.api_key_env.clone(),
+        ),
+        ("JCODE_OPENROUTER_ENV_FILE", resolved.env_file.clone()),
+        (
+            "JCODE_OPENROUTER_CACHE_NAMESPACE",
+            "opencode-go".to_string(),
+        ),
+    ];
+    for (name, value) in &vars {
+        jcode_base::env::set_var(name, value);
+    }
+    let provider = OpenRouterProvider::new().unwrap();
+
+    provider.set_api_key_account(Some("second")).unwrap();
+    ask(&provider);
+    let sent = requests.recv().unwrap();
+    for (name, _) in &vars {
+        jcode_base::env::remove_var(name);
+    }
+    assert!(sent.contains("authorization: bearer sk-second"), "{sent}");
+    assert_eq!(
+        provider.serving_api_key_account().as_deref(),
+        Some("opencode-go:second")
+    );
+    jcode_base::config::invalidate_config_cache();
+}
