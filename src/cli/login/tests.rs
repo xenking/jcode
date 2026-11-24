@@ -14,6 +14,7 @@ fn novita_login_saves_private_key_and_rejects_empty_replacement() {
             openai_compatible_api_key: Some(" novita_test_key ".into()),
             ..LoginOptions::default()
         },
+        None,
     )
     .unwrap();
     let path = crate::storage::app_config_dir()
@@ -37,11 +38,63 @@ fn novita_login_saves_private_key_and_rejects_empty_replacement() {
             openai_compatible_api_key: Some("  ".into()),
             ..LoginOptions::default()
         },
+        None,
     )
     .unwrap_err();
     assert!(err.to_string().contains("No API key provided"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
     set_or_clear_env("NOVITA_API_KEY", prev_key);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[test]
+fn account_label_saves_a_second_key_without_touching_the_first() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_key = std::env::var_os("OPENCODE_GO_API_KEY");
+    crate::env::remove_var("OPENCODE_GO_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let profile = crate::provider_catalog::OPENCODE_GO_PROFILE;
+    let login = |key: &str, label: Option<&str>| {
+        login_openai_compatible_flow(
+            &profile,
+            &LoginOptions {
+                openai_compatible_api_key: Some(key.into()),
+                ..LoginOptions::default()
+            },
+            label,
+        )
+    };
+
+    login("sk-first", None).unwrap();
+    login("sk-second", Some("second")).unwrap();
+
+    let env_file = crate::storage::app_config_dir()
+        .unwrap()
+        .join(profile.env_file);
+    let saved = std::fs::read_to_string(env_file).unwrap();
+    assert!(saved.contains("OPENCODE_GO_API_KEY=sk-first"), "{saved}");
+    assert!(!saved.contains("sk-second"), "{saved}");
+    let accounts = crate::provider_catalog::api_key_accounts("opencode-go");
+    let ids: Vec<_> = accounts.iter().map(|a| a.id.to_string()).collect();
+    assert_eq!(ids, ["opencode-go", "opencode-go:second"]);
+    assert!(accounts[0].active, "the unlabelled key keeps serving");
+    let credential = crate::provider_catalog::api_key_credential_for_account(&accounts[1].id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(credential.api_key, "sk-second");
+
+    // Labels are for providers that need a key.
+    let local = login_openai_compatible_flow(
+        &crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+        &LoginOptions::default(),
+        Some("x"),
+    )
+    .unwrap_err();
+    assert!(local.to_string().contains("single key"), "{local}");
+
+    set_or_clear_env("OPENCODE_GO_API_KEY", prev_key);
     set_or_clear_env("JCODE_HOME", prev_home);
 }
 

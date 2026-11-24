@@ -132,8 +132,12 @@ pub(crate) fn run_keys_command(action: super::super::args::KeysCommand) -> Resul
 }
 
 fn print_active_hint(provider: &str) {
-    if let Some(active) = crate::provider_catalog::active_api_key_account(provider) {
-        println!("Active: {active}");
+    match crate::provider_catalog::active_api_key_account(provider) {
+        Some(active) => println!("Active: {active}"),
+        None if crate::provider_catalog::api_key_provider_has_labelled_accounts(provider) => {
+            println!("No key is active. Choose one with `jcode auth keys use {provider} <label>`.")
+        }
+        None => {}
     }
 }
 
