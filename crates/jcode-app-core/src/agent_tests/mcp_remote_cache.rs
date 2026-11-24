@@ -420,6 +420,7 @@ async fn remote_empty_catalog_replaces_obsolete_cached_schemas() {
             name: "echo".into(),
             description: Some("Obsolete schema".into()),
             input_schema: json!({"type": "object"}),
+            ..Default::default()
         }],
     );
     cache.save();

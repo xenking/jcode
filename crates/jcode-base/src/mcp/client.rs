@@ -919,6 +919,8 @@ done
             enabled: None,
             disabled: None,
             timeout_secs: None,
+            approval: Default::default(),
+            approve_free: Vec::new(),
         }
     }
 

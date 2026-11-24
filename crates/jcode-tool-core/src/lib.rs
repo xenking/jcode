@@ -169,6 +169,17 @@ pub enum ExecutionClass {
     Barrier,
 }
 
+/// An MCP call waiting on a human decision, see [`Tool::mcp_approval`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpApprovalRequest {
+    /// Configured server name.
+    pub server: String,
+    /// Raw MCP tool name, as the server lists it.
+    pub tool: String,
+    /// The call's arguments, shown to the user as they will be sent.
+    pub arguments: Value,
+}
+
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -177,6 +188,14 @@ pub trait Tool: Send + Sync {
 
     /// Original MCP identity, independent of the provider-facing registry alias.
     fn mcp_identity(&self) -> Option<(&str, &str)> {
+        None
+    }
+
+    /// Set when this call must not run without a human yes: the harness asks
+    /// the user before dispatching it and refuses it when nobody can answer.
+    /// Enforced in the registry, so every caller (direct, `batch`, `codemode`)
+    /// goes through the same gate.
+    async fn mcp_approval(&self, _input: &Value) -> Option<McpApprovalRequest> {
         None
     }
 
@@ -191,6 +210,20 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema for the input parameters.
     fn parameters_schema(&self) -> Value;
+
+    /// JSON Schema of the typed result this tool returns in
+    /// [`ToolOutput::structured`], if it has one. Codemode declares such tools
+    /// as `Promise<XOutput>`; every other tool stays `Promise<any>`.
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
+
+    /// Behaviour hints a server declared for this tool (MCP `annotations`), as
+    /// JSON. Part of a proxy's identity: a refresh must replace a proxy whose
+    /// hints changed, because approval decisions read them.
+    fn mcp_annotations(&self) -> Option<Value> {
+        None
+    }
 
     fn execution_class(&self, _input: &Value, _ctx: &ToolContext) -> ExecutionClass {
         ExecutionClass::Barrier

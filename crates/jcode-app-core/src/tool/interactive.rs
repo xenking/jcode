@@ -37,6 +37,15 @@ pub(crate) fn is_owner_approval(request_id: &str) -> bool {
     request_id.starts_with("ask-premium-spawn-")
 }
 
+/// Approvals only a person may answer. Owner approvals are the strictest and
+/// are routed to the TUI alone. An MCP call approval may be answered from any
+/// attached UI, but never by the model: automation tools and key injection
+/// refuse to answer these, and the plain-text stdin path cannot.
+pub(crate) fn is_human_approval(request_id: &str) -> bool {
+    is_owner_approval(request_id)
+        || request_id.starts_with(&format!("ask-{}", super::mcp_approval::REQUEST_PREFIX))
+}
+
 fn dispatch_ask(
     session_id: &str,
     pending: &PendingAsk,

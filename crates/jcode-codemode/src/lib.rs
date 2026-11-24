@@ -71,15 +71,41 @@ impl CallStatus {
 pub const AVAILABLE: bool = cfg!(not(target_os = "freebsd"));
 
 /// A tool the script may call through `tools.<name>(args)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Schema of the typed result. When set, `types()` declares
+    /// `Promise<XOutput>` and the host returns the matching structured value.
+    pub output_schema: Option<Value>,
+}
+
+/// Time a run spent waiting on a person (for example an approval prompt).
+/// The host adds to it and the wall-clock limit extends by the same amount, so
+/// a human's thinking time never counts as the script running long.
+#[derive(Debug, Default)]
+pub struct PauseClock(std::sync::atomic::AtomicU64);
+
+impl PauseClock {
+    pub fn add(&self, waited: Duration) {
+        let millis = waited.as_millis().min(u128::from(u64::MAX)) as u64;
+        self.0
+            .fetch_add(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn paused(&self) -> Duration {
+        Duration::from_millis(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Harness side of the sandbox.
 pub trait Host: Send + Sync + 'static {
+    /// Clock the host adds human wait time to. `None` keeps a hard limit.
+    fn pause_clock(&self) -> Option<Arc<PauseClock>> {
+        None
+    }
+
     /// Execute a tool. `Ok` carries the tool result (already decoded to JSON
     /// when the output was JSON, otherwise a string). `Err` becomes a thrown
     /// `Error` inside the script.

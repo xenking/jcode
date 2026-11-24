@@ -50,9 +50,11 @@ impl Tool for DesktopTool {
         {
             bail!("answer the cold-session wake confirmation directly in the chat");
         }
-        if matches!(&action, DesktopAction::Click { selector, .. } if selector.strip_prefix("ask:").is_some_and(super::interactive::is_owner_approval))
+        if matches!(&action, DesktopAction::Click { selector, .. } if selector.strip_prefix("ask:").is_some_and(super::interactive::is_human_approval))
         {
-            bail!("the owner must answer the premium worker confirmation directly in the chat");
+            bail!(
+                "an approval must be answered by the user directly in the chat, not by automation"
+            );
         }
         if let Some(target) =
             submit_target(&action).filter(|target| target.session_id != ctx.session_id)

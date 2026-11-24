@@ -226,6 +226,7 @@ fn exotic_mcp_tool_definitions() -> Vec<ToolDefinition> {
                     name: name.to_string(),
                     description: Some(format!("{server}/{name}")),
                     input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    ..Default::default()
                 },
             )
         })

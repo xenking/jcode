@@ -995,3 +995,152 @@ fn mcp_source_logs_explain_provenance_without_config_values() {
     assert!(!imported.contains("TOKEN"));
     assert!(!imported.contains("inline-secret"));
 }
+
+#[test]
+fn tools_list_keeps_output_schema_and_annotations() {
+    let list: ToolsListResult = serde_json::from_value(serde_json::json!({
+        "tools": [
+            {
+                "name": "get",
+                "inputSchema": {"type": "object"},
+                "outputSchema": {"type": "object", "properties": {"id": {"type": "string"}}},
+                "annotations": {
+                    "title": "Get",
+                    "readOnlyHint": true,
+                    "destructiveHint": false,
+                    "idempotentHint": true,
+                    "openWorldHint": false
+                }
+            },
+            {"name": "bare", "inputSchema": {"type": "object"}}
+        ]
+    }))
+    .unwrap();
+    let get = &list.tools[0];
+    assert!(get.output_schema.as_ref().unwrap().is_object());
+    assert!(get.is_read_only());
+    let hints = get.annotations.as_ref().unwrap();
+    assert_eq!(hints.title.as_deref(), Some("Get"));
+    assert_eq!(hints.destructive_hint, Some(false));
+    assert_eq!(hints.idempotent_hint, Some(true));
+    assert_eq!(hints.open_world_hint, Some(false));
+    let bare = &list.tools[1];
+    assert!(bare.output_schema.is_none() && bare.annotations.is_none());
+    assert!(!bare.is_read_only(), "unannotated is not read-only");
+
+    // The on-disk schema cache round-trips both fields.
+    let again: McpToolDef = serde_json::from_value(serde_json::to_value(get).unwrap()).unwrap();
+    assert_eq!(again.output_schema, get.output_schema);
+    assert_eq!(again.annotations, get.annotations);
+}
+
+#[test]
+fn malformed_output_schema_and_annotations_never_break_tools_list() {
+    let list: ToolsListResult = serde_json::from_value(serde_json::json!({
+        "tools": [{
+            "name": "odd",
+            "inputSchema": {"type": "object"},
+            "outputSchema": "nope",
+            "annotations": {"readOnlyHint": "true", "title": 5}
+        }, {
+            "name": "worse",
+            "inputSchema": {"type": "object"},
+            "outputSchema": null,
+            "annotations": [1, 2]
+        }]
+    }))
+    .unwrap();
+    assert!(list.tools.iter().all(|tool| tool.output_schema.is_none()));
+    // A string where a bool belongs is not a read-only claim.
+    assert!(list.tools.iter().all(|tool| !tool.is_read_only()));
+}
+
+#[test]
+fn tool_call_result_carries_structured_content_with_or_without_text() {
+    let both: ToolCallResult = serde_json::from_value(serde_json::json!({
+        "content": [{"type": "text", "text": "{\"a\":1}"}],
+        "structuredContent": {"a": 1}
+    }))
+    .unwrap();
+    assert_eq!(both.structured_content, Some(serde_json::json!({"a": 1})));
+    let only_structured: ToolCallResult =
+        serde_json::from_value(serde_json::json!({"structuredContent": {"a": 2}})).unwrap();
+    assert!(only_structured.content.is_empty());
+    assert_eq!(
+        only_structured.structured_content,
+        Some(serde_json::json!({"a": 2}))
+    );
+}
+
+fn tool_def(name: &str, read_only: Option<bool>) -> McpToolDef {
+    McpToolDef {
+        name: name.into(),
+        input_schema: serde_json::json!({"type": "object"}),
+        annotations: read_only.map(|flag| McpToolAnnotations {
+            read_only_hint: Some(flag),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn approval_matrix() {
+    let server = |json: serde_json::Value| -> McpServerConfig {
+        serde_json::from_value(serde_json::json!({"command": "x"}))
+            .map(|mut base: McpServerConfig| {
+                if let Some(mode) = json.get("approval") {
+                    base.approval = serde_json::from_value(mode.clone()).unwrap();
+                }
+                if let Some(free) = json.get("approve_free") {
+                    base.approve_free = serde_json::from_value(free.clone()).unwrap();
+                }
+                base
+            })
+            .unwrap()
+    };
+    let read = tool_def("read", Some(true));
+    let write = tool_def("write", Some(false));
+    let bare = tool_def("bare", None);
+
+    // Default is off, whatever the annotations say.
+    let off = server(serde_json::json!({}));
+    assert_eq!(off.approval, McpApproval::Off);
+    assert!(
+        ![&read, &write, &bare]
+            .iter()
+            .any(|t| off.requires_approval(t))
+    );
+
+    let on = server(serde_json::json!({"approval": "annotations", "approve_free": ["bare"]}));
+    assert!(!on.requires_approval(&read), "read-only runs free");
+    assert!(on.requires_approval(&write), "write asks");
+    assert!(
+        !on.requires_approval(&bare),
+        "approve_free exempts by raw name"
+    );
+    assert!(
+        on.requires_approval(&tool_def("bare2", None)),
+        "unannotated asks"
+    );
+}
+
+#[test]
+fn unknown_approval_values_fail_closed_without_breaking_the_file() {
+    let config: McpConfig = serde_json::from_str(
+        r#"{"servers": {
+            "a": {"command": "x", "approval": "annotatons"},
+            "b": {"command": "x", "approval": "OFF"},
+            "c": {"command": "x", "approval": 3},
+            "d": {"command": "x"}
+        }}"#,
+    )
+    .unwrap();
+    assert_eq!(config.servers["a"].approval, McpApproval::Annotations);
+    assert_eq!(config.servers["b"].approval, McpApproval::Off);
+    assert_eq!(config.servers["c"].approval, McpApproval::Annotations);
+    assert_eq!(config.servers["d"].approval, McpApproval::Off);
+    // Defaults stay out of a saved file so existing configs do not churn.
+    let saved = serde_json::to_value(&config.servers["d"]).unwrap();
+    assert!(saved.get("approval").is_none() && saved.get("approve_free").is_none());
+}

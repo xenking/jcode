@@ -230,6 +230,7 @@ async fn client() -> Result<Arc<Client>> {
                                     label: image.label,
                                 })
                                 .collect(),
+                            structured: None,
                         }),
                     })
                     .is_err()

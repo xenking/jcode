@@ -35,6 +35,7 @@ fn tools() -> Vec<ToolInfo> {
             name: name.into(),
             description: format!("{name} tool\nsecond line"),
             input_schema: json!({ "type": "object" }),
+            ..ToolInfo::default()
         })
         .collect()
 }
@@ -572,9 +573,133 @@ fn schema_to_ts_covers_common_shapes() {
         name: "mcp__fs__read-file".into(),
         description: "Read".into(),
         input_schema: json!({"type":"object"}),
+        ..ToolInfo::default()
     }]);
     assert!(
         decl.contains("\"mcp__fs__read-file\"(args: McpFsReadFileInput)"),
         "{decl}"
+    );
+}
+
+#[test]
+fn declared_output_schema_types_the_result_and_untyped_stays_any() {
+    let typed = ToolInfo {
+        name: "mcp__srv__get-item".into(),
+        description: "Get".into(),
+        input_schema: json!({"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["item"],
+            "properties": {
+                "item": {"$ref": "#/$defs/Item"},
+                "next": {"type": ["string", "null"]}
+            },
+            "$defs": {"Item": {
+                "type": "object",
+                "required": ["id", "tags"],
+                "properties": {"id": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}
+            }}
+        })),
+    };
+    let untyped = ToolInfo {
+        name: "plain".into(),
+        description: "Plain".into(),
+        input_schema: json!({"type":"object"}),
+        ..ToolInfo::default()
+    };
+    let decl = ts::declarations([&typed, &untyped]);
+    assert_eq!(
+        ts::output_type_name("mcp__srv__get-item"),
+        "McpSrvGetItemOutput"
+    );
+    assert!(decl.contains("type McpSrvGetItemOutput = {"), "{decl}");
+    assert!(decl.contains("item: {"), "$ref must be inlined: {decl}");
+    assert!(decl.contains("tags: string[];"), "{decl}");
+    assert!(decl.contains("next?: string | null;"), "{decl}");
+    assert!(
+        decl.contains(
+            "\"mcp__srv__get-item\"(args: McpSrvGetItemInput): Promise<McpSrvGetItemOutput>;"
+        ),
+        "{decl}"
+    );
+    assert!(
+        decl.contains("plain(args: PlainInput): Promise<any>;"),
+        "{decl}"
+    );
+    assert!(!decl.contains("PlainOutput"), "{decl}");
+}
+
+#[test]
+fn unresolvable_and_recursive_refs_degrade_to_unknown() {
+    assert_eq!(
+        ts::schema_to_ts(&json!({"$ref": "https://x/y.json"})),
+        "unknown"
+    );
+    let recursive = json!({
+        "$ref": "#/$defs/Node",
+        "$defs": {"Node": {"type": "object", "properties": {"next": {"$ref": "#/$defs/Node"}}}}
+    });
+    assert!(ts::schema_to_ts(&recursive).contains("unknown"));
+}
+
+/// Host whose call waits on a "person" for `wait` and reports it to the clock.
+struct HumanHost {
+    clock: Arc<PauseClock>,
+    wait: Duration,
+}
+
+impl Host for HumanHost {
+    fn pause_clock(&self) -> Option<Arc<PauseClock>> {
+        Some(self.clock.clone())
+    }
+
+    fn call_tool(&self, _name: String, _args: Value) -> BoxFuture<'static, Result<Value, String>> {
+        let clock = self.clock.clone();
+        let wait = self.wait;
+        Box::pin(async move {
+            tokio::time::sleep(wait).await;
+            clock.add(wait);
+            Ok(json!("approved"))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn time_spent_waiting_on_a_person_does_not_count_against_the_deadline() {
+    let limits = Limits {
+        timeout: Duration::from_millis(400),
+        ..Limits::default()
+    };
+    // Three 300ms human waits: 900ms of wall clock against a 400ms limit.
+    let host = Arc::new(HumanHost {
+        clock: Arc::default(),
+        wait: Duration::from_millis(300),
+    });
+    let out = run(
+        "for (let i = 0; i < 3; i++) await tools.echo({}); return 'ok';".into(),
+        host,
+        tools(),
+        Map::new(),
+        limits,
+    )
+    .await;
+    assert_eq!(out.error, None, "{out:?}");
+    assert_eq!(out.result, Some(json!("ok")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_that_does_not_wait_on_a_person_still_times_out() {
+    let limits = Limits {
+        timeout: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let host = Arc::new(HumanHost {
+        clock: Arc::default(),
+        wait: Duration::ZERO,
+    });
+    let out = run("while (true) {}".into(), host, tools(), Map::new(), limits).await;
+    assert!(
+        out.error.as_deref().unwrap_or("").contains("timed out"),
+        "{out:?}"
     );
 }

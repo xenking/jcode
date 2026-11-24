@@ -58,13 +58,20 @@ struct RegistryHost {
     ctx: ToolContext,
     counter: AtomicUsize,
     ledger: Arc<CallLedger>,
+    /// Time spent waiting on a person, excluded from the script's deadline.
+    human_wait: Arc<jcode_codemode::PauseClock>,
 }
 
 impl Host for RegistryHost {
+    fn pause_clock(&self) -> Option<Arc<jcode_codemode::PauseClock>> {
+        Some(self.human_wait.clone())
+    }
+
     fn call_tool(&self, name: String, args: Value) -> BoxFuture<'static, Result<Value, String>> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let registry = self.registry.clone();
         let ledger = self.ledger.clone();
+        let human_wait = self.human_wait.clone();
         let sub_ctx = self.ctx.for_subcall(format!("codemode-{n}-{name}"));
         Box::pin(async move {
             let args = match args {
@@ -79,11 +86,16 @@ impl Host for RegistryHost {
                 }
                 other => return Err(format!("arguments must be an object, got {other}")),
             };
-            match registry
-                .execute_codemode_subcall(&name, args, sub_ctx, &ledger, n)
+            match super::mcp_approval::HUMAN_WAIT
+                .scope(
+                    human_wait,
+                    registry.execute_codemode_subcall(&name, args, sub_ctx, &ledger, n),
+                )
                 .await
             {
-                Ok(output) => Ok(jcode_codemode::decode_tool_output(&output.output)),
+                Ok(output) => Ok(output
+                    .structured
+                    .unwrap_or_else(|| jcode_codemode::decode_tool_output(&output.output))),
                 Err(err) => Err(crate::util::format_error_chain(&err)),
             }
         })
@@ -421,12 +433,14 @@ impl Tool for CodemodeTool {
             );
         }
 
+        let mut output_schemas = registry.output_schemas().await;
         let tools: Vec<ToolInfo> = registry
             .definitions_for_session(&ctx.session_id)
             .await
             .into_iter()
             .filter(|def| !EXCLUDED.contains(&def.name.as_str()))
             .map(|def| ToolInfo {
+                output_schema: output_schemas.remove(&def.name),
                 name: def.name,
                 description: def.description,
                 input_schema: def.input_schema,
@@ -439,6 +453,7 @@ impl Tool for CodemodeTool {
             ctx: ctx.clone(),
             counter: AtomicUsize::new(0),
             ledger: ledger.clone(),
+            human_wait: Arc::default(),
         });
         let store = load_store(&ctx.session_id)?;
         let limits = Limits {

@@ -10,6 +10,7 @@ fn collision_catalog() -> Vec<(String, crate::mcp::McpToolDef)> {
                     name: name.to_string(),
                     description: Some(server.to_string()),
                     input_schema: serde_json::json!({"type": "object"}),
+                    ..Default::default()
                 },
             )
         })

@@ -155,13 +155,103 @@ impl DiscoverResult {
 }
 
 /// MCP Tool definition from server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpToolDef {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// JSON Schema of the tool's `structuredContent` result (spec 2025-06-18).
+    #[serde(
+        rename = "outputSchema",
+        default,
+        deserialize_with = "lenient_output_schema",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_schema: Option<Value>,
+    /// Behaviour hints the server declares for the tool.
+    #[serde(
+        default,
+        deserialize_with = "lenient_annotations",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+/// A malformed `outputSchema` must not make the whole `tools/list` unreadable.
+/// Only an object schema can describe a result object, so anything else is
+/// dropped and the tool behaves as untyped.
+fn lenient_output_schema<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Ok(Option::<Value>::deserialize(deserializer)?.filter(Value::is_object))
+}
+
+/// Malformed annotations are dropped, never trusted: the tool then counts as
+/// unannotated, i.e. not read-only.
+fn lenient_annotations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<McpToolAnnotations>, D::Error> {
+    let raw = Option::<Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| {
+        let object = raw.as_object()?;
+        let flag = |key: &str| object.get(key).and_then(Value::as_bool);
+        Some(McpToolAnnotations {
+            title: object
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            read_only_hint: flag("readOnlyHint"),
+            destructive_hint: flag("destructiveHint"),
+            idempotent_hint: flag("idempotentHint"),
+            open_world_hint: flag("openWorldHint"),
+        })
+    }))
+}
+
+/// Tool `annotations` from `tools/list`. Every field is a hint and optional.
+/// The spec treats them as untrusted unless the server is, so jcode only acts
+/// on them for servers whose config opts in (`approval = "annotations"`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct McpToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(
+        rename = "readOnlyHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub read_only_hint: Option<bool>,
+    #[serde(
+        rename = "destructiveHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub destructive_hint: Option<bool>,
+    #[serde(
+        rename = "idempotentHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub idempotent_hint: Option<bool>,
+    #[serde(
+        rename = "openWorldHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub open_world_hint: Option<bool>,
+}
+
+impl McpToolDef {
+    /// Whether the server declares this tool read-only. An absent or `false`
+    /// hint is "not read-only": the spec's default is a writing tool.
+    pub fn is_read_only(&self) -> bool {
+        self.annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+            == Some(true)
+    }
 }
 
 /// tools/list result
@@ -180,9 +270,14 @@ pub struct ToolCallParams {
 /// tools/call result
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolCallResult {
+    /// Absent when a tool returns only `structuredContent`.
+    #[serde(default)]
     pub content: Vec<ContentBlock>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
+    /// Parsed result object when the tool declares an `outputSchema`.
+    #[serde(rename = "structuredContent", default)]
+    pub structured_content: Option<Value>,
 }
 
 /// Content block in tool result
@@ -255,9 +350,62 @@ pub struct McpServerConfig {
     /// extraction) can raise it here (issues #802, #1174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Human approval policy for this server's tool calls. `off` (default)
+    /// runs every tool as before. `annotations` lets only tools that declare
+    /// `readOnlyHint = true` run freely; every other call needs a human yes.
+    #[serde(default, skip_serializing_if = "McpApproval::is_off")]
+    pub approval: McpApproval,
+    /// Raw MCP tool names (as listed by the server) exempt from approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approve_free: Vec<String>,
+}
+
+/// Per-server approval policy, see [`McpServerConfig::approval`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpApproval {
+    #[default]
+    Off,
+    Annotations,
+}
+
+impl McpApproval {
+    pub fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
+}
+
+/// Fails closed: a misspelled value must not silently disable a safety gate
+/// (or, worse, make the whole config file unreadable), so anything other than
+/// `off` is treated as `annotations`.
+impl<'de> Deserialize<'de> for McpApproval {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        Ok(match raw.as_str().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(mode) if mode == "off" => Self::Off,
+            Some(mode) if mode == "annotations" => Self::Annotations,
+            _ => {
+                crate::logging::warn(&format!(
+                    "MCP: unknown approval value {raw}; using \"annotations\" (valid: \"off\", \"annotations\")"
+                ));
+                Self::Annotations
+            }
+        })
+    }
 }
 
 impl McpServerConfig {
+    /// Whether a call to `tool` on this server needs a human yes: the server
+    /// opted in, the tool is not declared read-only, and it is not exempt.
+    pub fn requires_approval(&self, tool: &McpToolDef) -> bool {
+        match self.approval {
+            McpApproval::Off => false,
+            McpApproval::Annotations => {
+                !tool.is_read_only() && !self.approve_free.iter().any(|name| name == &tool.name)
+            }
+        }
+    }
+
     /// A config entry is stdio when it has a command and is not explicitly a
     /// remote (http/sse) transport.
     pub fn is_stdio(&self) -> bool {
@@ -652,6 +800,8 @@ impl McpConfig {
                             enabled,
                             disabled: None,
                             timeout_secs: None,
+                            approval: Default::default(),
+                            approve_free: Vec::new(),
                         },
                     );
                 }

@@ -17,6 +17,8 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
         enabled: None,
         disabled: None,
         timeout_secs: None,
+        approval: Default::default(),
+        approve_free: Vec::new(),
     }
 }
 
@@ -25,6 +27,7 @@ fn tool(name: &str) -> McpToolDef {
         name: name.to_string(),
         description: Some(format!("{name} desc")),
         input_schema: json!({"type": "object"}),
+        ..Default::default()
     }
 }
 

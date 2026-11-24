@@ -363,6 +363,33 @@ impl Tool for McpCallTool {
         })
     }
 
+    async fn mcp_approval(&self, input: &Value) -> Option<jcode_tool_core::McpApprovalRequest> {
+        let params: McpCallInput = serde_json::from_value(input.clone()).ok()?;
+        let manager = self.manager.read().await;
+        let config = manager.config().servers.get(&params.server)?;
+        if config.approval.is_off() {
+            return None;
+        }
+        // A tool absent from the catalog counts as unannotated (not read-only).
+        let tool_def = manager
+            .searchable_tools()
+            .await
+            .into_iter()
+            .find(|(server, tool)| server == &params.server && tool.name == params.tool)
+            .map(|(_, tool)| tool)
+            .unwrap_or_else(|| crate::mcp::McpToolDef {
+                name: params.tool.clone(),
+                ..Default::default()
+            });
+        config
+            .requires_approval(&tool_def)
+            .then(|| jcode_tool_core::McpApprovalRequest {
+                server: params.server,
+                tool: params.tool,
+                arguments: params.arguments,
+            })
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input_flags = input.clone();
         let mut params: McpCallInput = serde_json::from_value(input)?;
@@ -555,6 +582,8 @@ fn connection_config(
         enabled: None,
         disabled: None,
         timeout_secs: None,
+        approval: Default::default(),
+        approve_free: Vec::new(),
     })
 }
 
@@ -650,6 +679,20 @@ impl Tool for McpManagementTool {
             },
             "required": ["action"]
         })
+    }
+
+    async fn mcp_approval(&self, input: &Value) -> Option<jcode_tool_core::McpApprovalRequest> {
+        // `action=call` is a tool call like any other, so it is gated here by
+        // the registry rather than asking again inside `McpCallTool::execute`.
+        if input.get("action").and_then(Value::as_str) != Some("call") {
+            return None;
+        }
+        McpCallTool {
+            manager: self.manager.clone(),
+            registry: self.registry.clone(),
+        }
+        .mcp_approval(input)
+        .await
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {

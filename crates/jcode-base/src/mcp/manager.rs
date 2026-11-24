@@ -751,6 +751,8 @@ mod tests {
                 enabled: Some(false),
                 disabled: None,
                 timeout_secs: None,
+                approval: Default::default(),
+                approve_free: Vec::new(),
             },
         );
         let manager = McpManager::with_config(config);
@@ -786,6 +788,8 @@ mod tests {
                 enabled: None,
                 disabled: None,
                 timeout_secs: None,
+                approval: Default::default(),
+                approve_free: Vec::new(),
             },
         );
         let manager = McpManager::with_config(config);
@@ -893,6 +897,8 @@ done
                 enabled: None,
                 disabled: None,
                 timeout_secs: Some(10),
+                approval: Default::default(),
+                approve_free: Vec::new(),
             },
         );
         let config = config

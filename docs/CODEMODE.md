@@ -52,8 +52,8 @@ codemode = true    # legacy alias, also default; either false disables
 | --- | --- |
 | `await tools.<name>(args)` / `callTool(name, args)` | Run a tool. JSON object/array output becomes a JS object/array. Other output is a string. Failures throw `Error("<tool>: <reason>")`. |
 | `listTools(filter?)` | `[{name, description}]` (first line of each description). |
-| `types(filter?)` | TypeScript declarations (`type XInput = {...}; declare const tools: {...}`) for matching tools. |
-| `describeTool(name)` | `{name, description, input_schema, typescript}`. |
+| `types(filter?)` | TypeScript declarations (`type XInput = {...}; declare const tools: {...}`) for matching tools. A tool whose MCP server declares an `outputSchema` also gets `type XOutput` and returns `Promise<XOutput>`; every other tool stays `Promise<any>`. |
+| `describeTool(name)` | `{name, description, input_schema, output_schema, typescript}`. |
 | `store(k, v)` / `load(k)` / `storedKeys()` | JSON store persisted per session across runs. |
 | `console.log/info/warn/error/debug` | Captured output, 64 KiB cap. |
 
@@ -61,8 +61,12 @@ MCP tools appear under their registry dispatch names (`mcp__<server>__<tool>`,
 which are always valid identifiers). The unified `mcp` tool is also callable.
 The legacy `mcp_search`/`mcp_call` names are hidden.
 
-The script sees the registry's rendered MCP output, not a guaranteed native
-MCP envelope. Check the returned shape before using it. Argument errors from
+A tool that declares an `outputSchema` returns its `structuredContent` object,
+so `const {sum} = await tools.mcp__calc__add({a: 1, b: 2})` is typed and needs
+no parsing. Without an `outputSchema` the script sees the registry's rendered
+output (parsed JSON when the text is a JSON object or array, otherwise a
+string), so check the shape before using it. Options for approval and result
+typing are in [MCP_TOOLS.md](MCP_TOOLS.md). Argument errors from
 `agentgrep` and JSON shape errors from `read` identify the bad field and show
 one valid call. For example, `agentgrep` trace expects a `terms` array with
 DSL entries such as `['subject:auth_status', 'relation:rendered']`. Repair the
@@ -103,6 +107,12 @@ the same one direct calls end in. So every nested call gets:
 `codemode` and `batch` cannot be called from inside a script. The sandbox has
 no filesystem, network, timer, module, or process API.
 
+An MCP server can opt in to a human yes per call (`approval = "annotations"`).
+The gate is part of this same path, so a script cannot reach a tool it could not
+reach directly: `tools.mcp__srv__write(...)` asks the user and throws when there
+is nobody to ask. The time a script spends waiting for a person is added to its
+deadline, so slow approvals do not time it out. See [MCP_TOOLS.md](MCP_TOOLS.md).
+
 One deliberate difference: nested calls set `accept_large_output: true`. A
 tool's output goes into the VM, not into the model context, so the per-call
 context guard and the MCP token budget would only corrupt data the script is
@@ -112,7 +122,8 @@ affects output size only, never permissions.
 ## Limits
 
 - QuickJS heap: 64 MiB, stack: 1 MiB.
-- Per-program deadline: 300 s wall clock, including awaited tool calls. It is
+- Per-program deadline: 300 s wall clock, including awaited tool calls but
+  excluding time spent waiting for a person to approve a call. It is
   enforced by both an interrupt handler (busy loops) and a select on the
   future (hung tools). When the deadline fires, in-flight host calls are
   aborted.
@@ -264,9 +275,6 @@ through the `*_jsc` crates).
 - Columns inside a rewritten statement can be approximate: lines are mapped
   exactly through the codegen source map, but column starts come from the
   reprinted text.
-- No approval pause clock (codewhale pauses the deadline while a human
-  approves). jcode's `pre_tool` gate is non-interactive, so this is not
-  needed today.
 - Nested calls are not shown as separate transcript tool cards. The receipt is
   the record.
 - MCP schemas come from the registry's cached catalog. A server that has

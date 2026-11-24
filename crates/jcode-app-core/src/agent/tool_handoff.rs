@@ -37,6 +37,27 @@ pub(super) fn handoff_budget(
     Some(MAX_BLOCKING_TOOL_WAIT)
 }
 
+/// How long a call may run in the foreground. A call that stops to ask the
+/// user (a gated MCP tool) waits for a person, not for work, so it is never
+/// moved to the background. A `codemode` or `batch` call that may ask from
+/// inside keeps its foreground up to the blocking ceiling instead of a few
+/// seconds: the prompt belongs to the live turn, which a handoff ends.
+pub(crate) async fn foreground_limit(
+    registry: &Registry,
+    name: &str,
+    input: &serde_json::Value,
+    session_id: &str,
+    foreground: Duration,
+) -> Option<Duration> {
+    if registry.awaits_human(name, input, session_id).await {
+        return None;
+    }
+    if registry.may_await_human_inside(name, session_id).await {
+        return Some(MAX_BLOCKING_TOOL_WAIT);
+    }
+    handoff_budget(name, input, foreground)
+}
+
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
     // `ask` is the registered tool name; `ask_user` is the legacy spelling.
@@ -98,7 +119,7 @@ pub(crate) async fn execute_with_background_budget(
     let bash_handoff = BashHandoff::for_tool(&name);
     let bash_handoff_for_tool = bash_handoff.clone();
     let shutdown = ctx.graceful_shutdown_signal.clone();
-    let handoff = handoff_budget(&name, &input, budget);
+    let handoff = foreground_limit(&registry, &name, &input, &session_id, budget).await;
     let display_name = handoff_display_name(&input);
     let work = crate::runtime_activity::spawn_session(&session_id, async move {
         run_tool(registry, tool_name, input, ctx, bash_handoff_for_tool).await

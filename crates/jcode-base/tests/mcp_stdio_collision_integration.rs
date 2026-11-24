@@ -137,6 +137,7 @@ fn cached_definitions() -> Vec<(String, McpToolDef)> {
                         input_schema: json!({"type": "object", "properties": {
                             "token": {"type": "string"}
                         }}),
+                        ..Default::default()
                     },
                 )
             })

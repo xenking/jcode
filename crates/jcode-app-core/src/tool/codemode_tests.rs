@@ -749,6 +749,7 @@ async fn mcp_fake_server_end_to_end() {
                 description: Some("Add two numbers".into()),
                 input_schema: json!({"type": "object", "required": ["a", "b"],
                     "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}),
+                ..Default::default()
             },
         ),
         (
@@ -757,6 +758,7 @@ async fn mcp_fake_server_end_to_end() {
                 name: "list-items".into(),
                 description: Some("List items".into()),
                 input_schema: json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
+                ..Default::default()
             },
         ),
     ];

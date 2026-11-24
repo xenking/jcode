@@ -1890,12 +1890,11 @@ async fn parse_and_inject_key(
     key_spec: &str,
     remote: &mut RemoteConnection,
 ) -> std::result::Result<String, String> {
-    if app
-        .ask_picker
-        .as_ref()
-        .is_some_and(|ask| ask.request_id.starts_with("ask-premium-spawn-"))
-    {
-        return Err("Owner approval requires terminal input".into());
+    if app.ask_picker.as_ref().is_some_and(|ask| {
+        ask.request_id.starts_with("ask-premium-spawn-")
+            || ask.request_id.starts_with("ask-mcp-approval-")
+    }) {
+        return Err("Approvals require terminal input".into());
     }
     let (key_code, modifiers) = app.parse_key_spec(key_spec)?;
     handle_remote_key(app, key_code, modifiers, remote)

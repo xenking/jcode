@@ -61,6 +61,38 @@ const PRELUDE: &str = r#"
 })();
 "#;
 
+/// Wall-clock limit of one run, extended by the time the host reports as
+/// spent waiting on a person. Cloning shares the clock.
+#[derive(Clone)]
+struct Deadline {
+    started: Instant,
+    timeout: Duration,
+    clock: Option<Arc<crate::PauseClock>>,
+}
+
+impl Deadline {
+    fn at(&self) -> Instant {
+        let paused = self.clock.as_ref().map_or(Duration::ZERO, |c| c.paused());
+        self.started + self.timeout + paused
+    }
+
+    fn expired(&self) -> bool {
+        Instant::now() >= self.at()
+    }
+
+    /// Resolves once the deadline passes. The deadline can move later while
+    /// this waits, so it re-reads it after every sleep.
+    async fn elapsed(&self) {
+        loop {
+            let at = self.at();
+            if Instant::now() >= at {
+                return;
+            }
+            tokio::time::sleep_until(at.into()).await;
+        }
+    }
+}
+
 struct Shared {
     host: Arc<dyn Host>,
     outer: tokio::runtime::Handle,
@@ -222,10 +254,16 @@ async fn run_on_thread(
     let rt = AsyncRuntime::new().map_err(|e| format!("failed to create JS runtime: {e}"))?;
     rt.set_memory_limit(shared.limits.memory_bytes).await;
     rt.set_max_stack_size(1024 * 1024).await;
-    let deadline = started + shared.limits.timeout;
+    let clock = shared.host.pause_clock();
+    let deadline = Deadline {
+        started,
+        timeout: shared.limits.timeout,
+        clock,
+    };
     let interrupt_cancel = shared.cancelled.clone();
+    let interrupt_deadline = deadline.clone();
     rt.set_interrupt_handler(Some(Box::new(move || {
-        interrupt_cancel.load(Ordering::Relaxed) || Instant::now() >= deadline
+        interrupt_cancel.load(Ordering::Relaxed) || interrupt_deadline.expired()
     })))
     .await;
     let ctx = AsyncContext::full(&rt)
@@ -280,13 +318,11 @@ async fn run_on_thread(
     };
     let result = tokio::select! {
         result = script => result,
-        _ = tokio::time::sleep(timeout) => Err(timeout_message()),
+        _ = deadline.elapsed() => Err(timeout_message()),
         _ = cancelled => Err("cancelled".to_string()),
     };
     let result = match result {
-        Err(err) if err.contains("interrupted") && Instant::now() >= deadline => {
-            Err(timeout_message())
-        }
+        Err(err) if err.contains("interrupted") && deadline.expired() => Err(timeout_message()),
         Err(err) if err.contains("out of memory") || err.contains("memory limit reached") => {
             Err(format!(
                 "{err} (codemode heap limit: {} bytes per run); process smaller batches in a new codemode run.",
@@ -373,6 +409,7 @@ fn install_globals<'js>(ctx: &rquickjs::Ctx<'js>, shared: &Arc<Shared>) -> rquic
                         "name": t.name,
                         "description": t.description,
                         "input_schema": t.input_schema,
+                        "output_schema": t.output_schema,
                         "typescript": crate::ts::declarations(std::iter::once(t)),
                     })
                     .to_string()

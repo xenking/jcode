@@ -24,12 +24,16 @@
 
 use super::protocol::{McpServerConfig, McpToolDef};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 const CACHE_FILE: &str = "mcp-schema-cache.json";
-const CACHE_VERSION: u32 = 1;
+/// Version 2 added `outputSchema` and `annotations`. Older entries lack them,
+/// so typed results and approval hints would be missing until each server
+/// reconnected; dropping them makes the first spawn re-list instead.
+const CACHE_VERSION: u32 = 2;
 
 /// One server's cached tool schemas plus the config fingerprint they were
 /// observed under.
@@ -197,6 +201,11 @@ impl McpSchemaCache {
             tool.name.hash(&mut catalog);
             tool.description.hash(&mut catalog);
             tool.input_schema.to_string().hash(&mut catalog);
+            tool.output_schema
+                .as_ref()
+                .map(Value::to_string)
+                .hash(&mut catalog);
+            tool.annotations.hash(&mut catalog);
         }
         let catalog = catalog.finish();
         // Include the file's identity so an external edit (another process,
@@ -311,6 +320,8 @@ fn tool_defs_equal(a: &[McpToolDef], b: &[McpToolDef]) -> bool {
             t.name.clone(),
             t.description.clone(),
             t.input_schema.to_string(),
+            t.output_schema.as_ref().map(Value::to_string),
+            t.annotations.clone(),
         )
     };
     let mut a_keys: Vec<_> = a.iter().map(key).collect();
@@ -347,6 +358,7 @@ mod shared_snapshot_tests {
                             "default": null
                         }}
                     }),
+                    ..Default::default()
                 })
                 .collect();
             cache.update(server, &config, tools);

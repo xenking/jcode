@@ -2016,10 +2016,17 @@ impl Agent {
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
-                let handoff = tool_handoff::handoff_budget(&tc.name, &tc.input, foreground_budget)
-                    .map(|budget| {
-                        started.map_or(budget, |started| budget.saturating_sub(started.elapsed()))
-                    });
+                let handoff = tool_handoff::foreground_limit(
+                    &self.registry,
+                    &tc.name,
+                    &tc.input,
+                    &self.session.id,
+                    foreground_budget,
+                )
+                .await
+                .map(|budget| {
+                    started.map_or(budget, |started| budget.saturating_sub(started.elapsed()))
+                });
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut automatic_background = false;

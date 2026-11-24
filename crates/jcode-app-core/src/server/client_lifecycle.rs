@@ -2833,9 +2833,9 @@ pub(super) async fn handle_client(
                 request_id,
                 input,
             } => {
-                if crate::tool::interactive::is_owner_approval(&request_id) {
+                if crate::tool::interactive::is_human_approval(&request_id) {
                     send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
-                        id, message: "Owner approval requires an interactive structured response".into(), retry_after_secs: None,
+                        id, message: "An approval requires an interactive structured response".into(), retry_after_secs: None,
                     }, "client_lifecycle: owner approval");
                     continue;
                 }

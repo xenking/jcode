@@ -54,6 +54,7 @@ pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 #[cfg(unix)]
 pub mod background_worker;
 pub mod mcp;
+mod mcp_approval;
 mod memory;
 mod name_suggestions;
 mod open;
@@ -808,6 +809,57 @@ impl Registry {
         defs
     }
 
+    /// Whether this call will stop and ask the user. Such a call must stay in
+    /// the foreground: a person's decision is not work to move to the
+    /// background after a few seconds.
+    pub(crate) async fn awaits_human(&self, name: &str, input: &Value, session_id: &str) -> bool {
+        let resolved = Self::resolve_tool_name_for_session(session_id, name);
+        if sdk::custom(session_id, resolved) {
+            return false;
+        }
+        let tool = self.tools.read().await.get(resolved).cloned();
+        match tool {
+            Some(tool) => tool.mcp_approval(input).await.is_some(),
+            None => false,
+        }
+    }
+
+    /// Whether a `codemode` or `batch` call may ask the user from inside,
+    /// because some registered MCP tool is gated. Its approval prompt belongs
+    /// to the live turn, which ends the moment the call is moved to the
+    /// background, so the call keeps its foreground until the blocking ceiling.
+    pub(crate) async fn may_await_human_inside(&self, name: &str, session_id: &str) -> bool {
+        let resolved = Self::resolve_tool_name_for_session(session_id, name);
+        if !matches!(resolved, "codemode" | "batch") {
+            return false;
+        }
+        let gated: Vec<Arc<dyn Tool>> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| tool.mcp_identity().is_some())
+            .cloned()
+            .collect();
+        for tool in gated {
+            if tool.mcp_approval(&Value::Null).await.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Declared result schemas of the registered tools that have one, by
+    /// registry name. Used by `codemode` to type results.
+    pub(crate) async fn output_schemas(&self) -> HashMap<String, Value> {
+        self.tools
+            .read()
+            .await
+            .iter()
+            .filter_map(|(name, tool)| Some((name.clone(), tool.output_schema()?)))
+            .collect()
+    }
+
     /// Enable test mode for memory tools (isolated storage)
     /// Called when session is marked as debug
     pub async fn enable_memory_test_mode(&self) {
@@ -1086,6 +1138,22 @@ impl Registry {
             );
         }
 
+        // Human approval for tools whose server opted in. After every hook so
+        // the user sees the final arguments, and before dispatch so a refusal
+        // never half-runs. Nested `batch`/`codemode` calls land here too.
+        if !is_custom
+            && let Some(request) = tool.mcp_approval(&input).await
+            && let Err(error) =
+                mcp_approval::require(&ctx, &request.server, &request.tool, &request.arguments)
+                    .await
+        {
+            let mut fields =
+                Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
+            fields.push(("block_reason".to_string(), format!("{error:#}")));
+            crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+            return Err(error);
+        }
+
         let started_at = std::time::Instant::now();
         if let Some((ledger, seq)) = codemode {
             ledger.dispatched(
@@ -1251,6 +1319,7 @@ impl Registry {
                 title: output.title,
                 metadata: output.metadata,
                 images: output.images,
+                structured: None,
             };
         }
 
@@ -1286,6 +1355,7 @@ impl Registry {
                 title: output.title,
                 metadata: output.metadata,
                 images: output.images,
+                structured: None,
             };
         }
 
@@ -1325,6 +1395,7 @@ impl Registry {
             title: output.title,
             metadata: output.metadata,
             images: output.images,
+            structured: None,
         }
     }
 
@@ -1457,6 +1528,8 @@ impl Registry {
                 .is_some_and(|existing| {
                     existing.description() == tool.description()
                         && existing.parameters_schema() == tool.parameters_schema()
+                        && existing.output_schema() == tool.output_schema()
+                        && existing.mcp_annotations() == tool.mcp_annotations()
                 })
         })
     }
@@ -1530,6 +1603,7 @@ impl Registry {
                         name: raw.to_string(),
                         description: None,
                         input_schema: Value::Null,
+                        ..Default::default()
                     },
                 )
             })
