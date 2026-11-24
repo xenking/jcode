@@ -307,7 +307,7 @@ fn azure_tool_turn_uses_responses_with_reasoning_and_replays_tool_history() {
         api_base: format!("http://{addr}/openai/v1"),
         profile_id: Some("azure-openai".into()),
         builtin_azure: true,
-        auth: Arc::new(|| {
+        auth: Arc::new(|_| {
             Ok(ProviderAuth::HeaderValue {
                 header_name: reqwest::header::HeaderName::from_static("api-key"),
                 value: "test-key".into(),

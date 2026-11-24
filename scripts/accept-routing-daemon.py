@@ -329,11 +329,50 @@ def check_failure_redecides(binary, port):
         Fixture.limited = set()
 
 
+def check_concurrent_sessions(binary, port):
+    Fixture.used["key-main"], Fixture.used["key-second"] = 10, 10
+    Fixture.limited = set()
+    daemon = scenario(binary, port, "auto")
+    daemon.start()
+    try:
+        one, two = daemon.session(), daemon.session()
+        ids = {name: next(e for e in client.events if e.get("type") == "session")["session_id"] for name, client in (("one", one), ("two", two))}
+        one.send(type="routing_intent", id=8, action={"action": "switch", "account": "opencode-go:second"})
+        one.until(lambda e: e.get("type") == "routing_status")
+        def run(client, request_id):
+            done = turn(client, request_id)
+            assert done["type"] == "done", done
+
+        for round_id in (2, 3):
+            threads = [threading.Thread(target=run, args=(client, round_id)) for client in (one, two)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        # Each turn answers with the key that served it, so read it off the stream.
+        def served_by(client):
+            return [e.get("text", "") for e in client.events if e.get("type") == "text_delta"]
+
+        assert all("key-second" in text for text in served_by(one)) and served_by(one), served_by(one)
+        assert all("key-main" in text for text in served_by(two)) and served_by(two), served_by(two)
+        assert sorted(Fixture.seen) == ["key-main"] * 2 + ["key-second"] * 2, Fixture.seen
+        lines = [line for line in daemon.decisions() if line["session"] in ids.values()]
+        by_session = {name: [line for line in lines if line["session"] == session] for name, session in ids.items()}
+        later = by_session["one"][-1]
+        assert later["current"] == "opencode-go:second" and later["decision"] == "stay", f"session one keeps its own key: {later}"
+        later = by_session["two"][-1]
+        assert later["current"] == "opencode-go" and later["decision"] == "stay", f"session two keeps its own key: {later}"
+        assert not (daemon.jcode / "api-key-accounts.json").exists(), "routing never rewrites the global active key"
+        print("ok concurrent: two sessions served from different keys, global active key untouched")
+    finally:
+        daemon.stop()
+
+
 def main(binary):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_port
-    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides):
+    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides, check_concurrent_sessions):
         check(binary, port)
     print("routing daemon acceptance: PASS")
 

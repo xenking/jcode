@@ -66,6 +66,14 @@ impl MultiProvider {
         ProviderRegistry::new(self).active_openrouter_execution()
     }
 
+    /// The runtime whose API key a session can bind: the active direct
+    /// OpenAI-compatible profile, when the OpenAI-compatible slot is active.
+    pub(super) fn active_labelled_key_runtime(&self) -> Option<Arc<dyn Provider>> {
+        (self.active_provider() == ActiveProvider::OpenRouter)
+            .then(|| self.active_openrouter_execution_provider())
+            .flatten()
+    }
+
     pub(super) fn clear_active_openai_compatible_profile(&self) {
         ProviderRegistry::new(self).clear_active_compatible_profile();
     }

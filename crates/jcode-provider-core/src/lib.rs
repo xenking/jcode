@@ -241,6 +241,20 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Bind this runtime to one API key of its provider without changing the
+    /// global active key. `None` selects the unlabelled key. Forks keep the
+    /// binding, and a runtime that never binds follows the global active key.
+    fn set_api_key_account(&self, _label: Option<&str>) -> Result<()> {
+        anyhow::bail!("This provider does not support labelled API keys")
+    }
+
+    /// The API-key account this runtime sends right now (`provider[:label]`),
+    /// whether bound or following the global active key. `None` for providers
+    /// without labelled API keys.
+    fn serving_api_key_account(&self) -> Option<String> {
+        None
+    }
+
     /// The explicitly bound OAuth account, independent of the global active login.
     fn oauth_account_label(&self) -> Option<String> {
         None
@@ -874,6 +888,20 @@ pub enum PremiumMode {
     Normal = 0,
     OnePerSession = 1,
     Zero = 2,
+}
+
+/// Which key of an API-key provider one runtime sends.
+///
+/// `Follow` reads the global active key at every request, so a login or
+/// `jcode login --account` switch moves every runtime that follows. `Account`
+/// binds this runtime alone: the routing service uses it so concurrent sessions
+/// can serve from different keys of one provider.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ApiKeyBinding {
+    #[default]
+    Follow,
+    /// `None` is the provider's unlabelled key.
+    Account(Option<String>),
 }
 
 /// Explicit OAuth-vs-API-key credential pin for dual-auth providers

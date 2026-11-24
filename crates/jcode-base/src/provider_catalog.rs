@@ -16,9 +16,10 @@ pub use api_key_accounts::{
     active_api_key_credential, active_named_provider_credential, api_key_accounts,
     api_key_credential_for_account, api_key_profile_id_for_env,
     api_key_provider_has_labelled_accounts, api_key_provider_headers,
-    api_key_provider_takes_labels, clear_key_command_cache, labelled_account_display_name,
+    api_key_provider_takes_labels, bound_api_key_account, bound_api_key_credential,
+    bound_named_provider_credential, clear_key_command_cache, labelled_account_display_name,
     ledger_key_for_account, remove_labelled_api_key, save_labelled_api_key,
-    set_active_api_key_account, spend_ledger_key,
+    set_active_api_key_account, spend_ledger_key, validate_api_key_binding,
 };
 
 mod profile_credentials;

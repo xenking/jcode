@@ -30,7 +30,7 @@ use jcode_base::provider_catalog::{
     resolve_openai_compatible_profile,
 };
 use jcode_message_types::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
-use jcode_provider_core::{EventStream, Provider};
+use jcode_provider_core::{ApiKeyBinding, EventStream, Provider};
 pub use jcode_provider_openrouter::{
     EndpointInfo, ModelInfo, ModelPricing, ModelTimestampIndex, ProviderRouting,
     all_model_timestamps, load_endpoints_disk_cache_public, load_model_pricing_disk_cache_public,
@@ -640,21 +640,22 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
-    let auth = match openai_compatible_runtime::builtin_profile_auth(&resolved) {
-        Ok(Some(auth)) => auth,
-        Ok(None) => {
-            finish_profile_catalog_refresh(&resolved.id);
-            return false;
-        }
-        Err(error) => {
-            jcode_base::logging::warn(&format!(
-                "Skipping {} model catalog refresh: {error:#}",
-                resolved.display_name
-            ));
-            finish_profile_catalog_refresh(&resolved.id);
-            return false;
-        }
-    };
+    let auth =
+        match openai_compatible_runtime::builtin_profile_auth(&resolved, &ApiKeyBinding::Follow) {
+            Ok(Some(auth)) => auth,
+            Ok(None) => {
+                finish_profile_catalog_refresh(&resolved.id);
+                return false;
+            }
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "Skipping {} model catalog refresh: {error:#}",
+                    resolved.display_name
+                ));
+                finish_profile_catalog_refresh(&resolved.id);
+                return false;
+            }
+        };
 
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         finish_profile_catalog_refresh(&resolved.id);
@@ -827,7 +828,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
 
 /// Per-instance credential resolver: constructed once, invoked at every use so
 /// env-file edits take effect without a process restart (issue #1386).
-type AuthResolver = Arc<dyn Fn() -> anyhow::Result<ProviderAuth> + Send + Sync>;
+type AuthResolver = Arc<dyn Fn(&ApiKeyBinding) -> anyhow::Result<ProviderAuth> + Send + Sync>;
 
 pub struct OpenRouterProvider {
     client: Client,
@@ -868,6 +869,9 @@ pub struct OpenRouterProvider {
     provider_routing: Arc<RwLock<ProviderRouting>>,
     /// Pinned provider for this session (cache-aware)
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    /// Which key of an API-key provider this runtime sends. Per instance, so
+    /// concurrent sessions can serve from different keys of one provider.
+    key_binding: Arc<Mutex<ApiKeyBinding>>,
     /// In-memory cache of per-model endpoint data
     endpoints_cache: Arc<RwLock<EndpointsCache>>,
     /// Background refresh state for per-model endpoint data
@@ -1345,7 +1349,8 @@ impl OpenRouterProvider {
         !self.supports_provider_features
             && self.api_base.trim_end_matches('/')
                 == jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.trim_end_matches('/')
-            && (self.auth)()
+            && self
+                .current_auth()
                 .map(|auth| {
                     auth.label()
                         .eq_ignore_ascii_case(jcode_base::subscription_catalog::JCODE_API_KEY_ENV)
@@ -1368,13 +1373,14 @@ impl OpenRouterProvider {
         })?;
         let auth_profile = profile.clone();
         let auth_name = profile_name.to_string();
-        let auth: AuthResolver = Arc::new(move || {
+        let auth: AuthResolver = Arc::new(move |binding| {
             // The active labelled key (or `key_command`) wins over the single
             // configured key, and its headers join the provider's own. A
             // failing `key_command` is an error here, never a fallback.
-            let credential = jcode_base::provider_catalog::active_named_provider_credential(
+            let credential = jcode_base::provider_catalog::bound_named_provider_credential(
                 &auth_name,
                 &auth_profile,
+                binding,
             )?;
             let key_env = auth_profile
                 .api_key_env
@@ -1418,7 +1424,7 @@ impl OpenRouterProvider {
             };
             auth.with_extra_headers(&headers)
         });
-        auth()?;
+        auth(&ApiKeyBinding::Follow)?;
         let model = profile
             .default_model
             .clone()
@@ -1512,6 +1518,7 @@ impl OpenRouterProvider {
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
+            key_binding: Default::default(),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         };
@@ -1632,9 +1639,9 @@ impl OpenRouterProvider {
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let auth: AuthResolver = Arc::new(Self::resolve_auth);
+        let auth: AuthResolver = Arc::new(|_| Self::resolve_auth());
         let auth_start = std::time::Instant::now();
-        auth()?;
+        auth(&ApiKeyBinding::Follow)?;
         jcode_base::logging::info(&format!(
             "[TIMING] openrouter_new: autodetect={}ms, auth={}ms, before_auth={}ms",
             autodetect_ms,
@@ -1754,6 +1761,7 @@ impl OpenRouterProvider {
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
             provider_pin: Arc::new(Mutex::new(None)),
+            key_binding: Default::default(),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
@@ -1786,7 +1794,7 @@ impl OpenRouterProvider {
             model: Arc::new(RwLock::new(model.to_string())),
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base: jcode_base::auth::grok_build::chat_proxy_base_url(),
-            auth: Arc::new(|| {
+            auth: Arc::new(|_| {
                 Ok(ProviderAuth::GrokCli {
                     label: GROK_BUILD_AUTH_LABEL.to_string(),
                 })
@@ -1811,13 +1819,14 @@ impl OpenRouterProvider {
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
+            key_binding: Default::default(),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         }
     }
 
     pub fn new_openrouter_api_key_runtime() -> Result<Self> {
-        let auth: AuthResolver = Arc::new(|| {
+        let auth: AuthResolver = Arc::new(|_| {
             let api_key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
                 .ok_or_else(|| {
                 let path = jcode_base::storage::app_config_dir()
@@ -1834,7 +1843,7 @@ impl OpenRouterProvider {
                 label: DEFAULT_API_KEY_NAME.to_string(),
             })
         });
-        auth()?;
+        auth(&ApiKeyBinding::Follow)?;
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
@@ -1860,6 +1869,7 @@ impl OpenRouterProvider {
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
             provider_pin: Arc::new(Mutex::new(None)),
+            key_binding: Default::default(),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
@@ -2037,6 +2047,7 @@ impl OpenRouterProvider {
         let client = self.client.clone();
         let api_base = self.api_base.clone();
         let auth = self.auth.clone();
+        let key_binding = Arc::clone(&self.key_binding);
         let model_name = model.to_string();
         let refresh_state = Arc::clone(&self.endpoint_refresh);
         let endpoints_cache = Arc::clone(&self.endpoints_cache);
@@ -2067,6 +2078,7 @@ impl OpenRouterProvider {
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
                 provider_pin: Arc::new(Mutex::new(None)),
+                key_binding,
                 endpoints_cache,
                 endpoint_refresh: Arc::clone(&refresh_state),
             };
@@ -2122,7 +2134,7 @@ impl OpenRouterProvider {
 
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let Ok(auth) = (self.auth)() else {
+        let Ok(auth) = self.current_auth() else {
             Self::finish_background_model_catalog_refresh(&self.model_catalog_refresh);
             return;
         };
@@ -2134,8 +2146,10 @@ impl OpenRouterProvider {
             .profile_id
             .clone()
             .unwrap_or_else(|| "openrouter".to_string());
+        let key_binding = self.key_binding_snapshot();
         handle.spawn(async move {
-            let client = match jcode_base::egress::transport_for_active_key(&egress_provider).await
+            let client = match jcode_base::egress::transport_for_binding(&egress_provider, &key_binding)
+                .await
             {
                 Ok(transport) => transport.client_or(&client),
                 Err(error) => {
@@ -2672,7 +2686,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.egress_client().await?,
             self.api_base.clone(),
-            (self.auth)()?,
+            self.current_auth()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2688,7 +2702,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.egress_client().await?,
             self.api_base.clone(),
-            (self.auth)()?,
+            self.current_auth()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2726,7 +2740,8 @@ impl OpenRouterProvider {
 
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)()?
+        let response = self
+            .current_auth()?
             .apply(self.egress_client().await?.get(&url))
             .await?
             .send()
@@ -2780,7 +2795,8 @@ impl OpenRouterProvider {
             .unwrap_or(0);
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)()?
+        let response = self
+            .current_auth()?
             .apply(self.egress_client().await?.get(&url))
             .await?
             .send()

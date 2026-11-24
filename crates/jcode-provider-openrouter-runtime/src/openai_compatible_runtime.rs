@@ -5,8 +5,9 @@ use super::*;
 /// `Ok(None)` means the profile needs a key and none is configured.
 pub(crate) fn builtin_profile_auth(
     resolved: &jcode_base::provider_catalog::ResolvedOpenAiCompatibleProfile,
+    binding: &ApiKeyBinding,
 ) -> Result<Option<ProviderAuth>> {
-    use jcode_base::provider_catalog::{active_api_key_credential, api_key_provider_headers};
+    use jcode_base::provider_catalog::{api_key_provider_headers, bound_api_key_credential};
     if resolved.id == "muse-subscription" {
         return Ok(
             load_openai_compatible_profile_api_key(resolved).map(|token| {
@@ -17,7 +18,7 @@ pub(crate) fn builtin_profile_auth(
             }),
         );
     }
-    let (token, label, headers) = match active_api_key_credential(&resolved.id)? {
+    let (token, label, headers) = match bound_api_key_credential(&resolved.id, binding)? {
         Some(credential) => {
             let label = if credential.account_id.label().is_some() {
                 credential.account_id.to_string()
@@ -58,8 +59,8 @@ impl OpenRouterProvider {
             jcode_base::auth::muse::ensure_enabled()?;
         }
         let resolver_profile = resolved.clone();
-        let auth: AuthResolver = Arc::new(move || {
-            builtin_profile_auth(&resolver_profile)?.ok_or_else(|| {
+        let auth: AuthResolver = Arc::new(move |binding| {
+            builtin_profile_auth(&resolver_profile, binding)?.ok_or_else(|| {
                 if resolver_profile.id == "muse-subscription" {
                     return anyhow::anyhow!(
                         "Muse subscription login unavailable. Run `jcode login --provider muse-subscription`. No pay-as-you-go key fallback was attempted."
@@ -77,7 +78,7 @@ impl OpenRouterProvider {
                 )
             })
         });
-        auth()?;
+        auth(&ApiKeyBinding::Follow)?;
 
         let static_context_limits = openai_compatible_profile_static_context_limits(profile);
         let static_models = openai_compatible_profile_static_models(profile);
@@ -113,6 +114,7 @@ impl OpenRouterProvider {
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
+            key_binding: Default::default(),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })

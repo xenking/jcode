@@ -175,3 +175,65 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
         );
     });
 }
+
+#[test]
+fn api_key_binding_reaches_only_the_active_compatible_profile() {
+    #[derive(Clone, Default)]
+    struct KeyProbe {
+        label: Arc<std::sync::Mutex<Option<Option<String>>>>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for KeyProbe {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("binding a key must not complete a prompt")
+        }
+        fn name(&self) -> &str {
+            "key-probe"
+        }
+        fn model(&self) -> String {
+            "m".into()
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+        fn set_api_key_account(&self, label: Option<&str>) -> Result<()> {
+            *self.label.lock().unwrap() = Some(label.map(str::to_string));
+            Ok(())
+        }
+        fn serving_api_key_account(&self) -> Option<String> {
+            self.label
+                .lock()
+                .unwrap()
+                .clone()
+                .flatten()
+                .map(|label| format!("probe:{label}"))
+        }
+    }
+
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_openai();
+        let probe = Arc::new(KeyProbe::default());
+        ProviderRegistry::new(&provider).install_compatible_profile("probe", probe.clone());
+        ProviderRegistry::new(&provider).set_active_compatible_profile("probe");
+
+        // Another slot is active: there is no labelled-key runtime to bind.
+        *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+        assert!(provider.set_api_key_account(Some("second")).is_err());
+        assert_eq!(provider.serving_api_key_account(), None);
+        assert_eq!(*probe.label.lock().unwrap(), None);
+
+        *provider.active.write().unwrap() = ActiveProvider::OpenRouter;
+        provider.set_api_key_account(Some("second")).unwrap();
+        assert_eq!(
+            provider.serving_api_key_account().as_deref(),
+            Some("probe:second")
+        );
+        assert_eq!(*probe.label.lock().unwrap(), Some(Some("second".into())));
+    });
+}

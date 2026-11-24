@@ -307,7 +307,7 @@ impl Provider for OpenRouterProvider {
         let transport = self.egress_transport().await?;
         let client = transport.client_or(&self.client);
         let api_base = self.api_base.clone();
-        let auth = (self.auth)()?;
+        let auth = self.current_auth()?;
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
@@ -882,7 +882,27 @@ impl Provider for OpenRouterProvider {
             )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
+            key_binding: Arc::new(Mutex::new(self.key_binding_snapshot())),
         })
+    }
+
+    fn set_api_key_account(&self, label: Option<&str>) -> Result<()> {
+        let provider = self
+            .profile_id
+            .as_deref()
+            .context("This provider does not support labelled API keys")?;
+        let binding = jcode_base::provider_catalog::validate_api_key_binding(provider, label)?;
+        *self
+            .key_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = binding;
+        Ok(())
+    }
+
+    fn serving_api_key_account(&self) -> Option<String> {
+        let provider = self.profile_id.as_deref()?;
+        jcode_base::provider_catalog::bound_api_key_account(provider, &self.key_binding_snapshot())
+            .map(|account| account.to_string())
     }
 }
 
@@ -941,7 +961,7 @@ impl OpenRouterProvider {
             Some(api_tools.len()),
             &[],
         );
-        let auth = (self.auth)()?;
+        let auth = self.current_auth()?;
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let transport = self.egress_transport().await?;
         let client = transport.client_or(&self.client);
@@ -993,7 +1013,19 @@ impl OpenRouterProvider {
     /// Fails closed when that key's required proxy is unreachable.
     pub(crate) async fn egress_transport(&self) -> Result<jcode_base::egress::Transport> {
         let provider = self.profile_id.as_deref().unwrap_or("openrouter");
-        jcode_base::egress::transport_for_active_key(provider).await
+        jcode_base::egress::transport_for_binding(provider, &self.key_binding_snapshot()).await
+    }
+
+    pub(crate) fn key_binding_snapshot(&self) -> ApiKeyBinding {
+        self.key_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The credential this runtime sends now, honoring its own key binding.
+    pub(crate) fn current_auth(&self) -> Result<ProviderAuth> {
+        (self.auth)(&self.key_binding_snapshot())
     }
 
     pub(crate) async fn egress_client(&self) -> Result<Client> {

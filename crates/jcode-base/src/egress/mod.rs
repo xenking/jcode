@@ -380,6 +380,20 @@ pub async fn transport_for_active_key(provider: &str) -> Result<Transport> {
     transport(provider, label).await
 }
 
+/// The transport of the key one runtime is bound to: its own account when it
+/// has one, else the globally active key.
+pub async fn transport_for_binding(
+    provider: &str,
+    binding: &jcode_provider_core::ApiKeyBinding,
+) -> Result<Transport> {
+    match binding {
+        jcode_provider_core::ApiKeyBinding::Follow => transport_for_active_key(provider).await,
+        jcode_provider_core::ApiKeyBinding::Account(label) => {
+            transport(provider, label.as_deref()).await
+        }
+    }
+}
+
 /// An HTTP client for one credential: the proxy client, or the shared direct one.
 pub async fn client(provider: &str, label: Option<&str>) -> Result<Client> {
     Ok(transport(provider, label).await?.client())

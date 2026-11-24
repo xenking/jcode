@@ -47,7 +47,13 @@ pub(super) fn current_account(agent: &Agent) -> Option<AccountId> {
         Some("openai-api") => return AccountId::parse("openai"),
         Some(key) if key.contains(':') => return AccountId::parse(key),
         Some(key) => {
-            return crate::provider_catalog::active_api_key_account(key)
+            // The session's own key, which a routed session binds apart from
+            // the global active one.
+            return provider
+                .serving_api_key_account()
+                .and_then(|account| AccountId::parse(&account))
+                .filter(|account| account.provider() == key)
+                .or_else(|| crate::provider_catalog::active_api_key_account(key))
                 .or_else(|| AccountId::parse(key));
         }
         None => {}
@@ -129,7 +135,16 @@ fn bind(
                     "{provider} does not take account labels, cannot move onto {account}"
                 );
             }
-            crate::provider_catalog::set_active_api_key_account(provider, label)?;
+            let serving = agent
+                .provider_handle()
+                .serving_api_key_account()
+                .and_then(|serving| AccountId::parse(&serving));
+            if serving.is_some_and(|serving| serving.provider() != provider) {
+                anyhow::bail!(
+                    "this session does not run on {provider}, cannot move onto {account}"
+                );
+            }
+            agent.provider_handle().set_api_key_account(label)?;
             agent.reset_provider_session();
             Ok(())
         }

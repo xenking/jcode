@@ -19,6 +19,7 @@
 use super::*;
 use crate::config::{ApiKeyProfileConfig, Config, LabelledApiKeyConfig, NamedProviderConfig};
 use anyhow::{Context, Result};
+use jcode_provider_core::ApiKeyBinding;
 use jcode_routing_policy::AccountId;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -564,15 +565,83 @@ pub(crate) fn active_api_key_credential_with(
 }
 
 fn active_credential_of(provider: &Provider<'_>) -> Result<Option<ApiKeyCredential>> {
+    bound_credential_of(provider, &ApiKeyBinding::Follow)
+}
+
+/// The account `binding` selects: the bound one, else the global active key.
+fn bound_account_of(
+    provider: &Provider<'_>,
+    store: &Store,
+    binding: &ApiKeyBinding,
+) -> Option<AccountId> {
+    match binding {
+        ApiKeyBinding::Follow => match active_label(store, provider) {
+            Some(label) => provider.account(Some(&label)),
+            None => provider.account(None),
+        },
+        ApiKeyBinding::Account(label) => provider.account(label.as_deref()),
+    }
+}
+
+fn bound_credential_of(
+    provider: &Provider<'_>,
+    binding: &ApiKeyBinding,
+) -> Result<Option<ApiKeyCredential>> {
     let store = load_store();
-    let account = match active_label(&store, provider) {
-        Some(label) => provider.account(Some(&label)),
-        None => provider.account(None),
+    let Some(account) = bound_account_of(provider, &store, binding) else {
+        return Ok(None);
     };
-    match account {
-        Some(account) => credential_for(provider, &store, &account),
+    let credential = credential_for(provider, &store, &account)?;
+    // A bound key that no longer exists must not quietly serve the global
+    // key: the session was placed on this account on purpose.
+    if credential.is_none() && matches!(binding, ApiKeyBinding::Account(_)) {
+        anyhow::bail!("No API key is available for {account}.");
+    }
+    Ok(credential)
+}
+
+/// The credential a runtime bound by `binding` sends for a built-in profile or
+/// `[providers.<name>]` entry.
+pub fn bound_api_key_credential(
+    provider: &str,
+    binding: &ApiKeyBinding,
+) -> Result<Option<ApiKeyCredential>> {
+    match Provider::resolve(crate::config::config(), provider) {
+        Some(provider) => bound_credential_of(&provider, binding),
         None => Ok(None),
     }
+}
+
+/// The account a runtime bound by `binding` serves: the bound one, else the
+/// global active key. `None` when the provider takes no labelled keys.
+pub fn bound_api_key_account(provider: &str, binding: &ApiKeyBinding) -> Option<AccountId> {
+    let provider = Provider::resolve(crate::config::config(), provider)?;
+    bound_account_of(&provider, &load_store(), binding)
+}
+
+/// Check that `label` names a key of `provider`, for binding a runtime.
+pub fn validate_api_key_binding(provider: &str, label: Option<&str>) -> Result<ApiKeyBinding> {
+    let config = crate::config::config();
+    let provider = Provider::resolve(config, provider)
+        .with_context(|| format!("'{provider}' does not take labelled API keys."))?;
+    let label = label.map(str::trim).filter(|label| !label.is_empty());
+    match label {
+        Some(label) => {
+            anyhow::ensure!(
+                labels(&provider, &load_store())
+                    .iter()
+                    .any(|known| known == label),
+                "No key labelled '{label}' for {}.",
+                provider.id()
+            );
+        }
+        None => anyhow::ensure!(
+            provider.default_source().is_some(),
+            "{} has no unlabelled key.",
+            provider.id()
+        ),
+    }
+    Ok(ApiKeyBinding::Account(label.map(str::to_string)))
 }
 
 /// The credential a `[providers.<name>]` entry serves requests with right now.
@@ -581,6 +650,15 @@ fn active_credential_of(provider: &Provider<'_>) -> Result<Option<ApiKeyCredenti
 pub fn active_named_provider_credential(
     name: &str,
     profile: &NamedProviderConfig,
+) -> Result<Option<ApiKeyCredential>> {
+    bound_named_provider_credential(name, profile, &ApiKeyBinding::Follow)
+}
+
+/// [`active_named_provider_credential`] for a runtime bound by `binding`.
+pub fn bound_named_provider_credential(
+    name: &str,
+    profile: &NamedProviderConfig,
+    binding: &ApiKeyBinding,
 ) -> Result<Option<ApiKeyCredential>> {
     if matches!(
         profile.provider_type,
@@ -592,7 +670,7 @@ pub fn active_named_provider_credential(
     if provider.account(None).is_none() {
         return Ok(None);
     }
-    active_credential_of(&provider)
+    bound_credential_of(&provider, binding)
 }
 
 /// Headers configured for a provider regardless of which key serves.

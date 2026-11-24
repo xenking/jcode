@@ -44,7 +44,7 @@ fn serve_chat() -> (String, mpsc::Receiver<String>) {
     (format!("http://{address}"), request_rx)
 }
 
-fn ask(provider: &OpenRouterProvider) {
+fn ask(provider: &dyn Provider) {
     let messages = vec![Message::user("hello")];
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
@@ -160,5 +160,71 @@ fn invalid_header_names_fail_loudly_without_echoing_values() {
     let message = format!("{error:#}");
     assert!(message.contains("bad header"), "{message}");
     assert!(!message.contains("secret-value"), "{message}");
+    jcode_base::config::invalidate_config_cache();
+}
+
+#[test]
+fn runtimes_bound_to_different_keys_serve_concurrently_without_moving_the_global_key() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (base, requests) = serve_chat();
+    write_config(&format!(
+        r#"
+        [api_key_profiles.opencode-go]
+        base_url = "{base}/v1"
+        "#
+    ));
+    sandbox
+        .write_openai_compatible_api_key(OPENCODE_GO_PROFILE, "sk-default")
+        .unwrap();
+    save_labelled_api_key("opencode-go", "second", "sk-second").unwrap();
+    save_labelled_api_key("opencode-go", "third", "sk-third").unwrap();
+    let template =
+        OpenRouterProvider::new_openai_compatible_profile_runtime(OPENCODE_GO_PROFILE).unwrap();
+    let one = template.fork();
+    let two = template.fork();
+    let follower = template.fork();
+
+    one.set_api_key_account(Some("second")).unwrap();
+    two.set_api_key_account(Some("third")).unwrap();
+    let sent = |provider: &dyn Provider| {
+        ask(provider);
+        requests.recv().unwrap()
+    };
+    assert!(sent(&*one).contains("authorization: bearer sk-second"));
+    assert!(sent(&*two).contains("authorization: bearer sk-third"));
+    assert!(sent(&*one).contains("authorization: bearer sk-second"));
+    assert_eq!(
+        one.serving_api_key_account().as_deref(),
+        Some("opencode-go:second")
+    );
+    assert_eq!(
+        two.serving_api_key_account().as_deref(),
+        Some("opencode-go:third")
+    );
+
+    // Binding is per runtime: the global key and an unbound runtime are untouched.
+    assert_eq!(
+        jcode_base::provider_catalog::active_api_key_account("opencode-go")
+            .unwrap()
+            .to_string(),
+        "opencode-go"
+    );
+    assert!(sent(&*follower).contains("authorization: bearer sk-default"));
+    assert_eq!(
+        follower.serving_api_key_account().as_deref(),
+        Some("opencode-go")
+    );
+
+    // A bound runtime keeps its key through the global switch and through forks.
+    set_active_api_key_account("opencode-go", Some("third")).unwrap();
+    assert!(sent(&*one).contains("authorization: bearer sk-second"));
+    assert!(sent(&*one.fork()).contains("authorization: bearer sk-second"));
+    assert!(sent(&*follower).contains("authorization: bearer sk-third"));
+
+    // `None` binds the unlabelled key explicitly, even while a label is active.
+    one.set_api_key_account(None).unwrap();
+    assert!(sent(&*one).contains("authorization: bearer sk-default"));
+    assert!(one.set_api_key_account(Some("missing")).is_err());
+
     jcode_base::config::invalidate_config_cache();
 }

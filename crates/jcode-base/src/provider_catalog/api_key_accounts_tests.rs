@@ -362,9 +362,14 @@ mod key_command {
 #[test]
 fn a_provider_with_only_labelled_keys_counts_as_configured_and_serves_them() {
     let _sandbox = AuthTestSandbox::new().unwrap();
-    assert!(!openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
+    assert!(!openai_compatible_profile_is_configured(
+        OPENCODE_GO_PROFILE
+    ));
     assert_eq!(
-        load_runtime_api_key(OPENCODE_GO_PROFILE.api_key_env, OPENCODE_GO_PROFILE.env_file),
+        load_runtime_api_key(
+            OPENCODE_GO_PROFILE.api_key_env,
+            OPENCODE_GO_PROFILE.env_file
+        ),
         None
     );
 
@@ -373,8 +378,11 @@ fn a_provider_with_only_labelled_keys_counts_as_configured_and_serves_them() {
     assert!(openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
     // The env-driven runtime path and the profile path both serve the active key.
     assert_eq!(
-        load_runtime_api_key(OPENCODE_GO_PROFILE.api_key_env, OPENCODE_GO_PROFILE.env_file)
-            .as_deref(),
+        load_runtime_api_key(
+            OPENCODE_GO_PROFILE.api_key_env,
+            OPENCODE_GO_PROFILE.env_file
+        )
+        .as_deref(),
         Some("sk-only")
     );
     let resolved = resolve_openai_compatible_profile(OPENCODE_GO_PROFILE);
@@ -383,10 +391,14 @@ fn a_provider_with_only_labelled_keys_counts_as_configured_and_serves_them() {
         Some("sk-only")
     );
     // Other providers are unaffected.
-    assert!(!openai_compatible_profile_is_configured(HUGGING_FACE_PROFILE));
+    assert!(!openai_compatible_profile_is_configured(
+        HUGGING_FACE_PROFILE
+    ));
 
     remove_labelled_api_key("opencode-go", "only").unwrap();
-    assert!(!openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
+    assert!(!openai_compatible_profile_is_configured(
+        OPENCODE_GO_PROFILE
+    ));
 }
 
 #[test]
@@ -407,7 +419,10 @@ fn spend_ledger_key_follows_the_active_account() {
         spend_ledger_key_with(&config, "openai-compatible:deepseek"),
         "openai-compatible:deepseek"
     );
-    assert_eq!(spend_ledger_key_with(&config, "claude:api-key"), "claude:api-key");
+    assert_eq!(
+        spend_ledger_key_with(&config, "claude:api-key"),
+        "claude:api-key"
+    );
     assert_eq!(
         ledger_key_for_account(&id("opencode-go")),
         "openai-compatible:opencode-go"
@@ -415,5 +430,42 @@ fn spend_ledger_key_follows_the_active_account() {
     assert_eq!(
         ledger_key_for_account(&id("opencode-go:second")),
         "opencode-go:second"
+    );
+}
+
+#[test]
+fn a_bound_key_ignores_the_global_active_key_and_never_falls_back_to_it() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    sandbox
+        .write_openai_compatible_api_key(OPENCODE_GO_PROFILE, "sk-default")
+        .unwrap();
+    save_labelled_api_key("opencode-go", "second", "sk-second").unwrap();
+    save_labelled_api_key("opencode-go", "third", "sk-third").unwrap();
+    set_active_api_key_account("opencode-go", Some("third")).unwrap();
+
+    let key = |binding: &ApiKeyBinding| {
+        bound_api_key_credential("opencode-go", binding)
+            .map(|credential| credential.map(|credential| credential.api_key))
+    };
+    assert_eq!(
+        key(&ApiKeyBinding::Follow).unwrap().as_deref(),
+        Some("sk-third")
+    );
+    let second = validate_api_key_binding("opencode-go", Some("second")).unwrap();
+    assert_eq!(key(&second).unwrap().as_deref(), Some("sk-second"));
+    let default = validate_api_key_binding("opencode-go", None).unwrap();
+    assert_eq!(key(&default).unwrap().as_deref(), Some("sk-default"));
+    assert_eq!(
+        bound_api_key_account("opencode-go", &second).map(|account| account.to_string()),
+        Some("opencode-go:second".to_string())
+    );
+    assert!(validate_api_key_binding("opencode-go", Some("missing")).is_err());
+
+    // The bound key was removed after the session took it: error, not `third`.
+    remove_labelled_api_key("opencode-go", "second").unwrap();
+    assert!(key(&second).is_err());
+    assert_eq!(
+        key(&ApiKeyBinding::Follow).unwrap().as_deref(),
+        Some("sk-third")
     );
 }

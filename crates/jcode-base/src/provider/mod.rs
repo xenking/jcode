@@ -2063,6 +2063,20 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn set_api_key_account(&self, label: Option<&str>) -> Result<()> {
+        let runtime = self
+            .active_labelled_key_runtime()
+            .ok_or_else(|| anyhow!("The active provider does not support labelled API keys"))?;
+        runtime.set_api_key_account(label)?;
+        self.invalidate_routes_memo();
+        Ok(())
+    }
+
+    fn serving_api_key_account(&self) -> Option<String> {
+        self.active_labelled_key_runtime()?
+            .serving_api_key_account()
+    }
+
     fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         use jcode_provider_core::ResolvedCredential;
         // Only report an *explicit* in-memory pin. Auto mode returns `None` so
