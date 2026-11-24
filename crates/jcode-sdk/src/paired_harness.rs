@@ -227,6 +227,24 @@ mod tests {
     }
 
     #[test]
+    fn websocket_refuses_redirects() {
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let target = destination.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: ws://{target}/harness/v1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        assert!(connect(&format!("http://{address}"), &"a".repeat(64)).is_err());
+        server.join().unwrap();
+        assert!(destination.accept().is_err());
+    }
+
+    #[test]
     fn client_sends_bearer_and_speaks_harness_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -255,7 +273,10 @@ mod tests {
                 let ping: serde_json::Value = serde_json::from_str(&ping).unwrap();
                 assert_eq!(ping["req"], "ping");
                 ws.send(Message::Text(serde_json::json!({"v":1,"reply_to":ping["id"],"ev":"pong"}).to_string())).await.unwrap();
-                let _ = ws.next().await;
+                let pending = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                let pending: serde_json::Value = serde_json::from_str(&pending).unwrap();
+                assert_eq!(pending["req"], "ping");
+                ws.close(None).await.unwrap();
             });
         });
         let client = crate::JcodeClient::connect_paired_harness(
@@ -265,6 +286,7 @@ mod tests {
         )
         .unwrap();
         client.ping().unwrap();
+        assert!(client.ping().is_err());
         drop(client);
         server.join().unwrap();
     }
