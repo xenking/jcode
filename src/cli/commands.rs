@@ -1823,6 +1823,7 @@ async fn run_memory_command_for_dir(
 }
 
 pub fn run_pair_command(list: bool, revoke: Option<String>, harness: bool) -> Result<()> {
+    let _lock = gateway::DeviceRegistry::lock_for_update()?;
     let mut registry = gateway::DeviceRegistry::load();
 
     if list {
