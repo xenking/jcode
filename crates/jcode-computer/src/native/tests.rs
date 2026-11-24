@@ -13,6 +13,10 @@ struct Fixture {
 
 impl Fixture {
     fn launch() -> Self {
+        Self::launch_with_background(false)
+    }
+
+    fn launch_with_background(background: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("JcodeAxFixture");
         let source = directory.path().join("fixture.swift");
@@ -29,7 +33,11 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&compile.stderr)
         );
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        if background {
+            command.env("JCODE_FIXTURE_BACKGROUND", "1");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -122,6 +130,40 @@ async fn live_reddy_observe() {
             .any(|row| row.as_str().is_some_and(|row| row.contains("Press"))),
         "no press action in tree"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a GUI session and Accessibility permission"]
+async fn background_press_selects_table_row() {
+    assert!(
+        super::platform::trusted(),
+        "Accessibility permission required"
+    );
+    let mut fixture = Fixture::launch_with_background(true);
+    let engine = Engine::default();
+    let snapshot = state(
+        execute(
+            &engine,
+            json!({"action":"observe", "app":format!("pid:{}", fixture.child.id())}),
+        )
+        .await,
+    );
+    assert!(snapshot["tree"].is_array(), "observe failed: {snapshot}");
+    let row = snapshot["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|line| line.split_whitespace().nth(1) == Some("Row"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing table row: {snapshot}"))
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let result = state(execute(&engine, json!({"action":"act", "snapshot_id":snapshot["snapshot_id"], "element_ref":row, "verb":"press"})).await);
+    assert_eq!(result["delivery"], "sent", "{result}");
+    assert_eq!(result["effect"], "verified", "{result}");
+    assert_eq!(fixture.send("selected-row"), "1");
 }
 
 #[tokio::test]

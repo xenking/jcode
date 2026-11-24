@@ -1,6 +1,7 @@
 import AppKit
 
-final class Fixture: NSObject {
+final class Fixture: NSObject, NSTableViewDataSource {
+    let table = NSTableView()
     let first: NSWindow
     let second: NSWindow
     let firstInput: NSTextField
@@ -35,8 +36,21 @@ final class Fixture: NSObject {
         secret.frame = NSRect(x: 30, y: 160, width: 200, height: 25)
         first.contentView!.addSubview(secret)
         super.init()
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("items"))
+        column.width = 200
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.frame = NSRect(x: 300, y: 30, width: 200, height: 100)
+        table.dataSource = self
+        first.contentView!.addSubview(table)
+        table.reloadData()
         firstButton.target = self
         firstButton.action = #selector(press)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { 2 }
+    func tableView(_ tableView: NSTableView, objectValueFor column: NSTableColumn?, row: Int) -> Any? {
+        ["First row", "Second row"][row]
     }
 
     @objc func press() { firstInput.stringValue = "pressed-first" }
@@ -56,6 +70,8 @@ final class Fixture: NSObject {
         case "set-first":
             firstInput.stringValue = "fixture-updated"
             reply("updated")
+        case "selected-row":
+            reply("\(table.selectedRow)")
         case "values":
             reply("\(firstInput.stringValue)|\(secondInput.stringValue)")
         default:
@@ -71,9 +87,14 @@ func reply(_ line: String) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let fixture = Fixture()
-fixture.second.orderFront(nil)
-fixture.first.makeKeyAndOrderFront(nil)
-app.activate(ignoringOtherApps: true)
+if ProcessInfo.processInfo.environment["JCODE_FIXTURE_BACKGROUND"] == nil {
+    fixture.second.orderFront(nil)
+    fixture.first.makeKeyAndOrderFront(nil)
+    app.activate(ignoringOtherApps: true)
+} else {
+    fixture.second.close()
+    fixture.first.orderFront(nil)
+}
 DispatchQueue.main.async {
     reply("\(fixture.first.windowNumber)|\(fixture.second.windowNumber)")
 }
