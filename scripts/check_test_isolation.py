@@ -15,7 +15,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "jcode-base"
-ISOLATION = {(BASE, "test-support"), (BASE, "test-isolated-hooks")}
+STORAGE = "jcode-storage"
+ISOLATION = {(BASE, "test-support"), (BASE, "test-isolated-hooks"), (STORAGE, "test-support")}
 
 
 def feature_closure(packages: dict, name: str, features: list[str]) -> set[tuple[str, str]]:
@@ -53,6 +54,12 @@ def violations(metadata: dict) -> list[str]:
         errors.append(
             "crates/jcode-base/Cargo.toml: test-support must enable test-isolated-hooks; "
             'set test-support = ["test-isolated-hooks"] so test homes and hooks cannot diverge'
+        )
+    if (STORAGE, "test-support") not in isolated:
+        errors.append(
+            "crates/jcode-base/Cargo.toml: test-support must enable jcode-storage/test-support; "
+            "storage-level callers (active_pids, sessions) resolve the real ~/.jcode otherwise "
+            'and leak phantom sessions: set test-support = [..., "jcode-storage/test-support"]'
         )
     owners = {
         name for name in packages

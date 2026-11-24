@@ -17,14 +17,22 @@ def package(name, features=None, dependencies=()):
 
 
 def fixture():
-    base = package("jcode-base", {"test-support": ["test-isolated-hooks"], "test-isolated-hooks": []})
+    storage = package("jcode-storage", {"test-support": []})
+    base = package("jcode-base", {"test-support": ["test-isolated-hooks", "jcode-storage/test-support"],
+                                  "test-isolated-hooks": []},
+                   dependencies=[dependency("jcode-storage")])
     app = package("app", dependencies=[dependency("jcode-base"), dependency("jcode-base", "dev", ["test-support"])])
-    return dict(packages=[base, app], workspace_members=["jcode-base", "app"])
+    return dict(packages=[base, app, storage], workspace_members=["jcode-base", "app", "jcode-storage"])
 
 
 class TestIsolationTests(unittest.TestCase):
     def test_isolated_dev_feature_passes(self):
         self.assertEqual(violations(fixture()), [])
+
+    def test_test_support_must_isolate_storage_level_callers(self):
+        data = fixture()
+        data["packages"][0]["features"]["test-support"] = ["test-isolated-hooks"]
+        self.assertIn("must enable jcode-storage/test-support", "\n".join(violations(data)))
 
     def test_test_support_cannot_omit_hook_isolation(self):
         data = fixture()

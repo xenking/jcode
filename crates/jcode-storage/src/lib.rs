@@ -79,6 +79,8 @@ static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
     LazyLock::new(|| Mutex::new(SecretHardenState::default()));
 
 mod active_pids;
+#[cfg(any(test, feature = "test-support"))]
+mod test_home;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
     find_active_session_id_by_pid, internal_pids_dir, mark_streaming, prune_active_pids_owned_by,
@@ -86,6 +88,8 @@ pub use active_pids::{
     set_session_internal, streaming_pids_dir, streaming_session_ids, unmark_streaming,
     unregister_active_pid, user_session_counts, user_session_presence,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use test_home::isolated_test_home;
 
 mod session_lease;
 pub use session_lease::{
@@ -199,13 +203,26 @@ fn ensure_private_runtime_dir(path: &Path) {
     }
 }
 
+/// Resolve `~/.jcode`. A test build never resolves the developer's real one:
+/// with `JCODE_HOME` unset it gets [`isolated_test_home`]. Every caller below
+/// the `jcode-base` wrapper (active_pids, sessions, ...) shares this rule, so a
+/// test guard that restores `JCODE_HOME` to unset cannot send them home.
 pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
     }
-
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    Ok(home.join(".jcode"))
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = std::env::var_os("JCODE_TEST_ISOLATED_HOME") {
+        // A child-process test that needs a specific home pins it here.
+        return Ok(PathBuf::from(pinned));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    return Ok(isolated_test_home().to_path_buf());
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
+        Ok(home.join(".jcode"))
+    }
 }
 
 /// Whether `JCODE_HOME` redirects this process away from the user's real

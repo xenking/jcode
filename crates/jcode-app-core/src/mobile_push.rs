@@ -791,7 +791,7 @@ fn record(
             None => String::new(),
         }
     ));
-    let Some(dir) = dirs::home_dir().map(|h| h.join(".jcode").join("logs")) else {
+    let Some(dir) = crate::storage::jcode_dir().ok().map(|dir| dir.join("logs")) else {
         return;
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {

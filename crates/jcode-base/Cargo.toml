@@ -134,7 +134,7 @@ default = ["bedrock"]
 # `pub` so downstream crates' test targets can reach them. Enabled as a
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
-test-support = ["test-isolated-hooks"]
+test-support = ["test-isolated-hooks", "jcode-storage/test-support"]
 # Suppress the machine's hooks in test builds unless a test opts in with
 # `hooks::TestHooksGuard::allow`. Enabled as a dev-dependency feature by
 # jcode-app-core, so it applies to test/bench/example builds only: unit tests must
@@ -166,6 +166,9 @@ tikv-jemalloc-sys = { version = "0.6", optional = true }
 global-hotkey = "0.7"
 
 [dev-dependencies]
+# base's own tests resolve storage-level homes (active_pids, sessions) the same
+# way as downstream tests: never the developer's ~/.jcode.
+jcode-storage = { path = "../jcode-storage", features = ["test-support"] }
 # The browserless login integration test installs the real terminal presenter.
 jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 # Dev-only cycle (cargo permits dev-dependencies on dependents): base's
