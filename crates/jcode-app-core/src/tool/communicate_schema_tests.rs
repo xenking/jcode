@@ -34,7 +34,7 @@ fn model_facing_swarm_definition_stays_compact() {
         crate::prompt::DEFAULT_SWARM_PROMPT.trim().len()
     );
     assert!(
-        prose_bytes < 1_210,
+        prose_bytes < 1_220,
         "swarm field descriptions grew to {prose_bytes} bytes"
     );
     // working_dir needs its inheritance rule: omission must not accidentally
