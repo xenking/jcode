@@ -157,7 +157,9 @@ fn snapshot_joins_published_meters_and_the_ledger_for_the_engine() {
     assert!(!super::snapshot(&policy, now).accounts.contains_key(&key));
 
     // Ledger spend crossing the budget blocks the account in the engine.
-    record_priced_spend("snapshot-test-hf", "m", 6.0, 1);
+    // Stamped with the test's own `now`: `record_priced_spend` reads the wall
+    // clock, and a row one second after `now` is outside the window.
+    record_ledger_row("snapshot-test-hf", "m", 6.0, 1, now);
     SNAPSHOTS.invalidate();
     let snapshot = super::snapshot(&policy, now);
     assert_eq!(snapshot.ledger["hf-snapshot-test"], 6.0);
