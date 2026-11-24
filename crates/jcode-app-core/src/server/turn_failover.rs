@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, mpsc};
 const MAX_SERVER_FAILOVERS: usize = 3;
 
 /// Whether `error` is the kind of failure the account router should handle.
-fn error_wants_failover(error: &str) -> bool {
+pub(super) fn error_wants_failover(error: &str) -> bool {
     if crate::provider::parse_failover_prompt_message(error).is_some() {
         return true;
     }
@@ -295,6 +295,9 @@ pub(super) async fn process_reserved_message_with_server_failover(
     )
     .await;
     let fallbacks = effective_worker_fallbacks(&guard);
+    // The routing policy handles account failures for every client, not just
+    // the ones that asked for server-side failover.
+    let enabled = enabled || (result.is_err() && super::routing_turn::owns_failover(&guard));
     if !enabled && result.is_err() && fallbacks.is_empty() {
         return result;
     }
@@ -812,6 +815,25 @@ pub(super) async fn retry_turn_with_server_failover(
         // Never re-ask after the model already produced a partial reply.
         if attempt_produced_reply(agent, attempt_start) {
             break;
+        }
+        // With routing in `auto` mode the policy owns account choice, so the
+        // pool rotation below stays out of the way for covered providers.
+        match super::routing_turn::on_failure(agent, &message, &event_tx).await {
+            Some(super::routing_turn::FailureRoute::Retry) => {
+                attempts += 1;
+                attempt_start = agent.message_count();
+                result = agent
+                    .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
+                    .await;
+                continue;
+            }
+            Some(super::routing_turn::FailureRoute::Surface(context)) => {
+                if let Some(context) = context {
+                    result = result.map_err(|error| error.context(context));
+                }
+                break;
+            }
+            None => {}
         }
         let Some(target) = pick_failover_target(agent, &message) else {
             if crate::provider::parse_failover_prompt_message(&message).is_none()

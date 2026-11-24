@@ -800,6 +800,13 @@ pub(crate) enum RoutingCommand {
     },
     /// Drop the hold
     Unstick,
+    /// Seed `[[routing.accounts]]` from `account-pool.json`: the pool's priority,
+    /// and `metered` for API keys. The pool stays and `[routing] mode` is not changed
+    ImportPool {
+        /// Show what would be written and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

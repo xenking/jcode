@@ -1,0 +1,563 @@
+//! Service tests against fixture meters, egress and clocks.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use jcode_routing_policy::config::{
+    AccountConfig, AccountKind, EgressConfig, OnLimit, PriorityConfig, RoutingConfig, RoutingMode,
+    Unit,
+};
+use jcode_routing_policy::state::RoutingState;
+use jcode_routing_policy::{
+    AccountId, AccountState, Availability, Policy, Reading, Role, Snapshot, Window,
+};
+use tokio::sync::mpsc;
+
+use super::*;
+use crate::protocol::{RoutingGateChoice, RoutingIntentAction, ServerEvent};
+
+const NOW: i64 = 1_800_000_000;
+
+struct FakeEnv {
+    now: AtomicI64,
+    routing: Mutex<RoutingConfig>,
+    readings: Mutex<BTreeMap<AccountId, Vec<Reading>>>,
+    availability: Mutex<BTreeMap<AccountId, Availability>>,
+    state: Mutex<RoutingState>,
+    home: tempfile::TempDir,
+}
+
+impl FakeEnv {
+    fn new(mode: RoutingMode, accounts: &[(&str, u32)]) -> Arc<Self> {
+        let routing = RoutingConfig {
+            mode,
+            accounts: accounts
+                .iter()
+                .map(|(id, priority)| AccountConfig {
+                    id: (*id).into(),
+                    kind: AccountKind::Subscription,
+                    priority: PriorityConfig::Flat(*priority),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        Arc::new(Self {
+            now: AtomicI64::new(NOW),
+            routing: Mutex::new(routing),
+            readings: Mutex::default(),
+            availability: Mutex::default(),
+            state: Mutex::default(),
+            home: tempfile::tempdir().unwrap(),
+        })
+    }
+
+    fn set_used(&self, account: &str, used: f64) {
+        let reading = Reading {
+            window: Window::hours(5),
+            unit: Unit::Percent,
+            used,
+            limit: None,
+            resets_at: Some(self.now() + 3_600),
+            model_class: None,
+        };
+        self.readings
+            .lock()
+            .unwrap()
+            .insert(AccountId::parse(account).unwrap(), vec![reading]);
+    }
+
+    fn on_limit(&self, account: &str, on_limit: OnLimit) {
+        for entry in &mut self.routing.lock().unwrap().accounts {
+            if entry.id == account {
+                entry.on_limit = on_limit;
+            }
+        }
+    }
+
+    fn log_lines(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(self.home.path().join("routing-decisions.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl RoutingEnv for FakeEnv {
+    fn now(&self) -> i64 {
+        self.now.load(Ordering::SeqCst)
+    }
+
+    fn routing(&self) -> (RoutingConfig, BTreeMap<String, EgressConfig>) {
+        (self.routing.lock().unwrap().clone(), BTreeMap::new())
+    }
+
+    fn snapshot(&self, _policy: &Policy, _now: i64) -> Snapshot {
+        let accounts = self
+            .readings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, readings)| {
+                (
+                    id.clone(),
+                    AccountState {
+                        readings: readings.clone(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        Snapshot {
+            accounts,
+            ..Default::default()
+        }
+    }
+
+    async fn availability(&self, account: &AccountId) -> Availability {
+        self.availability
+            .lock()
+            .unwrap()
+            .get(account)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn state(&self) -> RoutingState {
+        self.state.lock().unwrap().clone()
+    }
+
+    fn update_state(
+        &self,
+        now: i64,
+        change: &mut (dyn FnMut(&mut RoutingState) + Send),
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        change(&mut state);
+        state.prune(now);
+        Ok(())
+    }
+
+    fn home(&self) -> Option<PathBuf> {
+        Some(self.home.path().to_path_buf())
+    }
+}
+
+struct Sink(mpsc::UnboundedSender<ServerEvent>);
+
+#[async_trait]
+impl GateSink for Sink {
+    fn send(&self, event: ServerEvent) {
+        let _ = self.0.send(event);
+    }
+
+    async fn closed(&self) {
+        std::future::pending::<()>().await;
+    }
+}
+
+fn input(current: &str, seam: Seam, role: Role) -> TurnInput {
+    TurnInput {
+        session_id: "session-1".into(),
+        parent_session: None,
+        model: "claude-opus-5-5".into(),
+        provider: "claude".into(),
+        role,
+        current: AccountId::parse(current),
+        seam,
+    }
+}
+
+fn account(id: &str) -> AccountId {
+    AccountId::parse(id).unwrap()
+}
+
+#[tokio::test]
+async fn mode_off_is_inactive_and_leaves_no_trace() {
+    let env = FakeEnv::new(RoutingMode::Off, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    let service = RoutingService::new(env.clone());
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Start, Role::Interactive))
+        .await;
+
+    assert_eq!(plan, Plan::Inactive);
+    assert!(env.log_lines().is_empty());
+    assert!(!env.home.path().join("routing-health.json").exists());
+}
+
+#[tokio::test]
+async fn provider_without_routing_accounts_is_never_blocked() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1)]);
+    let service = RoutingService::new(env.clone());
+    let mut turn = input("openai:fox", Seam::Start, Role::Interactive);
+    turn.provider = "openai".into();
+    turn.model = "gpt-6.1-sol".into();
+
+    assert_eq!(service.plan(&turn).await, Plan::Inactive);
+    assert!(!service.applies("openai", "gpt-6.1-sol"));
+    assert!(service.applies("claude", "claude-opus-5-5"));
+}
+
+#[tokio::test]
+async fn shadow_logs_the_decision_and_changes_nothing() {
+    let env = FakeEnv::new(RoutingMode::Shadow, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    let service = RoutingService::new(env.clone());
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Start, Role::Interactive))
+        .await;
+
+    assert_eq!(plan, Plan::Observed);
+    let lines = env.log_lines();
+    assert_eq!(lines.len(), 1, "one line per turn");
+    let line = &lines[0];
+    assert_eq!(line["mode"], "shadow");
+    assert_eq!(line["session"], "session-1");
+    assert_eq!(line["model"], "claude-opus-5-5");
+    assert_eq!(line["current"], "claude:a");
+    assert_eq!(line["decision"], "move");
+    assert_eq!(line["account"], "claude:b");
+    assert_eq!(line["applied"], false);
+    assert!(line["reason"].as_str().unwrap().contains("claude:b"));
+    assert!(line["time"].as_str().unwrap().starts_with("2027-"));
+    assert_eq!(env.state(), RoutingState::default(), "no intent was written");
+}
+
+#[tokio::test]
+async fn auto_moves_a_fresh_session_off_a_spent_account() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    env.set_used("claude:b", 10.0);
+    let service = RoutingService::new(env.clone());
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Start, Role::Interactive))
+        .await;
+
+    let Plan::Move(outcome) = plan else {
+        panic!("expected a move, got {plan:?}");
+    };
+    assert_eq!(outcome.account, account("claude:b"));
+    assert_eq!(outcome.pending, None);
+    assert!(matches!(
+        outcome.event(),
+        ServerEvent::RoutingDecision { ref account, pending: None, .. } if account == "claude:b"
+    ));
+    assert_eq!(env.log_lines()[0]["applied"], true);
+}
+
+#[tokio::test]
+async fn warm_session_records_a_pending_move_and_cold_seam_takes_it() {
+    // claude:a is healthy but ranks below claude:b.
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 2), ("claude:b", 1)]);
+    env.set_used("claude:a", 20.0);
+    env.set_used("claude:b", 10.0);
+    let service = RoutingService::new(env.clone());
+
+    let warm = service
+        .plan(&input("claude:a", Seam::Warm, Role::Interactive))
+        .await;
+    let Plan::Stay(outcome) = warm else {
+        panic!("a warm session must not move, got {warm:?}");
+    };
+    assert_eq!(outcome.account, account("claude:a"));
+    assert_eq!(outcome.pending, Some(account("claude:b")));
+    assert_eq!(env.log_lines()[0]["decision"], "pending");
+
+    let cold = service
+        .plan(&input("claude:a", Seam::Cold, Role::Interactive))
+        .await;
+    assert!(matches!(cold, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+#[tokio::test]
+async fn warm_session_still_moves_when_the_current_account_is_spent() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 99.0);
+    let service = RoutingService::new(env.clone());
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Warm, Role::Interactive))
+        .await;
+
+    assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+#[tokio::test]
+async fn an_explicit_switch_moves_a_warm_session_immediately() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    service
+        .apply_intent(
+            "session-1",
+            None,
+            RoutingIntentAction::Switch {
+                account: Some("claude:b".into()),
+            },
+        )
+        .unwrap();
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Warm, Role::Interactive))
+        .await;
+
+    assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+async fn gate_scenario(
+    answer: RoutingGateChoice,
+) -> (Result<Plan, String>, Vec<ServerEvent>, Arc<FakeEnv>) {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.on_limit("claude:a", OnLimit::Ask);
+    env.set_used("claude:a", 99.0);
+    env.set_used("claude:b", 10.0);
+    let service = Arc::new(RoutingService::new(env.clone()));
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let turn = input("claude:a", Seam::Warm, Role::Interactive);
+
+    let routed = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.route(&turn, &Sink(tx)).await }
+    });
+    let mut seen = Vec::new();
+    let gate_id = loop {
+        let event = events.recv().await.expect("the gate opens");
+        if let ServerEvent::RoutingGate { gate_id, .. } = &event {
+            let gate_id = gate_id.clone();
+            seen.push(event);
+            break gate_id;
+        }
+        seen.push(event);
+    };
+    assert!(
+        !service.answer_gate("someone-else", &gate_id, RoutingGateChoice::Cancel),
+        "only the gated session may answer"
+    );
+    assert!(service.answer_gate("session-1", &gate_id, answer));
+    let result = routed.await.unwrap();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    (result, seen, env)
+}
+
+#[tokio::test]
+async fn gate_switch_answer_writes_the_intent_and_decides_again() {
+    let (result, events, env) = gate_scenario(RoutingGateChoice::Switch {
+        account: "claude:b".into(),
+    })
+    .await;
+
+    let Ok(Plan::Move(outcome)) = result else {
+        panic!("expected a move after the switch answer, got {result:?}");
+    };
+    assert_eq!(outcome.account, account("claude:b"));
+    let ServerEvent::RoutingGate { options, .. } = &events[0] else {
+        panic!("first event is the gate, got {events:?}");
+    };
+    assert!(options.iter().any(|option| matches!(
+        option,
+        crate::protocol::RoutingGateOption::Switch { account, .. } if account == "claude:b"
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::RoutingGateClosed { .. })),
+        "clients are told the gate is over"
+    );
+    assert_eq!(
+        env.state().sessions["session-1"].switch.as_deref(),
+        Some("claude:b")
+    );
+}
+
+#[tokio::test]
+async fn gate_ack_answer_keeps_spending_on_the_current_account() {
+    let (result, _, env) = gate_scenario(RoutingGateChoice::Ack { minutes: 30 }).await;
+
+    let Ok(Plan::Stay(outcome)) = result else {
+        panic!("expected to stay after an ack, got {result:?}");
+    };
+    assert_eq!(outcome.account, account("claude:a"));
+    assert_eq!(env.state().acks.len(), 1);
+    assert_eq!(env.state().acks[0].until, NOW + 30 * 60);
+}
+
+#[tokio::test]
+async fn gate_cancel_fails_the_turn() {
+    let (result, _, _) = gate_scenario(RoutingGateChoice::Cancel).await;
+
+    assert!(result.unwrap_err().contains("cancelled"));
+}
+
+#[tokio::test]
+async fn gate_ignores_an_account_it_did_not_offer() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.on_limit("claude:a", OnLimit::Ask);
+    env.set_used("claude:a", 99.0);
+    let service = Arc::new(RoutingService::new(env.clone()));
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let turn = input("claude:a", Seam::Warm, Role::Interactive);
+    let routed = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.route(&turn, &Sink(tx)).await }
+    });
+    let ServerEvent::RoutingGate { gate_id, .. } = events.recv().await.unwrap() else {
+        panic!("gate first");
+    };
+
+    service.answer_gate(
+        "session-1",
+        &gate_id,
+        RoutingGateChoice::Switch {
+            account: "claude:zzz".into(),
+        },
+    );
+    service.answer_gate("session-1", &gate_id, RoutingGateChoice::Cancel);
+
+    assert!(routed.await.unwrap().is_err());
+    assert!(env.state().sessions.is_empty(), "the bogus switch wrote nothing");
+}
+
+#[tokio::test]
+async fn a_subagent_is_blocked_instead_of_gated() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.on_limit("claude:a", OnLimit::Ask);
+    env.set_used("claude:a", 99.0);
+    let service = RoutingService::new(env.clone());
+    let (tx, mut events) = mpsc::unbounded_channel();
+
+    let result = service
+        .route(&input("claude:a", Seam::Warm, Role::Subagent), &Sink(tx))
+        .await;
+
+    assert!(result.unwrap_err().contains("claude:a"));
+    assert!(events.try_recv().is_err(), "no gate event for a subagent");
+}
+
+#[tokio::test]
+async fn a_definitive_failure_evicts_and_the_next_decision_moves_off() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let turn = input("claude:a", Seam::Cold, Role::Interactive);
+    assert!(matches!(service.plan(&turn).await, Plan::Stay(_)));
+
+    let availability = service.record_failure(&account("claude:a"), true);
+    assert!(matches!(availability, Availability::Evicted { .. }));
+
+    let plan = service.plan(&turn).await;
+    assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+#[tokio::test]
+async fn ordinary_failures_evict_only_after_the_configured_streak() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let a = account("claude:a");
+
+    assert_eq!(service.record_failure(&a, false), Availability::Ready);
+    assert_eq!(service.record_failure(&a, false), Availability::Ready);
+    assert!(matches!(
+        service.record_failure(&a, false),
+        Availability::Evicted { .. }
+    ));
+    service.record_success(&a);
+}
+
+#[tokio::test]
+async fn eviction_and_burn_history_survive_a_daemon_reload() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 40.0);
+    let service = RoutingService::new(env.clone());
+    let turn = input("claude:a", Seam::Cold, Role::Interactive);
+    service.plan(&turn).await;
+    env.now.store(NOW + 3_600, Ordering::SeqCst);
+    env.set_used("claude:a", 60.0);
+    service.plan(&turn).await;
+    service.record_failure(&account("claude:a"), true);
+
+    let reloaded = RoutingService::new(env.clone());
+    let learned = reloaded.learned();
+    assert_eq!(
+        learned.ring(&account("claude:a")).burn_rate(NOW + 3_600),
+        Some(20.0),
+        "20 points over the hour survive the reload"
+    );
+    assert!(matches!(
+        learned.availability(&account("claude:a"), NOW + 3_600),
+        Availability::Evicted { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_account_behind_a_down_required_proxy_is_skipped() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.availability
+        .lock()
+        .unwrap()
+        .insert(account("claude:a"), Availability::EgressDown);
+    let service = RoutingService::new(env.clone());
+
+    let plan = service
+        .plan(&input("claude:a", Seam::Start, Role::Interactive))
+        .await;
+
+    assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}
+
+#[tokio::test]
+async fn intents_are_validated_and_reported() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let current = account("claude:a");
+
+    assert!(
+        service
+            .apply_intent(
+                "session-1",
+                Some(&current),
+                RoutingIntentAction::Pin {
+                    account: Some("claude:nope".into())
+                }
+            )
+            .unwrap_err()
+            .contains("not in [[routing.accounts]]")
+    );
+    service
+        .apply_intent(
+            "session-1",
+            Some(&current),
+            RoutingIntentAction::Pin {
+                account: Some("claude:b".into()),
+            },
+        )
+        .unwrap();
+    service
+        .apply_intent(
+            "session-1",
+            Some(&current),
+            RoutingIntentAction::Paid { mode: "2h".into() },
+        )
+        .unwrap();
+    let text = service
+        .apply_intent("session-1", Some(&current), RoutingIntentAction::Status)
+        .unwrap();
+
+    assert!(text.contains("routing: auto"), "{text}");
+    assert!(text.contains("pin: claude:b"), "{text}");
+    assert!(text.contains("paid: allowed for 2h"), "{text}");
+    assert!(text.contains("* claude:a"), "current account is marked: {text}");
+
+    let pinned = service
+        .plan(&input("claude:a", Seam::Cold, Role::Interactive))
+        .await;
+    assert!(matches!(pinned, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
+}

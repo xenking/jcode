@@ -1521,3 +1521,40 @@ fn spawn_account_switch_refresh(
 #[cfg(test)]
 #[path = "provider_control_busy_tests.rs"]
 mod tests;
+
+/// Binds this session to a saved OAuth login for the routing service, without
+/// touching the global login. Announces the new credential like a manual
+/// account switch, and stays silent when the account cannot be bound.
+pub(super) fn bind_oauth_account(
+    agent: &mut Agent,
+    provider_kind: &str,
+    account_label: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    match provider_kind {
+        "anthropic" => {
+            crate::provider::clear_claude_provider_unavailability_for_account_label(Some(
+                account_label,
+            ));
+        }
+        "openai" => {
+            crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+                account_label,
+            ));
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
+    let current = agent.provider_model();
+    let selection = account_switch_selection(agent, provider_kind, account_label)?;
+    agent.set_route_selection(&selection)?;
+    agent.reset_provider_session();
+    let summary = (
+        agent.provider_model(),
+        agent.provider_name(),
+        agent.active_resolved_credential(),
+        agent.provider_reasoning_effort(),
+    );
+    send_model_changed_result(0, Ok(summary), current, agent, client_event_tx);
+    Ok(())
+}

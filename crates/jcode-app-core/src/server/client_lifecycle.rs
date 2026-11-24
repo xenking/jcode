@@ -3924,11 +3924,12 @@ pub(super) async fn handle_client(
             }
 
             Request::RoutingGateAnswer { id, gate_id, choice } => {
-                super::routing_requests::handle_gate_answer(id, gate_id, choice, &client_event_tx);
+                super::routing_requests::handle_gate_answer(id, &client_session_id, gate_id, choice, &client_event_tx);
             }
 
             Request::RoutingIntent { id, action } => {
-                super::routing_requests::handle_intent(id, action, &client_session_id, &client_event_tx);
+                let current = agent.try_lock().ok().and_then(|guard| super::routing_turn::current_account(&guard));
+                super::routing_requests::handle_intent(id, action, &client_session_id, current, &client_event_tx);
             }
 
             // These are handled via channels, not direct requests from TUI
@@ -4268,6 +4269,7 @@ pub(super) async fn process_reserved_message_with_role(
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
+    super::routing_turn::before_turn(agent, &event_tx).await?;
     let result = agent
         .run_reserved_streaming_mpsc(
             lease,
@@ -4281,6 +4283,7 @@ pub(super) async fn process_reserved_message_with_role(
         )
         .await;
     if result.is_ok() {
+        super::routing_turn::after_turn(agent);
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "turn_completed",

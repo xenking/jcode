@@ -100,7 +100,7 @@ impl Default for BurnRing {
 /// configured `evict_after` count and `evict_for` seconds, and reads the
 /// resulting [`Availability`]. A success clears the consecutive-failure count
 /// but never shortens an eviction; an eviction lapses on its own at `until`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthTracker {
     consecutive_failures: u32,
     evicted_until: Option<i64>,

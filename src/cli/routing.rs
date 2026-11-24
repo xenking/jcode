@@ -60,6 +60,7 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
             println!("hold cleared");
             Ok(())
         }
+        RoutingCommand::ImportPool { dry_run } => import_pool(dry_run),
     }
 }
 
@@ -234,4 +235,74 @@ fn until_text(until: i64, now: i64) -> String {
         (h, 0) => format!("{h}h"),
         (h, m) => format!("{h}h {m}m"),
     }
+}
+
+fn import_pool(dry_run: bool) -> Result<()> {
+    use crate::auth::account_pool::AccountPool;
+    use crate::provider_catalog::{LoginProviderAuthKind, login_providers};
+
+    let pool = AccountPool::load();
+    let config = crate::config::config();
+    let existing: Vec<String> = config
+        .routing
+        .accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .collect();
+    let providers = login_providers();
+    let plan = crate::routing_import::plan(
+        &pool,
+        &existing,
+        |key| pool.priority(key),
+        |key| {
+            providers
+                .iter()
+                .any(|login| login.id == key && login.auth_kind == LoginProviderAuthKind::ApiKey)
+        },
+    );
+    for skipped in &plan.skipped {
+        println!("skipped {}: {}", skipped.key, skipped.reason);
+    }
+    if plan.add.is_empty() {
+        println!("nothing to import: every account in account-pool.json is already routed or excluded");
+        return Ok(());
+    }
+    for account in &plan.add {
+        println!(
+            "{} {}  kind {:?}  priority {}",
+            if dry_run { "would add" } else { "added" },
+            account.id,
+            account.kind,
+            account.priority
+        )
+        ;
+    }
+    if dry_run {
+        println!("dry run: config.toml was not changed");
+        return Ok(());
+    }
+    let path = crate::config::Config::path().context("cannot locate config.toml")?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let updated = crate::routing_import::append_accounts(&text, &plan.add)?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, &updated).with_context(|| format!("cannot write {}", tmp.display()))?;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, &path).with_context(|| format!("cannot replace {}", path.display()))?;
+    println!(
+        "wrote {} account(s) to {}; account-pool.json is unchanged and [routing] mode stays {}",
+        plan.add.len(),
+        path.display(),
+        match config.routing.mode {
+            RoutingMode::Off => "off",
+            RoutingMode::Shadow => "shadow",
+            RoutingMode::Auto => "auto",
+        }
+    );
+    Ok(())
 }

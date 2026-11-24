@@ -21,6 +21,7 @@ use profile::profile_tool_selection;
 mod prompting;
 pub(crate) mod provider;
 mod reload_resume;
+mod routing;
 #[cfg(test)]
 mod reload_resume_tests;
 mod response_recovery;
