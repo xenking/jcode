@@ -2,7 +2,13 @@ use crate::client::Transport;
 use crate::errors::{Error, ErrorKind, Result};
 use futures::{SinkExt, StreamExt};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::IpAddr;
+#[cfg(any(not(unix), test))]
+use std::net::TcpListener;
+#[cfg(not(unix))]
+use std::net::TcpStream as LocalStream;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as LocalStream;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -55,6 +61,21 @@ pub fn pair_harness(
                 "Could not initialize pairing client",
             )
         })?;
+    let health = client
+        .get(endpoint(base_url, "/health")?)
+        .send()
+        .map_err(|_| Error::new(ErrorKind::ConnectFailed, "Could not reach pairing gateway"))?;
+    #[derive(serde::Deserialize)]
+    struct Health {
+        #[serde(default)]
+        harness_v1: bool,
+    }
+    if !health.status().is_success() || !read_json::<Health>(health)?.harness_v1 {
+        return Err(Error::new(
+            ErrorKind::ConnectFailed,
+            "Harness pairing is not enabled on this server",
+        ));
+    }
     let response = client.post(url).json(&serde_json::json!({"code": code, "device_id": device_id, "device_name": device_name, "scope": "harness"})).send()
         .map_err(|_| Error::new(ErrorKind::ConnectFailed, "Could not reach pairing gateway"))?;
     if !response.status().is_success() {
@@ -63,23 +84,11 @@ pub fn pair_harness(
             format!("Pairing rejected ({})", response.status()),
         ));
     }
-    let mut body = Vec::new();
-    response
-        .take(65537)
-        .read_to_end(&mut body)
-        .map_err(|_| Error::new(ErrorKind::Protocol, "Could not read pairing response"))?;
-    if body.len() > 65536 {
-        return Err(Error::new(
-            ErrorKind::Protocol,
-            "Pairing response too large",
-        ));
-    }
     #[derive(serde::Deserialize)]
     struct Response {
         token: String,
     }
-    let response: Response = serde_json::from_slice(&body)
-        .map_err(|_| Error::new(ErrorKind::Protocol, "Invalid pairing response"))?;
+    let response: Response = read_json(response)?;
     if response.token.len() != 64 || !response.token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Error::new(ErrorKind::Protocol, "Invalid pairing token"));
     }
@@ -88,7 +97,24 @@ pub fn pair_harness(
     })
 }
 
-struct PairedTransport(TcpStream);
+fn read_json<T: serde::de::DeserializeOwned>(response: reqwest::blocking::Response) -> Result<T> {
+    const LIMIT: usize = 64 * 1024;
+    let mut body = Vec::new();
+    response
+        .take(LIMIT as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| Error::new(ErrorKind::Protocol, "Could not read gateway response"))?;
+    if body.len() > LIMIT {
+        return Err(Error::new(
+            ErrorKind::Protocol,
+            "Gateway response too large",
+        ));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|_| Error::new(ErrorKind::Protocol, "Invalid gateway response"))
+}
+
+struct PairedTransport(LocalStream);
 impl Transport for PairedTransport {
     fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         let stream = self.0.try_clone().ok()?;
@@ -103,6 +129,22 @@ impl Transport for PairedTransport {
             .map_err(|_| Error::new(ErrorKind::Transport, "Could not split paired transport"))?;
         Ok((Box::new(BufReader::new(self.0)), Box::new(writer)))
     }
+}
+
+#[cfg(unix)]
+fn local_pair() -> std::io::Result<(LocalStream, LocalStream)> {
+    LocalStream::pair()
+}
+
+#[cfg(not(unix))]
+fn local_pair() -> std::io::Result<(LocalStream, LocalStream)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let client = LocalStream::connect(listener.local_addr()?)?;
+    let (peer, address) = listener.accept()?;
+    if address != client.local_addr()? {
+        return Err(std::io::Error::other("Unexpected local transport peer"));
+    }
+    Ok((client, peer))
 }
 
 pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
@@ -126,26 +168,8 @@ pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
             .map_err(|_| Error::new(ErrorKind::InvalidOption, "Invalid pairing token"))?;
     authorization.set_sensitive(true);
     request.headers_mut().insert("Authorization", authorization);
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let (client, peer) = local_pair()
         .map_err(|_| Error::new(ErrorKind::Transport, "Could not create local transport"))?;
-    let client = TcpStream::connect(
-        listener
-            .local_addr()
-            .map_err(|_| Error::new(ErrorKind::Transport, "Could not create local transport"))?,
-    )
-    .map_err(|_| Error::new(ErrorKind::Transport, "Could not create local transport"))?;
-    let expected_peer = client
-        .local_addr()
-        .map_err(|_| Error::new(ErrorKind::Transport, "Could not identify local transport"))?;
-    let (peer, address) = listener
-        .accept()
-        .map_err(|_| Error::new(ErrorKind::Transport, "Could not create local transport"))?;
-    if address != expected_peer {
-        return Err(Error::new(
-            ErrorKind::Transport,
-            "Unexpected local transport peer",
-        ));
-    }
     peer.set_nonblocking(true)
         .map_err(|_| Error::new(ErrorKind::Transport, "Could not configure local transport"))?;
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -160,9 +184,13 @@ pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
         runtime.block_on(async move {
             let connected = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(request)).await;
             let ws = match connected { Ok(Ok((ws, _))) => ws, _ => { let _ = ready_tx.send(false); return; } };
-            let Ok(stream) = tokio::net::TcpStream::from_std(peer) else { let _ = ready_tx.send(false); return; };
+            #[cfg(unix)]
+            let stream = tokio::net::UnixStream::from_std(peer);
+            #[cfg(not(unix))]
+            let stream = tokio::net::TcpStream::from_std(peer);
+            let Ok(stream) = stream else { let _ = ready_tx.send(false); return; };
             if ready_tx.send(true).is_err() { return; }
-            let (read, mut write) = stream.into_split();
+            let (read, mut write) = tokio::io::split(stream);
             let mut lines = tokio::io::BufReader::new(read).lines();
             let (mut sink, mut source) = ws.split();
             loop {
