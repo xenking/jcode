@@ -1558,3 +1558,54 @@ pub(super) fn bind_oauth_account(
     send_model_changed_result(0, Ok(summary), current, agent, client_event_tx);
     Ok(())
 }
+
+/// Binds this session to the provider's API-key route (`claude`, `openai` in
+/// the routing policy) for the routing service, without touching the global
+/// credential choice. The session keeps its model and moves like an account
+/// switch: same announcement, fresh provider session.
+pub(super) fn bind_api_key_route(
+    agent: &mut Agent,
+    provider_kind: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    use jcode_provider_core::{ActiveProvider, RuntimeKey};
+    let (target, runtime_key, method, provider_label) = match provider_kind {
+        "anthropic" => (
+            ActiveProvider::Claude,
+            RuntimeKey::AnthropicApiKey,
+            "claude-api",
+            "Claude",
+        ),
+        "openai" => (
+            ActiveProvider::OpenAI,
+            RuntimeKey::OpenAIApiKey,
+            "openai-api",
+            "OpenAI",
+        ),
+        _ => anyhow::bail!("{provider_kind} has no API-key route to move onto"),
+    };
+    let provider = agent.provider_handle();
+    anyhow::ensure!(
+        jcode_provider_core::parse_provider_hint(provider.name()) == Some(target),
+        "this session does not run on {provider_label}, cannot move onto its API-key route"
+    );
+    let current = agent.provider_model();
+    // A same-provider move must not silently select another model.
+    let selection = RouteSelection {
+        model: provider.model(),
+        runtime_key,
+        api_method: method.to_string(),
+        provider_label: provider_label.to_string(),
+        detail: String::new(),
+    };
+    agent.set_route_selection(&selection)?;
+    agent.reset_provider_session();
+    let summary = (
+        agent.provider_model(),
+        agent.provider_name(),
+        agent.active_resolved_credential(),
+        agent.provider_reasoning_effort(),
+    );
+    send_model_changed_result(0, Ok(summary), current, agent, client_event_tx);
+    Ok(())
+}

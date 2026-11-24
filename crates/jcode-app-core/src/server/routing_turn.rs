@@ -113,7 +113,7 @@ fn turn_input(agent: &Agent, seam: Seam) -> Option<TurnInput> {
 }
 
 /// Binds `account` to the session. The unlabelled Claude and OpenAI ids are the
-/// API-key routes, which a session cannot be moved onto from here.
+/// API-key routes, which a session moves onto like a saved OAuth login.
 fn bind(
     agent: &mut Agent,
     account: &AccountId,
@@ -126,9 +126,10 @@ fn bind(
         ("openai", Some(label)) => {
             super::provider_control::bind_oauth_account(agent, "openai", label, event_tx)
         }
-        ("claude" | "anthropic" | "openai", None) => {
-            anyhow::bail!("cannot move a session onto the API-key route {account}")
+        ("claude" | "anthropic", None) => {
+            super::provider_control::bind_api_key_route(agent, "anthropic", event_tx)
         }
+        ("openai", None) => super::provider_control::bind_api_key_route(agent, "openai", event_tx),
         (provider, label) => {
             if !crate::provider_catalog::api_key_provider_takes_labels(provider) {
                 anyhow::bail!(
@@ -276,3 +277,7 @@ pub(super) async fn on_failure(
         Err(reason) => Some(FailureRoute::Surface(Some(format!("routing: {reason}")))),
     }
 }
+
+#[cfg(test)]
+#[path = "routing_turn_tests.rs"]
+mod tests;
