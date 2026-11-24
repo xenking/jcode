@@ -499,3 +499,22 @@ fn drain_skips_unchanged_daemon_and_never_waits_on_initiator() {
         ["initiator", "wait-1", "wait-2", "wait-other", "worker"]
     );
 }
+
+#[test]
+fn reviewed_drain_waits_for_computation_but_not_a_checkpointable_question() {
+    let (_dir, _store, mut journal) = fixture();
+    journal.intent.reviewed = true;
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let _raccoon = activity.admit("session_raccoon_1").unwrap();
+    let _ask = activity.in_tool_call("session_raccoon_1", "ask", "question");
+    let _turkey = activity.admit("session_turkey_2").unwrap();
+
+    let snapshot = activity.snapshot();
+    assert!(snapshot.session("session_raccoon_1").unwrap().is_checkpointable());
+    for serving in ["abcdef123456", "0000000"] {
+        let blockers = drain_blockers(&snapshot, &journal, serving);
+        assert_eq!(blockers.iter().map(|session| session.session_id.as_str()).collect::<Vec<_>>(), ["session_turkey_2"]);
+    }
+    journal.intent.now = true;
+    assert!(drain_blockers(&snapshot, &journal, "0000000").is_empty());
+}
