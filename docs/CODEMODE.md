@@ -72,6 +72,10 @@ one valid call. For example, `agentgrep` trace expects a `terms` array with
 DSL entries such as `['subject:auth_status', 'relation:rendered']`. Repair the
 failed step rather than replaying successful calls with side effects.
 
+A script that starts while a never-listed MCP server is still on its first
+connection waits for it (up to 15 s), so its tools are there. A warm session
+never waits.
+
 Report shape returned to the model:
 
 ```
@@ -277,5 +281,3 @@ through the `*_jsc` crates).
   reprinted text.
 - Nested calls are not shown as separate transcript tool cards. The receipt is
   the record.
-- MCP schemas come from the registry's cached catalog. A server that has
-  never been listed is invisible until `mcp` connects it once.

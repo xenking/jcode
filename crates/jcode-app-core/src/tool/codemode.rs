@@ -26,6 +26,9 @@ use std::time::Duration;
 /// `batch` (pointless inside a script that already has `Promise.all`).
 const EXCLUDED: &[&str] = &["codemode", "batch"];
 
+/// Longest a script waits for never-listed MCP servers to finish connecting.
+const COLD_MCP_SERVER_WAIT: Duration = Duration::from_secs(15);
+
 /// Maximum characters of the final report returned to the model.
 const MAX_REPORT_CHARS: usize = 60_000;
 const MIN_OUTPUT_TOKENS: usize = 512;
@@ -433,6 +436,13 @@ impl Tool for CodemodeTool {
             );
         }
 
+        // A server that was never listed has no cached tools to advertise and
+        // connects in the background at session start. A script launched during
+        // that window would otherwise find none of its tools, so wait for it
+        // (bounded; a warm session returns immediately).
+        registry
+            .wait_for_cold_mcp_servers(COLD_MCP_SERVER_WAIT)
+            .await;
         let mut output_schemas = registry.output_schemas().await;
         let tools: Vec<ToolInfo> = registry
             .definitions_for_session(&ctx.session_id)

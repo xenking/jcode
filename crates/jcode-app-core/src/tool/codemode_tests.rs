@@ -810,3 +810,99 @@ async fn mcp_fake_server_end_to_end() {
     assert!(!out.contains("yyyyyyyyyy"), "{out}");
     assert!(out.len() < 4_000, "{}", out.len());
 }
+
+struct LateMcpTool;
+
+#[async_trait::async_trait]
+impl Tool for LateMcpTool {
+    fn name(&self) -> &str {
+        "ping"
+    }
+
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
+        Some(("late", "ping"))
+    }
+
+    fn description(&self) -> &str {
+        "Ping"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::new("pong"))
+    }
+}
+
+/// A server that was never listed has nothing cached, so its tools only exist
+/// once its first connection finishes. A script that starts in that window
+/// waits for it instead of reporting an empty catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_waits_for_a_never_listed_server_that_is_still_connecting() {
+    let registry = registry().await;
+    registry.mark_mcp_connecting(["late".to_string()]);
+    let publisher = registry.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        publisher
+            .refresh_connected_mcp_server(
+                vec![("mcp__late__ping".into(), Arc::new(LateMcpTool))],
+                "late",
+            )
+            .await;
+        publisher.mark_mcp_settled("late");
+    });
+    let started = std::time::Instant::now();
+    let out = registry
+        .execute(
+            "codemode",
+            json!({ "code": "return [listTools('mcp__late').length, await tools.mcp__late__ping({})];" }),
+            ctx("cold-server"),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(out.contains('1') && out.contains("pong"), "{out}");
+    assert!(started.elapsed() >= Duration::from_millis(250));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_fails_to_connect_does_not_stall_scripts() {
+    let registry = registry().await;
+    registry.mark_mcp_connecting(["down".to_string()]);
+    let publisher = registry.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        publisher.mark_mcp_settled("down");
+    });
+    let started = std::time::Instant::now();
+    let out = registry
+        .execute(
+            "codemode",
+            json!({ "code": "return listTools('mcp__down').length;" }),
+            ctx("down-server"),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(out.contains('0'), "{out}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_warm_session_never_waits() {
+    let registry = registry().await;
+    // Cached tools are already advertised, so a connecting server with tools
+    // is not "cold".
+    registry
+        .reconcile_mcp_tools(vec![("mcp__late__ping".into(), Arc::new(LateMcpTool))])
+        .await;
+    registry.mark_mcp_connecting(["late".to_string()]);
+    let started = std::time::Instant::now();
+    registry
+        .wait_for_cold_mcp_servers(Duration::from_secs(30))
+        .await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+}

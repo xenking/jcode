@@ -405,6 +405,21 @@ fn remember_withheld_call(session_id: &str, key: u64, invocation: &str) {
 struct McpPolicyIndex {
     current: HashMap<String, (String, String)>,
     history: HashMap<(String, String), HashSet<String>>,
+    /// Configured servers whose first connection has not finished. Scripts
+    /// wait briefly for these when they have no tools yet (see
+    /// [`Registry::wait_for_cold_mcp_servers`]).
+    connecting: HashSet<String>,
+    /// Woken whenever a server leaves `connecting`.
+    settled: Arc<tokio::sync::Notify>,
+}
+
+impl McpPolicyIndex {
+    /// A connecting server that has registered no tools yet.
+    fn has_cold_server(&self) -> bool {
+        self.connecting
+            .iter()
+            .any(|server| !self.current.values().any(|(owner, _)| owner == server))
+    }
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -807,6 +822,51 @@ impl Registry {
         }
         defs.retain(|def| !is_fixed_mcp_tool(&def.name));
         defs
+    }
+
+    /// Servers still making their first connection, so a script that runs
+    /// during startup can wait for tools it would otherwise not see.
+    pub(crate) fn mark_mcp_connecting(&self, servers: impl IntoIterator<Item = String>) {
+        self.mcp_policy
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .connecting
+            .extend(servers);
+    }
+
+    pub(crate) fn mark_mcp_settled(&self, server: &str) {
+        let mut index = self.mcp_policy.write().unwrap_or_else(|e| e.into_inner());
+        index.connecting.remove(server);
+        index.settled.notify_waiters();
+    }
+
+    /// Wait up to `max` for servers that are still connecting and have no
+    /// tools registered yet (a server that was never listed has nothing cached
+    /// to advertise). Returns at once when there is nothing to wait for, so a
+    /// warm session pays nothing.
+    pub(crate) async fn wait_for_cold_mcp_servers(&self, max: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + max;
+        loop {
+            let (notify, cold) = {
+                let index = self.mcp_policy.read().unwrap_or_else(|e| e.into_inner());
+                (Arc::clone(&index.settled), index.has_cold_server())
+            };
+            if !cold {
+                return;
+            }
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            // A server may have settled between the check and `enable`.
+            let still_cold = self
+                .mcp_policy
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_cold_server();
+            if !still_cold || tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Whether this call will stop and ask the user. Such a call must stay in
@@ -1803,8 +1863,29 @@ impl Registry {
             // Publish each completed connection independently. A slow handshake
             // must not hide an already-connected peer until an entire batch ends.
             let registry = self.clone();
+            // Scripts that run before a never-listed server finishes its first
+            // connection wait for it (bounded) instead of finding no tools.
+            let pending: Vec<String> = mcp_manager
+                .read()
+                .await
+                .config()
+                .servers
+                .iter()
+                .filter(|(_, cfg)| cfg.is_enabled())
+                .map(|(name, _)| name.clone())
+                .collect();
+            registry.mark_mcp_connecting(pending);
             tokio::spawn(async move {
                 use futures::StreamExt;
+
+                /// Leaves `connecting` on every path out of one connection's
+                /// handling, including the early `continue`s.
+                struct Settled<'a>(&'a Registry, String);
+                impl Drop for Settled<'_> {
+                    fn drop(&mut self) {
+                        self.0.mark_mcp_settled(&self.1);
+                    }
+                }
 
                 let configs: Vec<_> = mcp_manager
                     .read()
@@ -1842,6 +1923,7 @@ impl Registry {
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
                 while let Some((name, result)) = connections.next().await {
+                    let _settled = Settled(&registry, name.clone());
                     if let Err(error) = result {
                         crate::logging::event_rate_limited(
                             crate::logging::LogLevel::Error,
