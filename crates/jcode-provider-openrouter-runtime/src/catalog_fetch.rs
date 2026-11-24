@@ -8,6 +8,13 @@ impl ProviderAuth {
         req: reqwest::RequestBuilder,
         api_base: &str,
     ) -> Result<reqwest::RequestBuilder> {
+        if let Self::WithHeaders { inner, headers } = self {
+            let mut req = Box::pin(inner.apply_catalog(req, api_base)).await?;
+            for (name, value) in headers {
+                req = req.header(name, value);
+            }
+            return Ok(req);
+        }
         // Reuse key-probe rules without changing other providers' auth modes.
         if jcode_base::provider_catalog::api_base_is_anthropic(api_base) {
             match self {

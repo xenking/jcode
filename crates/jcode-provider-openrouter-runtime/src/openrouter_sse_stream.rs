@@ -309,8 +309,7 @@ async fn stream_response(
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
         let hint = if status == reqwest::StatusCode::FORBIDDEN && is_content_filter_error(&body) {
             "Hint: the provider's content filter blocked this request text. Remove or rewrite the flagged text before retrying."
-        } else if matches!(status.as_u16(), 401 | 403) && matches!(&auth, ProviderAuth::None { .. })
-        {
+        } else if matches!(status.as_u16(), 401 | 403) && auth.sends_no_credential() {
             "Hint: the endpoint refused the request. Check its access policy, authentication settings, and route."
         } else if azure_responses {
             match status.as_u16() {

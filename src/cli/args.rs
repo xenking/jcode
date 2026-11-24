@@ -1239,6 +1239,7 @@ pub(crate) use restart::RestartCommand;
 mod management;
 pub(crate) use management::AmbientCommand;
 pub(crate) use management::AuthCommand;
+pub(crate) use management::KeysCommand;
 pub(crate) use management::MemoryCommand;
 pub(crate) use management::ModelCommand;
 pub(crate) use management::ProviderCommand;

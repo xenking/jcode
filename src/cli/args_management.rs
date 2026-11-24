@@ -136,6 +136,11 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Manage several labelled API keys per provider
+    Keys {
+        #[command(subcommand)]
+        action: KeysCommand,
+    },
     /// Diagnose provider auth issues and suggest next steps
     Doctor {
         /// Optional provider id or alias to focus diagnosis on one provider
@@ -149,6 +154,52 @@ pub(crate) enum AuthCommand {
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum KeysCommand {
+    /// List labelled keys, marking the one requests use
+    List {
+        /// Limit to one provider, such as opencode-go or a [providers.<name>] entry
+        #[arg(id = "keys_provider", value_name = "PROVIDER")]
+        provider: Option<String>,
+
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save a labelled key (the label matches `[[routing.accounts]] id = "provider:label"`)
+    Add {
+        #[arg(id = "keys_provider", value_name = "PROVIDER")]
+        provider: String,
+
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// The key. Use `-` to read it from stdin. If omitted, jcode prompts securely.
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Read the key from this environment variable (keeps secrets out of argv).
+        #[arg(long)]
+        api_key_env: Option<String>,
+    },
+    /// Remove a stored labelled key
+    Remove {
+        #[arg(id = "keys_provider", value_name = "PROVIDER")]
+        provider: String,
+
+        #[arg(value_name = "LABEL")]
+        label: String,
+    },
+    /// Choose the key requests use. Omit the label to return to the unlabelled key.
+    Use {
+        #[arg(id = "keys_provider", value_name = "PROVIDER")]
+        provider: String,
+
+        #[arg(value_name = "LABEL")]
+        label: Option<String>,
     },
 }
 

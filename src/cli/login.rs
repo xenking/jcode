@@ -413,7 +413,7 @@ pub async fn run_login_provider(
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::OpenAiCompatible(profile) => {
-                login_openai_compatible_flow(&profile, &options)
+                login_openai_compatible_flow(&profile, &options, account_label)
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => {
@@ -656,6 +656,9 @@ pub(crate) async fn run_jcode_account_login(no_browser: bool) -> Result<()> {
 #[path = "login_key_flows.rs"]
 mod key_flows;
 use key_flows::*;
+#[path = "login_api_keys.rs"]
+mod api_keys;
+pub(crate) use api_keys::run_keys_command;
 async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::claude::login_target_label(requested_label)?;
     eprintln!("Logging in to Claude (account: {})...", label);
@@ -804,8 +807,18 @@ fn login_azure_flow(options: &LoginOptions) -> Result<()> {
 fn login_openai_compatible_flow(
     profile: &OpenAiCompatibleProfile,
     options: &LoginOptions,
+    account_label: Option<&str>,
 ) -> Result<()> {
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
+    let account_label = account_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if account_label.is_some() && (is_custom_profile || !profile.requires_api_key) {
+        anyhow::bail!(
+            "{} takes a single key. Labelled keys are for providers that need an API key, such as `jcode login opencode-go --account second`.",
+            profile.display_name
+        );
+    }
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
     eprintln!("Setting up {}...", resolved.display_name);
@@ -888,7 +901,7 @@ fn login_openai_compatible_flow(
 
     let auth_method = if resolved.requires_api_key {
         eprintln!("API key env variable: {}\n", resolved.api_key_env);
-        if options.openai_compatible_api_key.is_none() {
+        if options.openai_compatible_api_key.is_none() && account_label.is_none() {
             existing_key_notice::announce_existing_api_key(&resolved);
         }
         let key = match options.openai_compatible_api_key.as_deref() {
@@ -911,13 +924,18 @@ fn login_openai_compatible_flow(
             eprintln!("See setup details: {}", resolved.setup_url);
         }
 
-        crate::provider_catalog::save_env_value_to_env_file(
-            OPENAI_COMPAT_LOCAL_ENABLED_ENV,
-            &resolved.env_file,
-            None,
-        )?;
-        save_named_api_key(&resolved.env_file, &resolved.api_key_env, &key)?;
-        eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
+        if let Some(label) = account_label {
+            // A labelled key never replaces the unlabelled one.
+            api_keys::save_login_labelled_key(profile.id, &resolved.display_name, label, &key)?;
+        } else {
+            crate::provider_catalog::save_env_value_to_env_file(
+                OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                &resolved.env_file,
+                None,
+            )?;
+            save_named_api_key(&resolved.env_file, &resolved.api_key_env, &key)?;
+            eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
+        }
         "api_key"
     } else {
         eprintln!("Endpoint: {}", resolved.api_base);

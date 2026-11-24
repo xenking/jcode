@@ -409,6 +409,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Auth(subcmd)) => match subcmd {
             AuthCommand::Import { .. } => unreachable!("auth import handled before bootstrap"),
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
+            AuthCommand::Keys { action } => super::login::run_keys_command(action)?,
             AuthCommand::Doctor {
                 provider,
                 validate,

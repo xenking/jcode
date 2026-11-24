@@ -958,6 +958,8 @@ struct CostState {
     cached_completion_price: Option<f32>,
     // Cached cache-read pricing ($/1M tokens), when known for the active model.
     cached_cache_read_price: Option<f32>,
+    // Explicit cache-write price ($/1M tokens) from a config price override.
+    cached_cache_write_price: Option<f32>,
     // Model the cached_*_price values were resolved for, so we re-resolve on switch.
     cached_price_model: Option<String>,
 }

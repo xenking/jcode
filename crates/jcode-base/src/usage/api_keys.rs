@@ -180,12 +180,26 @@ pub(super) fn enqueue_api_key_usage_tasks(
             crate::auth::muse::has_cached_auth()
         } else {
             configured_key(profile.api_key_env, profile.env_file).is_some()
+                || crate::provider_catalog::api_key_provider_has_labelled_accounts(profile.id)
         };
         if !configured {
             continue;
         }
 
         let source_key = format!("openai-compatible:{}", profile.id);
+        // Every labelled key is its own report with its own windows or balance.
+        let labelled: Vec<_> = crate::provider_catalog::api_key_accounts(profile.id)
+            .into_iter()
+            .filter(|account| account.label.is_some())
+            .collect();
+        for account in &labelled {
+            let account_id = account.id.clone();
+            let profile = *profile;
+            tasks.spawn(
+                async move { Some(fetch_labelled_profile_report(profile, account_id).await) },
+            );
+            total += 1;
+        }
         // Profiles with a real quota or balance endpoint always report: they
         // do not need a prior local call to say something useful.
         let has_balance_api = matches!(
@@ -200,6 +214,10 @@ pub(super) fn enqueue_api_key_usage_tasks(
             continue;
         }
 
+        // Labelled keys with no unlabelled key left nothing to report here.
+        if configured_key(profile.api_key_env, profile.env_file).is_none() {
+            continue;
+        }
         let profile = *profile;
         tasks.spawn(async move { Some(fetch_compatible_profile_report(profile).await) });
         total += 1;
@@ -292,14 +310,72 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
 async fn fetch_compatible_profile_report(
     profile: crate::provider_catalog::OpenAiCompatibleProfile,
 ) -> ProviderUsage {
-    let source_key = format!("openai-compatible:{}", profile.id);
+    fetch_compatible_profile_report_for(profile, None).await
+}
+
+/// One report for a labelled key: the same balance or quota fetch as the
+/// unlabelled key, run with that key and listed under its own name.
+async fn fetch_labelled_profile_report(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    account: jcode_routing_policy::AccountId,
+) -> ProviderUsage {
+    let label = account.label().unwrap_or_default().to_string();
+    let lookup = account.clone();
+    let credential = tokio::task::spawn_blocking(move || {
+        crate::provider_catalog::api_key_credential_for_account(&lookup)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result);
+    match credential {
+        Ok(Some(credential)) => {
+            fetch_compatible_profile_report_for(profile, Some(credential)).await
+        }
+        failed => {
+            let mut report = ProviderUsage {
+                provider_name: format!("{} (API key) [{label}]", profile.display_name),
+                error: Some(match failed {
+                    Err(error) => format!("{error:#}"),
+                    _ => "no key stored for this label".to_string(),
+                }),
+                ..Default::default()
+            };
+            attach_activity(
+                &mut report,
+                &crate::provider_catalog::ledger_key_for_account(&account),
+            );
+            report
+        }
+    }
+}
+
+async fn fetch_compatible_profile_report_for(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    credential: Option<crate::provider_catalog::ApiKeyCredential>,
+) -> ProviderUsage {
+    // A labelled key replaces the unlabelled one for every fetch below.
+    let labelled_key = credential
+        .as_ref()
+        .filter(|credential| credential.account_id.label().is_some());
+    let label =
+        labelled_key.and_then(|credential| credential.account_id.label().map(str::to_string));
+    let key_override = labelled_key.map(|credential| credential.api_key.clone());
+    let key_for = |env_key: &str, env_file: &str| {
+        key_override
+            .clone()
+            .or_else(|| configured_key(env_key, env_file))
+    };
+    let source_key = match labelled_key {
+        Some(credential) => crate::provider_catalog::ledger_key_for_account(&credential.account_id),
+        None => format!("openai-compatible:{}", profile.id),
+    };
     let mut extra_info = Vec::new();
     let mut limits: Vec<UsageLimit> = Vec::new();
     let mut error: Option<String> = None;
 
     match profile.id {
         "deepseek" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 match fetch_deepseek_balance(&api_key).await {
                     Ok(lines) => extra_info.extend(lines),
                     Err(e) => {
@@ -309,7 +385,7 @@ async fn fetch_compatible_profile_report(
             }
         }
         "moonshotai" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 match fetch_moonshot_balance(&api_key, &resolved.api_base).await {
                     Ok(lines) => extra_info.extend(lines),
@@ -320,7 +396,7 @@ async fn fetch_compatible_profile_report(
             }
         }
         "kimi" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 match fetch_kimi_usage_limits(&api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     Ok(_) => {
@@ -338,7 +414,7 @@ async fn fetch_compatible_profile_report(
             // meaningless here; skip push_local_spend.
         }
         "zai" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 match fetch_zai_coding_plan_limits(&resolved.api_base, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
@@ -353,7 +429,7 @@ async fn fetch_compatible_profile_report(
             }
         }
         "opencode" | "opencode-go" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 match fetch_opencode_usage_limits(&resolved.api_base, &api_key).await {
                     Ok(fetched) => limits.extend(fetched),
@@ -397,7 +473,7 @@ async fn fetch_compatible_profile_report(
             // No provider-specific balance API: do a free `GET /models` probe
             // against the profile's own endpoint so the key status is real
             // rather than just "configured".
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 let status = probe_openai_compatible_key(&resolved.api_base, &api_key).await;
                 extra_info.push(("Key status".to_string(), status));
@@ -415,16 +491,41 @@ async fn fetch_compatible_profile_report(
         push_local_spend(&mut extra_info, &source_key);
     }
 
+    // With several keys, say which account each report is and which one serves.
+    let account_id = match labelled_key {
+        Some(credential) => Some(credential.account_id.clone()),
+        None if crate::provider_catalog::api_key_provider_has_labelled_accounts(profile.id) => {
+            jcode_routing_policy::AccountId::parse(profile.id)
+        }
+        None => None,
+    };
+    if let Some(account_id) = account_id {
+        let active = crate::provider_catalog::active_api_key_account(profile.id)
+            .is_some_and(|active| active == account_id);
+        extra_info.insert(
+            0,
+            (
+                "Account".to_string(),
+                format!("{account_id}{}", if active { " (active)" } else { "" }),
+            ),
+        );
+    }
     if matches!(profile.id, "opencode" | "opencode-go")
-        && let Some(account) = jcode_routing_policy::AccountId::parse(profile.id)
+        && let Some(account) = labelled_key
+            .map(|credential| credential.account_id.clone())
+            .or_else(|| jcode_routing_policy::AccountId::parse(profile.id))
     {
-        // Routing reads this meter by account id. A failed fetch has no limits,
-        // which forgets the last numbers instead of keeping them as current.
+        // Routing reads this meter by account id, so every labelled key keeps
+        // its own windows. A failed fetch has no limits, which forgets the last
+        // numbers instead of keeping them as current.
         crate::routing_meters::publish_opencode_limits(&account, &limits);
     }
-
+    let provider_name = match &label {
+        Some(label) => format!("{} (API key) [{label}]", profile.display_name),
+        None => format!("{} (API key)", profile.display_name),
+    };
     let mut report = ProviderUsage {
-        provider_name: format!("{} (API key)", profile.display_name),
+        provider_name,
         limits,
         extra_info,
         error,
@@ -956,6 +1057,138 @@ mod tests {
             .expect("live quota response parses");
         assert_eq!(limits.len(), 3);
         assert_eq!(limits[0].usage_percent, 23.0);
+    }
+
+    /// Loopback `/usage` that answers each bearer key with its own payload.
+    fn serve_usage_by_key(payloads: Vec<(&'static str, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                let body = payloads
+                    .iter()
+                    .find(|(key, _)| request.contains(&format!("bearer {key}")))
+                    .map(|(_, body)| *body);
+                let (status, body) = match (request.contains("get /usage"), body) {
+                    (true, Some(body)) => ("200 OK", body),
+                    _ => ("401 Unauthorized", "{}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn usage(rolling: u32, weekly: u32) -> String {
+        format!(
+            r#"{{"usage":{{"rolling":{{"status":"ok","percent":{rolling},"resetsAt":"2026-11-15T11:08:23.000Z"}},"weekly":{{"status":"ok","percent":{weekly},"resetsAt":"2026-11-16T00:00:00.000Z"}}}}}}"#
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn labelled_opencode_go_keys_are_listed_with_their_own_windows() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Keys are lowercase: the fixture matches them in a lowercased request.
+        let base = serve_usage_by_key(vec![
+            ("key-default", Box::leak(usage(10, 1).into_boxed_str())),
+            ("key-second", Box::leak(usage(55, 20).into_boxed_str())),
+            ("key-third", Box::leak(usage(90, 70).into_boxed_str())),
+            ("key-vault", Box::leak(usage(5, 2).into_boxed_str())),
+        ]);
+
+        let script = sandbox.root().join("vault.sh");
+        std::fs::write(&script, "#!/bin/sh\necho key-vault\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            crate::config::Config::path().unwrap(),
+            format!(
+                "[api_key_profiles.opencode-go]\nbase_url = \"{base}\"\n\
+                 [api_key_profiles.opencode-go.keys.vault]\nkey_command = [\"{}\"]\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+
+        sandbox
+            .write_openai_compatible_api_key(
+                crate::provider_catalog::OPENCODE_GO_PROFILE,
+                "key-default",
+            )
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "key-second")
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "third", "key-third")
+            .unwrap();
+        crate::provider_catalog::set_active_api_key_account("opencode-go", Some("second")).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut reports = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            enqueue_api_key_usage_tasks(&mut tasks);
+            let mut reports = Vec::new();
+            while let Some(report) = tasks.join_next().await {
+                reports.extend(report.unwrap());
+            }
+            reports
+        });
+        reports.retain(|report| report.provider_name.starts_with("OpenCode Go"));
+        reports.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+
+        let summary: Vec<_> = reports
+            .iter()
+            .map(|report| {
+                (
+                    report.provider_name.as_str(),
+                    report
+                        .limits
+                        .iter()
+                        .map(|l| l.usage_percent)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("OpenCode Go (API key)", vec![10.0, 1.0]),
+                ("OpenCode Go (API key) [second]", vec![55.0, 20.0]),
+                ("OpenCode Go (API key) [third]", vec![90.0, 70.0]),
+                ("OpenCode Go (API key) [vault]", vec![5.0, 2.0]),
+            ]
+        );
+        let account_row = |report: &ProviderUsage| {
+            report
+                .extra_info
+                .iter()
+                .find(|(key, _)| key == "Account")
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(account_row(&reports[0]).as_deref(), Some("opencode-go"));
+        assert_eq!(
+            account_row(&reports[1]).as_deref(),
+            Some("opencode-go:second (active)")
+        );
+        assert_eq!(
+            account_row(&reports[3]).as_deref(),
+            Some("opencode-go:vault")
+        );
+
+        crate::config::invalidate_config_cache();
     }
 
     #[test]

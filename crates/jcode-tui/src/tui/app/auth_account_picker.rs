@@ -410,6 +410,37 @@ impl App {
                     .is_empty(),
                 _ => false,
             };
+            // Every labelled API key is its own row, so several keys for one
+            // provider can be told apart and switched between.
+            if let LoginProviderTarget::OpenAiCompatible(profile) = provider.target {
+                for account in crate::provider_catalog::api_key_accounts(profile.id)
+                    .into_iter()
+                    .filter(|account| account.label.is_some())
+                {
+                    let label = account.label.clone().unwrap_or_default();
+                    let mut entry = Self::account_credential_entry(
+                        format!("{} [{label}]", provider.display_name),
+                        provider.auth_kind.label().to_string(),
+                        if account.active { "active" } else { "saved" }.to_string(),
+                        format!(
+                            "{} · {} · /usage shows its limits",
+                            account.id,
+                            match account.source {
+                                crate::provider_catalog::ApiKeySource::KeyCommand => "key_command",
+                                _ => "stored key",
+                            }
+                        ),
+                        crate::tui::PickerAction::Account(
+                            crate::tui::AccountPickerAction::Switch {
+                                provider_id: profile.id.to_string(),
+                                label,
+                            },
+                        ),
+                    );
+                    entry.is_current = account.active;
+                    entries.push(entry);
+                }
+            }
             let assessment = status.assessment_for_provider(provider);
             if has_named_accounts || !assessment.is_configured() {
                 continue;

@@ -10,6 +10,17 @@ pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENA
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
 pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
+mod api_key_accounts;
+pub use api_key_accounts::{
+    ApiKeyAccount, ApiKeyCredential, ApiKeySource, active_api_key_account,
+    active_api_key_credential, active_named_provider_credential, api_key_accounts,
+    api_key_credential_for_account, api_key_profile_id_for_env,
+    api_key_provider_has_labelled_accounts, api_key_provider_headers,
+    api_key_provider_takes_labels, clear_key_command_cache, labelled_account_display_name,
+    ledger_key_for_account, remove_labelled_api_key, save_labelled_api_key,
+    set_active_api_key_account, spend_ledger_key,
+};
+
 mod profile_credentials;
 pub use profile_credentials::{
     load_openai_compatible_profile_api_key, load_runtime_api_key,
@@ -91,6 +102,23 @@ fn resolve_openai_compatible_profile_endpoint(
     }
 
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
+
+    // `[api_key_profiles.<id>] base_url` points a built-in profile at a proxy
+    // or a loopback fixture.
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && let Some(base) = crate::config::config()
+            .api_key_profiles
+            .get(profile.id)
+            .and_then(|config| config.base_url.as_deref())
+    {
+        match normalize_api_base(base) {
+            Some(normalized) => resolved.api_base = normalized,
+            None => crate::logging::warn(&format!(
+                "Ignoring invalid api_key_profiles.{}.base_url",
+                profile.id
+            )),
+        }
+    }
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
         return resolved;

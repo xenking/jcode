@@ -186,6 +186,7 @@ pub(crate) fn configure_provider_profile(
         extra_body: None,
         supports_reasoning_effort: None,
         disable_reasoning_heuristics: false,
+        ..Default::default()
     };
 
     let config_path = Config::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;

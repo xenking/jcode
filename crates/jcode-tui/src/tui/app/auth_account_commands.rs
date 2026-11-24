@@ -447,19 +447,13 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
             "claude" => app.switch_account(&label),
             "openai" => app.switch_openai_account(&label),
-            _ => app.push_display_message(DisplayMessage::error(format!(
-                "Provider {} does not support account switching.",
-                provider_id
-            ))),
+            other => switch_api_key_account_local(app, other, &label),
         },
         AccountCommand::SwitchShorthand { label } => app.switch_account_by_label(&label),
         AccountCommand::Remove { provider_id, label } => match provider_id.as_str() {
             "claude" => app.remove_account(&label),
             "openai" => app.remove_openai_account(&label),
-            _ => app.push_display_message(DisplayMessage::error(format!(
-                "Provider {} does not support account removal.",
-                provider_id
-            ))),
+            other => remove_api_key_account_local(app, other, &label),
         },
         AccountCommand::SetDefaultProvider(provider) => {
             save_default_provider_setting(app, provider.as_deref())
@@ -738,13 +732,63 @@ fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&st
             };
             app.start_openai_login_for_account(&target)
         }
-        other => match resolve_account_provider_descriptor(other) {
-            Some(provider) => app.start_login_provider(provider),
-            None => app.push_display_message(DisplayMessage::error(format!(
-                "Unknown provider {}.",
-                other
-            ))),
-        },
+        other => {
+            let labelled = label.map(str::trim).filter(|label| !label.is_empty());
+            if let Some(label) = labelled
+                && crate::provider_catalog::api_key_provider_takes_labels(other)
+            {
+                // The key is pasted in a terminal so it never enters the chat
+                // transcript.
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Add the key from a terminal so it never enters this chat:\n\n`jcode login {other} --account {label}`\n\nThen switch with `/account {other} switch {label}`."
+                )));
+                return;
+            }
+            match resolve_account_provider_descriptor(other) {
+                Some(provider) => app.start_login_provider(provider),
+                None => app.push_display_message(DisplayMessage::error(format!(
+                    "Unknown provider {}.",
+                    other
+                ))),
+            }
+        }
+    }
+}
+
+/// `/account <provider> switch <label>` for API-key providers. `default`
+/// returns to the unlabelled key.
+fn switch_api_key_account_local(app: &mut App, provider_id: &str, label: &str) {
+    if !crate::provider_catalog::api_key_provider_takes_labels(provider_id) {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Provider {provider_id} does not support account switching."
+        )));
+        return;
+    }
+    let wanted = (!label.eq_ignore_ascii_case("default")).then_some(label);
+    match crate::provider_catalog::set_active_api_key_account(provider_id, wanted) {
+        Ok(account) => app.push_display_message(DisplayMessage::system(format!(
+            "Requests to {provider_id} now use {account}."
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!("{error:#}"))),
+    }
+}
+
+/// `/account <provider> remove <label>` for stored labelled API keys.
+fn remove_api_key_account_local(app: &mut App, provider_id: &str, label: &str) {
+    if !crate::provider_catalog::api_key_provider_takes_labels(provider_id) {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Provider {provider_id} does not support account removal."
+        )));
+        return;
+    }
+    match crate::provider_catalog::remove_labelled_api_key(provider_id, label) {
+        Ok(true) => app.push_display_message(DisplayMessage::system(format!(
+            "Removed {provider_id}:{label}."
+        ))),
+        Ok(false) => app.push_display_message(DisplayMessage::error(format!(
+            "No stored key {provider_id}:{label}. A key defined by `key_command` is removed from config.toml."
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!("{error:#}"))),
     }
 }
 

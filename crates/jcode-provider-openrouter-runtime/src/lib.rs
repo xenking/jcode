@@ -44,7 +44,7 @@ use jcode_provider_openrouter::{
 };
 use models_catalog_parse::parse_openai_compatible_models_response;
 use reqwest::Client;
-use reqwest::header::HeaderName;
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -191,25 +191,6 @@ fn configured_env_file_name() -> String {
         ));
         DEFAULT_ENV_FILE.to_string()
     }
-}
-
-fn load_named_profile_api_key(
-    env_key: &str,
-    profile: &jcode_base::config::NamedProviderConfig,
-) -> Option<String> {
-    if let Some(env_file) = profile
-        .env_file
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return load_api_key_from_env_or_config(env_key, env_file);
-    }
-
-    std::env::var(env_key)
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
 }
 
 fn parse_env_bool(value: &str) -> Option<bool> {
@@ -452,11 +433,49 @@ enum ProviderAuth {
     None {
         label: String,
     },
+    /// Another auth plus extra request headers, such as a labelled key's
+    /// `X-HF-Bill-To`. Built only by [`ProviderAuth::with_extra_headers`].
+    WithHeaders {
+        inner: Box<ProviderAuth>,
+        headers: Vec<(HeaderName, HeaderValue)>,
+    },
 }
 
 impl ProviderAuth {
+    /// Send `headers` with every request made under this auth. Names and values
+    /// are validated here, and a failure names only the header, never its value.
+    fn with_extra_headers(
+        self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self> {
+        if headers.is_empty() {
+            return Ok(self);
+        }
+        let headers = headers
+            .iter()
+            .map(|(name, value)| {
+                let parsed_name = HeaderName::from_bytes(name.trim().as_bytes())
+                    .with_context(|| format!("invalid header name '{name}' in config"))?;
+                let parsed_value = HeaderValue::from_str(value)
+                    .with_context(|| format!("invalid value for header '{name}' in config"))?;
+                Ok((parsed_name, parsed_value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::WithHeaders {
+            inner: Box::new(self),
+            headers,
+        })
+    }
+
     async fn apply(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
         match self {
+            Self::WithHeaders { inner, headers } => {
+                let mut req = Box::pin(inner.apply(req)).await?;
+                for (name, value) in headers {
+                    req = req.header(name, value);
+                }
+                Ok(req)
+            }
             Self::AuthorizationBearer { token, .. } => Ok(req.bearer_auth(token)),
             Self::HeaderValue {
                 header_name, value, ..
@@ -477,6 +496,14 @@ impl ProviderAuth {
         }
     }
 
+    fn sends_no_credential(&self) -> bool {
+        match self {
+            Self::None { .. } => true,
+            Self::WithHeaders { inner, .. } => inner.sends_no_credential(),
+            _ => false,
+        }
+    }
+
     fn label(&self) -> &str {
         match self {
             Self::AuthorizationBearer { label, .. } => label,
@@ -484,6 +511,7 @@ impl ProviderAuth {
             Self::AzureEntra { label } => label,
             Self::GrokCli { label } => label,
             Self::None { label } => label,
+            Self::WithHeaders { inner, .. } => inner.label(),
         }
     }
 }
@@ -612,18 +640,20 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
-    let auth = if let Some(key) = load_openai_compatible_profile_api_key(&resolved) {
-        ProviderAuth::AuthorizationBearer {
-            token: key,
-            label: resolved.api_key_env.clone(),
+    let auth = match openai_compatible_runtime::builtin_profile_auth(&resolved) {
+        Ok(Some(auth)) => auth,
+        Ok(None) => {
+            finish_profile_catalog_refresh(&resolved.id);
+            return false;
         }
-    } else if !resolved.requires_api_key {
-        ProviderAuth::None {
-            label: "local endpoint (no auth)".to_string(),
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Skipping {} model catalog refresh: {error:#}",
+                resolved.display_name
+            ));
+            finish_profile_catalog_refresh(&resolved.id);
+            return false;
         }
-    } else {
-        finish_profile_catalog_refresh(&resolved.id);
-        return false;
     };
 
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -1327,17 +1357,31 @@ impl OpenRouterProvider {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
         let auth_profile = profile.clone();
+        let auth_name = profile_name.to_string();
         let auth: AuthResolver = Arc::new(move || {
+            // The active labelled key (or `key_command`) wins over the single
+            // configured key, and its headers join the provider's own. A
+            // failing `key_command` is an error here, never a fallback.
+            let credential = jcode_base::provider_catalog::active_named_provider_credential(
+                &auth_name,
+                &auth_profile,
+            )?;
             let key_env = auth_profile
                 .api_key_env
                 .as_deref()
                 .map(str::trim)
                 .filter(|v| !v.is_empty());
-            let key_label = key_env.unwrap_or("inline api_key").to_string();
-            let key = key_env
-                .and_then(|name| load_named_profile_api_key(name, &auth_profile))
-                .or_else(|| auth_profile.api_key.clone());
-            Ok(match auth_profile.auth {
+            let key_label = match &credential {
+                Some(credential) if credential.account_id.label().is_some() => {
+                    credential.account_id.to_string()
+                }
+                _ => key_env.unwrap_or("inline api_key").to_string(),
+            };
+            let (key, headers) = match credential {
+                Some(credential) => (Some(credential.api_key), credential.headers),
+                None => (None, auth_profile.headers.clone()),
+            };
+            let auth = match auth_profile.auth {
                 jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
                     label: "local endpoint (no auth)".to_string(),
                 },
@@ -1361,7 +1405,8 @@ impl OpenRouterProvider {
                         .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
                     label: key_label,
                 },
-            })
+            };
+            auth.with_extra_headers(&headers)
         });
         auth()?;
         let model = profile
@@ -2447,6 +2492,29 @@ impl OpenRouterProvider {
     }
 
     fn resolve_auth() -> Result<ProviderAuth> {
+        let auth = Self::resolve_env_auth()?;
+        let headers = Self::env_profile_headers();
+        auth.with_extra_headers(&headers)
+    }
+
+    /// Headers configured for the built-in profile this env binding belongs to:
+    /// the provider's own, overlaid by the active labelled key's.
+    fn env_profile_headers() -> std::collections::BTreeMap<String, String> {
+        use jcode_base::provider_catalog::{
+            active_api_key_credential, api_key_profile_id_for_env, api_key_provider_headers,
+        };
+        let Some(profile_id) =
+            api_key_profile_id_for_env(&configured_api_key_name(), &configured_env_file_name())
+        else {
+            return Default::default();
+        };
+        match active_api_key_credential(profile_id) {
+            Ok(Some(credential)) => credential.headers,
+            _ => api_key_provider_headers(profile_id),
+        }
+    }
+
+    fn resolve_env_auth() -> Result<ProviderAuth> {
         if let Some(provider) = configured_dynamic_bearer_provider() {
             return match provider.as_str() {
                 "azure" => {
@@ -2849,6 +2917,8 @@ mod openrouter_input_modalities_tests;
 #[cfg(test)]
 #[path = "issue_1056_tests.rs"]
 mod issue_1056_tests;
+#[cfg(test)]
+mod labelled_key_tests;
 
 #[cfg(test)]
 #[path = "profile_catalog_backoff_tests.rs"]

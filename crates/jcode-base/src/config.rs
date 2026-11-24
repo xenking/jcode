@@ -4,11 +4,12 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AdvisorConfig, AgentProfileConfig, AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig,
-    AutoResetTrigger, AutoReviewConfig, CompactionConfig, CompactionMode,
-    CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH,
-    DEFAULT_UPDATE_REPO, DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig,
-    FeatureConfig, GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    AdvisorConfig, AgentProfileConfig, AgentsConfig, AmbientConfig, ApiKeyModelCost,
+    ApiKeyProfileConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger, AutoReviewConfig,
+    CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
+    CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode,
+    DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig,
+    HookCommands, HooksConfig, KeybindingsConfig, LabelledApiKeyConfig, LatexRenderingMode,
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, ModelPromptConfig,
     ModelPromptMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
     NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
@@ -701,6 +702,10 @@ pub struct Config {
     /// base_url = "https://llm.example.com/v1"
     /// api_key_env = "MY_GATEWAY_API_KEY"
     pub providers: BTreeMap<String, NamedProviderConfig>,
+
+    /// Headers, labelled keys and model prices for built-in API-key profiles.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub api_key_profiles: BTreeMap<String, ApiKeyProfileConfig>,
 
     /// Account routing policy: priorities, limits and budgets.
     #[serde(skip_serializing_if = "jcode_routing_policy::config::RoutingConfig::is_default")]

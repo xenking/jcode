@@ -570,6 +570,16 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
             if source_key == format!("openai-compatible:{}", crate::auth::muse::PROFILE_ID) {
                 return crate::auth::muse::has_cached_auth();
             }
+            // A labelled API key is reported by the API-key module under its
+            // own name while it exists.
+            if let Some(account) = jcode_routing_policy::AccountId::parse(source_key)
+                && account.label().is_some()
+                && crate::provider_catalog::api_key_accounts(account.provider())
+                    .iter()
+                    .any(|candidate| candidate.id == account)
+            {
+                return true;
+            }
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
             source_key

@@ -978,6 +978,73 @@ fn auth_status_subcommand_parses() {
 }
 
 #[test]
+fn auth_keys_subcommands_parse() {
+    let args =
+        Args::try_parse_from(["jcode", "auth", "keys", "list", "opencode-go", "--json"]).unwrap();
+    match args.command {
+        Some(Command::Auth(AuthCommand::Keys {
+            action: KeysCommand::List { provider, json },
+        })) => {
+            assert_eq!(provider.as_deref(), Some("opencode-go"));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "auth",
+        "keys",
+        "add",
+        "huggingface",
+        "org-a",
+        "--api-key-env",
+        "HF_ORG_A",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Auth(AuthCommand::Keys {
+            action:
+                KeysCommand::Add {
+                    provider,
+                    label,
+                    api_key,
+                    api_key_env,
+                },
+        })) => {
+            assert_eq!(
+                (provider.as_str(), label.as_str()),
+                ("huggingface", "org-a")
+            );
+            assert_eq!(api_key, None);
+            assert_eq!(api_key_env.as_deref(), Some("HF_ORG_A"));
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from(["jcode", "auth", "keys", "use", "opencode-go"]).unwrap();
+    match args.command {
+        Some(Command::Auth(AuthCommand::Keys {
+            action: KeysCommand::Use { provider, label },
+        })) => {
+            assert_eq!(provider, "opencode-go");
+            assert_eq!(label, None, "no label returns to the unlabelled key");
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn login_account_flag_labels_an_api_key_provider() {
+    let args =
+        Args::try_parse_from(["jcode", "login", "opencode-go", "--account", "second"]).unwrap();
+    match args.command {
+        Some(Command::Login { account, .. }) => assert_eq!(account.as_deref(), Some("second")),
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn auth_doctor_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "auth", "doctor", "openai", "--validate", "--json"])
         .unwrap();
