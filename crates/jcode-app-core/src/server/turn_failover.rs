@@ -1002,6 +1002,8 @@ mod tests {
     struct TwoAccountProvider {
         on_openai: Arc<StdMutex<bool>>,
         calls: Arc<StdMutex<Vec<(bool, usize)>>>,
+        input_chars: Arc<StdMutex<Vec<usize>>>,
+        allow_claude_success: bool,
         claude_failure: Option<(&'static str, String)>,
     }
 
@@ -1016,13 +1018,25 @@ mod tests {
         ) -> anyhow::Result<EventStream> {
             let on_openai = *self.on_openai.lock().unwrap();
             self.calls.lock().unwrap().push((on_openai, messages.len()));
-            if !on_openai {
+            self.input_chars.lock().unwrap().push(
+                messages
+                    .iter()
+                    .map(crate::compaction::message_char_count)
+                    .sum(),
+            );
+            if !on_openai && !self.allow_claude_success {
                 if let Some((_, error)) = &self.claude_failure {
                     anyhow::bail!("{error}");
                 }
                 anyhow::bail!("HTTP 429: usage_limit_reached for this account");
             }
             let events = vec![
+                Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(4_096),
+                    output_tokens: Some(5),
+                    cache_read_input_tokens: Some(0),
+                    cache_creation_input_tokens: Some(4_096),
+                }),
                 Ok(StreamEvent::TextDelta("answered on backup".into())),
                 Ok(StreamEvent::MessageEnd { stop_reason: None }),
             ];
@@ -1047,6 +1061,9 @@ mod tests {
         }
         fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
             Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        }
+        fn supports_image_input(&self) -> bool {
+            true
         }
         fn set_model(&self, model: &str) -> anyhow::Result<()> {
             *self.on_openai.lock().unwrap() = model.starts_with("openai-api:");
@@ -1089,6 +1106,101 @@ mod tests {
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn cold_route_switch_compacts_before_first_provider_request() {
+        check_cold_route_switch(false).await;
+    }
+
+    #[tokio::test]
+    async fn cold_route_switch_compacts_before_failover_retry() {
+        check_cold_route_switch(true).await;
+    }
+
+    async fn check_cold_route_switch(failover: bool) {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let mut config = crate::config::Config::load();
+        config.compaction.snapcompact = true;
+        config.compaction.snapcompact_decisions_model = "off".into();
+        config.save().unwrap();
+        crate::auth::account_pool::AccountPool {
+            members: vec!["anthropic-api".into(), "openai-api".into()],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+
+        let provider = TwoAccountProvider {
+            allow_claude_success: !failover,
+            ..Default::default()
+        };
+        let mut agent = Agent::new(Arc::new(provider.clone()), crate::tool::Registry::empty());
+        use crate::message::{ContentBlock, Role};
+        for i in 0..24 {
+            agent.add_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                vec![ContentBlock::Text {
+                    text: format!("Archived turn {i}: {}", "history ".repeat(4_500)),
+                    cache_control: None,
+                }],
+            );
+        }
+        let agent = Arc::new(Mutex::new(agent));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        if !failover {
+            process_message_with_server_failover(
+                Arc::clone(&agent),
+                "initial turn",
+                Vec::new(),
+                None,
+                tx.clone(),
+                false,
+            )
+            .await
+            .unwrap();
+            let mut agent = agent.lock().await;
+            agent.set_model("openai-api:gpt-6.1-sol").unwrap();
+            agent.reset_provider_session();
+        }
+        process_message_with_server_failover(agent, "continue", Vec::new(), None, tx, failover)
+            .await
+            .unwrap();
+
+        let calls = provider.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(target, _)| *target).collect::<Vec<_>>(),
+            [false, true]
+        );
+        let sizes = provider.input_chars.lock().unwrap();
+        assert!(
+            sizes[0] > 800_000,
+            "initial provider requests should be large: {sizes:?}"
+        );
+        assert!(
+            sizes[1] < 600_000,
+            "first request on the target route was not compacted: {sizes:?}"
+        );
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let notice = events.iter().position(|event| matches!(event, ServerEvent::StatusDetail { detail }
+            if detail.starts_with("Switching to gpt-6.1-sol: compacting") && detail.contains("before sending")));
+        let request = events
+            .iter()
+            .rposition(|event| matches!(event, ServerEvent::KvCacheRequest { .. }));
+        assert!(matches!((notice, request), (Some(notice), Some(request)) if notice < request));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::KvCacheMiss { .. }))
+        );
+        drop(home);
     }
 
     #[test]
