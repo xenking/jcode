@@ -79,7 +79,13 @@ impl Tool for AskTool {
             .or_else(|| ctx.stdin_request_tx.filter(|tx| !tx.is_closed()));
         let (response, answer_note) = match route {
             Some(tx) => (
-                ask_client(tx, &input.questions, &ctx.tool_call_id).await?,
+                crate::turn_activity::global()
+                    .wait_for_ask(
+                        &ctx.session_id,
+                        &ctx.tool_call_id,
+                        ask_client(tx, &input.questions, &ctx.tool_call_id),
+                    )
+                    .await?,
                 None,
             ),
             None => {

@@ -277,7 +277,7 @@ fn ask_checkpoint_acknowledgement_does_not_wait_for_roster_ready_or_user() {
     isolated(async {
         let activity = ActivityRegistry::default();
         let _turn = activity.admit("checkpoint-ask").unwrap();
-        let _ask = activity.in_tool("checkpoint-ask", "ask");
+        let _ask = activity.park_ask("checkpoint-ask", "question");
         assert_eq!(
             activity.snapshot().session("checkpoint-ask").unwrap().phase,
             TurnPhase::AskBlocked

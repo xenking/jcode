@@ -251,7 +251,7 @@ pub(super) async fn await_reload_signal(
         // rejection rather than disappearing between capture and exec.
         let activity = crate::turn_activity::global();
         let admission = match signal.idle_timeout {
-            Some(timeout) => activity.wait_for_quiescence(timeout).await,
+            Some(timeout) => activity.wait_for_checkpointable(timeout).await,
             None => activity.close_admission(),
         };
         let _admission = match admission {
@@ -280,7 +280,7 @@ pub(super) async fn await_reload_signal(
             serde_json::json!({}),
         );
 
-        graceful_shutdown_sessions(
+        let unfinished = graceful_shutdown_sessions(
             &signal.request_id,
             &sessions,
             swarm_members,
@@ -289,6 +289,22 @@ pub(super) async fn await_reload_signal(
             signal.triggering_session.as_deref(),
         )
         .await;
+        if signal.idle_timeout.is_some() && !unfinished.is_empty() {
+            super::write_reload_state(
+                &signal.request_id,
+                &signal.hash,
+                super::ReloadPhase::Failed,
+                Some(format!(
+                    "durable checkpoint missing for {}",
+                    unfinished
+                        .into_iter()
+                        .map(|session| session.session_id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+            continue;
+        }
         crate::logging::info(&format!(
             "Server: graceful shutdown completed for reload request={} after {}ms state={}",
             signal.request_id,
@@ -400,7 +416,7 @@ pub(super) async fn await_reload_signal(
 }
 
 /// Swarm status can lag turn startup (or the member can be absent entirely).
-async fn persist_reload_recovery_intents(
+pub(super) async fn persist_reload_recovery_intents(
     reload_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     triggering_session: Option<&str>,
@@ -553,7 +569,7 @@ pub(super) async fn graceful_shutdown_sessions(
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     triggering_session: Option<&str>,
-) {
+) -> Vec<crate::turn_activity::SessionActivity> {
     graceful_shutdown_sessions_with_timeout(
         reload_id,
         _sessions,
@@ -563,7 +579,7 @@ pub(super) async fn graceful_shutdown_sessions(
         RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT,
         triggering_session,
     )
-    .await;
+    .await
 }
 
 async fn graceful_shutdown_sessions_with_timeout(
@@ -649,7 +665,7 @@ async fn checkpoint_active_sessions(
         crate::logging::info("Server: all watched sessions acknowledged durable checkpoints");
     } else {
         crate::logging::warn(&format!(
-            "Server: reload checkpoint timeout after {}ms, proceeding under forced-reload policy, unfinished: {unfinished:?}",
+            "Server: reload checkpoint timeout after {}ms, unfinished: {unfinished:?}",
             timeout.as_millis()
         ));
     }

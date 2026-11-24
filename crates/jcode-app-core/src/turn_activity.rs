@@ -4,7 +4,7 @@
 //! publish facts here before execution and retain their guards through cleanup.
 //! Checkpoint acknowledgement is explicit and follows durable transcript saving.
 use anyhow::{Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
@@ -16,7 +16,7 @@ pub fn global() -> &'static ActivityRegistry {
     &GLOBAL
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnPhase {
     Admitted,
@@ -28,7 +28,7 @@ pub enum TurnPhase {
     Terminal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionActivity {
     pub session_id: String,
     pub phase: TurnPhase,
@@ -80,11 +80,15 @@ impl ActivitySnapshot {
         &'a self,
         rollout: Option<&str>,
     ) -> impl Iterator<Item = &'a SessionActivity> {
-        self.sessions.iter().filter(move |session| {
-            session.is_busy()
-                && !session.is_checkpointable()
-                && rollout.is_none_or(|id| session.waiting_rollout.as_deref() != Some(id))
+        self.checkpoint_blockers().filter(move |session| {
+            rollout.is_none_or(|id| session.waiting_rollout.as_deref() != Some(id))
         })
+    }
+
+    pub(crate) fn checkpoint_blockers(&self) -> impl Iterator<Item = &SessionActivity> {
+        self.sessions
+            .iter()
+            .filter(|s| s.is_busy() && !s.is_checkpointable())
     }
 
     pub fn session(&self, session_id: &str) -> Option<&SessionActivity> {
@@ -116,6 +120,9 @@ enum Participant {
         rollout: String,
         call: String,
     },
+    AskWait {
+        call: String,
+    },
 }
 
 #[derive(Default)]
@@ -126,6 +133,30 @@ struct SessionState {
 }
 
 impl SessionState {
+    fn parked_on_ask(&self) -> bool {
+        let mut waits = self.participants.values().filter_map(|p| match p {
+            Participant::AskWait { call } => Some(call),
+            _ => None,
+        });
+        let Some(call) = waits.next() else {
+            return false;
+        };
+        if waits.next().is_some() {
+            return false;
+        }
+        let mut admission = false;
+        let mut execution = false;
+        self.participants.values().all(|p| match p {
+            Participant::Admission => !std::mem::replace(&mut admission, true),
+            Participant::Execution => !std::mem::replace(&mut execution, true),
+            Participant::Tool {
+                name, call: owned, ..
+            } => name == "ask" && owned == call,
+            Participant::AskWait { .. } => true,
+            Participant::RolloutWait { .. } => false,
+        })
+    }
+
     fn waiting_rollout(&self) -> Option<&str> {
         let mut admissions = 0;
         let mut executions = 0;
@@ -193,15 +224,13 @@ impl SessionState {
                 TurnPhase::RolloutWaiting,
                 format!("passively waiting for rollout {rollout}"),
             )
+        } else if self.parked_on_ask() {
+            (
+                TurnPhase::AskBlocked,
+                "waiting for user answer, checkpointable on interruption".into(),
+            )
         } else if let Some(tool) = tool {
-            if tool == "ask" {
-                (
-                    TurnPhase::AskBlocked,
-                    "waiting for user answer, checkpointable on interruption".into(),
-                )
-            } else {
-                (TurnPhase::InTool, format!("executing tool {tool}"))
-            }
+            (TurnPhase::InTool, format!("executing tool {tool}"))
         } else if active {
             (
                 TurnPhase::Admitted,
@@ -226,6 +255,7 @@ struct State {
     revision: u64,
     next_token: u64,
     fence: Option<u64>,
+    parked_asks_fenced: bool,
     sessions: BTreeMap<String, SessionState>,
     stopping: std::collections::HashSet<std::path::PathBuf>,
 }
@@ -412,7 +442,7 @@ impl ActivityRegistry {
     ) -> AdmissionGuard {
         let token = state.next();
         let session = state.sessions.entry(session_id.to_owned()).or_default();
-        if session.participants.is_empty() && matches!(participant, Participant::Admission) {
+        if session.participants.is_empty() {
             session.checkpoint_requested = false;
             session.checkpointed = false;
         }
@@ -420,7 +450,41 @@ impl ActivityRegistry {
         self.changed.notify_waiters();
         AdmissionGuard {
             registry: self.clone(),
-            token,
+            token: Some(token),
+        }
+    }
+
+    pub(crate) fn park_ask(&self, session_id: &str, call: &str) -> AdmissionGuard {
+        let mut state = self.lock();
+        self.insert(
+            &mut state,
+            session_id,
+            Participant::AskWait { call: call.into() },
+        )
+    }
+
+    /// Keep an answer from starting more work after a reviewed replacement has
+    /// taken the fence. Reload can still cancel the enclosing ask future.
+    pub(crate) async fn wait_for_ask<T>(
+        &self,
+        session_id: &str,
+        call: &str,
+        answer: impl std::future::Future<Output = T>,
+    ) -> T {
+        let mut parked = self.park_ask(session_id, call);
+        let answer = answer.await;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.lock();
+                if !state.parked_asks_fenced {
+                    parked.release(&mut state);
+                    return answer;
+                }
+            }
+            changed.await;
         }
     }
 
@@ -463,21 +527,24 @@ impl ActivityRegistry {
 
     /// Forced reload closes admission even when interruption is required.
     pub fn close_admission(&self) -> Result<AdmissionFence> {
-        self.fence(false)
+        self.fence(FencePolicy::Any)
     }
 
     /// Idle replacement must prove quiescence while atomically closing admission.
     pub fn try_quiescent(&self) -> Result<AdmissionFence> {
-        self.fence(true)
+        self.fence(FencePolicy::Idle)
     }
 
-    pub async fn wait_for_quiescence(&self, timeout: Duration) -> Result<AdmissionFence> {
+    pub(crate) async fn wait_for_checkpointable(
+        &self,
+        timeout: Duration,
+    ) -> Result<AdmissionFence> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            match self.try_quiescent() {
+            match self.fence(FencePolicy::Checkpointable) {
                 Ok(fence) => return Ok(fence),
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
@@ -486,17 +553,24 @@ impl ActivityRegistry {
         }
     }
 
-    fn fence(&self, require_idle: bool) -> Result<AdmissionFence> {
+    fn fence(&self, policy: FencePolicy) -> Result<AdmissionFence> {
         let mut state = self.lock();
         ensure!(state.fence.is_none(), "turn admission already fenced");
-        let busy = state.snapshot().busy_sessions();
-        ensure!(
-            !require_idle || busy.is_empty(),
-            "turns are active: {}",
-            busy.join(", ")
-        );
+        if policy != FencePolicy::Any {
+            let snapshot = state.snapshot();
+            let busy = match policy {
+                FencePolicy::Any => unreachable!(),
+                FencePolicy::Idle => snapshot.busy_sessions(),
+                FencePolicy::Checkpointable => snapshot
+                    .checkpoint_blockers()
+                    .map(|s| s.session_id.clone())
+                    .collect(),
+            };
+            ensure!(busy.is_empty(), "turns are active: {}", busy.join(", "));
+        }
         let token = state.next();
         state.fence = Some(token);
+        state.parked_asks_fenced = policy == FencePolicy::Checkpointable;
         Ok(AdmissionFence {
             registry: self.clone(),
             token,
@@ -545,6 +619,13 @@ impl ActivityRegistry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FencePolicy {
+    Any,
+    Idle,
+    Checkpointable,
+}
+
 fn stop_path(session_id: &str) -> Result<std::path::PathBuf> {
     use sha2::{Digest, Sha256};
     let key = Sha256::digest(session_id.as_bytes());
@@ -574,20 +655,31 @@ impl Drop for SessionStopGuard {
 #[must_use]
 pub struct AdmissionGuard {
     registry: ActivityRegistry,
-    token: u64,
+    token: Option<u64>,
 }
 
-impl Drop for AdmissionGuard {
-    fn drop(&mut self) {
-        let mut state = self.registry.lock();
+impl AdmissionGuard {
+    fn release(&mut self, state: &mut State) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
         let mut changed = false;
         for session in state.sessions.values_mut() {
-            changed |= session.participants.remove(&self.token).is_some();
+            changed |= session.participants.remove(&token).is_some();
         }
         if changed {
             state.next();
         }
         self.registry.changed.notify_waiters();
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if self.token.is_some() {
+            let registry = self.registry.clone();
+            self.release(&mut registry.lock());
+        }
     }
 }
 
@@ -632,6 +724,7 @@ impl Drop for AdmissionFence {
         let mut state = self.registry.lock();
         if state.fence == Some(self.token) {
             state.fence = None;
+            state.parked_asks_fenced = false;
             for session in state.sessions.values_mut() {
                 session.checkpoint_requested = false;
                 session.checkpointed = false;

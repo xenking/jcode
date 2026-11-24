@@ -49,7 +49,15 @@ daemon. A later transaction archives the previous terminal journal under
 `rollout/receipts/`, so replay can return the old outcome without reading the
 new transaction or running a build. `jcode rollout --status` shows the live
 blockers and reasons when the owning daemon is reachable during drain. The
-offline journal still exposes the phase, owner, and selected pair.
+offline journal still exposes the phase, owner, and selected pair. It also
+retains the `blockers` from a drain timeout after rollback. If the daemon is
+reachable, `retry_blockers` describes current activity separately, so a client
+can wait to retry without treating the historical blockers as still active.
+
+Desktop submits the two full SHAs approved by the user with `--apply-reviewed`.
+That mode prints a JSON `id` receipt to stdout and sends build progress to
+stderr. Desktop uses the receipt to avoid following somebody else's rollout
+even if it selected the same two commits.
 
 The submitting CLI re-probes artifact versions against the pinned commits.
 `handoff.lock` serializes a change of preparation record with submission. If
@@ -89,8 +97,12 @@ resumes the same journal, rather than submitting another rollout.
    without waiting for an answer. They remain busy for idle-upgrade policy. No
    streaming-marker/roster union decides quiescence. `server:turn_activity` exposes
    the snapshot and both derived busy/drain session lists to CLI planning.
-   `--now` is allowed for agents because durable recovery owns continuation
-   admission.
+   Reviewed rollouts atomically fence admissions once only checkpointable turns
+   remain and require durable checkpoint acknowledgement before replacing the
+   daemon. A pending `ask` is re-presented on reconnect before the provider
+   continues. If only Desktop changes, the daemon retains the pending question
+   in memory while Desktop reconnects. The explicit `--now` option skips the
+   drain and uses interruption and normal reload recovery instead.
 5. Probe again, persist `exec_pending`, and request a pinned reload.
 6. Once the replacement accept loops are live, startup records `serving` and
    resumes Desktop swap and verification.

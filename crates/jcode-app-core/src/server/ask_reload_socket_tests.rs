@@ -36,6 +36,201 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
+    use crate::server::{Server, reload, reload_recovery::RecoveryOwner, runtime::ServerRuntime};
+
+    struct QuestionProvider;
+    #[async_trait]
+    impl Provider for QuestionProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<EventStream> {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::ToolUseStart { id: "parked-question".into(), name: "ask".into() }),
+                Ok(StreamEvent::ToolInputDelta(r#"{"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}"#.into())),
+                Ok(StreamEvent::ToolUseEnd),
+                Ok(StreamEvent::MessageEnd { stop_reason: Some("tool_use".into()) }),
+            ])))
+        }
+        fn name(&self) -> &str {
+            "reviewed-checkpoint-question"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    async fn send(writer: &mut crate::transport::WriteHalf, message: serde_json::Value) {
+        writer
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        step: &str,
+        matches: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        let mut events = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                assert_ne!(
+                    reader.read_line(&mut line).await.unwrap(),
+                    0,
+                    "{step}: disconnected"
+                );
+                let event = serde_json::from_str(&line).unwrap();
+                if matches(&event) {
+                    return event;
+                }
+                events.push(line);
+            }
+        })
+        .await;
+        result.unwrap_or_else(|_| {
+            panic!("{step}: expected event was not received; received {events:?}")
+        })
+    }
+
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_raccoon_parked_question";
+    let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    session.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::Text {
+            text: "Existing session.".into(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let subscribe = json!({"type":"subscribe","id":1,"target_session_id":session_id,"working_dir":home._home.path(),"continue_on_disconnect":true});
+    let socket = home._runtime.path().join("old-ask.sock");
+    let server = Server::new_with_paths(
+        Arc::new(QuestionProvider),
+        socket.clone(),
+        home._runtime.path().join("old-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    send(&mut writer, subscribe.clone()).await;
+    until(&mut reader, "initial subscribe", |e| {
+        matches!(e, ServerEvent::Done { id: 1 })
+    })
+    .await;
+    send(
+        &mut writer,
+        json!({"type":"message","id":2,"content":"Ask me to choose."}),
+    )
+    .await;
+    until(&mut reader, "initial question", |e| matches!(e, ServerEvent::AskUserRequest { request_id, .. } if request_id == "ask-parked-question")).await;
+
+    let activity = crate::turn_activity::global();
+    let fence = activity
+        .wait_for_checkpointable(Duration::ZERO)
+        .await
+        .expect("an unanswered question must not block the reviewed fence");
+    reload::persist_reload_recovery_intents("reviewed-ask", &server.swarm_state.members, None)
+        .await;
+    let unfinished = reload::graceful_shutdown_sessions(
+        "reviewed-ask",
+        &server.sessions,
+        &server.swarm_state.members,
+        &server.shutdown_signals,
+        &server.swarm_event_tx,
+        None,
+    )
+    .await;
+    assert!(
+        unfinished.is_empty(),
+        "checkpoint was not acknowledged: {unfinished:?}"
+    );
+    let persisted = crate::session::Session::load(session_id).unwrap();
+    assert!(persisted.messages.iter().flat_map(|m| &m.content).any(|block| matches!(block,
+        ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true) }
+        if tool_use_id == "parked-question" && content.contains("interrupted by server reload")
+    )));
+    drop(writer);
+    drop(reader);
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+    drop(fence);
+
+    let provider = RecoveryProvider::default();
+    let socket = home._runtime.path().join("new-ask.sock");
+    let server = Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("new-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let recovery = RecoveryOwner::new(&server);
+    let startup = recovery.reconcile_once().await;
+    assert!(
+        startup.tasks.is_empty(),
+        "an unanswered question must wait for its client"
+    );
+    recovery.spawn(runtime.cancellation_token(), startup);
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    send(&mut writer, subscribe).await;
+    let history = until(&mut reader, "restored history", |e| {
+        matches!(e, ServerEvent::History { .. })
+    })
+    .await;
+    let ServerEvent::History {
+        reload_recovery: Some(_),
+        ..
+    } = history
+    else {
+        panic!("reconnecting client did not receive a durable recovery directive");
+    };
+    let question = until(&mut reader, "restored question", |e| {
+        assert!(
+            !matches!(e, ServerEvent::TextDelta { .. }),
+            "provider continued before the answer"
+        );
+        matches!(e, ServerEvent::AskUserRequest { .. })
+    })
+    .await;
+    let ServerEvent::AskUserRequest {
+        request_id,
+        questions,
+        ..
+    } = question
+    else {
+        unreachable!()
+    };
+    assert_eq!(request_id, "ask-parked-question");
+    assert_eq!(questions[0].question, "Which?");
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    send(&mut writer, json!({"type":"ask_user_response","id":3,"request_id":request_id,"response":{"answers":[{"selected":["B"]}]}})).await;
+    until(&mut reader, "answer persisted", |e| matches!(e, ServerEvent::ToolDone { name, output, .. } if name == "ask" && output.contains("Which? -> B"))).await;
+    until(&mut reader, "continued turn", |e| {
+        matches!(e, ServerEvent::TextDelta { .. })
+    })
+    .await;
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
     use crate::server::ask_escalation::tests::member;
     use crate::server::{ask_escalation, reload_recovery, runtime::ServerRuntime};

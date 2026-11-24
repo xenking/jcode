@@ -677,7 +677,7 @@ pub fn send_reload_signal_target(
     ))
 }
 
-pub(super) fn send_idle_reload_signal_target(
+pub(super) fn send_checkpointable_reload_signal_target(
     hash: String,
     target: jcode_selfdev_types::ImmutableTarget,
     timeout: std::time::Duration,

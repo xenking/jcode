@@ -53,6 +53,7 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
         serving: true,
         mutations: Vec::new(),
         error: None,
+        blockers: Vec::new(),
         recovery: serde_json::Value::Null,
     };
     store.save(&journal).unwrap();
@@ -507,14 +508,61 @@ fn reviewed_drain_waits_for_computation_but_not_a_checkpointable_question() {
     let activity = crate::turn_activity::ActivityRegistry::default();
     let _raccoon = activity.admit("session_raccoon_1").unwrap();
     let _ask = activity.in_tool_call("session_raccoon_1", "ask", "question");
+    assert!(
+        !activity
+            .snapshot()
+            .session("session_raccoon_1")
+            .unwrap()
+            .is_checkpointable()
+    );
+    let _waiting = activity.park_ask("session_raccoon_1", "question");
     let _turkey = activity.admit("session_turkey_2").unwrap();
 
     let snapshot = activity.snapshot();
-    assert!(snapshot.session("session_raccoon_1").unwrap().is_checkpointable());
+    assert!(
+        snapshot
+            .session("session_raccoon_1")
+            .unwrap()
+            .is_checkpointable()
+    );
     for serving in ["abcdef123456", "0000000"] {
         let blockers = drain_blockers(&snapshot, &journal, serving);
-        assert_eq!(blockers.iter().map(|session| session.session_id.as_str()).collect::<Vec<_>>(), ["session_turkey_2"]);
+        assert_eq!(
+            blockers
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session_turkey_2"]
+        );
     }
+    let _parallel = activity.in_tool_call("session_raccoon_1", "bash", "still-working");
+    let concurrent = activity.snapshot();
+    assert_eq!(drain_blockers(&concurrent, &journal, "0000000").len(), 2);
     journal.intent.now = true;
-    assert!(drain_blockers(&snapshot, &journal, "0000000").is_empty());
+    assert!(drain_blockers(&concurrent, &journal, "0000000").is_empty());
+}
+
+#[test]
+fn deadline_blockers_survive_rollback_while_retry_reads_current_activity() {
+    let (_dir, store, mut journal) = fixture();
+    journal.intent.reviewed = true;
+    journal.phase = Phase::Draining;
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let work = activity.admit("session_turkey_2").unwrap();
+    let snapshot = activity.snapshot();
+    let busy = drain_blockers(&snapshot, &journal, "0000000");
+    assert_eq!(
+        status_value(&journal, &snapshot, &journal.socket).unwrap()["blockers"][0]["session_id"],
+        "session_turkey_2"
+    );
+    journal.error = Some(drain_timeout(&mut journal, busy).to_string());
+    store.phase(&mut journal, Phase::RolledBack).unwrap();
+    drop(work);
+    let persisted = load_at(&store.path).unwrap().unwrap();
+    let status = status_value(&persisted, &activity.snapshot(), &persisted.socket).unwrap();
+    assert_eq!(
+        status["blockers"][0]["reason"],
+        "turn owns admission or publication lease"
+    );
+    assert_eq!(status["retry_blockers"], serde_json::json!([]));
 }

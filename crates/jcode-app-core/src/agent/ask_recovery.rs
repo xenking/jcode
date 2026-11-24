@@ -115,10 +115,18 @@ impl Agent {
                 }
                 result = async {
                     let mut ctx = ctx;
-                    if crate::tool::interactive::sender(&ctx.session_id).is_none()
-                        && !crate::server::ask_escalation::wait_for_recovery_coordinator(&ctx.session_id).await
-                    {
-                        ctx.stdin_request_tx = Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await);
+                    if crate::tool::interactive::sender(&ctx.session_id).is_none() {
+                        ctx.stdin_request_tx = crate::turn_activity::global().wait_for_ask(
+                            &ctx.session_id,
+                            &ctx.tool_call_id,
+                            async {
+                                if crate::server::ask_escalation::wait_for_recovery_coordinator(&ctx.session_id).await {
+                                    None
+                                } else {
+                                    Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await)
+                                }
+                            },
+                        ).await;
                     }
                     self.registry.execute("ask", ask.input.clone(), ctx).await
                 } => {

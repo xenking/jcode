@@ -50,7 +50,17 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
                 eprintln!("Could not prune stale rollout bundles: {error:#}");
             }
         }
-        super::rollout::run(&mut host, &options, &mut std::io::stdout())
+        if options.reviewed {
+            let super::rollout::Outcome::Submitted(id) =
+                super::rollout::run(&mut host, &options, &mut std::io::stderr())?
+            else {
+                bail!("reviewed update did not submit a new rollout");
+            };
+            println!("{}", serde_json::json!({"id": id}));
+        } else {
+            super::rollout::run(&mut host, &options, &mut std::io::stdout())?;
+        }
+        Ok::<_, anyhow::Error>(())
     })?;
     Ok(())
 }
@@ -72,7 +82,10 @@ fn rollout_status() -> Result<serde_json::Value> {
     }
     drop(gate);
     if let Some(journal) = &journal
-        && journal.phase == rollout::Phase::Draining
+        && (matches!(
+            journal.phase,
+            rollout::Phase::Draining | rollout::Phase::ExecPending | rollout::Phase::Serving
+        ) || (journal.phase.terminal() && !journal.blockers.is_empty()))
         && let Ok(socket) = control_socket(&journal.socket)
         && let Ok(live) = daemon_control(&socket, "server:rollout_status")
         && live["id"] == journal.id
@@ -409,7 +422,12 @@ impl Host for MacHost {
                     if self.own_session.is_some() {
                         bail!("a reviewed rollout must start outside an agent turn");
                     }
-                    if daemon_control(&self.control_socket()?, "server:rollout_reviewed_v1")
+                    let capability = if options.now {
+                        "server:rollout_reviewed_now_v1"
+                    } else {
+                        "server:rollout_reviewed_v1"
+                    };
+                    if daemon_control(&self.control_socket()?, capability)
                         .context("the running daemon does not support reviewed updates")?
                         != true
                     {

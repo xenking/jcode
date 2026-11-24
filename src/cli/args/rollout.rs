@@ -12,8 +12,8 @@ pub(crate) struct RolloutArgs {
     /// Refresh fork heads and print a paired update preview as JSON (no installation)
     #[arg(long, conflicts_with_all = ["dry_run", "status", "now", "no_desktop", "apply_reviewed"])]
     pub check_update: bool,
-    /// Apply only the explicitly reviewed full CLI and Desktop commits, while idle
-    #[arg(long, conflicts_with_all = ["dry_run", "status", "now", "no_desktop"])]
+    /// Apply only the explicitly reviewed full CLI and Desktop commits
+    #[arg(long, conflicts_with_all = ["dry_run", "status", "no_desktop"])]
     pub apply_reviewed: bool,
     /// Reload without waiting for mid-turn sessions; reload recovery resumes them
     #[arg(long)]
@@ -38,19 +38,17 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn reviewed_updates_cannot_force_or_omit_desktop() {
-        for flag in [
-            "--now",
-            "--no-desktop",
-            "--status",
-            "--dry-run",
-            "--check-update",
-        ] {
+    fn reviewed_updates_can_explicitly_force_but_cannot_omit_desktop() {
+        for flag in ["--no-desktop", "--status", "--dry-run", "--check-update"] {
             assert!(
                 Args::try_parse_from(["jcode", "rollout", "--apply-reviewed", flag]).is_err(),
                 "{flag}"
             );
         }
+        let args = Args::try_parse_from(["jcode", "rollout", "--apply-reviewed", "--now"]).unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Rollout(rollout)) if rollout.apply_reviewed && rollout.now)
+        );
         let args = Args::try_parse_from(["jcode", "rollout", "--check-update"]).unwrap();
         assert!(matches!(args.command, Some(Command::Rollout(rollout)) if rollout.check_update));
     }

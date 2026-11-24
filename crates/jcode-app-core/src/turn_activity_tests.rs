@@ -100,12 +100,38 @@ fn admitted_lease_is_busy_before_any_execution_or_streaming() {
 async fn reviewed_restart_waits_for_turns_and_then_fences_new_admission() {
     let activity = ActivityRegistry::default();
     let turn = activity.admit("reviewed-active-turn").unwrap();
-    assert!(activity.wait_for_quiescence(Duration::ZERO).await.is_err());
+    assert!(
+        activity
+            .wait_for_checkpointable(Duration::ZERO)
+            .await
+            .is_err()
+    );
     drop(turn);
-    let fence = activity.wait_for_quiescence(Duration::ZERO).await.unwrap();
+    let fence = activity
+        .wait_for_checkpointable(Duration::ZERO)
+        .await
+        .unwrap();
     assert!(activity.admit("reviewed-new-turn").is_err());
     drop(fence);
     assert!(activity.admit("reviewed-new-turn").is_ok());
+}
+
+#[tokio::test]
+async fn answer_cannot_leave_a_parked_turn_during_reviewed_replacement() {
+    let activity = ActivityRegistry::default();
+    let _turn = activity.admit("asking").unwrap();
+    let (answer, received) = tokio::sync::oneshot::channel();
+    let question = activity.wait_for_ask("asking", "question", received);
+    tokio::pin!(question);
+    assert!(futures::poll!(&mut question).is_pending());
+    let fence = activity
+        .wait_for_checkpointable(Duration::ZERO)
+        .await
+        .unwrap();
+    answer.send("B").unwrap();
+    assert!(futures::poll!(&mut question).is_pending());
+    drop(fence);
+    assert_eq!(question.await.unwrap(), "B");
 }
 
 #[tokio::test]
@@ -190,7 +216,7 @@ fn admission_between_snapshot_and_exec_fence_cannot_be_lost() {
 async fn ask_blocked_is_checkpointable_without_waiting_for_user_answer() {
     let activity = ActivityRegistry::default();
     let admitted = activity.admit("asking").unwrap();
-    let ask = activity.in_tool("asking", "ask");
+    let ask = activity.park_ask("asking", "question");
     assert_eq!(
         activity.snapshot().session("asking").unwrap().phase,
         TurnPhase::AskBlocked
@@ -233,7 +259,7 @@ fn renamed_participants_release_by_identity_not_stale_session_name() {
 fn drain_excludes_checkpointable_asks_but_idle_upgrade_still_sees_ownership() {
     let activity = ActivityRegistry::default();
     let _ask_turn = activity.admit("asking").unwrap();
-    let _ask = activity.in_tool("asking", "ask");
+    let _ask = activity.park_ask("asking", "question");
     let _tool_turn = activity.admit("tool").unwrap();
     let _tool = activity.in_tool("tool", "bash");
     let _admitted = activity.admit("accepted").unwrap();

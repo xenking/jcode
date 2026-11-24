@@ -96,6 +96,8 @@ pub struct Journal {
     pub serving: bool,
     pub mutations: Vec<Mutation>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<SessionActivity>,
     #[serde(default)]
     pub recovery: serde_json::Value,
 }
@@ -452,7 +454,10 @@ impl Store {
 }
 
 fn is_capability_probe(command: &str) -> bool {
-    matches!(command, "rollout_preparation_v1" | "rollout_reviewed_v1")
+    matches!(
+        command,
+        "rollout_preparation_v1" | "rollout_reviewed_v1" | "rollout_reviewed_now_v1"
+    )
 }
 
 pub(super) fn is_control_command(command: &str) -> bool {
@@ -467,15 +472,7 @@ pub(super) fn control(command: &str) -> Result<String> {
             return Ok("null".into());
         };
         let snapshot = crate::turn_activity::global().snapshot();
-        let blockers = if journal.phase == Phase::Draining && journal.socket == super::socket_path()
-        {
-            drain_blockers(&snapshot, &journal, jcode_build_meta::git_hash())
-        } else {
-            Vec::new()
-        };
-        let mut value = serde_json::to_value(journal)?;
-        value["blockers"] = serde_json::to_value(blockers)?;
-        return Ok(value.to_string());
+        return Ok(status_value(&journal, &snapshot, &super::socket_path())?.to_string());
     }
     if is_capability_probe(command) {
         return Ok("true".into());
@@ -487,16 +484,38 @@ pub(super) fn control(command: &str) -> Result<String> {
     Ok(serde_json::to_string(&submit(intent)?)?)
 }
 
+fn status_value(
+    journal: &Journal,
+    snapshot: &ActivitySnapshot,
+    socket: &Path,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(journal)?;
+    if journal.socket == socket {
+        if matches!(
+            journal.phase,
+            Phase::Draining | Phase::ExecPending | Phase::Serving
+        ) {
+            value["blockers"] = serde_json::to_value(drain_blockers(
+                snapshot,
+                journal,
+                jcode_build_meta::git_hash(),
+            ))?;
+        } else if journal.phase.terminal() && !journal.blockers.is_empty() {
+            value["retry_blockers"] =
+                serde_json::to_value(snapshot.checkpoint_blockers().collect::<Vec<_>>())?;
+        }
+    }
+    Ok(value)
+}
+
 /// The intent is durable before acknowledgement. Dropping the submitting
 /// connection cannot cancel this daemon-owned task.
 pub(super) fn submit(intent: Intent) -> Result<Journal> {
     if intent.app != app_path() {
         bail!("rollout app path differs from daemon JCODE_ROLLOUT_APP");
     }
-    if intent.reviewed
-        && (intent.now || intent.triggering_session.is_some() || intent.bundle.is_none())
-    {
-        bail!("reviewed rollout requires a paired bundle, normal drain and no triggering session");
+    if intent.reviewed && (intent.triggering_session.is_some() || intent.bundle.is_none()) {
+        bail!("reviewed rollout requires a paired bundle and no triggering session");
     }
     if let Some(bundle) = intent.bundle.as_deref() {
         super::rollout_desktop::validate_bundle_replacement(bundle, &intent.app, intent.reviewed)?;
@@ -568,6 +587,7 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
         serving: false,
         mutations: Vec::new(),
         error: None,
+        blockers: Vec::new(),
         recovery: serde_json::Value::Null,
         intent,
     };
@@ -694,19 +714,17 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
             if busy.is_empty() {
                 break;
             }
-            let detail = busy
-                .iter()
-                .map(|session| format!("{} ({})", session.session_id, session.reason))
-                .collect::<Vec<_>>()
-                .join(", ");
             if tokio::time::Instant::now() >= deadline {
-                bail!("drain timed out: {detail}");
+                return Err(drain_timeout(journal, busy));
             }
+            let detail = blocker_detail(busy);
             store.log(journal, &format!("draining: {detail}"))?;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         preflight(&journal.staged_binary, &journal.intent.cli).await?;
-        if same_commit(jcode_build_meta::git_hash(), &journal.intent.cli) {
+        if same_commit(jcode_build_meta::git_hash(), &journal.intent.cli)
+            && !(journal.intent.reviewed && journal.intent.now)
+        {
             journal.serving = true;
             store.phase(journal, Phase::Serving)?;
         } else {
@@ -715,8 +733,8 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
             let target = jcode_build_support::runtime_generation::resolve(
                 jcode_selfdev_types::DesiredSelection::InstalledVersion(journal.intent.cli.clone()),
             )?;
-            let request = if journal.intent.reviewed {
-                super::reload_state::send_idle_reload_signal_target(
+            let request = if journal.intent.reviewed && !journal.intent.now {
+                super::reload_state::send_checkpointable_reload_signal_target(
                     journal.intent.cli.clone(),
                     target,
                     deadline.saturating_duration_since(tokio::time::Instant::now()),
@@ -739,6 +757,17 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
                     && Some(&state.request_id) == journal.reload_id.as_ref()
                     && state.phase == super::ReloadPhase::Failed
                 {
+                    if state
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.starts_with("reload admission deferred:"))
+                    {
+                        let snapshot = crate::turn_activity::global().snapshot();
+                        let busy = drain_blockers(&snapshot, journal, jcode_build_meta::git_hash());
+                        if !busy.is_empty() {
+                            return Err(drain_timeout(journal, busy));
+                        }
+                    }
                     bail!(
                         "pinned reload failed: {}",
                         state.detail.as_deref().unwrap_or("unknown error")
@@ -752,11 +781,23 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
             journal.phase,
             Phase::Serving | Phase::DesktopSwap | Phase::Verifying
         ) {
-        Some(
-            crate::turn_activity::global()
-                .wait_for_quiescence(timeout)
-                .await?,
-        )
+        let activity = crate::turn_activity::global();
+        Some(if journal.intent.now {
+            activity.close_admission()?
+        } else {
+            match activity.wait_for_checkpointable(timeout).await {
+                Ok(fence) => fence,
+                Err(error) => {
+                    let snapshot = activity.snapshot();
+                    let busy = drain_blockers(&snapshot, journal, jcode_build_meta::git_hash());
+                    return Err(if busy.is_empty() {
+                        error
+                    } else {
+                        drain_timeout(journal, busy)
+                    });
+                }
+            }
+        })
     } else {
         None
     };
@@ -809,23 +850,20 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
 
 /// Sessions the daemon must wait for before it may exec the new generation.
 ///
-/// Nothing blocks when the daemon already serves the target (a Desktop-only
-/// rollout never reloads it), or with `--now`. The initiating session is never
-/// a blocker: it is waiting on this rollout, so waiting on it only ran the
-/// drain into its timeout. Reload recovery resumes it like any other turn.
+/// Reviewed updates also drain before swapping Desktop when the CLI is unchanged.
+/// A checkpointable question is not computation, but still owns recovery.
 fn drain_blockers<'a>(
     snapshot: &'a ActivitySnapshot,
     journal: &Journal,
     serving: &str,
 ) -> Vec<&'a SessionActivity> {
-    if journal.intent.reviewed {
-        return snapshot
-            .sessions
-            .iter()
-            .filter(|session| session.is_busy())
-            .collect();
+    if journal.intent.now {
+        return Vec::new();
     }
-    if journal.intent.now || same_commit(serving, &journal.intent.cli) {
+    if journal.intent.reviewed {
+        return snapshot.checkpoint_blockers().collect();
+    }
+    if same_commit(serving, &journal.intent.cli) {
         return Vec::new();
     }
     snapshot
@@ -834,6 +872,20 @@ fn drain_blockers<'a>(
             journal.intent.triggering_session.as_deref() != Some(session.session_id.as_str())
         })
         .collect()
+}
+
+fn blocker_detail<'a>(blockers: impl IntoIterator<Item = &'a SessionActivity>) -> String {
+    blockers
+        .into_iter()
+        .map(|session| format!("{} ({})", session.session_id, session.reason))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn drain_timeout(journal: &mut Journal, blockers: Vec<&SessionActivity>) -> anyhow::Error {
+    let detail = blocker_detail(blockers.iter().copied());
+    journal.blockers = blockers.into_iter().cloned().collect();
+    anyhow::anyhow!("drain timed out: {detail}")
 }
 
 fn same_commit(a: &str, b: &str) -> bool {
@@ -965,11 +1017,14 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
         inode(&journal.intent.app).is_ok_and(|installed| installed == incoming)
     });
     let _admission = if journal.intent.reviewed && (journal.backup_ready || installed_incoming) {
-        Some(
-            crate::turn_activity::global()
-                .wait_for_quiescence(Duration::from_secs(journal.intent.drain_timeout_secs))
-                .await?,
-        )
+        let activity = crate::turn_activity::global();
+        Some(if journal.intent.now {
+            activity.close_admission()?
+        } else {
+            activity
+                .wait_for_checkpointable(Duration::from_secs(journal.intent.drain_timeout_secs))
+                .await?
+        })
     } else {
         None
     };
@@ -996,8 +1051,8 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
                 journal.previous_shared.clone(),
             ),
         )?;
-        if journal.intent.reviewed {
-            super::reload_state::send_idle_reload_signal_target(
+        if journal.intent.reviewed && !journal.intent.now {
+            super::reload_state::send_checkpointable_reload_signal_target(
                 journal.previous_shared.clone(),
                 target,
                 Duration::from_secs(journal.intent.drain_timeout_secs),

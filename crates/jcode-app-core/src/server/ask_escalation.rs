@@ -411,13 +411,18 @@ async fn handle_escalation(
     );
     let (outcome, reason) = tokio::select! {
         biased;
-        answer = answer_rx.recv() => match answer {
-            Some(response) => (Some(response), "answered"),
-            None => (None, "withdrawn"),
-        },
         _ = &mut cancelled => (None, "withdrawn"),
         _ = closed.cancelled() => (None, "withdrawn"),
-        _ = tokio::time::sleep(escalated_ask_timeout()) => (None, "timed_out"),
+        result = crate::turn_activity::global().wait_for_ask(&worker_session_id, &tool_call_id, async {
+            tokio::select! {
+                biased;
+                answer = answer_rx.recv() => match answer {
+                    Some(response) => (Some(response), "answered"),
+                    None => (None, "withdrawn"),
+                },
+                _ = tokio::time::sleep(escalated_ask_timeout()) => (None, "timed_out"),
+            }
+        }) => result,
     };
     drop(wait);
     lock_pending().remove(&request_id);
