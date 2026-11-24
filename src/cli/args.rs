@@ -459,8 +459,11 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Cloud(CloudCommand),
 
-    /// Generate a pairing code for iOS/web client
+    /// Manage device pairing for the gateway
     Pair {
+        /// Generate an invite for a paired Harness client instead of a phone
+        #[arg(long, conflicts_with_all = ["list", "revoke"])]
+        harness: bool,
         /// List paired devices instead of generating a code
         #[arg(long)]
         list: bool,

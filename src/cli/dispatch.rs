@@ -485,8 +485,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Cloud(subcmd)) => {
             super::cloud_move::run_cli(subcmd)?;
         }
-        Some(Command::Pair { list, revoke }) => {
-            commands::run_pair_command(list, revoke)?;
+        Some(Command::Pair { list, revoke, harness }) => {
+            commands::run_pair_command(list, revoke, harness)?;
         }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
