@@ -151,7 +151,7 @@ fn sweep_does_not_touch_an_in_flight_rollout_even_without_an_executor() {
     let path = store.path.clone();
     drop(store);
 
-    sweep_desktop_before_rollout_at(path, &journal.intent.app).unwrap();
+    sweep_before_rollout_at(path, &journal.intent.app).unwrap();
 
     assert!(journal.backup_app.is_dir());
     assert!(journal.incoming_app.is_dir());
@@ -211,7 +211,7 @@ fn sweep_repairs_an_interrupted_cleanup_and_is_repeatable() {
     };
 
     for _ in 0..2 {
-        sweep_desktop_before_rollout_at(path.clone(), installed).unwrap();
+        sweep_before_rollout_at(path.clone(), installed).unwrap();
 
         assert!(installed.is_dir());
         assert!(journal.backup_app.is_dir());
@@ -221,6 +221,43 @@ fn sweep_repairs_an_interrupted_cleanup_and_is_repeatable() {
         #[cfg(unix)]
         assert!(symlink.is_symlink());
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_sweep_keeps_the_previous_daemon_over_a_newer_unused_build() {
+    use std::fs::{self, File, FileTimes};
+    use std::time::SystemTime;
+
+    let (root, store, mut journal) = fixture();
+    let builds = root.path().join("builds");
+    let old = SystemTime::now() - Duration::from_secs(7200);
+    let write_build = |label: &str, modified| {
+        let directory = builds.join("versions").join(label);
+        fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join(crate::build::binary_name());
+        fs::write(&binary, label).unwrap();
+        for path in [&directory, &binary] {
+            File::open(path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+        binary
+    };
+    let previous = write_build("123456789", old);
+    let retired = write_build("234567890", old + Duration::from_secs(1));
+    let current = write_build("abcdef123", old + Duration::from_secs(2));
+    let channel = builds.join("shared-server");
+    fs::create_dir(&channel).unwrap();
+    std::os::unix::fs::symlink(&current, channel.join(crate::build::binary_name())).unwrap();
+    journal.previous_binary = previous.clone();
+
+    store.phase(&mut journal, Phase::Completed).unwrap();
+
+    assert!(previous.is_file());
+    assert!(current.is_file());
+    assert!(!retired.exists());
 }
 
 #[test]

@@ -28,7 +28,7 @@ fn update_launch_services(flag: &str, app: &Path) {
     let _ = (flag, app);
 }
 
-fn process_table() -> Result<Vec<(u32, u32, PathBuf)>> {
+pub(super) fn process_table() -> Result<Vec<(u32, u32, PathBuf)>> {
     let listing = output(Command::new("ps").args(["-Ao", "uid=,pid=,ppid="]))?;
     let mut processes = Vec::new();
     for line in listing.lines() {

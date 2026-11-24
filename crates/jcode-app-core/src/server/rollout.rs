@@ -11,6 +11,10 @@ use std::time::Duration;
 use super::{rollout_desktop, rollout_fs};
 use crate::turn_activity::{ActivitySnapshot, SessionActivity};
 
+#[cfg(target_os = "macos")]
+#[path = "rollout_builds.rs"]
+mod rollout_builds;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Intent {
     pub cli: String,
@@ -153,11 +157,11 @@ pub fn try_handoff_gate() -> Result<Option<File>> {
 }
 
 /// Reclaim space before checking build admission, without competing with recovery.
-pub fn sweep_desktop_before_rollout(app: &Path) -> Result<()> {
-    sweep_desktop_before_rollout_at(journal_path()?, app)
+pub fn sweep_before_rollout(app: &Path) -> Result<()> {
+    sweep_before_rollout_at(journal_path()?, app)
 }
 
-fn sweep_desktop_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
+fn sweep_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
     let Some(_handoff) = try_lock(&path.with_file_name("handoff.lock"))? else {
         return Ok(());
     };
@@ -174,7 +178,7 @@ fn sweep_desktop_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
         .as_ref()
         .is_none_or(|journal| journal.phase.terminal())
     {
-        store.sweep_desktop_bundles(app, journal.as_ref())?;
+        store.sweep_artifacts(app, journal.as_ref())?;
     }
     Ok(())
 }
@@ -305,11 +309,22 @@ impl Store {
         self.save(journal)?;
         self.log(journal, &format!("phase {phase:?}"))?;
         if phase.terminal()
-            && let Err(error) = self.sweep_desktop_bundles(&journal.intent.app, Some(journal))
+            && let Err(error) = self.sweep_artifacts(&journal.intent.app, Some(journal))
         {
             crate::logging::warn(&format!("Cannot prune rollout bundles: {error:#}"));
         }
         Ok(())
+    }
+
+    fn sweep_artifacts(&self, app: &Path, journal: Option<&Journal>) -> Result<()> {
+        let desktop = self.sweep_desktop_bundles(app, journal);
+        #[cfg(target_os = "macos")]
+        if let Some(home) = self.path.parent().and_then(Path::parent)
+            && let Err(error) = rollout_builds::sweep(&home.join("builds"), journal)
+        {
+            crate::logging::warn(&format!("Cannot prune rollout binaries: {error:#}"));
+        }
+        desktop
     }
 
     fn sweep_desktop_bundles(&self, app: &Path, journal: Option<&Journal>) -> Result<()> {
