@@ -244,7 +244,7 @@ pub(super) async fn acquire_serve_lock(path: &std::path::Path) -> Result<Vec<Dae
 
 pub(super) async fn prepare_serve_replacement(
     path: &std::path::Path,
-) -> Result<Option<(std::fs::File, std::fs::File)>> {
+) -> Result<Option<(super::rollout::Lock, super::rollout::Lock)>> {
     let ServeListener::Live(_peer_pid) = serve_listener(path).await? else {
         return Ok(None);
     };

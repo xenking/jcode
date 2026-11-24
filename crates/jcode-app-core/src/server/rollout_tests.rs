@@ -294,6 +294,35 @@ fn mutation_intent_and_result_are_atomic_durable_and_lock_is_exclusive() {
     assert!(Store::acquire(path).unwrap().is_some());
 }
 
+/// Any test or tool that forks while a lock is held copies the descriptor into
+/// the child until it execs. A lock that follows the descriptor then outlives its
+/// owner and fails the next acquire, which looked like a flaky lock test.
+#[cfg(unix)]
+#[test]
+fn executor_lock_is_released_with_its_owner_even_while_a_child_is_forking() {
+    use std::os::unix::process::CommandExt;
+    let (_dir, store, _journal) = fixture();
+    let path = store.path.clone();
+    let child = std::thread::spawn(|| {
+        let mut command = std::process::Command::new("true");
+        // The child sits between fork and exec, still holding every descriptor.
+        unsafe {
+            command.pre_exec(|| {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Ok(())
+            });
+        }
+        command.status().unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(store);
+    assert!(
+        Store::acquire(path).unwrap().is_some(),
+        "a forked child must not keep the executor lock alive"
+    );
+    child.join().unwrap();
+}
+
 #[test]
 fn interrupted_rollback_spawns_previous_before_startup_reconciles() {
     let (_dir, store, mut journal) = fixture();

@@ -154,8 +154,8 @@ pub fn record_preparation(preparation: &Preparation) -> Result<()> {
     save_at(&preparation_path()?, preparation)
 }
 
-pub fn try_handoff_gate() -> Result<Option<File>> {
-    try_lock(&journal_path()?.with_file_name("handoff.lock"))
+pub fn try_handoff_gate() -> Result<Option<Lock>> {
+    try_process_lock(&journal_path()?.with_file_name("handoff.lock"))
 }
 
 /// Reclaim space before checking build admission, without competing with recovery.
@@ -164,7 +164,7 @@ pub fn sweep_before_rollout(app: &Path) -> Result<()> {
 }
 
 fn sweep_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
-    let Some(_handoff) = try_lock(&path.with_file_name("handoff.lock"))? else {
+    let Some(_handoff) = try_process_lock(&path.with_file_name("handoff.lock"))? else {
         return Ok(());
     };
     // Do not take the executor lock across a daemon exec handoff. The new
@@ -186,10 +186,10 @@ fn sweep_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(File, File)> {
+pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(Lock, Lock)> {
     let handoff =
         try_handoff_gate()?.context("cannot replace the daemon during rollout admission")?;
-    let executor = try_lock(&journal_path()?.with_file_name("executor.lock"))?
+    let executor = try_process_lock(&journal_path()?.with_file_name("executor.lock"))?
         .context("cannot replace the daemon during an active rollout")?;
     if let Some(journal) = read_journal()?
         && !journal.phase.terminal()
@@ -204,7 +204,7 @@ pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(File, File)> {
 }
 
 pub fn try_preparation_lock() -> Result<Option<File>> {
-    try_lock(&journal_path()?.with_file_name("preparation.lock"))
+    try_inheritable_lock(&journal_path()?.with_file_name("preparation.lock"))
 }
 
 fn refresh_recovery(journal: &mut Journal) -> Result<()> {
@@ -229,7 +229,40 @@ pub(super) fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<O
     }
 }
 
-fn try_lock(path: &Path) -> Result<Option<File>> {
+/// A rollout lock that belongs to this process alone.
+///
+/// `flock` follows the open file description, so a child forked while the lock
+/// is held (a `pre_exec` spawn between fork and exec) keeps it alive after its
+/// owner drops it. POSIX record locks belong to the process and are never
+/// inherited, but a second acquire in the owning process would silently
+/// succeed, so the `HELD` registry keeps one holder per file inside the process.
+#[derive(Debug)]
+pub struct Lock {
+    file: Option<File>,
+    #[cfg(unix)]
+    id: (u64, u64),
+}
+
+#[cfg(unix)]
+static HELD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(u64, u64)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Close first: closing any descriptor of the file releases the record
+        // lock, and only then may another holder in this process claim the file.
+        drop(self.file.take());
+        #[cfg(unix)]
+        HELD.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// An exclusive `flock` that child processes inherit. Preparation relies on it:
+/// the CLI hands this descriptor to the mutating build so a killed CLI cannot let
+/// a second preparation in while cargo still uses the shared inputs.
+fn try_inheritable_lock(path: &Path) -> Result<Option<File>> {
     let dir = path.parent().context("rollout lock has no parent")?;
     std::fs::create_dir_all(dir)?;
     let file = OpenOptions::new()
@@ -257,6 +290,48 @@ fn try_lock(path: &Path) -> Result<Option<File>> {
     }
 }
 
+fn try_process_lock(path: &Path) -> Result<Option<Lock>> {
+    let dir = path.parent().context("rollout lock has no parent")?;
+    std::fs::create_dir_all(dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        let id = (metadata.dev(), metadata.ino());
+        let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !held.insert(id) {
+            return Ok(None);
+        }
+        let mut request: libc::flock = unsafe { std::mem::zeroed() };
+        request.l_type = libc::F_WRLCK as _;
+        request.l_whence = libc::SEEK_SET as _;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &request) } != 0 {
+            held.remove(&id);
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::EAGAIN | libc::EACCES) => Ok(None),
+                _ => Err(error.into()),
+            };
+        }
+        Ok(Some(Lock {
+            file: Some(file),
+            id,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        bail!("daemon rollout locking requires Unix")
+    }
+}
+
 pub(super) fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
@@ -276,7 +351,7 @@ pub(super) fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
 
 struct Store {
     path: PathBuf,
-    _lock: File,
+    _lock: Lock,
 }
 
 enum DesktopArtifact {
@@ -299,7 +374,8 @@ fn desktop_artifact(name: &str) -> Option<(&str, (u64, u64), DesktopArtifact)> {
 
 impl Store {
     fn acquire(path: PathBuf) -> Result<Option<Self>> {
-        Ok(try_lock(&path.with_file_name("executor.lock"))?.map(|lock| Self { path, _lock: lock }))
+        Ok(try_process_lock(&path.with_file_name("executor.lock"))?
+            .map(|lock| Self { path, _lock: lock }))
     }
 
     fn save(&self, journal: &Journal) -> Result<()> {
