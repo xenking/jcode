@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::rollout_fs;
+use super::{rollout_desktop, rollout_fs};
 use crate::turn_activity::{ActivitySnapshot, SessionActivity};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,20 +118,18 @@ pub fn read_journal() -> Result<Option<Journal>> {
     load_at(&journal_path()?)
 }
 
-fn receipt_path(id: &str) -> Result<PathBuf> {
+fn receipt_path(path: &Path, id: &str) -> Result<PathBuf> {
     if !id.starts_with("rollout_")
         || id.len() > 128
         || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     {
         bail!("invalid rollout ID");
     }
-    Ok(journal_path()?
-        .with_file_name("receipts")
-        .join(format!("{id}.json")))
+    Ok(path.with_file_name("receipts").join(format!("{id}.json")))
 }
 
 pub(crate) fn inspect(id: &str) -> Result<Option<Journal>> {
-    let receipt = receipt_path(id)?;
+    let receipt = receipt_path(&journal_path()?, id)?;
     if let Some(journal) = read_journal()?.filter(|journal| journal.id == id) {
         return Ok(Some(journal));
     }
@@ -152,6 +150,33 @@ pub fn record_preparation(preparation: &Preparation) -> Result<()> {
 
 pub fn try_handoff_gate() -> Result<Option<File>> {
     try_lock(&journal_path()?.with_file_name("handoff.lock"))
+}
+
+/// Reclaim space before checking build admission, without competing with recovery.
+pub fn sweep_desktop_before_rollout(app: &Path) -> Result<()> {
+    sweep_desktop_before_rollout_at(journal_path()?, app)
+}
+
+fn sweep_desktop_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
+    let Some(_handoff) = try_lock(&path.with_file_name("handoff.lock"))? else {
+        return Ok(());
+    };
+    // Do not take the executor lock across a daemon exec handoff. The new
+    // daemon needs that lock even if the old executor has already released it.
+    if load_at(&path)?.is_some_and(|journal| !journal.phase.terminal()) {
+        return Ok(());
+    }
+    let Some(store) = Store::acquire(path)? else {
+        return Ok(());
+    };
+    let journal = load_at(&store.path)?;
+    if journal
+        .as_ref()
+        .is_none_or(|journal| journal.phase.terminal())
+    {
+        store.sweep_desktop_bundles(app, journal.as_ref())?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -248,6 +273,24 @@ struct Store {
     _lock: File,
 }
 
+enum DesktopArtifact {
+    Incoming,
+    Backup,
+}
+
+fn desktop_artifact(name: &str) -> Option<(&str, (u64, u64), DesktopArtifact)> {
+    let (id, suffix) = name.strip_prefix(".Jcode.")?.split_once('.')?;
+    let kind = match suffix {
+        "incoming.app" => DesktopArtifact::Incoming,
+        "backup.app" => DesktopArtifact::Backup,
+        _ => return None,
+    };
+    let (timestamp, nonce) = id.strip_prefix("rollout_")?.split_once('_')?;
+    let order = (timestamp.parse().ok()?, nonce.parse().ok()?);
+    // Only canonical IDs from new_id("rollout") are rollout-owned paths.
+    (id == format!("rollout_{}_{}", order.0, order.1)).then_some((id, order, kind))
+}
+
 impl Store {
     fn acquire(path: PathBuf) -> Result<Option<Self>> {
         Ok(try_lock(&path.with_file_name("executor.lock"))?.map(|lock| Self { path, _lock: lock }))
@@ -260,7 +303,95 @@ impl Store {
     fn phase(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
         journal.phase = phase;
         self.save(journal)?;
-        self.log(journal, &format!("phase {phase:?}"))
+        self.log(journal, &format!("phase {phase:?}"))?;
+        if phase.terminal()
+            && let Err(error) = self.sweep_desktop_bundles(&journal.intent.app, Some(journal))
+        {
+            crate::logging::warn(&format!("Cannot prune rollout bundles: {error:#}"));
+        }
+        Ok(())
+    }
+
+    fn sweep_desktop_bundles(&self, app: &Path, journal: Option<&Journal>) -> Result<()> {
+        let parent = app.parent().context("app has no parent")?;
+        let installed = app.file_name().context("app has no filename")?;
+        let parent = match parent.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("resolving {}", parent.display()));
+            }
+        };
+        let installed_target = match app.canonicalize() {
+            Ok(path) => Some(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("resolving {}", app.display()));
+            }
+        };
+        let mut backups = Vec::new();
+        let mut remove = Vec::new();
+        for entry in
+            std::fs::read_dir(&parent).with_context(|| format!("reading {}", parent.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if installed.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            let Some((id, order, kind)) = desktop_artifact(name) else {
+                continue;
+            };
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if installed_target.as_ref() == Some(&path) {
+                continue;
+            }
+            match kind {
+                DesktopArtifact::Incoming => remove.push(path),
+                DesktopArtifact::Backup => {
+                    let ready = if let Some(journal) = journal.filter(|journal| journal.id == id) {
+                        journal.backup_ready
+                    } else {
+                        // Legacy leftovers can predate receipts. Use a receipt
+                        // when available to rule out a failed, partial copy.
+                        load_at(&receipt_path(&self.path, id)?)?
+                            .is_none_or(|receipt| receipt.backup_ready)
+                    };
+                    if ready {
+                        backups.push((order, path));
+                    } else {
+                        remove.push(path);
+                    }
+                }
+            }
+        }
+
+        backups.sort_unstable_by_key(|(order, _)| *order);
+        let keep = backups.pop();
+        remove.extend(backups.into_iter().map(|(_, path)| path));
+        if remove.is_empty() {
+            return Ok(());
+        }
+        // Keep the manual fallback on disk, not as an alternate app for its ID.
+        if let Some((_, path)) = keep {
+            rollout_desktop::unregister_bundle(&path);
+        }
+        for path in remove {
+            rollout_desktop::unregister_bundle(&path);
+            if let Err(error) = std::fs::remove_dir_all(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logging::warn(&format!("Cannot remove {}: {error}", path.display()));
+            }
+        }
+        if app.is_dir() {
+            rollout_desktop::register_bundle(app);
+        }
+        rollout_fs::sync_parent(app)
     }
 
     fn log(&self, journal: &Journal, message: &str) -> Result<()> {
@@ -426,7 +557,7 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
         intent,
     };
     if let Some(previous) = previous {
-        let receipt = receipt_path(&previous.id)?;
+        let receipt = receipt_path(&path, &previous.id)?;
         std::fs::create_dir_all(receipt.parent().context("rollout receipt has no parent")?)?;
         save_at(&receipt, &previous)?;
     }
@@ -758,6 +889,7 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     {
         journal.desktop_swapped = true;
         store.save(journal)?;
+        rollout_desktop::register_bundle(&journal.intent.app);
         super::rollout_desktop::retire_stale_bridges(&journal.intent.app, &journal.intent.app)
             .await?;
         return launch_desktop(store, journal, &handoff).await;
@@ -792,6 +924,7 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     }
     journal.desktop_swapped = true;
     store.after(journal, "bundle atomically installed; backup retained")?;
+    rollout_desktop::register_bundle(&journal.intent.app);
     launch_desktop(store, journal, &handoff).await
 }
 
@@ -876,6 +1009,7 @@ fn restore_bundle(store: &Store, journal: &mut Journal) -> Result<()> {
         }
         journal.desktop_swapped = false;
         store.after(journal, "previous bundle restored")?;
+        rollout_desktop::register_bundle(&journal.intent.app);
     }
     Ok(())
 }

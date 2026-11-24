@@ -23,7 +23,7 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
         .unwrap();
     let journal = Journal {
         schema: 1,
-        id: "rollout_fixture".into(),
+        id: "rollout_100_2".into(),
         intent: Intent {
             cli_sha: None,
             preparation_id: None,
@@ -44,8 +44,8 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
         previous_shared: "123456789".into(),
         previous_binary: root.join("old-jcode"),
         staged_binary: root.join("new-jcode"),
-        incoming_app: root.join("Applications/.Jcode.incoming.app"),
-        backup_app: root.join("Applications/.Jcode.backup.app"),
+        incoming_app: root.join("Applications/.Jcode.rollout_100_2.incoming.app"),
+        backup_app: root.join("Applications/.Jcode.rollout_100_2.backup.app"),
         incoming_inode: None,
         backup_ready: false,
         desktop_swapped: false,
@@ -57,6 +57,170 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
     };
     store.save(&journal).unwrap();
     (dir, store, journal)
+}
+
+#[test]
+fn completed_rollout_keeps_only_the_newest_backup() {
+    let (_dir, store, mut journal) = fixture();
+    let old_backup = journal
+        .intent
+        .app
+        .with_file_name(".Jcode.rollout_99_9.backup.app");
+    let old_incoming = old_backup.with_file_name(".Jcode.rollout_99_9.incoming.app");
+    let unrelated = old_backup.with_file_name(".Jcode.rollout_notes.backup.app");
+    for path in [&old_backup, &old_incoming, &unrelated] {
+        std::fs::create_dir(path).unwrap();
+    }
+    rollout_fs::copy_bundle(&journal.intent.app, &journal.backup_app).unwrap();
+    journal.backup_ready = true;
+    rollout_fs::copy_bundle(
+        journal.intent.bundle.as_deref().unwrap(),
+        &journal.incoming_app,
+    )
+    .unwrap();
+    rollout_fs::exchange_paths(&journal.incoming_app, &journal.intent.app).unwrap();
+
+    store.phase(&mut journal, Phase::Completed).unwrap();
+
+    assert!(!old_backup.exists());
+    assert!(!old_incoming.exists());
+    assert!(!journal.incoming_app.exists());
+    assert!(unrelated.is_dir());
+    assert_eq!(
+        std::fs::read_to_string(journal.backup_app.join("version")).unwrap(),
+        "old"
+    );
+    assert_eq!(
+        std::fs::read_to_string(journal.intent.app.join("version")).unwrap(),
+        "new"
+    );
+}
+
+#[test]
+fn rolled_back_rollout_removes_the_exchanged_bundle() {
+    let (_dir, store, mut journal) = fixture();
+    rollout_fs::copy_bundle(&journal.intent.app, &journal.backup_app).unwrap();
+    journal.backup_ready = true;
+    rollout_fs::copy_bundle(
+        journal.intent.bundle.as_deref().unwrap(),
+        &journal.incoming_app,
+    )
+    .unwrap();
+    rollout_fs::exchange_paths(&journal.incoming_app, &journal.intent.app).unwrap();
+    restore_bundle(&store, &mut journal).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(journal.incoming_app.join("version")).unwrap(),
+        "new"
+    );
+
+    store.phase(&mut journal, Phase::RolledBack).unwrap();
+
+    assert!(!journal.incoming_app.exists());
+    assert!(journal.backup_app.is_dir());
+    assert_eq!(
+        std::fs::read_to_string(journal.intent.app.join("version")).unwrap(),
+        "old"
+    );
+}
+
+#[test]
+fn failed_rollout_does_not_replace_a_good_backup_with_a_partial_copy() {
+    let (_dir, store, mut journal) = fixture();
+    let old_backup = journal
+        .intent
+        .app
+        .with_file_name(".Jcode.rollout_99_9.backup.app");
+    rollout_fs::copy_bundle(&journal.intent.app, &old_backup).unwrap();
+    std::fs::create_dir(&journal.backup_app).unwrap();
+    std::fs::create_dir(&journal.incoming_app).unwrap();
+
+    store.phase(&mut journal, Phase::Failed).unwrap();
+
+    assert!(old_backup.is_dir());
+    assert!(!journal.backup_app.exists());
+    assert!(!journal.incoming_app.exists());
+    assert!(journal.intent.app.is_dir());
+}
+
+#[test]
+fn sweep_does_not_touch_an_in_flight_rollout_even_without_an_executor() {
+    let (_dir, store, journal) = fixture();
+    for path in [&journal.backup_app, &journal.incoming_app] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let path = store.path.clone();
+    drop(store);
+
+    sweep_desktop_before_rollout_at(path, &journal.intent.app).unwrap();
+
+    assert!(journal.backup_app.is_dir());
+    assert!(journal.incoming_app.is_dir());
+    assert!(journal.intent.app.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn sweep_preserves_the_target_of_an_installed_app_symlink() {
+    let (_dir, store, mut journal) = fixture();
+    let app = &journal.intent.app;
+    std::fs::rename(app, &journal.incoming_app).unwrap();
+    std::os::unix::fs::symlink(&journal.incoming_app, app).unwrap();
+    std::fs::create_dir(&journal.backup_app).unwrap();
+    journal.backup_ready = true;
+
+    store.phase(&mut journal, Phase::Completed).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(journal.intent.app.join("version")).unwrap(),
+        "old"
+    );
+}
+
+#[test]
+fn sweep_repairs_an_interrupted_cleanup_and_is_repeatable() {
+    let (_dir, store, mut journal) = fixture();
+    let installed = &journal.intent.app;
+    let old_backup = installed.with_file_name(".Jcode.rollout_98_99.backup.app");
+    let partial = installed.with_file_name(".Jcode.rollout_99_9.backup.app");
+    for path in [
+        &old_backup,
+        &partial,
+        &journal.backup_app,
+        &journal.incoming_app,
+    ] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let receipt = receipt_path(&store.path, "rollout_99_9").unwrap();
+    std::fs::create_dir(receipt.parent().unwrap()).unwrap();
+    let mut previous = journal.clone();
+    previous.id = "rollout_99_9".into();
+    previous.phase = Phase::Failed;
+    save_at(&receipt, &previous).unwrap();
+    // The latest rollout reached terminal state but died before pruning.
+    journal.phase = Phase::Completed;
+    journal.backup_ready = true;
+    store.save(&journal).unwrap();
+    let path = store.path.clone();
+    drop(store);
+
+    #[cfg(unix)]
+    let symlink = {
+        let symlink = installed.with_file_name(".Jcode.rollout_101_1.incoming.app");
+        std::os::unix::fs::symlink(installed, &symlink).unwrap();
+        symlink
+    };
+
+    for _ in 0..2 {
+        sweep_desktop_before_rollout_at(path.clone(), installed).unwrap();
+
+        assert!(installed.is_dir());
+        assert!(journal.backup_app.is_dir());
+        assert!(!old_backup.exists());
+        assert!(!partial.exists());
+        assert!(!journal.incoming_app.exists());
+        #[cfg(unix)]
+        assert!(symlink.is_symlink());
+    }
 }
 
 #[test]

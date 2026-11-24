@@ -46,6 +46,11 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
             host.terminal_at_start = crate::server::rollout::read_journal()?
                 .filter(|journal| journal.phase.terminal())
                 .map(|journal| journal.id);
+            if let Err(error) =
+                crate::server::rollout::sweep_desktop_before_rollout(&host.layout.app)
+            {
+                eprintln!("Could not prune stale rollout bundles: {error:#}");
+            }
         }
         super::rollout::run(&mut host, &options, &mut std::io::stdout())
     })?;
