@@ -79,7 +79,7 @@ const OPENCODE_USAGE_WINDOWS: [(&str, &str); 3] = [
 /// `{"usage":{"rolling":{"status":"ok","percent":23,"resetsAt":"..."}, ...}}`.
 ///
 /// Unavailable windows must not read as a healthy zero.
-fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
+pub(super) fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
     let Some(usage) = payload.get("usage") else {
         return Vec::new();
     };
@@ -413,6 +413,14 @@ async fn fetch_compatible_profile_report(
         || (matches!(profile.id, "zai" | "opencode" | "opencode-go") && !limits.is_empty());
     if !plan_quota_shown {
         push_local_spend(&mut extra_info, &source_key);
+    }
+
+    if matches!(profile.id, "opencode" | "opencode-go")
+        && let Some(account) = jcode_routing_policy::AccountId::parse(profile.id)
+    {
+        // Routing reads this meter by account id. A failed fetch has no limits,
+        // which forgets the last numbers instead of keeping them as current.
+        crate::routing_meters::publish_opencode_limits(&account, &limits);
     }
 
     let mut report = ProviderUsage {

@@ -1,0 +1,15 @@
+[package]
+name = "jcode-routing-meters"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jcode-routing-policy = { path = "../jcode-routing-policy" }
+chrono = "0.4"
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

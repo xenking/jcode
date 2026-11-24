@@ -87,6 +87,7 @@ pub mod protocol;
 pub mod provider;
 pub mod provider_activity;
 pub mod provider_catalog;
+pub mod routing_meters;
 pub mod recent_session_index;
 pub mod registry;
 pub mod routing_state;

@@ -3896,6 +3896,7 @@ dependencies = [
  "jcode-provider-openrouter",
  "jcode-provider-openrouter-runtime",
  "jcode-render-core",
+ "jcode-routing-meters",
  "jcode-routing-policy",
  "jcode-selfdev-types",
  "jcode-session-types",
@@ -4617,6 +4618,18 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "unicode-width",
+]
+
+[[package]]
+name = "jcode-routing-meters"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jcode-routing-policy",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

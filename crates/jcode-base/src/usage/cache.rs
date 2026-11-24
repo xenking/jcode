@@ -994,12 +994,22 @@ pub(super) fn openai_snapshot_from_usage(
 /// contain default zeroes. Only a real last-good sample with a still-open,
 /// explicitly dated window is safe to show as stale.
 fn anthropic_window_ratio(usage: &UsageData, value: f32, reset: Option<&str>) -> Option<f32> {
+    anthropic_window_ratio_at(usage, value, reset, chrono::Utc::now().timestamp())
+}
+
+/// [`anthropic_window_ratio`] judged at `now` (unix seconds).
+pub(super) fn anthropic_window_ratio_at(
+    usage: &UsageData,
+    value: f32,
+    reset: Option<&str>,
+    now: i64,
+) -> Option<f32> {
     if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return None;
     }
     let future_reset = reset
         .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
-        .is_some_and(|reset| reset > chrono::Utc::now());
+        .is_some_and(|reset| reset.timestamp() > now);
     if usage.last_error.is_none() {
         // A success can remain cached across a reset while polling backs
         // off. Never route or display the rolled-over window as current.

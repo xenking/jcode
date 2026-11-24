@@ -30,6 +30,9 @@ mod openai_reset;
 pub(crate) use openai_reset::auto_reset_weekly_usage;
 mod provider_fetch;
 mod remote_accounts;
+mod routing_readings;
+#[cfg(test)]
+mod routing_readings_tests;
 #[cfg(test)]
 pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
@@ -61,6 +64,9 @@ use provider_fetch::*;
 pub use remote_accounts::{
     clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
     remote_account_usage_received, set_remote_account_usage,
+};
+pub(crate) use routing_readings::{
+    anthropic_account_readings, cursor_readings, openai_account_readings, opencode_readings,
 };
 pub use startup_snapshot::{
     AccountUsageStartupPublisher, hydrate_remote_account_usage,
@@ -205,7 +211,30 @@ async fn fetch_anthropic_usage_data_uncached(
         "juniper_tide": data.juniper_tide,
         "cedar_ember": data.cedar_ember,
     });
-    let usage = UsageData {
+    let usage = usage_data_from_response(&data);
+    if let Some(label) = cache_key.strip_prefix("label:")
+        && quota_known
+        && !usage.is_stale()
+        && [usage.five_hour, usage.seven_day]
+            .into_iter()
+            .chain(usage.seven_day_opus)
+            .chain(usage.model_scoped.iter().map(|window| window.utilization))
+            .all(|ratio| ratio.is_finite() && (0.0..0.99).contains(&ratio))
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "claude",
+            label,
+            probe_started,
+        );
+    }
+    let usage = disk_cache::store_success_with_reset_status(&cache_key, &usage, Some(reset_status));
+    store_anthropic_usage(cache_key, usage.clone());
+    Ok(usage)
+}
+
+/// The cached usage sample a successful Anthropic usage response describes.
+fn usage_data_from_response(data: &UsageResponse) -> UsageData {
+    UsageData {
         five_hour: data
             .five_hour
             .as_ref()
@@ -227,14 +256,14 @@ async fn fetch_anthropic_usage_data_uncached(
             .map(usage_percent_to_ratio),
         model_scoped: data
             .limits
-            .into_iter()
+            .iter()
             .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
             .filter_map(|limit| {
-                let model_name = limit.scope?.model?.display_name?;
+                let model_name = limit.scope.as_ref()?.model.as_ref()?.display_name.clone()?;
                 Some(ModelScopedUsageWindow {
                     model_name,
                     utilization: usage_percent_to_ratio(limit.percent?),
-                    resets_at: limit.resets_at,
+                    resets_at: limit.resets_at.clone(),
                 })
             })
             .collect(),
@@ -247,26 +276,7 @@ async fn fetch_anthropic_usage_data_uncached(
         last_success_at: Some(Instant::now()),
         refresh_after: None,
         last_error: None,
-    };
-
-    if let Some(label) = cache_key.strip_prefix("label:")
-        && quota_known
-        && !usage.is_stale()
-        && [usage.five_hour, usage.seven_day]
-            .into_iter()
-            .chain(usage.seven_day_opus)
-            .chain(usage.model_scoped.iter().map(|window| window.utilization))
-            .all(|ratio| ratio.is_finite() && (0.0..0.99).contains(&ratio))
-    {
-        crate::provider::models::clear_quota_unavailability_after_probe(
-            "claude",
-            label,
-            probe_started,
-        );
     }
-    let usage = disk_cache::store_success_with_reset_status(&cache_key, &usage, Some(reset_status));
-    store_anthropic_usage(cache_key, usage.clone());
-    Ok(usage)
 }
 
 /// A failed request keeps any last-known limits, but marks them as stale and

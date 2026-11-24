@@ -321,11 +321,19 @@ fn parse_wham_window(window: &serde_json::Value, fallback_name: &str) -> Option<
         .get("used_percent")
         .and_then(parse_f32_value)
         .map(clamp_percent)?;
-    let resets_at = obj.get("reset_at").and_then(parse_f32_value).map(|ts| {
-        chrono::DateTime::from_timestamp(ts as i64, 0)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| format!("{}", ts as i64))
-    });
+    // Epoch seconds need f64: an f32 cannot hold a current timestamp to the minute.
+    let resets_at = obj
+        .get("reset_at")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        })
+        .map(|ts| {
+            chrono::DateTime::from_timestamp(ts as i64, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| format!("{}", ts as i64))
+        });
     Some(UsageLimit {
         name: parse_window_seconds(obj)
             .map(window_duration_label)

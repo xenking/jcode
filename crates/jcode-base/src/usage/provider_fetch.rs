@@ -692,6 +692,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         Ok(response) if response.status().is_success() => {
             let json: serde_json::Value = response.json().await.unwrap_or_default();
             let report = cursor_plan_usage_report(&json);
+            crate::routing_meters::publish_cursor_limits(&report.limits);
             // A 200 with neither usage fields nor membership info carries
             // nothing usable; fall back to the key-status probe. Membership
             // without usage still shows the plan label.

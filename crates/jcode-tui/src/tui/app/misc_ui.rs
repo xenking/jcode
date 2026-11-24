@@ -248,7 +248,13 @@ impl App {
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(
+            call_cost,
+            self.streaming.streaming_input_tokens
+                + self.streaming.streaming_output_tokens
+                + self.streaming.streaming_cache_read_tokens.unwrap_or(0)
+                + self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+        );
     }
 
     /// Accrue the dollar cost of a single completed remote API call.
@@ -286,7 +292,10 @@ impl App {
             cache_creation_delta,
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(
+            call_cost,
+            input_delta + output_delta + cache_read_delta + cache_creation_delta,
+        );
     }
 
     /// Seed `cost.total_cost` from token totals restored when resuming a
@@ -325,7 +334,7 @@ impl App {
     /// `/usage` can show per-login spend (today / month / all-time). Only ever
     /// called from the billed-per-token paths, so every dollar recorded here
     /// is real API-key spend rather than subscription usage.
-    fn record_api_key_spend(&self, call_cost: f32) {
+    fn record_api_key_spend(&self, call_cost: f32, tokens: u64) {
         if !call_cost.is_finite() || call_cost <= 0.0 {
             return;
         }
@@ -335,9 +344,11 @@ impl App {
         let source_key =
             crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref());
         let cost = call_cost as f64;
+        let model = <Self as TuiState>::provider_model(self);
         // Ledger writes hit the filesystem; never block the render/input loop.
+        // The routing spend ledger gets the same call with its model and tokens.
         std::thread::spawn(move || {
-            crate::provider_activity::record_spend(&source_key, cost);
+            crate::routing_meters::record_priced_spend(&source_key, &model, cost, tokens);
         });
     }
 
