@@ -378,6 +378,8 @@ impl Provider for OpenAIProvider {
         let client = egress.client_or(&self.client);
         let panic_tx = tx.clone();
         let log_context = jcode_base::logging::current_context_snapshot();
+        // Read before the spawn: the task does not inherit the caller's task-locals.
+        let fail_fast_limits = jcode_provider_core::account_limit_fail_fast();
 
         tokio::spawn(async move {
             if let Some(session) = log_context.session.as_deref() {
@@ -810,7 +812,11 @@ impl Provider for OpenAIProvider {
                             // request to OpenAI API")` (e.g. TLS BadRecordMac) is
                             // visible to the retry classifier.
                             let error_str = format!("{error:#}").to_lowercase();
-                            if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            if is_retryable_error(&error_str)
+                                && !(fail_fast_limits
+                                    && jcode_provider_core::is_account_limit_error(&error_str))
+                                && attempt + 1 < MAX_RETRIES
+                            {
                                 if saw_output {
                                     // Partial output already reached the
                                     // consumer; roll it back so the retried

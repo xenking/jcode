@@ -21,10 +21,10 @@ use profile::profile_tool_selection;
 mod prompting;
 pub(crate) mod provider;
 mod reload_resume;
-mod routing;
 #[cfg(test)]
 mod reload_resume_tests;
 mod response_recovery;
+mod routing;
 mod runtime_recovery;
 mod session_title;
 mod shake_tools;
@@ -362,6 +362,10 @@ pub struct Agent {
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// The routing service has another account for this session, so a rate
+    /// or usage limit must reach it on the first occurrence, not after the
+    /// provider's own same-account retries.
+    routing_fail_fast_limits: bool,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
     /// Last observed transport/connection type for this session
@@ -571,6 +575,7 @@ impl Agent {
             _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
             provider_session_id: None,
+            routing_fail_fast_limits: false,
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,

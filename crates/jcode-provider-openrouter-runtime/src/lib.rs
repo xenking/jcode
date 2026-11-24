@@ -2964,6 +2964,9 @@ mod issue_1056_tests;
 mod labelled_key_tests;
 
 #[cfg(test)]
+mod account_limit_tests;
+
+#[cfg(test)]
 #[path = "profile_catalog_backoff_tests.rs"]
 mod profile_catalog_backoff_tests;
 

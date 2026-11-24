@@ -42,6 +42,32 @@ pub fn worker_request_is_pinned() -> bool {
     PIN_WORKER_REQUEST.try_with(|_| ()).is_ok()
 }
 
+tokio::task_local! {
+    static ACCOUNT_LIMITS_FAIL_FAST: ();
+}
+
+/// Run a provider request that must surface an account limit (rate limit or
+/// usage exhaustion) on its first occurrence. The routing service sets this
+/// when another eligible account can take the turn, so retrying the limited
+/// one only burns time. Transient 5xx and network retries are unaffected.
+pub async fn with_account_limit_fail_fast<F: std::future::Future>(
+    fail_fast: bool,
+    request: F,
+) -> F::Output {
+    if fail_fast {
+        ACCOUNT_LIMITS_FAIL_FAST.scope((), request).await
+    } else {
+        request.await
+    }
+}
+
+/// Whether the request being built runs under [`with_account_limit_fail_fast`].
+/// Providers read it while building the request, before any spawned task, and
+/// carry the value into their retry loop.
+pub fn account_limit_fail_fast() -> bool {
+    ACCOUNT_LIMITS_FAIL_FAST.try_with(|_| ()).is_ok()
+}
+
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 
@@ -59,7 +85,7 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    is_definitive_usage_exhaustion, parse_failover_prompt_message,
+    is_account_limit_error, is_definitive_usage_exhaustion, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,

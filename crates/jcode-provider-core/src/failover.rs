@@ -181,6 +181,13 @@ pub fn usage_limit_details(message: &str) -> Option<UsageLimitDetails> {
     Some(UsageLimitDetails { window, reset })
 }
 
+/// Whether `message` reports an account limit: a rate limit, usage window or
+/// quota exhaustion, billing block. Retrying the same account cannot be
+/// expected to help soon, which is what routing relies on to fail fast.
+pub fn is_account_limit_error(message: &str) -> bool {
+    usage_limit_details(message).is_some()
+}
+
 fn is_auth_or_access_failure(lower: &str) -> bool {
     [
         "access denied",

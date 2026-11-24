@@ -160,9 +160,11 @@ pub(super) async fn before_turn(
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
     if !routing_enabled() {
+        agent.set_routing_fail_fast_limits(false);
         return Ok(());
     }
     let Some(input) = turn_input(agent, agent.routing_seam()) else {
+        agent.set_routing_fail_fast_limits(false);
         return Ok(());
     };
     let plan = routing_service::global()
@@ -178,10 +180,19 @@ pub(super) async fn before_turn(
 /// limit blocks the turn with its reason.
 pub async fn route_unattached_turn(agent: &mut Agent) -> anyhow::Result<()> {
     let (tx, _events) = mpsc::unbounded_channel();
-    before_turn(agent, &tx).await
+    let routed = before_turn(agent, &tx).await;
+    // Nothing here re-routes after a failure, so the provider keeps its own
+    // same-account retries.
+    agent.set_routing_fail_fast_limits(false);
+    routed
 }
 
 fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+    // A limit reaches routing at once only while another account can serve.
+    agent.set_routing_fail_fast_limits(match &plan {
+        Plan::Stay(outcome) | Plan::Move(outcome) => outcome.alternative,
+        _ => false,
+    });
     match plan {
         Plan::Stay(outcome) => {
             let _ = event_tx.send(outcome.event());
@@ -249,10 +260,17 @@ pub(super) async fn on_failure(
         return None;
     }
     if let Some(current) = &input.current {
-        service.record_failure(
-            current,
-            jcode_provider_core::failover::is_definitive_usage_exhaustion(message),
-        );
+        let definitive = jcode_provider_core::failover::is_definitive_usage_exhaustion(message);
+        // The turn was handed over at the first limit because another account
+        // can serve it: rest this one, so the decision below moves on.
+        if !definitive
+            && agent.routing_fail_fast_limits()
+            && jcode_provider_core::is_account_limit_error(message)
+        {
+            service.record_limit(current);
+        } else {
+            service.record_failure(current, definitive);
+        }
     }
     match service.route(&input, &EventSink(event_tx)).await {
         Ok(Plan::Move(outcome)) => {
@@ -269,6 +287,7 @@ pub(super) async fn on_failure(
             let _ = event_tx.send(ServerEvent::ConnectionPhase {
                 phase: format!("retrying on {target}"),
             });
+            agent.set_routing_fail_fast_limits(outcome.alternative);
             Some(FailureRoute::Retry)
         }
         Ok(_) => Some(FailureRoute::Surface(Some(

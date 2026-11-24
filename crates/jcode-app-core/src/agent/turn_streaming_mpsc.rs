@@ -364,12 +364,15 @@ impl Agent {
                             cache_capture.clone(),
                             jcode_provider_core::with_pinned_worker_request(
                                 self.session.is_swarm_worker,
-                                provider.complete_split(
-                                    send_messages,
-                                    &tools,
-                                    &split_prompt.static_part,
-                                    &split_prompt.dynamic_part,
-                                    resume_session_id.as_deref(),
+                                jcode_provider_core::with_account_limit_fail_fast(
+                                    self.routing_fail_fast_limits,
+                                    provider.complete_split(
+                                        send_messages,
+                                        &tools,
+                                        &split_prompt.static_part,
+                                        &split_prompt.dynamic_part,
+                                        resume_session_id.as_deref(),
+                                    ),
                                 ),
                             )
                         )

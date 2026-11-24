@@ -314,32 +314,38 @@ impl Provider for OpenRouterProvider {
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
 
-        tokio::spawn(async move {
-            if tx
-                .send(Ok(StreamEvent::ConnectionType {
-                    connection: "https/sse".to_string(),
-                }))
-                .await
-                .is_err()
-            {
-                return;
-            }
-            run_stream_with_retries(
-                client,
-                transport,
-                api_base,
-                auth,
-                send_openrouter_headers,
-                conversation_id,
-                request_for_retries,
-                false,
-                tx,
-                provider_pin,
-                model_for_stream,
-                responses_api,
-            )
-            .await;
-        });
+        // The retry loop runs in a spawned task, which does not inherit the
+        // caller's task-locals: carry the routing fail-fast request across.
+        let fail_fast_limits = jcode_provider_core::account_limit_fail_fast();
+        tokio::spawn(jcode_provider_core::with_account_limit_fail_fast(
+            fail_fast_limits,
+            async move {
+                if tx
+                    .send(Ok(StreamEvent::ConnectionType {
+                        connection: "https/sse".to_string(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                run_stream_with_retries(
+                    client,
+                    transport,
+                    api_base,
+                    auth,
+                    send_openrouter_headers,
+                    conversation_id,
+                    request_for_retries,
+                    false,
+                    tx,
+                    provider_pin,
+                    model_for_stream,
+                    responses_api,
+                )
+                .await;
+            },
+        ));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

@@ -26,7 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class Fixture(BaseHTTPRequestHandler):
     used = {"key-main": 10, "key-second": 10}  # percent, per key
-    limited = set()  # keys answered with 429
+    limited = set()  # keys answered with a 429 usage-limit exhaustion
+    throttled = set()  # keys answered with a plain 429 rate limit
     seen = []  # keys of chat requests, in order
     bodies = []  # request bodies, same order
     lock = threading.Lock()
@@ -58,6 +59,8 @@ class Fixture(BaseHTTPRequestHandler):
         with self.lock:
             self.seen.append(key)
             self.bodies.append(body)
+        if key in self.throttled:
+            return self.reply(429, {"error": {"message": "Too many requests, rate limit exceeded", "code": "rate_limit_exceeded"}})
         if key in self.limited:
             return self.reply(429, {"error": {"message": "usage_limit_reached", "code": "usage_limit_reached"}})
         self.send_response(200)
@@ -329,6 +332,26 @@ def check_failure_redecides(binary, port):
         Fixture.limited = set()
 
 
+def check_rate_limit_reaches_routing_first(binary, port):
+    Fixture.used["key-main"], Fixture.used["key-second"] = 10, 10
+    Fixture.limited, Fixture.throttled = set(), {"key-main"}
+    daemon = scenario(binary, port, "auto")
+    daemon.start()
+    try:
+        client = daemon.session()
+        done = turn(client, 2)
+        assert done["type"] == "done", done
+        # A plain rate limit used to be retried on the limited key about eight
+        # times, with backoff, before routing saw it. With another account
+        # ready it must reach routing on the first request.
+        assert Fixture.seen == ["key-main", "key-second"], f"one request to the limited key: {Fixture.seen}"
+        assert any(e.get("type") == "routing_decision" and e["account"] == "opencode-go:second" for e in client.events), types(client)
+        print("ok rate limit: one request to the limited key, then the turn finished on key-second")
+    finally:
+        daemon.stop()
+        Fixture.throttled = set()
+
+
 def check_concurrent_sessions(binary, port):
     Fixture.used["key-main"], Fixture.used["key-second"] = 10, 10
     Fixture.limited = set()
@@ -372,7 +395,7 @@ def main(binary):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_port
-    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides, check_concurrent_sessions):
+    for check in (check_off, check_shadow, check_auto_move, check_gate, check_headless_block, check_subagent_block, check_failure_redecides, check_concurrent_sessions, check_rate_limit_reaches_routing_first):
         check(binary, port)
     print("routing daemon acceptance: PASS")
 

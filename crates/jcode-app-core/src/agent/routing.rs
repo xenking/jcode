@@ -8,6 +8,15 @@ impl Agent {
         self.session.parent_id.clone()
     }
 
+    /// Whether a limit must reach routing on its first occurrence.
+    pub(crate) fn set_routing_fail_fast_limits(&mut self, fail_fast: bool) {
+        self.routing_fail_fast_limits = fail_fast;
+    }
+
+    pub(crate) fn routing_fail_fast_limits(&self) -> bool {
+        self.routing_fail_fast_limits
+    }
+
     /// Where the session stands relative to its prompt cache: a session with no
     /// history picks freely, a cold cache can move for free, a warm one cannot.
     pub(crate) fn routing_seam(&self) -> Seam {

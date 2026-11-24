@@ -79,6 +79,9 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     /// A better account a warm session will move to at its next cold seam.
     pub pending: Option<AccountId>,
+    /// Another account could take this turn if `account` hit a limit, so the
+    /// provider should hand a limit to routing at once instead of retrying.
+    pub alternative: bool,
 }
 
 impl Outcome {
@@ -118,6 +121,11 @@ pub enum Plan {
 
 /// Gates reopened after a re-decision before the turn is given up.
 const MAX_GATE_ROUNDS: usize = 4;
+
+/// How long an account rests after a limit it hit while another account could
+/// serve. Long enough for the turn to move, short enough that a per-minute
+/// throttle does not park the account for the full eviction window.
+const LIMIT_COOLDOWN_SECS: u64 = 300;
 
 pub struct RoutingService {
     env: Arc<dyn RoutingEnv>,
@@ -285,6 +293,7 @@ impl RoutingService {
                     reason: reason.clone(),
                     warnings: warnings.clone(),
                     pending: None,
+                    alternative: false,
                 };
                 if input.current.as_ref() == Some(account) {
                     Plan::Stay(outcome)
@@ -310,8 +319,44 @@ impl RoutingService {
                 reason: reason.clone(),
             },
         };
+        let plan = match plan {
+            Plan::Stay(mut outcome) => {
+                outcome.alternative =
+                    self.alternative_exists(&active, input, &evaluation, &outcome.account, now);
+                Plan::Stay(outcome)
+            }
+            Plan::Move(mut outcome) => {
+                outcome.alternative =
+                    self.alternative_exists(&active, input, &evaluation, &outcome.account, now);
+                Plan::Move(outcome)
+            }
+            other => other,
+        };
         self.record(&active, input, &plan, now);
         if auto { plan } else { Plan::Observed }
+    }
+
+    /// Whether the policy would pick another account for this turn if
+    /// `serving` hit a limit. Pins and holds still count: a pinned session has
+    /// nowhere to go, so its provider keeps its own retries.
+    fn alternative_exists(
+        &self,
+        active: &Active,
+        input: &TurnInput,
+        evaluation: &Evaluation,
+        serving: &AccountId,
+        now: i64,
+    ) -> bool {
+        let mut snapshot = evaluation.snapshot.clone();
+        snapshot
+            .accounts
+            .entry(serving.clone())
+            .or_default()
+            .availability = Availability::Evicted { until: now + 3600 };
+        matches!(
+            decide_with(&active.policy, &snapshot, &evaluation.intents, input, now),
+            Decision::Use { account, .. } if &account != serving
+        )
     }
 
     /// Whether leaving the current account right now is right: at a cold seam
@@ -463,6 +508,24 @@ impl RoutingService {
             if definitive { 1 } else { evict_after },
             evict_for,
         );
+        self.flush(now);
+        availability
+    }
+
+    /// A rate or usage limit hit on `account` while another account can take
+    /// the turn. Takes the account out for a short cooldown, so the re-decision
+    /// that follows moves the turn at once, without the long eviction a
+    /// broken credential gets. Returns the availability now recorded.
+    pub fn record_limit(&self, account: &AccountId) -> Availability {
+        let (routing, egress) = self.env.routing();
+        let evict_for = match Policy::from_config(&routing, &egress) {
+            Ok(policy) => policy.evict_for_secs,
+            Err(_) => LIMIT_COOLDOWN_SECS,
+        };
+        let now = self.env.now();
+        let availability =
+            self.learned()
+                .on_failure(account, now, 1, evict_for.min(LIMIT_COOLDOWN_SECS));
         self.flush(now);
         availability
     }

@@ -387,6 +387,17 @@ pub(super) async fn run_stream_with_retries(
                     return;
                 }
 
+                // A routed session with another eligible account hands any
+                // account limit to routing at once, burst throttles included.
+                if retry_settings.fail_fast_limits
+                    && !saw_output
+                    && !response_accepted
+                    && jcode_provider_core::is_account_limit_error(&error_str)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 let retry_recoverable_limit =
                     error_classification::should_retry_recoverable_rate_limit(
                         &error_str,

@@ -43,6 +43,9 @@ pub(super) fn with_binding_beta(base: &str, thinking: &Option<ApiThinking>) -> S
 /// Both fallback paths use this snapshot to rebuild the next wire request.
 pub(super) struct RetrySettings {
     pub(super) worker_request_is_pinned: bool,
+    /// Routing has another account for this turn, so an account limit is
+    /// surfaced on its first occurrence.
+    pub(super) fail_fast_limits: bool,
     effort: Option<String>,
     show_thinking: bool,
     max_tokens_override: Option<u32>,
@@ -53,6 +56,7 @@ impl RetrySettings {
     pub(super) fn from_provider(provider: &AnthropicProvider) -> Self {
         Self {
             worker_request_is_pinned: jcode_provider_core::worker_request_is_pinned(),
+            fail_fast_limits: jcode_provider_core::account_limit_fail_fast(),
             effort: provider.stored_reasoning_effort(),
             show_thinking: jcode_base::config::config().display.show_thinking,
             max_tokens_override: provider.max_tokens_override,
@@ -151,6 +155,7 @@ mod tests {
     fn settings(effort: Option<&str>) -> RetrySettings {
         RetrySettings {
             worker_request_is_pinned: false,
+            fail_fast_limits: false,
             effort: effort.map(str::to_string),
             show_thinking: false,
             max_tokens_override: None,

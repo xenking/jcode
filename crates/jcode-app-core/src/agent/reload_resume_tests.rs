@@ -357,9 +357,9 @@ async fn reload_resume_compacts_over_budget_context_before_inference() {
     );
     assert!(request.iter().any(|message| {
         message.role == Role::User
-            && message.content.iter().any(|block| {
-                matches!(block, ContentBlock::Text { text, .. } if text.contains(pending))
-            })
+            && message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(pending)),
+            )
     }));
     assert!(!has_synthetic_user_prompt(request));
     let (before, after) = std::iter::from_fn(|| rx.try_recv().ok())
