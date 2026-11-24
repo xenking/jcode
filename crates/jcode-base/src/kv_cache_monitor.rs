@@ -658,8 +658,9 @@ impl KvCacheMonitor {
         if let Some(baseline) = self.baseline.as_mut() {
             let baseline = Arc::make_mut(baseline);
             baseline.completed_at -= by;
-            baseline.completed_in_process =
-                baseline.completed_in_process.and_then(|at| at.checked_sub(by));
+            baseline.completed_in_process = baseline
+                .completed_in_process
+                .and_then(|at| at.checked_sub(by));
         }
     }
 
@@ -1303,7 +1304,11 @@ mod tests {
         assert!(!expired.reason.harness_caused());
         assert!(expired.detail.contains("idle 2h"), "{}", expired.detail);
         assert!(expired.detail.contains("typical"), "{}", expired.detail);
-        assert!(!expired.detail.contains("unconfirmed"), "{}", expired.detail);
+        assert!(
+            !expired.detail.contains("unconfirmed"),
+            "{}",
+            expired.detail
+        );
 
         monitor.begin_request(openai_oauth_route(), sig(&[10, 11, 12]));
         assert_eq!(

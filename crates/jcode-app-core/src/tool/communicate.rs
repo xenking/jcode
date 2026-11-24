@@ -938,7 +938,7 @@ impl Tool for CommunicateTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Spawn: worker agent profile (scout read-only map, task implement, sonic narrow edits, reviewer read-only review). Omit to use the lane's lane_profile."
+                    "description": "scout, task, sonic or reviewer."
                 },
                 "session_ids": {
                     "type": "array",

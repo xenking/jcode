@@ -1866,7 +1866,9 @@ pub fn run_pair_command(list: bool, revoke: Option<String>, harness: bool) -> Re
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback());
         if !gw_config.enabled || !gw_config.harness_enabled || !is_loopback {
-            anyhow::bail!("Harness pairing requires [gateway] enabled = true, harness_enabled = true, and a loopback bind_addr");
+            anyhow::bail!(
+                "Harness pairing requires [gateway] enabled = true, harness_enabled = true, and a loopback bind_addr"
+            );
         }
         let code = registry.generate_pairing_code_scoped(gateway::DeviceScope::Harness);
         registry.save()?;

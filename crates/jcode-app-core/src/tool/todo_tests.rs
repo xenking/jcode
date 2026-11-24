@@ -1086,7 +1086,7 @@ fn ownership_gate_output_preserves_the_saved_todo_card() {
 
     assert_eq!(output.title.as_deref(), Some("1 todos"));
     assert!(output.output.starts_with('['));
-    assert!(output.output.contains("\"status\": \"in_progress\""));
+    assert!(output.output.contains("\"status\":\"in_progress\""));
     assert!(
         output
             .output
@@ -1147,14 +1147,13 @@ fn compact_write_echo_omits_authored_text_but_stays_card_parseable() {
     assert_eq!(compact.metadata, full.metadata);
 
     // Same parse sequence as the TUI todo card: array, then labelled sections.
-    let mut stream =
-        serde_json::Deserializer::from_str(&compact.output).into_iter::<Vec<TodoItem>>();
+    let mut stream = serde_json::Deserializer::from_str(&compact.output).into_iter::<Vec<Value>>();
     let parsed = stream
         .next()
         .expect("todo array")
         .expect("valid todo array");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].status, "in_progress");
+    assert_eq!(parsed[0]["status"], "in_progress");
     let rest = compact.output[stream.byte_offset()..].trim_start();
     let plan_json = rest
         .strip_prefix("Plan:")

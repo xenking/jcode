@@ -1474,7 +1474,7 @@ impl Tool for TodoTool {
         });
         schema["properties"]["todos"]["items"]["properties"]["lane_profile"] = json!({
             "type": ["string", "null"],
-            "description": "Worker agent profile for the whole lane, e.g. scout, task, sonic, reviewer."
+            "description": "Lane worker profile."
         });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
@@ -1523,10 +1523,7 @@ impl Tool for TodoTool {
                         }, "speed": {
                             "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
                             "description": "As lane_speed in add."
-                        }, "profile": {
-                            "type": ["string", "null"],
-                            "description": "As lane_profile in add."
-                        }, "items": {"type": "array", "minItems": 1, "items": item}}
+                        }, "profile": {"type": "string"}, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
