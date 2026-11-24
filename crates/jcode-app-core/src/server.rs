@@ -2330,6 +2330,7 @@ impl Server {
                 port: gw_config.port,
                 bind_addr: gw_config.bind_addr.clone(),
                 enabled: gw_config.enabled,
+                harness_enabled: gw_config.harness_enabled,
             }
         };
 
@@ -2341,9 +2342,11 @@ impl Server {
             tokio::sync::mpsc::unbounded_channel::<crate::gateway::GatewayClient>();
 
         let listener_runtime = runtime.clone();
+        let daemon_socket = self.socket_path.clone();
         let listener_spawned = runtime
             .spawn_background_task(async move {
-                if let Err(e) = crate::gateway::run_gateway(config, client_tx).await {
+                if let Err(e) = crate::gateway::run_gateway(config, client_tx, daemon_socket).await
+                {
                     crate::logging::error(&format!("Gateway error: {}", e));
                 }
             })

@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct WsAuth {
     pub(super) token: String,
     pub(super) source: WsAuthSource,

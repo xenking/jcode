@@ -524,6 +524,16 @@ impl JcodeClient {
         Self::over(transport, &options, path, false, None)
     }
 
+    /// Connect to a separately paired Harness gateway.
+    pub fn connect_paired_harness(
+        base_url: &str,
+        token: &str,
+        options: ConnectOptions,
+    ) -> Result<Self> {
+        let transport = crate::paired_harness::connect(base_url, token)?;
+        Self::connect_with(transport, options)
+    }
+
     fn over(
         transport: Box<dyn Transport>,
         options: &ConnectOptions,

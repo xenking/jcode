@@ -2,7 +2,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::storage;
-use jcode_gateway_types::{PairedDevice, PairingCode};
+use jcode_gateway_types::{DeviceScope, PairedDevice, PairingCode};
 
 // ---------------------------------------------------------------------------
 // Device registry (persisted to ~/.jcode/devices.json)
@@ -41,8 +41,11 @@ impl DeviceRegistry {
 
     /// Generate a 6-digit pairing code, valid for 5 minutes
     pub fn generate_pairing_code(&mut self) -> String {
+        self.generate_pairing_code_scoped(DeviceScope::Phone)
+    }
+
+    pub fn generate_pairing_code_scoped(&mut self, scope: DeviceScope) -> String {
         use rand::Rng;
-        let code: String = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::minutes(5);
 
@@ -50,7 +53,19 @@ impl DeviceRegistry {
         let now_str = now.to_rfc3339();
         self.pending_codes.retain(|c| c.expires_at > now_str);
 
+        let code = loop {
+            let candidate = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+            if self
+                .pending_codes
+                .iter()
+                .all(|pending| pending.code != candidate)
+            {
+                break candidate;
+            }
+        };
+
         self.pending_codes.push(PairingCode {
+            scope,
             code: code.clone(),
             created_at: now.to_rfc3339(),
             expires_at: expires.to_rfc3339(),
@@ -62,11 +77,15 @@ impl DeviceRegistry {
 
     /// Validate a pairing code and consume it. Returns true if valid.
     pub fn validate_code(&mut self, code: &str) -> bool {
+        self.validate_code_scoped(code, DeviceScope::Phone)
+    }
+
+    pub fn validate_code_scoped(&mut self, code: &str, scope: DeviceScope) -> bool {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(idx) = self
             .pending_codes
             .iter()
-            .position(|c| c.code == code && c.expires_at > now)
+            .position(|c| c.code == code && c.scope == scope && c.expires_at > now)
         {
             self.pending_codes.remove(idx);
             let _ = self.save();
@@ -82,6 +101,16 @@ impl DeviceRegistry {
         device_id: String,
         device_name: String,
         apns_token: Option<String>,
+    ) -> String {
+        self.pair_device_scoped(device_id, device_name, apns_token, DeviceScope::Phone)
+    }
+
+    pub fn pair_device_scoped(
+        &mut self,
+        device_id: String,
+        device_name: String,
+        apns_token: Option<String>,
+        scope: DeviceScope,
     ) -> String {
         use rand::Rng;
         // Generate a random auth token
@@ -99,6 +128,7 @@ impl DeviceRegistry {
         self.devices.retain(|d| d.id != device_id);
 
         self.devices.push(PairedDevice {
+            scope,
             id: device_id,
             name: device_name,
             apns_token,
