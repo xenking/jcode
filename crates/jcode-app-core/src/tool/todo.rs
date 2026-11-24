@@ -647,10 +647,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
             let lane = lane
                 .as_object()
                 .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
-            if lane
-                .keys()
-                .any(|key| !["lane", "items", "after", "owner", "speed"].contains(&key.as_str()))
-            {
+            if lane.keys().any(|key| {
+                !["lane", "items", "after", "owner", "speed", "profile"].contains(&key.as_str())
+            }) {
                 bail!("unexpected lane field");
             }
             let name = lane

@@ -164,6 +164,20 @@ fn hierarchy_rejects_malformed_structures() {
 }
 
 #[test]
+fn hierarchy_lane_profile_reaches_every_lane_item() {
+    let input = json!({"phases":[{"phase":1,"lanes":[{"lane":"mech","profile":"sonic","items":[
+        {"name":"Rename","status":"pending","priority":"high","confidence":"plausible"},
+        {"name":"Format","status":"pending","priority":"low","confidence":"plausible"}]}]}]});
+    let parsed = parse_todo_input(input).unwrap().todos.unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert!(
+        parsed
+            .iter()
+            .all(|todo| todo.lane_profile.as_deref() == Some("sonic"))
+    );
+}
+
+#[test]
 fn hierarchy_open_items_validate_fields_and_types() {
     let wrap =
         |item: Value| json!({"phases":[{"phase":1,"lanes":[{"lane":"work","items":[item]}]}]});
