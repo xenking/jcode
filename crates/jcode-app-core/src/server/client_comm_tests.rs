@@ -1040,6 +1040,99 @@ fn root_or_worker_member(
     )
 }
 
+#[tokio::test]
+async fn harness_default_message_targets_parent_or_coordinator() {
+    let swarm_id = "swarm-default-message";
+    let mut receivers = HashMap::new();
+    let mut members = HashMap::new();
+    for (id, parent) in [
+        ("coordinator", None),
+        ("parent", Some("coordinator")),
+        ("nested", Some("parent")),
+        ("orphan", Some("departed")),
+    ] {
+        let (member, receiver) = root_or_worker_member(id, id, swarm_id, parent);
+        members.insert(id.to_string(), member);
+        receivers.insert(id, receiver);
+    }
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        members.keys().cloned().collect(),
+    )])));
+    let members = Arc::new(RwLock::new(members));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+    let (events, _) = broadcast::channel(16);
+
+    for (sender, expected_scope, recipients) in [
+        ("nested", "dm", &["parent"][..]),
+        ("orphan", "dm", &["coordinator"][..]),
+        (
+            "coordinator",
+            "broadcast",
+            &["parent", "nested", "orphan"][..],
+        ),
+    ] {
+        handle_comm_message(
+            1,
+            sender.into(),
+            format!("update from {sender}"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            &reply_tx,
+            &sessions,
+            &Arc::default(),
+            &members,
+            &swarms,
+            &Arc::default(),
+            &Arc::default(),
+            &Arc::default(),
+            &events,
+            &Arc::default(),
+        )
+        .await;
+
+        let mut reply = reply_rx.try_recv().unwrap();
+        if expected_scope == "dm" {
+            assert!(
+                matches!(
+                    reply,
+                    ServerEvent::RuntimeCommandResult { ref data, .. }
+                        if data["default_target"] == recipients[0]
+                ),
+                "{reply:?}"
+            );
+            reply = reply_rx.try_recv().unwrap();
+        }
+        assert!(matches!(reply, ServerEvent::Done { id: 1 }), "{reply:?}");
+        for (id, receiver) in &mut receivers {
+            let event = receiver.try_recv();
+            if recipients.contains(id) {
+                assert!(
+                    matches!(
+                        event,
+                        Ok(ServerEvent::Notification {
+                            notification_type: NotificationType::Message { scope: Some(ref scope), .. },
+                            ref message,
+                            ..
+                        }) if scope == expected_scope && message.contains(&format!("update from {sender}"))
+                    ),
+                    "{id}: {event:?}"
+                );
+            } else {
+                assert!(event.is_err(), "{id}: {event:?}");
+            }
+        }
+    }
+}
+
 /// A root (user-driven) session can DM any other live session on the daemon by
 /// exact session id or unique friendly name, without knowing its swarm. Spawned
 /// workers stay confined to their own swarm.

@@ -657,27 +657,25 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
         Some("dm")
     );
 
-    // Broadcasts are scoped to the sender's spawned subtree; the coordinator
-    // keeps whole-swarm reach as an escape hatch. The peer was not spawned by
-    // the sender, so promote the sender to coordinator (self-promotion is
-    // allowed while the swarm has no coordinator) so the broadcast reaches it.
-    // A non-coordinator `message` with no target is a mistake (forgot
-    // to_session): it errors instead of broadcasting. The peer is a plain
-    // agent here; the sender was elected coordinator on join.
     let peer_ctx = test_ctx(&peer_session, &repo_dir);
     let untargeted = tool
         .execute(
-            json!({"action": "message", "message": "oops"}),
+            json!({"action": "message", "message": "default-dm"}),
             peer_ctx.clone(),
         )
-        .await;
-    assert!(
-        untargeted
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.to_string().contains("needs a target")),
-        "worker message without a target should be rejected: {:?}",
-        untargeted.map(|o| o.output)
+        .await
+        .expect("a peer without a report-back parent defaults to the coordinator");
+    assert_eq!(
+        untargeted.output,
+        format!("Direct message sent to {sender_session}: default-dm")
+    );
+    assert_eq!(
+        sender
+            .next_message_notification(Duration::from_secs(5))
+            .await
+            .expect("coordinator should receive the default DM")
+            .as_deref(),
+        Some("dm")
     );
     // The same worker can still reach the coordinator directly.
     tool.execute(

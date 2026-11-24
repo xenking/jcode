@@ -355,7 +355,44 @@ pub(super) async fn handle_comm_message(
             None
         };
 
-        let resolved_to_session = if let Some(target) = cross_swarm_default_target {
+        let default_dm_target = if require_target
+            && to_session.is_none()
+            && channel.is_none()
+            && cross_swarm_id.is_none()
+        {
+            let members = swarm_members.read().await;
+            let sender = members.get(&from_session);
+            if sender.is_some_and(|member| member.role == "coordinator") {
+                None
+            } else {
+                let target = sender
+                    .and_then(|member| member.report_back_to_session_id.as_ref())
+                    .filter(|id| swarm_session_ids.contains(id) && members.contains_key(*id))
+                    .or_else(|| {
+                        swarm_session_ids
+                            .iter()
+                            .filter(|id| members.get(*id).is_some_and(|m| m.role == "coordinator"))
+                            .min()
+                    })
+                    .cloned();
+                drop(members);
+                if target.is_none() {
+                    send_client_event_best_effort(client_event_tx, ServerEvent::Error {
+                        id,
+                        message: "No report-back parent or swarm coordinator. Pass to_session or channel.".to_string(),
+                        retry_after_secs: None,
+                    }, "client_comm_message: Error");
+                    return;
+                }
+                target
+            }
+        } else {
+            None
+        };
+
+        let resolved_to_session = if let Some(target) =
+            cross_swarm_default_target.or_else(|| default_dm_target.clone())
+        {
             Some(target)
         } else if let Some(ref target) = to_session {
             match resolve_dm_target_session(target, &swarm_session_ids, swarm_members).await {
@@ -458,22 +495,6 @@ pub(super) async fn handle_comm_message(
             let members = swarm_members.read().await;
             members.keys().cloned().collect()
         };
-
-        if require_target && scope == "broadcast" && cross_swarm_id.is_none() {
-            let sender_is_coordinator = swarm_members
-                .read()
-                .await
-                .get(&from_session)
-                .is_some_and(|member| member.role == "coordinator");
-            if !sender_is_coordinator {
-                send_client_event_best_effort(client_event_tx, ServerEvent::Error {
-                    id,
-                    message: "message needs a target: pass to_session (the agent to message) or channel. Only the coordinator can message everyone without one.".to_string(),
-                    retry_after_secs: None,
-                }, "client_comm_message: Error");
-                return;
-            }
-        }
 
         // Broadcast-style sends are subtree-scoped: a sender reaches only the
         // agents it (transitively) spawned, via the report-back ancestry chain.
@@ -763,6 +784,17 @@ pub(super) async fn handle_comm_message(
                     message: String::new(),
                 },
                 "client_comm_message: direct receipt",
+            );
+        } else if let Some(target) = default_dm_target {
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "swarm_message".into(),
+                    data: serde_json::json!({"status": "sent", "default_target": target}),
+                    message: String::new(),
+                },
+                "client_comm_message: default DM receipt",
             );
         }
         send_client_event_best_effort(

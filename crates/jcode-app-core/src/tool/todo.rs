@@ -447,22 +447,28 @@ fn prepare_todo_patch(
                     .ok_or_else(|| anyhow::anyhow!("unknown after todo {id:?}"))
             })
             .transpose()?;
-        for (public, canonical) in [("phase", "stage"), ("lane", "group")] {
-            if !fields.contains_key(public) && !fields.contains_key(canonical) {
-                let value = anchor
+        for (alias, canonical) in [("phase", "stage"), ("wave", "stage"), ("lane", "group")] {
+            if let Some(value) = fields.remove(alias) {
+                fields.insert(canonical.into(), value);
+            }
+        }
+        let template = anchor.or_else(|| todos.last());
+        for (public, canonical, fallback) in [
+            ("phase", "stage", json!(1)),
+            ("lane", "group", json!("default")),
+        ] {
+            if !fields.contains_key(canonical) {
+                let value = template
                     .and_then(|todo| todo.get(canonical).or_else(|| todo.get(public)))
                     .filter(|value| !value.is_null())
+                    .cloned()
+                    .or_else(|| after.is_none().then_some(fallback))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "added todo needs {public}, or an after todo with membership"
                         )
                     })?;
-                fields.insert(canonical.to_string(), value.clone());
-            }
-        }
-        for (alias, canonical) in [("phase", "stage"), ("wave", "stage"), ("lane", "group")] {
-            if let Some(value) = fields.remove(alias) {
-                fields.insert(canonical.into(), value);
+                fields.insert(canonical.to_string(), value);
             }
         }
         let lane_template = todos.iter().find(|todo| {
@@ -1527,7 +1533,7 @@ impl Tool for TodoTool {
                 }}}
         });
         schema["properties"]["add"]["description"] =
-            json!("Specify phase/lane or inherit from after.");
+            json!("Phase/lane: after, last todo, or 1/default.");
         // Item fields repeat across phases, add, and update, and every word is
         // paid on every request. Describe them once, on add (the superset),
         // and point the other two routes at it.

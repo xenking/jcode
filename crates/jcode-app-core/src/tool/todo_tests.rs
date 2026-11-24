@@ -236,7 +236,6 @@ fn hierarchy_patch_inherits_and_preserves_membership() {
         assert_eq!(todo.group.as_deref(), Some("x"));
     }
     for patch in [
-        json!({"add":[{"id":"b"}]}),
         json!({"add":[{"id":"b","after":"missing"}]}),
         json!({"update":[{"id":"a","phase":0}]}),
         json!({"update":[{"id":"a","lane":""}]}),
@@ -249,6 +248,44 @@ fn hierarchy_patch_inherits_and_preserves_membership() {
         assert_eq!(stored[0]["content"], "A");
     }
 }
+
+#[test]
+fn harness_default_todo_add_inherits_the_last_items_membership() {
+    let stored = json!([
+        {"id":"first","content":"First","status":"pending","priority":"high","stage":3,"group":"earlier"},
+        {"id":"last","content":"Last","status":"pending","priority":"high","stage":2,"group":"latest"}
+    ]);
+    let input = json!({"add":[
+        {"id":"next","content":"Next","status":"pending","priority":"high"},
+        {"id":"explicit","content":"Explicit","status":"pending","priority":"high","wave":4,"after":"first"}
+    ]});
+    let patched = apply_todo_patch(input, || stored).unwrap();
+    let todos = parse_todo_input(patched).unwrap().todos.unwrap();
+    assert_eq!(
+        todos
+            .iter()
+            .map(|item| (item.id.as_str(), item.stage, item.group.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("first", Some(3), Some("earlier")),
+            ("explicit", Some(4), Some("earlier")),
+            ("last", Some(2), Some("latest")),
+            ("next", Some(2), Some("latest")),
+        ]
+    );
+}
+
+#[test]
+fn harness_default_todo_add_creates_initial_membership() {
+    let input = json!({"add":[
+        {"id":"first","content":"First","status":"pending","priority":"high"}
+    ]});
+    let patched = apply_todo_patch(input, || json!([])).unwrap();
+    let todos = parse_todo_input(patched).unwrap().todos.unwrap();
+    assert_eq!(todos[0].stage, Some(1));
+    assert_eq!(todos[0].group.as_deref(), Some("default"));
+}
+
 use super::*;
 
 #[test]

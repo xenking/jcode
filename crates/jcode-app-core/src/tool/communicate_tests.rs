@@ -24,6 +24,82 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn harness_default_stop_accepts_session_ids_and_single_target_aliases() {
+    let _env_lock = crate::storage::lock_test_env();
+    let runtime = tempfile::TempDir::new().unwrap();
+    let socket = runtime.path().join("jcode.sock");
+    let _socket = EnvGuard::set("JCODE_SOCKET", &socket);
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let server = tokio::spawn(async move {
+        for (expected, expected_force) in [
+            ("missing", true),
+            ("worker", true),
+            ("new", false),
+            ("old", false),
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let Request::CommStop {
+                id,
+                session_id,
+                target_session,
+                force,
+            } = serde_json::from_str(&line).unwrap()
+            else {
+                panic!("expected a stop request, got {line}");
+            };
+            assert_eq!(session_id, "owner");
+            assert_eq!(target_session, expected);
+            assert_eq!(force.unwrap_or(false), expected_force);
+            let response = if expected == "missing" {
+                ServerEvent::Error {
+                    id,
+                    message: "session not found".into(),
+                    retry_after_secs: None,
+                }
+            } else {
+                ServerEvent::Done { id }
+            };
+            stream
+                .write_all((serde_json::to_string(&response).unwrap() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let tool = CommunicateTool::new();
+    let ctx = test_ctx("owner", runtime.path());
+    let output = tool
+        .execute(
+            json!({"action":"stop","session_ids":["missing","worker"],"force":true}),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.output.contains("Stopped 1 swarm worker(s): worker"),
+        "{}",
+        output.output
+    );
+    assert!(
+        output.output.contains("missing (session not found)"),
+        "{}",
+        output.output
+    );
+    for input in [
+        json!({"action":"stop","to_session":"new"}),
+        json!({"action":"stop","target_session":"old"}),
+    ] {
+        tool.execute(input, ctx.clone()).await.unwrap();
+    }
+    server.await.unwrap();
+}
+
 #[test]
 fn tool_is_named_swarm() {
     assert_eq!(CommunicateTool::new().name(), "swarm");

@@ -885,7 +885,7 @@ impl Tool for CommunicateTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "Routes to to_session, then channel, else broadcasts (coordinator only)."
+                    "description": "to_session, then channel. Else DM parent/coordinator or broadcast as coordinator."
                 },
                 "tldr": {
                     "type": "string",
@@ -893,7 +893,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Agent ID/unique name. summary requires one exact same-swarm session ID from list."
+                    "description": "ID/unique name. Optional for message. summary needs exact same-swarm ID from list."
                 },
                 "effort": {
                     "type": "string",
@@ -1114,10 +1114,6 @@ impl Tool for CommunicateTool {
             }
 
             "message" => {
-                // `message` is the general-purpose send: it routes by the fields
-                // provided. With `to_session` it acts as a DM, with `channel` it
-                // posts to that channel, and with neither it broadcasts to the
-                // sender's spawned subtree (whole swarm only for the coordinator).
                 let message = params
                     .message
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
@@ -1137,8 +1133,6 @@ impl Tool for CommunicateTool {
                     delivery: params.delivery,
                     tldr,
                     to_swarm: to_swarm.clone(),
-                    // A worker that forgets `to_session` gets an error rather
-                    // than broadcasting; the coordinator may still message all.
                     require_target: true,
                 };
 
@@ -1151,7 +1145,16 @@ impl Tool for CommunicateTool {
                         if let Some(output) = queued_cold_output(&response) {
                             return Ok(output);
                         }
-                        let confirmation = match (to_session, channel) {
+                        let default_target = match &response {
+                            ServerEvent::RuntimeCommandResult { command, data, .. }
+                                if command == "swarm_message" =>
+                            {
+                                data["default_target"].as_str()
+                            }
+                            _ => None,
+                        };
+                        let confirmation = match (to_session.as_deref().or(default_target), channel)
+                        {
                             (Some(target), _) => {
                                 format!("Direct message sent to {}: {}", target, message)
                             }
@@ -1682,9 +1685,18 @@ impl Tool for CommunicateTool {
             }
 
             "stop" => {
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for stop action")
-                })?;
+                let Some(target) = params.target_session else {
+                    let targets = params.session_ids.unwrap_or_default();
+                    if targets.is_empty() {
+                        anyhow::bail!("stop requires to_session or a nonempty session_ids list");
+                    }
+                    let outcome =
+                        stop_swarm_sessions(&ctx, targets, params.force.unwrap_or(false)).await;
+                    if outcome.stopped.is_empty() {
+                        return Err(anyhow::Error::msg(outcome.describe()));
+                    }
+                    return Ok(ToolOutput::new(outcome.describe()));
+                };
 
                 let request = Request::CommStop {
                     id: REQUEST_ID,
