@@ -175,3 +175,85 @@ fn default_section_round_trips_empty() {
     let back: RoutingConfig = toml::from_str(&text).expect("parse back");
     assert_eq!(back, config);
 }
+
+#[test]
+fn strategy_fields_validate_and_land() {
+    let policy = parse(
+        r#"
+        [routing]
+        reserve_floor_pct = 10
+        reserve_horizon_min = 90
+        hysteresis_pct = 3
+        evict_after = 5
+        evict_for = "45m"
+
+        [[routing.accounts]]
+        id = "claude:a"
+        drain_before_reset_h = 12
+        drain_limit_pct = 98
+
+        [[routing.accounts]]
+        id = "openai:codex"
+        kind = "credits"
+        pacing = "month-line"
+        pacing_slack_pct = 2
+        "#,
+    )
+    .expect("valid");
+    assert_eq!(policy.reserve_floor_pct, 10.0);
+    assert_eq!(policy.reserve_horizon_min, 90.0);
+    assert_eq!(policy.hysteresis_pct, 3.0);
+    assert_eq!(policy.evict_after, 5);
+    assert_eq!(policy.evict_for_secs, 45 * 60);
+    assert_eq!(policy.accounts[0].drain_before_reset_h, Some(12.0));
+    assert_eq!(policy.accounts[0].drain_limit_pct, 98.0);
+    assert_eq!(policy.accounts[1].pacing, crate::Pacing::MonthLine);
+    assert_eq!(policy.accounts[1].pacing_slack_pct, 2.0);
+}
+
+#[test]
+fn strategy_fields_report_every_problem_at_once() {
+    let errors = parse(
+        r#"
+        [routing]
+        reserve_floor_pct = 200
+        reserve_horizon_min = 0
+        hysteresis_pct = 100
+        evict_after = 0
+        evict_for = "calendar-month"
+
+        [[routing.accounts]]
+        id = "claude:bad-drain-h"
+        drain_before_reset_h = -1
+
+        [[routing.accounts]]
+        id = "claude:bad-drain-limit"
+        drain_limit_pct = 101
+
+        [[routing.accounts]]
+        id = "claude:bad-pacing"
+        pacing = "month-line"
+
+        [[routing.accounts]]
+        id = "openai:x"
+        kind = "credits"
+        pacing = "month-line"
+        pacing_slack_pct = 100
+        "#,
+    )
+    .expect_err("invalid");
+    let joined = errors.join("\n");
+    for needle in [
+        "reserve_floor_pct",
+        "reserve_horizon_min",
+        "hysteresis_pct",
+        "evict_after",
+        "evict_for",
+        "drain_before_reset_h",
+        "drain_limit_pct",
+        "pacing month-line is only for credits",
+        "pacing_slack_pct",
+    ] {
+        assert!(joined.contains(needle), "missing `{needle}` in:\n{joined}");
+    }
+}

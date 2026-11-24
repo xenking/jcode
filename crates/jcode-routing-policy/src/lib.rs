@@ -9,6 +9,7 @@ pub mod config;
 mod engine;
 mod policy;
 pub mod state;
+mod strategy;
 
 pub use engine::{
     AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Reading, Request, Role,
@@ -18,6 +19,9 @@ pub use policy::{
     Account, AccountId, Budget, Egress, ModelGlob, Policy, PolicyError, Priority, Scope, UNRANKED,
     Window,
 };
+pub use strategy::{BurnRing, BurnSample, HealthTracker};
+
+pub use config::Pacing;
 
 #[cfg(test)]
 mod engine_tests;

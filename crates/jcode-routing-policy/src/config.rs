@@ -20,6 +20,19 @@ pub struct RoutingConfig {
     pub limit_pct: f64,
     /// Subagents leave an account this many percent points earlier.
     pub subagent_reserve_pct: f64,
+    /// Minimum headroom in percent the adaptive limit keeps when the burn rate
+    /// is measurable. `limit_pct` stays the ceiling.
+    pub reserve_floor_pct: f64,
+    /// Projection horizon in minutes over which the burn rate must stay under
+    /// the remaining room before the account is left.
+    pub reserve_horizon_min: f64,
+    /// Moving onto a non-current account needs this many percent points more
+    /// room below its limit than staying on the current one.
+    pub hysteresis_pct: f64,
+    /// Consecutive failures that evict an account.
+    pub evict_after: u32,
+    /// How long an eviction lasts, as a duration like `30m`, `5h` or `7d`.
+    pub evict_for: String,
     pub accounts: Vec<AccountConfig>,
     pub budgets: Vec<BudgetConfig>,
 }
@@ -31,6 +44,11 @@ impl Default for RoutingConfig {
             paid: PaidMode::Auto,
             limit_pct: 95.0,
             subagent_reserve_pct: 5.0,
+            reserve_floor_pct: 0.0,
+            reserve_horizon_min: 60.0,
+            hysteresis_pct: 0.0,
+            evict_after: 3,
+            evict_for: "30m".into(),
             accounts: Vec::new(),
             budgets: Vec::new(),
         }
@@ -65,6 +83,17 @@ pub enum PaidMode {
     Off,
 }
 
+/// How a paid account is preferred within the paid tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Pacing {
+    /// No pacing preference; the account is a plain last resort.
+    #[default]
+    Off,
+    /// Prefer while the spend fraction is behind the elapsed month fraction.
+    MonthLine,
+}
+
 /// `[[routing.accounts]]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -80,6 +109,16 @@ pub struct AccountConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress: Option<String>,
     pub on_limit: OnLimit,
+    /// Treat a weekly window that resets within this many hours as a drain
+    /// candidate. `None` disables drain-before-reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_before_reset_h: Option<f64>,
+    /// The percent ceiling a drain candidate may run to (default 99).
+    pub drain_limit_pct: f64,
+    /// Pacing strategy for a credits account.
+    pub pacing: Pacing,
+    /// Hysteresis slack above the month line before a paced account is dropped.
+    pub pacing_slack_pct: f64,
 }
 
 impl Default for AccountConfig {
@@ -91,6 +130,10 @@ impl Default for AccountConfig {
             models: Vec::new(),
             egress: None,
             on_limit: OnLimit::Switch,
+            drain_before_reset_h: None,
+            drain_limit_pct: 99.0,
+            pacing: Pacing::Off,
+            pacing_slack_pct: 0.0,
         }
     }
 }

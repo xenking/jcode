@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::config::{
     AccountConfig, AccountKind, BudgetAction, BudgetConfig, EgressConfig, MeterSource, OnLimit,
-    PaidMode, PriorityConfig, RoutingConfig, RoutingMode, Unit,
+    Pacing, PaidMode, PriorityConfig, RoutingConfig, RoutingMode, Unit,
 };
 
 /// `provider:label` or `provider`.
@@ -156,6 +156,15 @@ pub struct Account {
     pub models: Vec<ModelGlob>,
     pub egress: Option<String>,
     pub on_limit: OnLimit,
+    /// Weekly window resetting within this many hours makes the account a
+    /// drain candidate. `None` disables drain-before-reset.
+    pub drain_before_reset_h: Option<f64>,
+    /// The percent ceiling a drain candidate may run to.
+    pub drain_limit_pct: f64,
+    /// How a credits account is preferred within the paid tier.
+    pub pacing: Pacing,
+    /// Slack above the month line before a paced account stops being preferred.
+    pub pacing_slack_pct: f64,
 }
 
 impl Account {
@@ -205,6 +214,11 @@ pub struct Policy {
     pub paid: PaidMode,
     pub limit_pct: f64,
     pub subagent_reserve_pct: f64,
+    pub reserve_floor_pct: f64,
+    pub reserve_horizon_min: f64,
+    pub hysteresis_pct: f64,
+    pub evict_after: u32,
+    pub evict_for_secs: u64,
     pub accounts: Vec<Account>,
     pub budgets: Vec<Budget>,
     pub egress: BTreeMap<String, Egress>,
@@ -256,6 +270,28 @@ impl Policy {
         if !(0.0..100.0).contains(&routing.subagent_reserve_pct) {
             err("routing.subagent_reserve_pct must be in 0..100".into());
         }
+        if !(0.0..=routing.limit_pct).contains(&routing.reserve_floor_pct) {
+            err(format!(
+                "routing.reserve_floor_pct must be in 0..=limit_pct ({})",
+                routing.limit_pct
+            ));
+        }
+        if !(routing.reserve_horizon_min > 0.0 && routing.reserve_horizon_min.is_finite()) {
+            err("routing.reserve_horizon_min must be positive".into());
+        }
+        if !(0.0..100.0).contains(&routing.hysteresis_pct) {
+            err("routing.hysteresis_pct must be in 0..100".into());
+        }
+        if routing.evict_after == 0 {
+            err("routing.evict_after must be at least 1".into());
+        }
+        let evict_for_secs = match Window::parse(&routing.evict_for) {
+            Some(Window::Span { secs }) if secs > 0 => secs,
+            _ => {
+                err("routing.evict_for must be a duration like 30m, 5h or 7d".into());
+                0
+            }
+        };
 
         let mut accounts: Vec<Account> = Vec::new();
         for raw in &routing.accounts {
@@ -285,6 +321,11 @@ impl Policy {
                 paid: routing.paid,
                 limit_pct: routing.limit_pct,
                 subagent_reserve_pct: routing.subagent_reserve_pct,
+                reserve_floor_pct: routing.reserve_floor_pct,
+                reserve_horizon_min: routing.reserve_horizon_min,
+                hysteresis_pct: routing.hysteresis_pct,
+                evict_after: routing.evict_after,
+                evict_for_secs,
                 accounts,
                 budgets,
                 egress: proxies,
@@ -331,6 +372,28 @@ fn account_from_config(
             "routing.accounts `{id}`: egress `{name}` is not defined in [egress.{name}]"
         ));
     }
+    if let Some(hours) = raw.drain_before_reset_h
+        && !(hours >= 0.0 && hours.is_finite())
+    {
+        return Err(format!(
+            "routing.accounts `{id}`: drain_before_reset_h must be a non-negative number"
+        ));
+    }
+    if !(0.0..=100.0).contains(&raw.drain_limit_pct) {
+        return Err(format!(
+            "routing.accounts `{id}`: drain_limit_pct must be in 0..=100"
+        ));
+    }
+    if raw.pacing == Pacing::MonthLine && raw.kind != AccountKind::Credits {
+        return Err(format!(
+            "routing.accounts `{id}`: pacing month-line is only for credits accounts"
+        ));
+    }
+    if !(0.0..100.0).contains(&raw.pacing_slack_pct) {
+        return Err(format!(
+            "routing.accounts `{id}`: pacing_slack_pct must be in 0..100"
+        ));
+    }
     Ok(Account {
         id,
         kind: raw.kind,
@@ -338,6 +401,10 @@ fn account_from_config(
         models,
         egress: raw.egress.clone(),
         on_limit: raw.on_limit,
+        drain_before_reset_h: raw.drain_before_reset_h,
+        drain_limit_pct: raw.drain_limit_pct,
+        pacing: raw.pacing,
+        pacing_slack_pct: raw.pacing_slack_pct,
     })
 }
 
