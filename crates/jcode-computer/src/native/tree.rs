@@ -54,7 +54,7 @@ fn walk(target: &Target, deadline: Instant, stop_at: Option<&str>) -> NativeResu
         let identity = match Identity::read(&element) {
             Ok(Some(identity)) => identity,
             Ok(None) if depth != 0 => continue,
-            Err(e) if depth != 0 && e.ax_code == Some(-25202) => {
+            Err(e) if depth != 0 && matches!(e.ax_code, Some(-25200 | -25202)) => {
                 truncated = true;
                 continue;
             }
@@ -64,7 +64,13 @@ fn walk(target: &Target, deadline: Instant, stop_at: Option<&str>) -> NativeResu
         if identity.secure() {
             continue;
         }
-        let value = element.value()?;
+        let value = match element.value() {
+            Err(e) if e.0 == -25200 => {
+                truncated = true;
+                None
+            }
+            result => result?,
+        };
         if stop_at.is_some_and(|needle| matches_query(&identity, value.as_deref(), needle)) {
             return Ok(Tree {
                 nodes,
@@ -73,7 +79,13 @@ fn walk(target: &Target, deadline: Instant, stop_at: Option<&str>) -> NativeResu
             });
         }
         let actions = if stop_at.is_none() {
-            element.actions()?
+            match element.actions() {
+                Err(e) if e.0 == -25200 => {
+                    truncated = true;
+                    Vec::new()
+                }
+                result => result?,
+            }
         } else {
             Vec::new()
         };

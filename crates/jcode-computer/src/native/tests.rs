@@ -95,6 +95,36 @@ fn row_ref<'a>(snapshot: &'a Value, query: &str) -> &'a str {
 }
 
 #[tokio::test]
+#[ignore = "requires a running Reddy window and Accessibility permission"]
+async fn live_reddy_observe() {
+    let id: u32 = std::env::var("JCODE_REDDY_WINDOW_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let result = state(
+        execute(
+            &Engine::default(),
+            json!({"action":"observe", "window_id":id}),
+        )
+        .await,
+    );
+    assert!(
+        result["tree"]
+            .as_array()
+            .is_some_and(|tree| !tree.is_empty()),
+        "{result}"
+    );
+    assert!(
+        result["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row.as_str().is_some_and(|row| row.contains("Press"))),
+        "no press action in tree"
+    );
+}
+
+#[tokio::test]
 #[ignore = "opens two synthetic AppKit windows; run only in an isolated GUI test session with Accessibility and Screen Recording"]
 async fn live_native_fixture() {
     assert!(
