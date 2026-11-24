@@ -6,6 +6,9 @@ use super::*;
 use crate::mobile_runner::{LiveSession, LocalSessionHost};
 
 struct Fixture {
+    // Turns persist the session under `JCODE_HOME`. Tests that swap it hold this
+    // lock and delete their home on exit, which fails a turn mid-write (ENOENT).
+    _env: std::sync::MutexGuard<'static, ()>,
     host: DaemonSessions,
     agent: Arc<Mutex<Agent>>,
     session_id: String,
@@ -14,6 +17,7 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    let env = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
@@ -42,6 +46,7 @@ async fn fixture() -> Fixture {
         ),
     };
     Fixture {
+        _env: env,
         host,
         agent,
         session_id,

@@ -345,7 +345,11 @@ async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn detached_coordinator_cancel_signals_only_its_own_turn() {
+    // An active turn lands in the process-global turn registry. Fence tests
+    // assert that registry is idle under this lock, so hold it while ours lives.
+    let _global_turns = crate::storage::lock_test_env();
     fn member(
         session_id: &str,
         parent: Option<&str>,
@@ -476,7 +480,11 @@ async fn detached_coordinator_cancel_signals_only_its_own_turn() {
 /// stale timer must not clear it, otherwise the running turn never observes
 /// the interrupt and keeps generating.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
+    // An active turn lands in the process-global turn registry. Fence tests
+    // assert that registry is idle under this lock, so hold it while ours lives.
+    let _global_turns = crate::storage::lock_test_env();
     let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stop_signal = InterruptSignal::new();
     let control = SessionControlHandle::cancel_only(
