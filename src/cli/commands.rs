@@ -1822,7 +1822,7 @@ async fn run_memory_command_for_dir(
     Ok(())
 }
 
-pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
+pub fn run_pair_command(list: bool, revoke: Option<String>, harness: bool) -> Result<()> {
     let mut registry = gateway::DeviceRegistry::load();
 
     if list {
@@ -1858,6 +1858,20 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     }
 
     let gw_config = &crate::config::config().gateway;
+
+    if harness {
+        let is_loopback = gw_config
+            .bind_addr
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+        if !gw_config.enabled || !gw_config.harness_enabled || !is_loopback {
+            anyhow::bail!("Harness pairing requires [gateway] enabled = true, harness_enabled = true, and a loopback bind_addr");
+        }
+        let code = registry.generate_pairing_code_scoped(gateway::DeviceScope::Harness);
+        registry.save()?;
+        eprintln!("Desktop pairing code: {code} (expires in 5 minutes)");
+        return Ok(());
+    }
 
     if !gw_config.enabled {
         eprintln!("\x1b[33m⚠\x1b[0m  Gateway is disabled. Enable it in ~/.jcode/config.toml:\n");
