@@ -77,7 +77,7 @@ pub async fn fetch_oauth_account_usage(
                             Ok(token) => {
                                 let key = anthropic_usage_cache_key(&token, Some(&account.label));
                                 reset_token = token.clone();
-                                fetch_anthropic_usage_data(token, key).await
+                                fetch_anthropic_usage_data(token, key, Some(&account.label)).await
                             }
                             Err(error) => Err(error),
                         }
@@ -94,7 +94,12 @@ pub async fn fetch_oauth_account_usage(
                         )
                         .is_none()
                     {
-                        omp_banked::import_for_account(&reset_token, &cache_key).await;
+                        omp_banked::import_for_account(
+                            &reset_token,
+                            &cache_key,
+                            Some(&account.label),
+                        )
+                        .await;
                     }
                     anthropic_snapshot_from_usage(account.label, account.email, &data)
                 })
@@ -221,7 +226,7 @@ mod tests {
             );
         }
         assert!(
-            fetch_anthropic_usage_data("unused-token".into(), format!("label:{label}"))
+            fetch_anthropic_usage_data("unused-token".into(), format!("label:{label}"), None)
                 .await
                 .is_ok()
         );

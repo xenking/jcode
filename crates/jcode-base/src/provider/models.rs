@@ -31,7 +31,6 @@ use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,
     OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
     core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
-    shared_http_client,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1205,6 +1204,7 @@ mod scoped_refresh_tests {
         assert!(begin_openai_model_catalog_refresh_for_scope(&scope));
         refresh_openai_model_catalog_in_background_for_scope(
             String::new(),
+            None,
             true,
             "scope-test",
             scope.clone(),

@@ -49,6 +49,15 @@ impl Transport {
         }
     }
 
+    /// Route a custom client builder (own timeouts, redirect policy) through
+    /// the proxy. A direct transport leaves the builder untouched.
+    pub fn apply(&self, builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder> {
+        match &self.0 {
+            Some(endpoint) => Ok(builder.proxy(Proxy::all(endpoint.url.clone())?)),
+            None => Ok(builder),
+        }
+    }
+
     /// A client for transport-fault retries: never reuses a pooled connection.
     pub fn retry_client(&self) -> Client {
         match &self.0 {
@@ -187,7 +196,12 @@ fn tunnel_error(message: &str) -> io::Error {
     io::Error::other(message.to_owned())
 }
 
-async fn http_connect(stream: &mut TcpStream, proxy: &Url, host: &str, port: u16) -> io::Result<()> {
+async fn http_connect(
+    stream: &mut TcpStream,
+    proxy: &Url,
+    host: &str,
+    port: u16,
+) -> io::Result<()> {
     use base64::Engine as _;
     let target = if host.contains(':') {
         format!("[{host}]:{port}")
@@ -226,7 +240,12 @@ async fn http_connect(stream: &mut TcpStream, proxy: &Url, host: &str, port: u16
     }
 }
 
-async fn socks5_connect(stream: &mut TcpStream, proxy: &Url, host: &str, port: u16) -> io::Result<()> {
+async fn socks5_connect(
+    stream: &mut TcpStream,
+    proxy: &Url,
+    host: &str,
+    port: u16,
+) -> io::Result<()> {
     let auth = credentials(proxy);
     let greeting: &[u8] = if auth.is_some() {
         &[5, 2, 0, 2]
@@ -351,6 +370,14 @@ pub async fn transport(provider: &str, label: Option<&str>) -> Result<Transport>
 
 pub async fn transport_for(account: &AccountId) -> Result<Transport> {
     transport(account.provider(), account.label()).await
+}
+
+/// The transport of the API key that serves `provider` requests right now:
+/// the active labelled key, else the unlabelled one.
+pub async fn transport_for_active_key(provider: &str) -> Result<Transport> {
+    let account = crate::provider_catalog::active_api_key_account(provider);
+    let label = account.as_ref().and_then(AccountId::label);
+    transport(provider, label).await
 }
 
 /// An HTTP client for one credential: the proxy client, or the shared direct one.

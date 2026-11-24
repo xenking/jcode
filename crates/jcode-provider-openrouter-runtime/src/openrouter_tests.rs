@@ -3074,6 +3074,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
 
         super::openrouter_sse_stream::run_stream_with_retries(
             client,
+            jcode_base::egress::Transport::default(),
             api_base,
             ProviderAuth::None {
                 label: "test".to_string(),

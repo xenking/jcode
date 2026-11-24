@@ -86,6 +86,7 @@ impl AsyncWrite for WsTransport {
 pub(crate) async fn connect_ws_with_mode<R>(
     request: R,
     mode: CompressionMode,
+    egress: &jcode_base::egress::Transport,
 ) -> Result<(OpenAIWs, Response), WsError>
 where
     R: IntoClientRequest + Unpin,
@@ -108,7 +109,8 @@ where
         _ => return Err(WsError::Url(UrlError::UnsupportedUrlScheme)),
     };
     let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
-    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    // A credential with egress dials through its proxy and never directly.
+    let tcp = egress.connect_tcp(host.as_str(), port).await?;
     let transport = if tls {
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| WsError::Tls(TlsError::InvalidDnsName))?;
@@ -130,10 +132,28 @@ where
 }
 
 /// Connect a WebSocket using the configured `[provider] request_compression`.
+#[cfg(test)]
 #[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
 pub(crate) async fn connect_ws<R>(request: R) -> Result<(OpenAIWs, Response), WsError>
 where
     R: IntoClientRequest + Unpin,
 {
-    connect_ws_with_mode(request, jcode_base::provider::request_compression_mode()).await
+    connect_ws_via(request, &jcode_base::egress::Transport::default()).await
+}
+
+/// Connect through the credential's egress transport.
+#[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
+pub(crate) async fn connect_ws_via<R>(
+    request: R,
+    egress: &jcode_base::egress::Transport,
+) -> Result<(OpenAIWs, Response), WsError>
+where
+    R: IntoClientRequest + Unpin,
+{
+    connect_ws_with_mode(
+        request,
+        jcode_base::provider::request_compression_mode(),
+        egress,
+    )
+    .await
 }

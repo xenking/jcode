@@ -28,6 +28,8 @@ mod openai_response;
 pub use openai_response::{openai_response_generation, record_openai_response_limits};
 mod openai_reset;
 pub(crate) use openai_reset::auto_reset_weekly_usage;
+#[cfg(test)]
+mod egress_tests;
 mod provider_fetch;
 mod remote_accounts;
 mod routing_readings;
@@ -124,9 +126,14 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
 
-async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
+async fn fetch_anthropic_usage_data(
+    access_token: String,
+    cache_key: String,
+    account_label: Option<&str>,
+) -> Result<UsageData> {
+    let account_label = account_label.map(str::to_owned);
     flight::fetch(cache_key.clone(), || {
-        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL)
+        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL, account_label)
     })
     .await
 }
@@ -135,10 +142,12 @@ async fn fetch_anthropic_usage_data_uncached(
     access_token: String,
     cache_key: String,
     url: &str,
+    account_label: Option<String>,
 ) -> Result<UsageData> {
     let mut request_log = flight::RequestLog::new(&cache_key);
     let probe_started = Instant::now();
-    let client = crate::provider::shared_http_client();
+    // Quota meters leave from the same egress as the account's inference.
+    let client = crate::egress::client("claude", account_label.as_deref()).await?;
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
         client
             .get(url)

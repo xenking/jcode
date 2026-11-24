@@ -745,6 +745,7 @@ fn claude_refresh_error_is_invalid_scope(err: &anyhow::Error) -> bool {
 async fn send_claude_refresh_request(
     refresh_token: &str,
     scope: Option<&'static str>,
+    label: Option<&str>,
 ) -> Result<ClaudeRefreshTokenResponse> {
     let payload = ClaudeRefreshTokenRequest {
         grant_type: "refresh_token",
@@ -753,7 +754,8 @@ async fn send_claude_refresh_request(
         scope,
     };
 
-    let client = crate::provider::shared_http_client();
+    // The refresh leaves from the same egress as the account's inference.
+    let client = crate::egress::client("claude", label).await?;
     let resp = client
         .post(claude::TOKEN_URL)
         .header("Content-Type", "application/json")
@@ -780,14 +782,14 @@ async fn refresh_claude_tokens_inner(
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
     let scoped_result =
-        send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES)).await;
+        send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES), label).await;
     let tokens = match scoped_result {
         Ok(tokens) => tokens,
         Err(err) if claude_refresh_error_is_invalid_scope(&err) => {
             crate::logging::warn(
                 "Claude token refresh rejected Claude Code scopes; retrying without an explicit scope for legacy token compatibility",
             );
-            match send_claude_refresh_request(refresh_token, None).await {
+            match send_claude_refresh_request(refresh_token, None, label).await {
                 Ok(tokens) => tokens,
                 Err(fallback_err) => {
                     anyhow::bail!(
@@ -1059,12 +1061,15 @@ async fn request_openai_token_refresh(
     token_url: &str,
     timeout: Duration,
     refresh_token: &str,
+    label: Option<&str>,
 ) -> Result<OAuthTokens> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let headers_received = AtomicBool::new(false);
+    // The refresh leaves from the same egress as the account's inference.
+    let client = crate::egress::client("openai", label).await?;
     let exchange = async {
-        let resp = crate::provider::shared_http_client()
+        let resp = client
             .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!(
@@ -1137,7 +1142,7 @@ async fn refresh_openai_tokens_inner(
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
     let result: Result<OAuthTokens> = async {
-        let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
+        let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token, label).await?;
 
         if let Some(label) = label {
             crate::auth::codex::update_account_tokens(

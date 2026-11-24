@@ -108,6 +108,7 @@ fn run_azure(base: String) -> Vec<Result<StreamEvent>> {
             Duration::from_secs(10),
             run_stream_with_retries(
                 reqwest::Client::new(),
+                jcode_base::egress::Transport::default(),
                 base,
                 ProviderAuth::None {
                     label: "test".into(),

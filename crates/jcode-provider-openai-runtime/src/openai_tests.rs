@@ -245,7 +245,7 @@ async fn live_openai_catalog() -> Result<Option<jcode_base::provider::OpenAIMode
 
     let token = openai_access_token(None, &Arc::new(RwLock::new(creds))).await?;
     Ok(Some(
-        jcode_base::provider::fetch_openai_model_catalog(&token).await?,
+        jcode_base::provider::fetch_openai_model_catalog(&token, None).await?,
     ))
 }
 

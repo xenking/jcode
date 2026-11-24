@@ -365,11 +365,17 @@ impl Provider for OpenAIProvider {
 
         let credentials = Arc::clone(&self.credentials);
         let account_label = self.refresh_account_label();
+        // Fail closed when the credential's required egress proxy is down.
+        let egress = {
+            let credentials = self.credentials.read().await;
+            let label = Self::egress_label(&credentials, account_label.as_deref());
+            jcode_base::egress::transport("openai", label).await?
+        };
         let transport_mode = transport_mode_snapshot;
         let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
         let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
         let model_for_transport = model_id.clone();
-        let client = self.client.clone();
+        let client = egress.client_or(&self.client);
         let panic_tx = tx.clone();
         let log_context = jcode_base::logging::current_context_snapshot();
 
@@ -439,6 +445,7 @@ impl Provider for OpenAIProvider {
                     match continuation_result {
                         PersistentWsResult::OpaqueWsRejection => {
                             recover_opaque_ws_rejection(
+                                egress.retry_client(),
                                 Arc::clone(&credentials),
                                 account_label.clone(),
                                 &request,
@@ -655,7 +662,7 @@ impl Provider for OpenAIProvider {
                         let attempt_client = if attempt == 0 {
                             client.clone()
                         } else {
-                            jcode_provider_core::fresh_transport_client()
+                            egress.retry_client()
                         };
                         stream_response(
                             attempt_client,
@@ -694,6 +701,7 @@ impl Provider for OpenAIProvider {
                     match result {
                         Err(OpenAIStreamFailure::OpaqueWsRejection) => {
                             recover_opaque_ws_rejection(
+                                egress.retry_client(),
                                 Arc::clone(&credentials),
                                 account_label.clone(),
                                 &request,

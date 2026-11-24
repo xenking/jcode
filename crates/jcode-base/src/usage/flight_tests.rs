@@ -56,7 +56,7 @@ fn reset_offers_reuse_the_single_coordinated_usage_response() {
                 let label = format!("combined-reset-{index}");
                 let key = format!("label:{label}");
                 let results = futures::future::join_all((0..8).map(|_| {
-                    fetch(key.clone(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.clone(), &url))
+                    fetch(key.clone(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.clone(), &url, None))
                 })).await;
                 assert!(results.iter().all(|result| result.as_ref().unwrap().last_error.is_none()));
                 server.await.unwrap();
@@ -241,7 +241,7 @@ fn received_429_is_cached_without_waiting_for_error_body() {
             std::future::pending::<()>().await;
         });
         let key = "label:flight-http-429";
-        let result = tokio::time::timeout(Duration::from_secs(2), fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url))).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url, None))).await.unwrap();
         assert!(result.unwrap_err().to_string().contains("429"));
         let cached = disk_cache::fresh(key).unwrap();
         assert!(cached.last_error.unwrap().contains("429"));
@@ -269,7 +269,7 @@ fn aborted_http_body_read_persists_backoff() {
         });
         let key = "label:flight-http-cancel";
         let probe = tokio::spawn(async move {
-            fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url)).await
+            fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url, None)).await
         });
         tokio::time::timeout(Duration::from_secs(2), received).await.unwrap().unwrap();
         tokio::task::yield_now().await;

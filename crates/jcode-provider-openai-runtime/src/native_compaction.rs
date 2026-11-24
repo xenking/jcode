@@ -39,9 +39,14 @@ impl OpenAIProvider {
             );
         }
 
-        let access_token =
-            openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+        let account_label = self.refresh_account_label();
+        let access_token = openai_access_token(account_label.clone(), &self.credentials).await?;
         let creds = self.credentials.read().await;
+        let egress = jcode_base::egress::transport(
+            "openai",
+            Self::egress_label(&creds, account_label.as_deref()),
+        )
+        .await?;
         let is_chatgpt_mode = Self::is_chatgpt_mode(&creds);
         let account_id = creds.account_id.clone();
         let url = Self::responses_compact_url(&creds);
@@ -77,8 +82,8 @@ impl OpenAIProvider {
         // goes as its text summary.
         native_web_search::downgrade_web_search_calls(&mut input);
 
-        let mut builder = self
-            .client
+        let mut builder = egress
+            .client_or(&self.client)
             .post(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json");

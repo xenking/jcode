@@ -67,7 +67,9 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
     let usage = match cached {
         Some(data) => Ok(data),
-        None => fetch_anthropic_usage_data(access_token.clone(), cache_key).await,
+        None => {
+            fetch_anthropic_usage_data(access_token.clone(), cache_key, Some(&account_label)).await
+        }
     };
     match usage {
         Ok(data) => {
@@ -90,7 +92,7 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     super::anthropic_banked::cached_banked_resets(&access_token, label);
                 if banked.is_none() {
                     let key = anthropic_usage_cache_key(&access_token, label);
-                    super::omp_banked::import_for_account(&access_token, &key).await;
+                    super::omp_banked::import_for_account(&access_token, &key, label).await;
                     banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
                 }
                 report.anthropic_limit_reset = offer;
@@ -241,7 +243,16 @@ pub(super) async fn fetch_openai_usage_for_account(
     }
 
     let probe_started = Instant::now();
-    let client = crate::provider::shared_http_client();
+    let client = match crate::egress::client("openai", account_label).await {
+        Ok(client) => client,
+        Err(error) => {
+            return ProviderUsage {
+                provider_name: display_name,
+                error: Some(error.to_string()),
+                ..Default::default()
+            };
+        }
+    };
     let request = || {
         let mut builder = client
             .get(OPENAI_USAGE_URL)
@@ -400,7 +411,11 @@ pub(super) async fn fetch_openai_usage_for_account(
 pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
     let api_key = openrouter_api_key()?;
 
-    let client = crate::provider::shared_http_client();
+    // Credit meters leave from the same egress as OpenRouter inference.
+    let client = crate::egress::transport_for_active_key("openrouter")
+        .await
+        .ok()?
+        .client();
 
     let (key_resp, credits_resp) = tokio::join!(
         client

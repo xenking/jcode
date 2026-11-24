@@ -304,7 +304,8 @@ impl Provider for OpenRouterProvider {
         });
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
-        let client = self.client.clone();
+        let transport = self.egress_transport().await?;
+        let client = transport.client_or(&self.client);
         let api_base = self.api_base.clone();
         let auth = (self.auth)()?;
         let send_openrouter_headers = self.send_openrouter_headers;
@@ -325,6 +326,7 @@ impl Provider for OpenRouterProvider {
             }
             run_stream_with_retries(
                 client,
+                transport,
                 api_base,
                 auth,
                 send_openrouter_headers,
@@ -941,7 +943,8 @@ impl OpenRouterProvider {
         );
         let auth = (self.auth)()?;
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
-        let client = self.client.clone();
+        let transport = self.egress_transport().await?;
+        let client = transport.client_or(&self.client);
         let api_base = self.api_base.clone();
         let conversation_id = self.conversation_id.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -957,6 +960,7 @@ impl OpenRouterProvider {
             }
             run_stream_with_retries(
                 client,
+                transport,
                 api_base,
                 auth,
                 false,
@@ -985,6 +989,17 @@ impl OpenRouterProvider {
     ///
     /// Standard/direct OpenRouter and built-in profiles keep the existing
     /// env-var-driven `cache_path()` semantics.
+    /// The egress transport of the key serving this provider right now.
+    /// Fails closed when that key's required proxy is unreachable.
+    pub(crate) async fn egress_transport(&self) -> Result<jcode_base::egress::Transport> {
+        let provider = self.profile_id.as_deref().unwrap_or("openrouter");
+        jcode_base::egress::transport_for_active_key(provider).await
+    }
+
+    pub(crate) async fn egress_client(&self) -> Result<Client> {
+        Ok(self.egress_transport().await?.client_or(&self.client))
+    }
+
     pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
         (self.is_user_named_profile() || self.profile_id.as_deref() == Some("grok-build"))
             .then(|| self.profile_id.clone())

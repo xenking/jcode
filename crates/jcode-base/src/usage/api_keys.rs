@@ -45,12 +45,15 @@ fn key_status_from_response(status: reqwest::StatusCode) -> String {
 
 /// Free `GET {base}/models` probe used for OpenAI-compatible profiles that do
 /// not expose a balance API. Returns a human-readable key status.
-async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
+async fn probe_openai_compatible_key(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> String {
     let base = api_base.trim_end_matches('/');
     if base.is_empty() {
         return "configured (no endpoint to probe)".to_string();
     }
-    let client = crate::provider::shared_http_client();
     let request = crate::provider_catalog::apply_openai_compatible_catalog_auth(
         client.get(format!("{}/models", base)),
         base,
@@ -111,12 +114,16 @@ pub(super) fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLim
 
 /// Live quota windows for an OpenCode Zen / OpenCode Go API key. The service
 /// exposes real percentages, so the report never has to guess from spend.
-async fn fetch_opencode_usage_limits(api_base: &str, api_key: &str) -> Result<Vec<UsageLimit>> {
+async fn fetch_opencode_usage_limits(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
     let base = api_base.trim_end_matches('/');
     if base.is_empty() {
         return Err(anyhow::anyhow!("no API endpoint"));
     }
-    let response = crate::provider::shared_http_client()
+    let response = client
         .get(format!("{base}/usage"))
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Accept", "application/json")
@@ -232,7 +239,17 @@ async fn fetch_anthropic_api_key_report() -> ProviderUsage {
     let mut extra_info = Vec::new();
 
     if let Some(api_key) = configured_key("ANTHROPIC_API_KEY", "anthropic.env") {
-        let client = crate::provider::shared_http_client();
+        let client = match crate::egress::client("claude", None).await {
+            Ok(client) => client,
+            Err(error) => {
+                extra_info.push(("Key status".to_string(), format!("unavailable ({error})")));
+                return ProviderUsage {
+                    provider_name: display_name,
+                    extra_info,
+                    ..Default::default()
+                };
+            }
+        };
         let response = client
             .get("https://api.anthropic.com/v1/models?limit=1")
             .header("x-api-key", &api_key)
@@ -247,7 +264,7 @@ async fn fetch_anthropic_api_key_report() -> ProviderUsage {
         extra_info.push(("Key status".to_string(), status));
 
         if let Some(admin_key) = configured_key("ANTHROPIC_ADMIN_API_KEY", "anthropic.env")
-            && let Some(cost) = fetch_anthropic_org_cost(&admin_key).await
+            && let Some(cost) = fetch_anthropic_org_cost(&client, &admin_key).await
         {
             extra_info.push((
                 "Org cost this month (admin API)".to_string(),
@@ -273,7 +290,17 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
     let mut extra_info = Vec::new();
 
     if let Some(api_key) = configured_key("OPENAI_API_KEY", "openai.env") {
-        let client = crate::provider::shared_http_client();
+        let client = match crate::egress::client("openai", None).await {
+            Ok(client) => client,
+            Err(error) => {
+                extra_info.push(("Key status".to_string(), format!("unavailable ({error})")));
+                return ProviderUsage {
+                    provider_name: display_name,
+                    extra_info,
+                    ..Default::default()
+                };
+            }
+        };
         let response = client
             .get("https://api.openai.com/v1/models")
             .header("Authorization", format!("Bearer {}", api_key))
@@ -287,7 +314,7 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
         extra_info.push(("Key status".to_string(), status));
 
         if let Some(admin_key) = configured_key("OPENAI_ADMIN_API_KEY", "openai.env")
-            && let Some(cost) = fetch_openai_org_cost(&admin_key).await
+            && let Some(cost) = fetch_openai_org_cost(&client, &admin_key).await
         {
             extra_info.push((
                 "Org cost this month (admin API)".to_string(),
@@ -365,6 +392,21 @@ async fn fetch_compatible_profile_report_for(
             .clone()
             .or_else(|| configured_key(env_key, env_file))
     };
+    // Balance and quota meters leave from the key's own egress.
+    let client = match crate::egress::client(profile.id, label.as_deref()).await {
+        Ok(client) => client,
+        Err(error) => {
+            let provider_name = match &label {
+                Some(label) => format!("{} (API key) [{label}]", profile.display_name),
+                None => format!("{} (API key)", profile.display_name),
+            };
+            return ProviderUsage {
+                provider_name,
+                error: Some(error.to_string()),
+                ..Default::default()
+            };
+        }
+    };
     let source_key = match labelled_key {
         Some(credential) => crate::provider_catalog::ledger_key_for_account(&credential.account_id),
         None => format!("openai-compatible:{}", profile.id),
@@ -376,7 +418,7 @@ async fn fetch_compatible_profile_report_for(
     match profile.id {
         "deepseek" => {
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
-                match fetch_deepseek_balance(&api_key).await {
+                match fetch_deepseek_balance(&client, &api_key).await {
                     Ok(lines) => extra_info.extend(lines),
                     Err(e) => {
                         extra_info.push(("Balance".to_string(), format!("unavailable ({})", e)))
@@ -387,7 +429,7 @@ async fn fetch_compatible_profile_report_for(
         "moonshotai" => {
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                match fetch_moonshot_balance(&api_key, &resolved.api_base).await {
+                match fetch_moonshot_balance(&client, &api_key, &resolved.api_base).await {
                     Ok(lines) => extra_info.extend(lines),
                     Err(e) => {
                         extra_info.push(("Balance".to_string(), format!("unavailable ({})", e)))
@@ -397,7 +439,7 @@ async fn fetch_compatible_profile_report_for(
         }
         "kimi" => {
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
-                match fetch_kimi_usage_limits(&api_key).await {
+                match fetch_kimi_usage_limits(&client, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     Ok(_) => {
                         // Unknown capacity must not look healthy in the
@@ -416,13 +458,14 @@ async fn fetch_compatible_profile_report_for(
         "zai" => {
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                match fetch_zai_coding_plan_limits(&resolved.api_base, &api_key).await {
+                match fetch_zai_coding_plan_limits(&client, &resolved.api_base, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     _ => {
                         // Not a Coding Plan key (or quota API unavailable):
                         // fall back to the pay-as-you-go key probe below.
                         let status =
-                            probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                            probe_openai_compatible_key(&client, &resolved.api_base, &api_key)
+                                .await;
                         extra_info.push(("Key status".to_string(), status));
                     }
                 }
@@ -431,13 +474,14 @@ async fn fetch_compatible_profile_report_for(
         "opencode" | "opencode-go" => {
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                match fetch_opencode_usage_limits(&resolved.api_base, &api_key).await {
+                match fetch_opencode_usage_limits(&client, &resolved.api_base, &api_key).await {
                     Ok(fetched) => limits.extend(fetched),
                     Err(e) => {
                         // Older Zen deployments expose no quota endpoint. The
                         // free key probe still proves the credential works.
                         let status =
-                            probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                            probe_openai_compatible_key(&client, &resolved.api_base, &api_key)
+                                .await;
                         extra_info.push(("Key status".to_string(), status));
                         extra_info.push(("Quota".to_string(), format!("unavailable ({e})")));
                     }
@@ -475,7 +519,8 @@ async fn fetch_compatible_profile_report_for(
             // rather than just "configured".
             if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                let status = probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                let status =
+                    probe_openai_compatible_key(&client, &resolved.api_base, &api_key).await;
                 extra_info.push(("Key status".to_string(), status));
             }
         }
@@ -536,8 +581,10 @@ async fn fetch_compatible_profile_report_for(
 }
 
 /// DeepSeek exposes a real balance endpoint for plain API keys.
-async fn fetch_deepseek_balance(api_key: &str) -> Result<Vec<(String, String)>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_deepseek_balance(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<(String, String)>> {
     let response = client
         .get("https://api.deepseek.com/user/balance")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -585,14 +632,17 @@ async fn fetch_deepseek_balance(api_key: &str) -> Result<Vec<(String, String)>> 
 }
 
 /// Moonshot exposes `GET /v1/users/me/balance` for plain API keys.
-async fn fetch_moonshot_balance(api_key: &str, api_base: &str) -> Result<Vec<(String, String)>> {
+async fn fetch_moonshot_balance(
+    client: &reqwest::Client,
+    api_key: &str,
+    api_base: &str,
+) -> Result<Vec<(String, String)>> {
     let base = api_base.trim_end_matches('/');
     let currency = if base.contains("moonshot.cn") {
         "CNY"
     } else {
         "USD"
     };
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!("{}/users/me/balance", base))
         .header("Authorization", format!("Bearer {}", api_key))
@@ -640,8 +690,10 @@ async fn fetch_moonshot_balance(api_key: &str, api_base: &str) -> Result<Vec<(St
 }
 
 /// Kimi Code exposes per-window quota through the coding usage endpoint.
-async fn fetch_kimi_usage_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_kimi_usage_limits(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
     let response = client
         .get("https://api.kimi.com/coding/v1/usages")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -810,8 +862,11 @@ pub(super) fn zai_quota_url(api_base: &str) -> String {
 /// Z.ai GLM Coding Plan exposes plan quota windows (5-hour, weekly, and MCP
 /// monthly) through the monitor quota endpoint. Pay-as-you-go keys are
 /// rejected, which the caller uses as the fallback signal.
-async fn fetch_zai_coding_plan_limits(api_base: &str, api_key: &str) -> Result<Vec<UsageLimit>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_zai_coding_plan_limits(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
     let response = client
         .get(zai_quota_url(api_base))
         .header("Authorization", format!("Bearer {}", api_key))
@@ -895,9 +950,8 @@ pub(super) fn parse_zai_coding_plan_limits(json: &serde_json::Value) -> Vec<Usag
 
 /// Anthropic org-wide cost for the current month. Requires an *admin* API key
 /// (`sk-ant-admin...`); regular keys cannot read cost reports.
-async fn fetch_anthropic_org_cost(admin_key: &str) -> Option<f64> {
+async fn fetch_anthropic_org_cost(client: &reqwest::Client, admin_key: &str) -> Option<f64> {
     let starting_at = month_start_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!(
             "https://api.anthropic.com/v1/organizations/cost_report?starting_at={}&limit=31",
@@ -934,9 +988,8 @@ async fn fetch_anthropic_org_cost(admin_key: &str) -> Option<f64> {
 }
 
 /// OpenAI org-wide cost for the current month. Requires an admin API key.
-async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
+async fn fetch_openai_org_cost(client: &reqwest::Client, admin_key: &str) -> Option<f64> {
     let start_time = month_start_utc().timestamp();
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!(
             "https://api.openai.com/v1/organization/costs?start_time={}&limit=31",
@@ -1053,7 +1106,11 @@ mod tests {
             .build()
             .unwrap();
         let limits = runtime
-            .block_on(fetch_opencode_usage_limits(&base, "test-key"))
+            .block_on(fetch_opencode_usage_limits(
+                &crate::provider::shared_http_client(),
+                &base,
+                "test-key",
+            ))
             .expect("live quota response parses");
         assert_eq!(limits.len(), 3);
         assert_eq!(limits[0].usage_percent, 23.0);
@@ -1191,6 +1248,94 @@ mod tests {
         crate::config::invalidate_config_cache();
     }
 
+    /// Each key's quota meter leaves from that key's own egress.
+    #[test]
+    fn labelled_key_meters_follow_their_keys_egress() {
+        use crate::egress::fixture::Proxy;
+
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let proxy = runtime.block_on(Proxy::start());
+        let dead = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let base = serve_usage_by_key(vec![
+            ("key-default", Box::leak(usage(10, 1).into_boxed_str())),
+            ("key-second", Box::leak(usage(55, 20).into_boxed_str())),
+            ("key-third", Box::leak(usage(90, 70).into_boxed_str())),
+        ]);
+        std::fs::write(
+            crate::config::Config::path().unwrap(),
+            format!(
+                "[api_key_profiles.opencode-go]\nbase_url = \"{base}\"\n\
+                 [egress.corp]\nurl = \"{}\"\nrequired = true\n\
+                 [egress.gone]\nurl = \"{dead}\"\nrequired = true\n\
+                 [[routing.accounts]]\nid = \"opencode-go:second\"\negress = \"corp\"\n\
+                 [[routing.accounts]]\nid = \"opencode-go:third\"\negress = \"gone\"\n",
+                proxy.url
+            ),
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        sandbox
+            .write_openai_compatible_api_key(
+                crate::provider_catalog::OPENCODE_GO_PROFILE,
+                "key-default",
+            )
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "key-second")
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "third", "key-third")
+            .unwrap();
+
+        let mut reports = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            enqueue_api_key_usage_tasks(&mut tasks);
+            let mut reports = Vec::new();
+            while let Some(report) = tasks.join_next().await {
+                reports.extend(report.unwrap());
+            }
+            reports
+        });
+        reports.retain(|report| report.provider_name.starts_with("OpenCode Go"));
+        reports.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+        let by_name = |name: &str| {
+            reports
+                .iter()
+                .find(|report| report.provider_name == name)
+                .unwrap_or_else(|| panic!("no report {name}"))
+        };
+        let percents = |name: &str| -> Vec<f32> {
+            by_name(name)
+                .limits
+                .iter()
+                .map(|l| l.usage_percent)
+                .collect()
+        };
+
+        // The unassigned key reads its meter directly.
+        assert_eq!(percents("OpenCode Go (API key)"), vec![10.0f32, 1.0]);
+        // The assigned key reads it through its proxy, and only that key does.
+        assert_eq!(percents("OpenCode Go (API key) [second]"), vec![55.0, 20.0]);
+        let through_proxy = proxy.seen();
+        assert_eq!(through_proxy.len(), 1, "proxy saw {through_proxy:?}");
+        assert!(through_proxy[0].starts_with(&format!("GET {base}/usage ")));
+        // A required proxy that is down reads nothing and says why.
+        let third = by_name("OpenCode Go (API key) [third]");
+        assert!(third.limits.is_empty());
+        assert!(
+            third
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("required egress proxy")),
+            "{:?}",
+            third.error
+        );
+
+        crate::config::invalidate_config_cache();
+    }
+
     #[test]
     fn opencode_usage_fetch_reports_a_missing_endpoint_instead_of_zeros() {
         let base = serve_once("404 Not Found", "{}");
@@ -1200,7 +1345,11 @@ mod tests {
             .unwrap();
         assert!(
             runtime
-                .block_on(fetch_opencode_usage_limits(&base, "test-key"))
+                .block_on(fetch_opencode_usage_limits(
+                    &crate::provider::shared_http_client(),
+                    &base,
+                    "test-key",
+                ))
                 .is_err()
         );
     }

@@ -24,7 +24,12 @@ impl OpenAIProvider {
         let catalog = if is_chatgpt_mode {
             let access_token =
                 openai_access_token(account_label.clone(), &self.credentials).await?;
-            match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
+            match jcode_base::provider::fetch_openai_model_catalog(
+                &access_token,
+                account_label.as_deref(),
+            )
+            .await
+            {
                 Ok(catalog) => catalog,
                 // The server can reject a token that still looks fresh by its
                 // local expiry (revoked/rotated). The chat path recovers by
@@ -60,7 +65,11 @@ impl OpenAIProvider {
                             "token force-refresh after catalog 401/403 also failed: {refresh_err:#}"
                         ))
                         })?;
-                    jcode_base::provider::fetch_openai_model_catalog(&refreshed).await?
+                    jcode_base::provider::fetch_openai_model_catalog(
+                        &refreshed,
+                        account_label.as_deref(),
+                    )
+                    .await?
                 }
                 Err(err) => return Err(err),
             }

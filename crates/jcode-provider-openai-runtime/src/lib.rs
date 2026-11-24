@@ -43,7 +43,11 @@ mod model_selection;
 mod openai_ws_connect;
 mod response_request;
 mod speed;
+#[cfg(test)]
 use openai_ws_connect::connect_ws;
+use openai_ws_connect::connect_ws_via;
+#[cfg(test)]
+mod egress_tests;
 mod native_compaction;
 mod openai_retry_diagnostics;
 mod openai_stream_cancellation;
@@ -1133,6 +1137,15 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
+    /// The egress label of the credential in use: an OAuth login by its
+    /// account label, a platform API key by the bare provider entry.
+    fn egress_label<'a>(
+        credentials: &CodexCredentials,
+        account_label: Option<&'a str>,
+    ) -> Option<&'a str> {
+        account_label.filter(|_| Self::is_chatgpt_mode(credentials))
+    }
+
     /// Model-catalog scope for the credential this runtime will actually send.
     /// ChatGPT/Codex OAuth and platform API keys expose different model lists,
     /// so validation, availability, and refresh must all use the loaded
@@ -1473,6 +1486,7 @@ impl OpenAIProvider {
                         };
                     jcode_base::provider::refresh_openai_model_catalog_in_background_for_scope(
                         token,
+                        self.refresh_account_label(),
                         is_chatgpt_mode,
                         "openai-request-setup",
                         scope.clone(),

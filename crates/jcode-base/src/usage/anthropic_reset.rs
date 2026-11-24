@@ -80,11 +80,25 @@ pub(super) fn authorize(
     )
 }
 
+#[cfg(test)]
 pub(super) fn reset_client() -> Result<reqwest::Client> {
+    reset_builder()
+        .build()
+        .context("Could not create the Claude reset client")
+}
+
+fn reset_builder() -> reqwest::ClientBuilder {
     // Never follow redirects with credentials or retry the claim automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(35))
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// The reset client for one stored login, through that login's egress.
+pub(super) async fn reset_client_for(account_label: Option<&str>) -> Result<reqwest::Client> {
+    crate::egress::transport("claude", account_label)
+        .await?
+        .apply(reset_builder())?
         .build()
         .context("Could not create the Claude reset client")
 }
@@ -279,7 +293,13 @@ pub async fn prepare_anthropic_limit_reset(
     account_label: Option<String>,
 ) -> Result<std::result::Result<PendingAnthropicLimitReset, AnthropicLimitResetUnavailable>> {
     let access_token = fresh_access_token(account_label.as_deref()).await?;
-    prepare_with_token(&reset_client()?, API_BASE, access_token, account_label).await
+    prepare_with_token(
+        &reset_client_for(account_label.as_deref()).await?,
+        API_BASE,
+        access_token,
+        account_label,
+    )
+    .await
 }
 
 async fn prepare_with_token(
@@ -384,7 +404,12 @@ impl AnthropicLimitResetOutcome {
 pub async fn consume_anthropic_limit_reset(
     pending: &PendingAnthropicLimitReset,
 ) -> Result<AnthropicLimitResetOutcome> {
-    let result = consume_with_client(&reset_client()?, API_BASE, pending).await;
+    let result = consume_with_client(
+        &reset_client_for(pending.account_label.as_deref()).await?,
+        API_BASE,
+        pending,
+    )
+    .await;
     // Invalidate even on uncertain errors: a timed-out claim may have applied.
     invalidate_anthropic_usage_reset_state(pending.account_label.as_deref());
     result

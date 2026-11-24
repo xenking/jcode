@@ -14,7 +14,7 @@ const NO_SPEED_ACK: &str = concat!(
     "event: message_stop\ndata: {}\n\n"
 );
 
-fn runtime() -> tokio::runtime::Runtime {
+pub(super) fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -81,7 +81,7 @@ fn capture<const N: usize>(
     (url, server)
 }
 
-fn oauth_account(label: &str, token: &str) -> String {
+pub(super) fn oauth_account(label: &str, token: &str) -> String {
     auth::claude::upsert_account(auth::claude::AnthropicAccount {
         label: label.into(),
         access: token.into(),
@@ -94,7 +94,7 @@ fn oauth_account(label: &str, token: &str) -> String {
     .unwrap()
 }
 
-fn oauth_provider(url: &str, account: &str, model: &str) -> AnthropicProvider {
+pub(super) fn oauth_provider(url: &str, account: &str, model: &str) -> AnthropicProvider {
     let provider = AnthropicProvider::new();
     provider.set_oauth_account(Some(account)).unwrap();
     let provider = provider

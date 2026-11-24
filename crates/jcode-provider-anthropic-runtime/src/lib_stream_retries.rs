@@ -6,6 +6,7 @@ use super::*;
 )]
 pub(super) async fn run_stream_with_retries(
     client: Client,
+    transport: jcode_base::egress::Transport,
     initial_token: String,
     is_oauth: bool,
     mut request: ApiRequest,
@@ -87,7 +88,7 @@ pub(super) async fn run_stream_with_retries(
         let attempt_client = if attempt == 0 {
             client.clone()
         } else {
-            jcode_provider_core::fresh_transport_client()
+            transport.retry_client()
         };
 
         let mut response_accepted = false;

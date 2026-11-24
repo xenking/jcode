@@ -43,7 +43,7 @@ async fn fetch_usage() -> Result<UsageData> {
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, active_label.as_deref());
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, active_label.as_deref()).await
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
@@ -364,6 +364,7 @@ pub fn fetch_usage_for_account_sync(
     access_token: &str,
     refresh_token: &str,
     expires_at: i64,
+    account_label: Option<&str>,
 ) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
 
@@ -380,6 +381,7 @@ pub fn fetch_usage_for_account_sync(
             access_token.to_string(),
             refresh_token.to_string(),
             expires_at,
+            account_label.map(str::to_owned),
         ))
     });
 
@@ -446,7 +448,12 @@ fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {
         let usage = if account.label == current_label && active_cached.fetched_at.is_some() {
             Ok(active_cached.clone())
         } else {
-            fetch_usage_for_account_sync(&account.access, &account.refresh, account.expires)
+            fetch_usage_for_account_sync(
+                &account.access,
+                &account.refresh,
+                account.expires,
+                Some(&account.label),
+            )
         };
 
         match usage {
@@ -537,6 +544,7 @@ async fn fetch_usage_for_account(
     access_token: String,
     _refresh_token: String,
     expires_at: i64,
+    account_label: Option<String>,
 ) -> Result<UsageData> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     if expires_at < now_ms {
@@ -544,16 +552,20 @@ async fn fetch_usage_for_account(
     }
 
     let cache_key = anthropic_usage_cache_key(&access_token, None);
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, account_label.as_deref()).await
 }
 
 /// Fetch the current Anthropic OAuth usage for an already-resolved access
 /// token. This is used on the request path when model-scoped quota affects
 /// routing. Unlike [`get`], it waits for the first fetch instead of returning
-/// an empty snapshot while a background refresh starts.
-pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
+/// an empty snapshot while a background refresh starts. `account_label` selects
+/// the egress of the account that owns the token.
+pub async fn fetch_usage_for_access_token(
+    access_token: &str,
+    account_label: Option<&str>,
+) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
-    fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
+    fetch_anthropic_usage_data(access_token.to_string(), cache_key, account_label).await
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)

@@ -291,11 +291,25 @@ struct ConsumeRequest<'a> {
     credit_id: &'a str,
 }
 
+#[cfg(test)]
 fn reset_client() -> Result<reqwest::Client> {
+    reset_builder()
+        .build()
+        .context("Could not create the OpenAI reset client")
+}
+
+fn reset_builder() -> reqwest::ClientBuilder {
     // Do not follow redirects with credentials or retry a mutation automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// The reset client for one login, through that login's egress.
+async fn reset_client_for(account_label: Option<&str>) -> Result<reqwest::Client> {
+    crate::egress::transport("openai", account_label)
+        .await?
+        .apply(reset_builder())?
         .build()
         .context("Could not create the OpenAI reset client")
 }
@@ -398,7 +412,7 @@ pub async fn prepare_openai_usage_reset_for_account(
             .unwrap_or_else(|| "current ChatGPT login".into()),
     };
     prepare_with_credentials(
-        &reset_client()?,
+        &reset_client_for(account_label.as_deref()).await?,
         RESET_CREDITS_URL,
         credentials,
         account_label,
@@ -466,7 +480,12 @@ async fn prepare_with_credentials(
 pub async fn consume_openai_usage_reset(
     pending: &PendingOpenAiUsageReset,
 ) -> Result<OpenAiUsageResetOutcome> {
-    let result = consume_with_client(&reset_client()?, RESET_CREDITS_URL, pending).await;
+    let result = consume_with_client(
+        &reset_client_for(pending.account_label.as_deref()).await?,
+        RESET_CREDITS_URL,
+        pending,
+    )
+    .await;
     // Invalidate even on uncertain errors: a timed-out POST may have reset usage.
     super::cache::invalidate_openai_usage_after_reset(
         &pending.credentials.access_token,

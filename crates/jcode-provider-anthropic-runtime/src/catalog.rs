@@ -18,7 +18,11 @@ impl AnthropicProvider {
             anyhow::bail!("resolved an empty Anthropic access token");
         }
         let catalog = if is_oauth {
-            jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
+            jcode_base::provider::fetch_anthropic_model_catalog_oauth(
+                &token,
+                self.oauth_refresh_label().as_deref(),
+            )
+            .await?
         } else {
             jcode_base::provider::fetch_anthropic_model_catalog(&token).await?
         };
@@ -90,7 +94,12 @@ impl AnthropicProvider {
     ) -> Result<()> {
         let catalog = if oauth {
             let (token, _) = self.get_oauth_access_token().await?;
-            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
+            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(
+                &token,
+                self.oauth_refresh_label().as_deref(),
+            )
+            .await
+            {
                 Ok(catalog) => catalog,
                 Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
                     let token = force_refresh_oauth_token(
@@ -98,7 +107,11 @@ impl AnthropicProvider {
                         &self.oauth_refresh_label(),
                     )
                     .await?;
-                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
+                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(
+                        &token,
+                        self.oauth_refresh_label().as_deref(),
+                    )
+                    .await?
                 }
                 Err(err) => return Err(err),
             }

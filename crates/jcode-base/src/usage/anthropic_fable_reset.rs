@@ -1,7 +1,9 @@
 //! Fable earned resets using Claude Code 2.1.322's `cedar_ember` contract.
 //! See docs/anthropic-fable-resets.md for primary-source evidence.
 
-use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client};
+#[cfg(test)]
+use super::anthropic_reset::reset_client;
+use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client_for};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -130,7 +132,7 @@ pub(crate) async fn auto_reset_fable_usage(account_label: Option<String>) -> Res
         return Ok(false);
     };
     let token = fresh_access_token(Some(&label)).await?;
-    let client = reset_client()?;
+    let client = reset_client_for(Some(&label)).await?;
     redeem(
         &client,
         BASE,

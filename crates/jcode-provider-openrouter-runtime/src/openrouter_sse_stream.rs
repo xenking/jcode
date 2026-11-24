@@ -77,6 +77,7 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
 )]
 pub(super) async fn run_stream_with_retries(
     client: Client,
+    transport: jcode_base::egress::Transport,
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
@@ -139,7 +140,7 @@ pub(super) async fn run_stream_with_retries(
         let attempt_client = if attempt == 0 {
             client.clone()
         } else {
-            jcode_provider_core::fresh_transport_client()
+            transport.retry_client()
         };
 
         let response = stream_response(

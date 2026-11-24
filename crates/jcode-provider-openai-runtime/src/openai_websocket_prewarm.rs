@@ -194,8 +194,21 @@ impl PrewarmSlot {
                     payload.get("model").and_then(Value::as_str),
                     payload.get("service_tier").and_then(Value::as_str),
                 );
+                // Egress follows the account these credentials belong to.
+                let account_label =
+                    jcode_base::auth::codex::list_accounts()
+                        .ok()
+                        .and_then(|accounts| {
+                            jcode_base::auth::codex::account_label_for_credentials(
+                                &accounts, &creds,
+                            )
+                        });
+                let account_label = OpenAIProvider::egress_label(&creds, account_label.as_deref())
+                    .map(str::to_owned);
                 drop(creds);
-                let (socket, response) = connect_ws(handshake).await?;
+                let egress =
+                    jcode_base::egress::transport("openai", account_label.as_deref()).await?;
+                let (socket, response) = connect_ws_via(handshake, &egress).await?;
                 capture_turn_state(
                     &turn_state,
                     response

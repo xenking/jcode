@@ -124,7 +124,7 @@ fn read_report(
 
 /// Profile verification binds both the OAuth account and organization before
 /// importing other applications' observations. No credential is read from OMP.
-pub(super) async fn import_for_account(token: &str, key: &str) {
+pub(super) async fn import_for_account(token: &str, key: &str, account_label: Option<&str>) {
     // Unit tests use isolated JCODE_HOME but inherit the developer's HOME.
     // Never inspect a real OMP database or contact Anthropic from such tests.
     #[cfg(test)]
@@ -134,10 +134,17 @@ pub(super) async fn import_for_account(token: &str, key: &str) {
     let Some(path) = omp_database().filter(|p| p.is_file()) else {
         return;
     };
+    let client = match crate::egress::client("claude", account_label).await {
+        Ok(client) => client,
+        Err(error) => {
+            crate::logging::debug(&format!("OMP profile verification unavailable: {error}"));
+            return;
+        }
+    };
     if !super::disk_cache::begin_omp_probe(key, token) {
         return;
     }
-    let response = crate::provider::shared_http_client()
+    let response = client
         .get(crate::auth::oauth::claude::PROFILE_URL)
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("User-Agent", "jcode")

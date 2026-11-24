@@ -22,6 +22,8 @@ mod usage_recording;
 
 mod catalog;
 #[cfg(test)]
+mod egress_tests;
+#[cfg(test)]
 mod speed_tests;
 
 use jcode_base::auth;
@@ -530,7 +532,10 @@ impl AnthropicProvider {
         {
             return selected_model;
         }
-        let Ok(usage) = jcode_base::usage::fetch_usage_for_access_token(token).await else {
+        let label = self.oauth_refresh_label();
+        let Ok(usage) =
+            jcode_base::usage::fetch_usage_for_access_token(token, label.as_deref()).await
+        else {
             return selected_model;
         };
         let Some(fallback) = Self::fallback_for_model_scoped_usage(&selected_model, &usage) else {
@@ -1057,6 +1062,17 @@ impl AnthropicProvider {
         }
     }
 
+    /// The egress transport of the credential serving this request. OAuth is
+    /// keyed by account label, an API key by the bare `claude` provider entry.
+    async fn egress_transport(&self, is_oauth: bool) -> Result<jcode_base::egress::Transport> {
+        let label = if is_oauth {
+            self.oauth_refresh_label()
+        } else {
+            None
+        };
+        jcode_base::egress::transport("claude", label.as_deref()).await
+    }
+
     fn oauth_refresh_label(&self) -> Option<String> {
         self.oauth_account_label()
             .or_else(auth::claude::active_account_label)
@@ -1492,9 +1508,12 @@ impl Provider for AnthropicProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
+        // Fails closed when the credential's required egress proxy is down.
+        let transport = self.egress_transport(is_oauth).await?;
+        let client = transport.client_or(&self.client);
         if is_oauth {
             ensure_oauth_preflight(
-                &self.client,
+                &client,
                 &token,
                 &self.oauth_session_id,
                 &self.oauth_preflight_done,
@@ -1577,7 +1596,6 @@ impl Provider for AnthropicProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         // Clone what we need for the async task
-        let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
         let oauth_account_label = self.oauth_refresh_label();
         let oauth_session_id = self.oauth_session_id.clone();
@@ -1599,6 +1617,7 @@ impl Provider for AnthropicProvider {
             }
             run_stream_with_retries(
                 client,
+                transport,
                 token,
                 is_oauth,
                 request,
@@ -1999,9 +2018,12 @@ impl Provider for AnthropicProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
+        // Fails closed when the credential's required egress proxy is down.
+        let transport = self.egress_transport(is_oauth).await?;
+        let client = transport.client_or(&self.client);
         if is_oauth {
             ensure_oauth_preflight(
-                &self.client,
+                &client,
                 &token,
                 &self.oauth_session_id,
                 &self.oauth_preflight_done,
@@ -2088,7 +2110,6 @@ impl Provider for AnthropicProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         // Clone what we need for the async task
-        let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
         let oauth_account_label = self.oauth_refresh_label();
         let oauth_session_id = self.oauth_session_id.clone();
@@ -2109,6 +2130,7 @@ impl Provider for AnthropicProvider {
             }
             run_stream_with_retries(
                 client,
+                transport,
                 token,
                 is_oauth,
                 request,

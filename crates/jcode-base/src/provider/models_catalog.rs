@@ -195,10 +195,15 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
 }
 
 /// Fetch model availability and context windows from the Codex backend API.
-pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIModelCatalog> {
+///
+/// `account_label` selects the egress of the login that owns the token.
+pub async fn fetch_openai_model_catalog(
+    access_token: &str,
+    account_label: Option<&str>,
+) -> Result<OpenAIModelCatalog> {
     note_openai_model_catalog_refresh_attempt();
 
-    let client = shared_http_client();
+    let client = crate::egress::client("openai", account_label).await?;
     let resp = client
         .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -218,7 +223,7 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
 }
 
 pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicModelCatalog> {
-    fetch_anthropic_model_catalog_with_request(|client, after_id| {
+    fetch_anthropic_model_catalog_with_request(None, |client, after_id| {
         let mut req = client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", api_key)
@@ -236,8 +241,9 @@ pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicMod
 
 pub async fn fetch_anthropic_model_catalog_oauth(
     access_token: &str,
+    account_label: Option<&str>,
 ) -> Result<AnthropicModelCatalog> {
-    fetch_anthropic_model_catalog_with_request(|client, after_id| {
+    fetch_anthropic_model_catalog_with_request(account_label, |client, after_id| {
         let mut req = crate::provider::anthropic::apply_oauth_attribution_headers(
             client
                 .get("https://api.anthropic.com/v1/models")
@@ -265,12 +271,13 @@ pub async fn fetch_anthropic_model_catalog_oauth(
 }
 
 async fn fetch_anthropic_model_catalog_with_request<F>(
+    account_label: Option<&str>,
     mut build_request: F,
 ) -> Result<AnthropicModelCatalog>
 where
     F: FnMut(&reqwest::Client, Option<&str>) -> reqwest::RequestBuilder,
 {
-    let client = shared_http_client();
+    let client = crate::egress::client("claude", account_label).await?;
     let mut available = HashSet::new();
     let mut limits = HashMap::new();
     let mut after_id: Option<String> = None;
@@ -326,7 +333,7 @@ where
 pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIModelCatalog> {
     note_openai_model_catalog_refresh_attempt();
 
-    let client = shared_http_client();
+    let client = crate::egress::client("openai", None).await?;
     // Honor the same API-base override as the Responses request path so a
     // custom/proxied endpoint is probed for models instead of the real
     // api.openai.com (issue #343).
@@ -445,8 +452,11 @@ mod tests {
 
 /// Fetch context window sizes from the Codex backend API.
 /// Returns a map of model slug -> context_window tokens.
-pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<String, usize>> {
-    Ok(fetch_openai_model_catalog(access_token)
+pub async fn fetch_openai_context_limits(
+    access_token: &str,
+    account_label: Option<&str>,
+) -> Result<HashMap<String, usize>> {
+    Ok(fetch_openai_model_catalog(access_token, account_label)
         .await?
         .context_limits)
 }

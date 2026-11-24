@@ -103,6 +103,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
         let (tx, mut events) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
         super::openrouter_sse_stream::run_stream_with_retries(
             client,
+            jcode_base::egress::Transport::default(),
             api_base,
             ProviderAuth::None {
                 label: "test".to_string(),

@@ -83,6 +83,7 @@ mod opaque_rejection_tests;
 /// This is intentionally outside the generic retry loop. Even a transient
 /// failure of this single HTTPS attempt must not schedule another replay.
 pub(super) async fn recover_opaque_ws_rejection(
+    recovery_client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
     request: &Value,
@@ -96,7 +97,7 @@ pub(super) async fn recover_opaque_ws_rejection(
     );
     let (recovery_tx, mut recovery_rx) = mpsc::channel(100);
     let recovery = stream_response(
-        jcode_provider_core::fresh_transport_client(),
+        recovery_client,
         credentials,
         account_label,
         request,
@@ -1683,6 +1684,8 @@ async fn stream_response_websocket_authenticated(
         || routing_header_log_fields(ws_request.headers()),
     );
     identity.0 = access_token.clone();
+    let egress_label =
+        OpenAIProvider::egress_label(&creds, account_label.as_deref()).map(str::to_owned);
     drop(creds);
 
     let usage_generation = jcode_base::usage::openai_response_generation();
@@ -1690,9 +1693,13 @@ async fn stream_response_websocket_authenticated(
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
     let connect_start = std::time::Instant::now();
 
+    // Fail closed: a credential with a required egress never dials directly.
+    let egress = jcode_base::egress::transport("openai", egress_label.as_deref())
+        .await
+        .map_err(OpenAIStreamFailure::Other)?;
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
-        connect_ws(ws_request),
+        connect_ws_via(ws_request, &egress),
     )
     .await
     .map_err(|_| {

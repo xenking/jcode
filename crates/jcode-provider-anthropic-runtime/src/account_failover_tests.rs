@@ -569,6 +569,7 @@ fn http_retry_decision_with_policy(
             let (tx, mut rx) = mpsc::channel(64);
             let task = tokio::spawn(run_stream_with_retries(
                 Client::builder().no_proxy().build().unwrap(),
+                jcode_base::egress::Transport::default(),
                 "test-token".into(),
                 true,
                 ApiRequest {

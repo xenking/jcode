@@ -105,13 +105,17 @@ async fn handle(mut client: TcpStream, log: Arc<Mutex<Vec<String>>>) -> Option<(
         return Some(());
     }
     let rest = target.strip_prefix("http://")?;
-    let (authority, path) = rest.split_once('/').map_or((rest, "/".to_owned()), |(a, p)| {
-        (a, format!("/{p}"))
-    });
+    let (authority, path) = rest
+        .split_once('/')
+        .map_or((rest, "/".to_owned()), |(a, p)| (a, format!("/{p}")));
     let mut upstream = TcpStream::connect(authority).await.ok()?;
     let mut forwarded = format!("{method} {path} HTTP/1.1\r\n");
     for line in lines {
-        let name = line.split(':').next().unwrap_or_default().to_ascii_lowercase();
+        let name = line
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if name != "connection" && name != "proxy-connection" {
             forwarded.push_str(line);
             forwarded.push_str("\r\n");
@@ -132,6 +136,8 @@ pub struct Upstream {
     task: tokio::task::JoinHandle<()>,
 }
 
+const JSON: &str = "application/json";
+
 #[derive(Clone, Debug)]
 pub struct Request {
     pub request_line: String,
@@ -140,6 +146,11 @@ pub struct Request {
 
 impl Upstream {
     pub async fn start(body: &'static str) -> Self {
+        Self::start_as(JSON, body).await
+    }
+
+    /// As [`Upstream::start`], with another content type (`text/event-stream`).
+    pub async fn start_as(content_type: &'static str, body: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -156,7 +167,7 @@ impl Upstream {
                         let close = head.to_ascii_lowercase().contains("connection: close");
                         log.lock().unwrap().push(Request { request_line, head });
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{body}",
+                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{}Content-Length: {}\r\n\r\n{body}",
                             if close { "Connection: close\r\n" } else { "" },
                             body.len()
                         );

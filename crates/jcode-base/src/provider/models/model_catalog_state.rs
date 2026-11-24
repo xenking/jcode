@@ -639,12 +639,14 @@ pub fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
 /// a 401.
 pub fn refresh_openai_model_catalog_in_background(
     access_token: String,
+    account_label: Option<String>,
     is_chatgpt_mode: bool,
     context: &'static str,
 ) {
     let scope = openai_catalog_scope_for_credential(is_chatgpt_mode, &access_token);
     refresh_openai_model_catalog_in_background_for_scope(
         access_token,
+        account_label,
         is_chatgpt_mode,
         context,
         scope,
@@ -654,6 +656,7 @@ pub fn refresh_openai_model_catalog_in_background(
 /// Refresh a catalog for a captured credential scope, never the global active login.
 pub fn refresh_openai_model_catalog_in_background_for_scope(
     access_token: String,
+    account_label: Option<String>,
     is_chatgpt_mode: bool,
     context: &'static str,
     scope: String,
@@ -670,7 +673,7 @@ pub fn refresh_openai_model_catalog_in_background_for_scope(
         let refresh_result = if use_platform_api {
             fetch_openai_api_key_model_catalog(&access_token).await
         } else {
-            fetch_openai_model_catalog(&access_token).await
+            fetch_openai_model_catalog(&access_token, account_label.as_deref()).await
         };
         match refresh_result {
             Ok(catalog)

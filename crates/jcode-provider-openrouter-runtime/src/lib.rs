@@ -669,14 +669,19 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        let result = fetch_models_from_api(
-            jcode_provider_core::shared_http_client(),
-            api_base,
-            auth,
-            models_cache,
-            Some(profile_id.clone()),
-        )
-        .await;
+        let result = match jcode_base::egress::transport_for_active_key(&profile_id).await {
+            Ok(transport) => {
+                fetch_models_from_api(
+                    transport.client(),
+                    api_base,
+                    auth,
+                    models_cache,
+                    Some(profile_id.clone()),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         let succeeded = result.is_ok();
         match result {
             Ok(models) => {
@@ -777,14 +782,19 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        let result = fetch_models_from_api(
-            jcode_provider_core::shared_http_client(),
-            api_base,
-            auth,
-            models_cache,
-            Some(namespace.to_string()),
-        )
-        .await;
+        let result = match jcode_base::egress::transport_for_active_key(namespace).await {
+            Ok(transport) => {
+                fetch_models_from_api(
+                    transport.client(),
+                    api_base,
+                    auth,
+                    models_cache,
+                    Some(namespace.to_string()),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         let succeeded = result.is_ok();
         match result {
             Ok(models) => {
@@ -2120,7 +2130,22 @@ impl OpenRouterProvider {
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
         let ns = self.foreground_cache_namespace();
+        let egress_provider = self
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| "openrouter".to_string());
         handle.spawn(async move {
+            let client = match jcode_base::egress::transport_for_active_key(&egress_provider).await
+            {
+                Ok(transport) => transport.client_or(&client),
+                Err(error) => {
+                    jcode_base::logging::info(&format!(
+                        "Skipping OpenRouter model catalog refresh ({context}): {error}"
+                    ));
+                    OpenRouterProvider::finish_background_model_catalog_refresh(&refresh_state);
+                    return;
+                }
+            };
             match fetch_models_from_api(client, api_base, auth, models_cache, ns).await {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
@@ -2645,7 +2670,7 @@ impl OpenRouterProvider {
         }
 
         fetch_models_from_api(
-            self.client.clone(),
+            self.egress_client().await?,
             self.api_base.clone(),
             (self.auth)()?,
             Arc::clone(&self.models_cache),
@@ -2661,7 +2686,7 @@ impl OpenRouterProvider {
         }
 
         fetch_models_from_api(
-            self.client.clone(),
+            self.egress_client().await?,
             self.api_base.clone(),
             (self.auth)()?,
             Arc::clone(&self.models_cache),
@@ -2702,7 +2727,7 @@ impl OpenRouterProvider {
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
         let response = (self.auth)()?
-            .apply(self.client.get(&url))
+            .apply(self.egress_client().await?.get(&url))
             .await?
             .send()
             .await
@@ -2756,7 +2781,7 @@ impl OpenRouterProvider {
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
         let response = (self.auth)()?
-            .apply(self.client.get(&url))
+            .apply(self.egress_client().await?.get(&url))
             .await?
             .send()
             .await
@@ -2914,6 +2939,8 @@ mod openrouter_pricing_deadlock_tests;
 #[path = "openrouter_input_modalities_tests.rs"]
 mod openrouter_input_modalities_tests;
 
+#[cfg(test)]
+mod egress_tests;
 #[cfg(test)]
 #[path = "issue_1056_tests.rs"]
 mod issue_1056_tests;
