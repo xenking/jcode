@@ -55,9 +55,6 @@ impl BridgeState {
     }
 
     pub(super) fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
-        if event["activity"]["is_processing"].as_bool() == Some(true) {
-            return None;
-        }
         let directive = &event["reload_recovery"];
         let (continuation_message, reconnect_notice) = if let Some(message) =
             directive["continuation_message"].as_str()
@@ -66,7 +63,8 @@ impl BridgeState {
                 message.to_string(),
                 directive["reconnect_notice"].as_str().map(str::to_string),
             )
-        } else if event["was_interrupted"].as_bool() == Some(true)
+        } else if event["activity"]["is_processing"].as_bool() != Some(true)
+            && event["was_interrupted"].as_bool() == Some(true)
             && event["messages"]
                 .as_array()
                 .is_some_and(|messages| !messages.is_empty())

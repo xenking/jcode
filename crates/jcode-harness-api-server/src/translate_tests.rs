@@ -4353,13 +4353,28 @@ fn attachment_recovery_preserves_explicit_directive_with_zero_message_bootstrap(
 }
 
 #[test]
+fn attachment_recovery_preserves_pending_intent_when_turn_is_already_reserved() {
+    let mut state = BridgeState::default();
+    let (mut history, _) = recovery_attach(&mut state, Some("recover"));
+    history["activity"]["is_processing"] = json!(true);
+    let frames = state.legacy_event_to_api(&history);
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::SessionRecovery { session_id, .. } if session_id == "recover"
+    ));
+}
+
+#[test]
 fn attachment_recovery_suppresses_active_completed_and_blank_directives_once() {
     for case in ["active", "completed", "blank"] {
         let mut state = BridgeState::default();
         let (mut history, _) = recovery_attach(&mut state, Some("recover"));
         let recoverable = history.clone();
         match case {
-            "active" => history["activity"]["is_processing"] = json!(true),
+            "active" => {
+                history["activity"]["is_processing"] = json!(true);
+                history["reload_recovery"] = Value::Null;
+            }
             "completed" => {
                 history["was_interrupted"] = json!(false);
                 history["reload_recovery"] = Value::Null;

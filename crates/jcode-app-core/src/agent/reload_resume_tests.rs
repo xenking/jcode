@@ -38,11 +38,13 @@ impl Drop for TestHome {
 }
 
 type Captured = Arc<StdMutex<Vec<Vec<Message>>>>;
+const COMPACTION_FIXTURE_WINDOW: usize = 64_000;
 
 #[derive(Clone, Default)]
 struct ScriptedProvider {
     requests: Captured,
     replies: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    compaction_enabled: bool,
 }
 
 impl ScriptedProvider {
@@ -110,6 +112,18 @@ impl Provider for ScriptedProvider {
 
     fn model(&self) -> String {
         "scripted-1".to_string()
+    }
+
+    fn supports_compaction(&self) -> bool {
+        self.compaction_enabled
+    }
+
+    fn context_window(&self) -> usize {
+        if self.compaction_enabled {
+            COMPACTION_FIXTURE_WINDOW
+        } else {
+            crate::provider::DEFAULT_CONTEXT_LIMIT
+        }
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -300,6 +314,67 @@ async fn reload_mid_tool_resumes_with_only_a_tool_result() {
 #[tokio::test]
 async fn reload_mid_tool_preserves_compacted_anthropic_prefix_with_pinned_skill() {
     reload_mid_tool_with_prefix(true).await;
+}
+
+#[tokio::test]
+async fn reload_resume_compacts_over_budget_context_before_inference() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut session = crate::session::Session::create(None, None);
+    let old_text = "archived fixture text ".repeat(240);
+    for _ in 0..32 {
+        session.add_message(Role::User, Message::user(&old_text).content.to_vec());
+        session.add_message(
+            Role::Assistant,
+            Message::assistant_text(&old_text).content.to_vec(),
+        );
+    }
+    let pending = "Finish the interrupted task";
+    session.add_message(Role::User, Message::user(pending).content.to_vec());
+    session.save().unwrap();
+    let capture = ScriptedProvider {
+        compaction_enabled: true,
+        ..Default::default()
+    };
+    let full_count = session.messages.len();
+    let mut agent =
+        Agent::new_with_session(Arc::new(capture.clone()), Registry::empty(), session, None);
+    let lease = agent.claim_server_turn().unwrap();
+    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+    assert_eq!(
+        agent
+            .resume_interrupted_turn_mpsc(&lease, tx, true)
+            .await
+            .unwrap(),
+        ResumeOutcome::Continued
+    );
+
+    let requests = capture.requests();
+    let request = requests.first().unwrap();
+    assert!(
+        request.len() < full_count,
+        "first inference must see the compacted history"
+    );
+    assert!(request.iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. } if text.contains(pending))
+            })
+    }));
+    assert!(!has_synthetic_user_prompt(request));
+    let (before, after) = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            ServerEvent::Compaction {
+                trigger,
+                pre_tokens: Some(before),
+                post_tokens: Some(after),
+                ..
+            } if trigger == "hard_compact" => Some((before, after)),
+            _ => None,
+        })
+        .expect("resumed turn reports compaction");
+    assert!(before > COMPACTION_FIXTURE_WINDOW as u64);
+    assert!(after < COMPACTION_FIXTURE_WINDOW as u64);
 }
 
 async fn reload_mid_tool_with_prefix(compacted: bool) {

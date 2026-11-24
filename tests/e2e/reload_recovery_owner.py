@@ -73,13 +73,14 @@ class Fixture:
     def __init__(self, binary, case):
         self.temp = tempfile.TemporaryDirectory(prefix='recovery-owner-', dir=os.environ['JCODE_SCRATCH_DIR'])
         self.root = Path(self.temp.name)
-        candidate = self.root / 'candidate'
-        candidate.mkdir()
-        os.link(binary, candidate / 'jcode')
+        self.runtime = self.root / 'run'
+        self.runtime.mkdir()
+        (self.runtime / 'owner').touch()
+        os.link(binary, self.runtime / 'jcode')
         bridge_source = Path(binary).with_name('jcode-harness-api-bridge')
         if bridge_source.exists():
-            os.link(bridge_source, candidate / bridge_source.name)
-        self.binary = str(candidate / 'jcode')
+            os.link(bridge_source, self.runtime / bridge_source.name)
+        self.binary = str(self.runtime / 'jcode')
         self.case = case
         self.calls = []
         self.lock = threading.Lock()
@@ -139,17 +140,17 @@ class Fixture:
 
         self.provider = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         threading.Thread(target=self.provider.serve_forever, daemon=True).start()
-        self.home = self.root / 'jcode'
-        self.runtime = self.root / 'run'
-        for path in [self.home, self.runtime, self.root / 'home']:
+        self.home = self.runtime / 'data'
+        for path in [self.home, self.root / 'home']:
             path.mkdir()
-        self.path = self.runtime / 'd.sock'
+        self.path = self.runtime / 'app.sock'
         self.env = {
             'PATH': '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
             'HOME': str(self.root / 'home'), 'USER': os.environ.get('USER', 'fixture'),
             'TERM': 'xterm-256color', 'TMPDIR': str(self.runtime),
             'XDG_RUNTIME_DIR': str(self.runtime), 'JCODE_HOME': str(self.home),
             'JCODE_RUNTIME_DIR': str(self.runtime), 'JCODE_SOCKET': str(self.path),
+            'JCODE_TEST_SESSION': '1', 'JCODE_DEBUG_CONTROL': '1', 'JCODE_VERIFY_EXEC_RELOAD': '1',
             'JCODE_PROVIDER': 'openai-compatible', 'JCODE_MODEL': 'fake-model',
             'JCODE_OPENAI_COMPAT_API_BASE': f'http://127.0.0.1:{self.provider.server_port}/v1',
             'OPENAI_COMPAT_API_KEY': 'fixture-only', 'JCODE_OPENAI_COMPAT_DEFAULT_MODEL': 'fake-model',
@@ -161,7 +162,8 @@ class Fixture:
         self.start()
 
     def start(self):
-        self.daemon = subprocess.Popen([self.binary, '--no-update', '--no-selfdev', 'serve', '--socket', str(self.path)],
+        self.daemon = subprocess.Popen([self.binary, '--no-update', '--no-selfdev', '--debug-socket',
+                                        'serve', '--socket', str(self.path)],
                                        env=self.env, cwd=self.root, stdout=self.log, stderr=self.log, start_new_session=True)
         eventually('socket ready', lambda: self.path.exists())
 
@@ -187,9 +189,16 @@ class Fixture:
             wire.event(lambda e: e.get('type') == 'ask_user_request')
         self.initial_starts = self.turn_starts(session)
         assert len(self.initial_starts) == 1, 'original turn must have a canonical TURN_START'
-        wire.send({'type': 'reload', 'id': 3, 'force': True})
-        wire.event(lambda e: e.get('type') == 'reloading')
-        eventually('real exec reload', lambda: any('"exec_start"' in p.read_text() for p in (self.home / 'reload-traces').glob('*.jsonl')))
+        debug = Wire(self.runtime / 'app-debug.sock')
+        try:
+            debug.send({'type': 'debug_command', 'id': 3, 'command': 'server:reload:verify-exec'})
+            result = debug.event(lambda e: e.get('id') == 3)
+            assert result['ok'], result
+        finally:
+            debug.close()
+        reload_id = json.loads(result['output'])['request_id']
+        trace = self.home / 'reload-traces' / (reload_id + '.jsonl')
+        eventually('real exec reload', lambda: trace.exists() and '"exec_start"' in trace.read_text())
         for wire in self.wires:
             wire.close()
         self.wires.clear()
@@ -318,6 +327,7 @@ def run(binary, case):
         assert fixture.continuation_count() == 1, fixture.calls
         record = fixture.record(session)
         assert record and record['status'] == 'started', record
+        assert record['role'] == 'interrupted_peer', record
         starts = fixture.recovery_starts(session)
         assert len(starts) == 1, f'exactly one canonical continuation TURN_START: {starts}'
         print(json.dumps({'case': case, 'result': 'PASS', 'session': session,

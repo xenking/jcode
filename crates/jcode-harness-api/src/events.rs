@@ -573,9 +573,8 @@ pub enum ApiEvent {
     },
 
     /// Recovery intent from attachment history, emitted at most once per attach.
-    /// May precede `Attached`. Subscribe to events before attaching. The client
-    /// decides whether to send the continuation; the bridge never sends it.
-    /// Ordinary history refreshes, empty histories, and active turns do not emit it.
+    /// May precede `Attached`. Subscribe to events before attaching. Clients
+    /// observe recovery; only the daemon admits continuation turns.
     SessionRecovery {
         session_id: String,
         continuation_message: String,
