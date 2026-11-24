@@ -290,6 +290,7 @@ mod tests {
 
     fn device(id: &str, name: &str) -> PairedDevice {
         PairedDevice {
+            scope: jcode_gateway_types::DeviceScope::Phone,
             id: id.to_string(),
             name: name.to_string(),
             token_hash: "hash".to_string(),

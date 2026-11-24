@@ -151,6 +151,7 @@ mod errors;
 mod launch;
 #[cfg(feature = "ssh-native")]
 mod native_ssh;
+mod paired_harness;
 mod process;
 mod ssh;
 mod structured;
@@ -192,6 +193,7 @@ pub use launch::{
 };
 #[cfg(feature = "ssh-native")]
 pub use native_ssh::{NativeSshKey, NativeSshOptions, NativeSshTransport};
+pub use paired_harness::{PairedHarness, pair_harness};
 pub use ssh::SshConnectOptions;
 #[cfg(unix)]
 pub use ssh::{SharedSshTransport, WeakSharedSshTransport};
