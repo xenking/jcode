@@ -944,3 +944,54 @@ fn default_prompt_points_owner_decisions_at_the_ask_tool() {
         "the model never reaches for ask unless the base prompt names it"
     );
 }
+
+#[test]
+fn model_prompt_replaces_base_and_appends_with_tool_gating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sources =
+        StaticPromptSources::with_capabilities(Some(dir.path()), PromptCapabilities::default());
+    let gate = |name: &str| name != "codemode";
+    let build = |model_prompt: Option<&crate::model_prompt::ModelPrompt>| {
+        let composition = PromptComposition {
+            tool_gate: Some(&gate),
+            profile: None,
+            model_prompt,
+        };
+        build_system_prompt_split_composed(
+            None,
+            &[],
+            false,
+            None,
+            Some(dir.path()),
+            &sources,
+            (None, ContextInfo::default()),
+            &composition,
+        )
+        .0
+        .static_part
+    };
+
+    let default = build(None);
+    assert!(default.contains("You are Jcode"));
+
+    let appended = build(Some(&crate::model_prompt::ModelPrompt {
+        replace: None,
+        append: vec!["Family note.\n<!-- tools: codemode -->Codemode-only note.".into()],
+        key: "0".into(),
+    }));
+    assert!(appended.starts_with(default.split("\n\n").next().unwrap()));
+    assert!(appended.contains("Family note."));
+    assert!(!appended.contains("Codemode-only note."), "gated by tools");
+    assert!(!appended.contains("<!-- tools"));
+
+    let replaced = build(Some(&crate::model_prompt::ModelPrompt {
+        replace: Some("You are a terse model-specific agent.".into()),
+        append: vec!["Appended after the replacement.".into()],
+        key: "1,2".into(),
+    }));
+    assert!(replaced.starts_with("You are a terse model-specific agent."));
+    assert!(!replaced.contains("You are Jcode"));
+    let replacement_at = replaced.find("model-specific").unwrap();
+    let append_at = replaced.find("Appended after").unwrap();
+    assert!(replacement_at < append_at);
+}

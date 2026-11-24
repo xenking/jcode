@@ -74,6 +74,7 @@ pub mod message;
 pub mod mobile_runner;
 pub mod mobile_sync;
 pub mod model_pricing;
+pub mod model_prompt;
 pub mod model_usage;
 pub mod output_style;
 pub mod persistence_batch;

@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+mod advisor_review;
 mod ask_recovery;
 #[cfg(test)]
 mod cache_monitor_tests;

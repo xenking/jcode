@@ -54,6 +54,7 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
     "webfetch",
     "load_tools",
     "selfdev",
+    "advisor",
 ];
 
 /// UI-driving tools a delegated implementer has no use for.
@@ -135,7 +136,8 @@ fn normalize(name: &str) -> String {
     jcode_tool_types::resolve_tool_name(name.trim()).to_string()
 }
 
-fn expand_home(path: &str) -> PathBuf {
+/// Expand a leading `~/` to the home directory.
+pub fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {

@@ -4,16 +4,17 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentProfileConfig, AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger,
-    AutoReviewConfig, CompactionConfig, CompactionMode, CrossProviderFailoverMode,
-    CustomWebSearchConfig, CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO,
-    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
-    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
-    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
-    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode,
-    TerminalConfig, TodoHeaderMode, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    AdvisorConfig, AgentProfileConfig, AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig,
+    AutoResetTrigger, AutoReviewConfig, CompactionConfig, CompactionMode,
+    CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH,
+    DEFAULT_UPDATE_REPO, DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig,
+    FeatureConfig, GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, ModelPromptConfig,
+    ModelPromptMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
+    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
+    ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
+    SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, TodoHeaderMode, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};

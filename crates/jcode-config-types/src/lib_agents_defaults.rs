@@ -36,6 +36,8 @@ impl Default for AgentsConfig {
             swarm_stall_nudge: false,
             root_profile: None,
             profiles: std::collections::BTreeMap::new(),
+            model_prompts: Vec::new(),
+            advisor: AdvisorConfig::default(),
         }
     }
 }

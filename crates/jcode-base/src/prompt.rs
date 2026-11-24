@@ -97,6 +97,14 @@ fn base_system_prompt_parts_composed(
     // reach the model.
     let base = render_tool_gated(&base, composition.tool_gate.unwrap_or(&|_| true));
     let mut parts = vec![base];
+    if let Some(model_prompt) = composition.model_prompt {
+        for text in &model_prompt.append {
+            parts.push(render_tool_gated(
+                text,
+                composition.tool_gate.unwrap_or(&|_| true),
+            ));
+        }
+    }
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
@@ -136,6 +144,8 @@ pub struct PromptComposition<'a> {
     /// Whether this session may call a tool. `None` keeps every tool-gated line.
     pub tool_gate: Option<&'a dyn Fn(&str) -> bool>,
     pub profile: Option<&'a ProfilePrompt>,
+    /// `[[agents.model_prompts]]` resolved for the session's model.
+    pub model_prompt: Option<&'a crate::model_prompt::ModelPrompt>,
 }
 
 impl PromptComposition<'_> {
@@ -218,6 +228,14 @@ pub struct StaticPromptSnapshot {
     pub file_versions: Option<PromptFileVersions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_chars: Option<usize>,
+    /// Matched `[[agents.model_prompts]]` rules when the text was rendered.
+    /// A model switch that changes this re-renders the prefix.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_prompt_key: String,
+    /// Model the text was rendered for. Empty in older snapshots, which are
+    /// never re-rendered.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rendered_for_model: String,
 }
 
 impl StaticPromptSnapshot {
@@ -787,7 +805,8 @@ pub fn build_system_prompt_split_with_sources(
 
 /// Build a split prompt for one session's tool policy and agent profile.
 ///
-/// Order: base (tool-gated), capability modules, agent profile, self-dev,
+/// Order: base or model replacement (tool-gated), model appends, capability
+/// modules, agent profile, self-dev,
 /// AGENTS.md, overlay, preferred tools, skills. Everything here is static for
 /// the session and freezes with the provider-cache prefix.
 #[expect(
@@ -804,10 +823,10 @@ pub fn build_system_prompt_split_composed(
     agents_md: (Option<String>, ContextInfo),
     composition: &PromptComposition<'_>,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let base = sources
-        .files
-        .base_override
-        .as_deref()
+    let base = composition
+        .model_prompt
+        .and_then(|model_prompt| model_prompt.replace.as_deref())
+        .or(sources.files.base_override.as_deref())
         .unwrap_or(DEFAULT_SYSTEM_PROMPT);
     let mut static_parts =
         base_system_prompt_parts_composed(sources.capabilities, base.into(), composition);

@@ -1,5 +1,6 @@
 pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
 
+mod advisor;
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
@@ -681,7 +682,7 @@ impl Registry {
         tools
     }
 
-    pub async fn new(_provider: Arc<dyn Provider>) -> Self {
+    pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let start = std::time::Instant::now();
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
@@ -721,6 +722,15 @@ impl Registry {
                 &mut tools_map,
                 "codemode",
                 codemode::CodemodeTool::new(registry.downgrade()),
+            );
+        }
+        // The advisor is opt-in (`[agents.advisor] model`). Unconfigured, it
+        // is never registered and costs nothing.
+        if crate::advisor::AdvisorSettings::from_config().is_some() {
+            Self::insert_tool(
+                &mut tools_map,
+                "advisor",
+                advisor::AdvisorTool::new(Arc::clone(&provider)),
             );
         }
         let session_tools_ms = session_tools_start.elapsed().as_millis();
@@ -771,6 +781,15 @@ impl Registry {
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
         tools.keys().cloned().collect()
+    }
+
+    /// Whether `name` is registered, without waiting. `None` while the map is
+    /// being written.
+    pub(crate) fn try_has_tool(&self, name: &str) -> Option<bool> {
+        self.tools
+            .try_read()
+            .ok()
+            .map(|tools| tools.contains_key(Self::resolve_tool_name(name)))
     }
 
     /// Tool definitions a session may call, honoring its registered allow and

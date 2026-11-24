@@ -766,6 +766,31 @@ swarm_stall_after_secs = 600
 # skills = false
 # instructions_file = "~/.jcode/profiles/scout.md"
 #
+# Model prompts: text per model family or exact model, matched by glob on the
+# model ID (`provider:model` when the pattern has a colon). Every matching rule
+# applies in order: `append` adds after the default instructions, `replace`
+# swaps them out (the last matching replace wins). Lines starting with
+# `<!-- tools: name -->` stay only when the session has that tool.
+# [[agents.model_prompts]]
+# match = ["claude-*"]
+# mode = "append"
+# instructions = "Prefer short answers. Batch independent reads."
+# [[agents.model_prompts]]
+# match = ["gpt-6*-sol"]
+# mode = "replace"
+# instructions_file = "~/.jcode/prompts/sol.md"
+#
+# Advisor: a stronger model the agent consults with the `advisor` tool. It
+# sees a digest of the session (requests, the agent's messages, one line per
+# tool call), never raw tool output, and answers NOTE, CONCERN or BLOCKER.
+# Unset model means no advisor tool. With auto_review, every turn that ran
+# tools is reviewed when it ends, and a CONCERN or BLOCKER wakes the agent.
+# [agents.advisor]
+# model = "claude-opus-5-5"
+# effort = "high"
+# max_digest_tokens = 12000
+# auto_review = false
+#
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
 # auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.

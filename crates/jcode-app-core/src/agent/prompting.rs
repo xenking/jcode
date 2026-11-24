@@ -269,11 +269,19 @@ impl Agent {
             .as_deref()
             .map(std::path::Path::new);
         let session_id = self.session_id().to_string();
-        let tool_gate = move |name: &str| crate::tool::session_allows_tool(&session_id, name);
+        // A line about a tool stays only when the session may call it and the
+        // tool exists here (opt-in tools such as codemode or advisor).
+        let registry = &self.registry;
+        let tool_gate = move |name: &str| {
+            crate::tool::session_allows_tool(&session_id, name)
+                && registry.try_has_tool(name).unwrap_or(true)
+        };
         let profile = self.profile_prompt();
+        let model_prompt = self.model_prompt();
         let composition = crate::prompt::PromptComposition {
             tool_gate: Some(&tool_gate),
             profile: profile.as_ref(),
+            model_prompt: Some(&model_prompt),
         };
         let (split, info) = crate::prompt::build_system_prompt_split_composed(
             None,
@@ -291,10 +299,20 @@ impl Agent {
         )
     }
 
+    /// `[[agents.model_prompts]]` for the model this session runs on now.
+    pub(super) fn model_prompt(&self) -> crate::model_prompt::ModelPrompt {
+        crate::model_prompt::resolve(
+            &crate::config::config().agents.model_prompts,
+            self.provider.name(),
+            &self.provider.model(),
+        )
+    }
+
     /// Finalize at the first real request, after the SDK has had a chance to
     /// supply creation options. Debug inspection and speculative warmup do not
     /// commit the prefix.
     pub(super) fn freeze_static_prompt(&mut self) {
+        self.rerender_after_model_prompt_change();
         if let StaticPromptState::Bootstrap(sources) = &self.static_prompt {
             let (text, skills_chars) = self.render_static_prompt(sources);
             self.static_prompt = StaticPromptState::Frozen(crate::prompt::StaticPromptSnapshot {
@@ -305,8 +323,34 @@ impl Agent {
                     .is_none()
                     .then(|| sources.files.versions()),
                 skills_chars: Some(skills_chars),
+                model_prompt_key: self.model_prompt().key,
+                rendered_for_model: self.provider.model(),
             });
         }
+    }
+
+    /// A model switch already starts a new provider cache, so when it changes
+    /// which model prompt rules match, the prefix is rendered again for the
+    /// new model. A switch within the same rules keeps the frozen bytes, and
+    /// a config edit alone never changes a running session.
+    fn rerender_after_model_prompt_change(&mut self) {
+        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+            return;
+        };
+        if self.session.system_prompt.is_some()
+            || snapshot.rendered_for_model.is_empty()
+            || snapshot.rendered_for_model == self.provider.model()
+            || snapshot.model_prompt_key == self.model_prompt().key
+        {
+            return;
+        }
+        self.static_prompt = StaticPromptState::bootstrap(
+            self.session
+                .working_dir
+                .as_deref()
+                .map(std::path::Path::new),
+        );
+        self.prompt_inputs_recorded = false;
     }
 
     pub(super) fn announce_prompt_file_changes(&mut self) -> anyhow::Result<()> {

@@ -58,6 +58,10 @@ class H(BaseHTTPRequestHandler):
             text += " " + " ".join(f"pad{i}" for i in range(6000))
         last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
         prompt = text_of(msgs[last_user]) if last_user >= 0 else ""
+        if (CONTROL and "[e2e:advisor-concern]" in prompt and msgs
+                and "You are the advisor" in text_of(msgs[0])):
+            # A deterministic advisor verdict for the auto-review wake path.
+            text = "CONCERN: [e2e] advisor probe concern"
         if ("You just received a direct swarm message" in prompt and last_user > 0
                 and "[e2e:worker-step:" in text_of(msgs[last_user - 1])):
             last_user -= 1
@@ -220,6 +224,9 @@ class H(BaseHTTPRequestHandler):
             if not self.hold(match.group(1)):
                 return
         usage_marker = re.search(r"\[e2e:input-tokens:([0-9]{1,7})\]", prompt) if CONTROL else None
+        if not req.get("tools"):
+            # A tool-free side call (advisor, title) cannot answer with tool calls.
+            tool_calls = None
         input_tokens = int(usage_marker.group(1)) if usage_marker else 1
         usage = {"prompt_tokens": input_tokens, "completion_tokens": 1, "total_tokens": input_tokens + 1}
         if not req.get("stream"):

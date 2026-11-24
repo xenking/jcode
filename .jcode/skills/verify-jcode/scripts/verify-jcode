@@ -1280,6 +1280,9 @@ def launch(args, *, prepare_workspace=None):
         if getattr(args, "line_anchors", False):
             with (root / "data/config.toml").open("a") as config:
                 config.write("\n[tools]\nline_anchors = true\n")
+        if extra := getattr(args, "extra_config", None):
+            with (root / "data/config.toml").open("a") as config:
+                config.write("\n" + Path(extra).read_text() + "\n")
         harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
         harness.save()
         (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
@@ -1401,6 +1404,7 @@ def main():
     start.add_argument("--rows", type=int, default=48)
     start.add_argument("--line-anchors", action="store_true", help="Enable experimental version-checked file anchors")
     start.add_argument("--premium-spawn", action="store_true", help="Expose a synthetic Astra model at loopback")
+    start.add_argument("--extra-config", help="TOML file appended to the isolated config.toml")
     start.add_argument("--loopback-exec-worker", action="store_true",
                        help="Route Bash through the staged executable's execution worker, with no SSH")
     group = sub.add_parser("cloud-group-return", help="Run the isolated Linux group migration round trip")

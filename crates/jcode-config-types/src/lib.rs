@@ -855,6 +855,60 @@ pub struct AgentsConfig {
     /// `task`, `sonic`, `scout`, `reviewer`) overrides it field by field.
     #[serde(default)]
     pub profiles: std::collections::BTreeMap<String, AgentProfileConfig>,
+    /// System prompt text per model family or exact model, matched by glob
+    /// against the model ID. Every matching rule applies in config order.
+    #[serde(default)]
+    pub model_prompts: Vec<ModelPromptConfig>,
+    /// A stronger model the agent consults through the `advisor` tool. It
+    /// sees a compact digest of the session, not raw tool output.
+    #[serde(default)]
+    pub advisor: AdvisorConfig,
+}
+
+/// How a model prompt combines with the default system prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelPromptMode {
+    /// Added after the default instructions.
+    #[default]
+    Append,
+    /// Replaces the default instructions (`system_prompt.md`). Project
+    /// AGENTS.md, profiles, self-dev and skills still follow it.
+    Replace,
+}
+
+/// One `[[agents.model_prompts]]` rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelPromptConfig {
+    /// Case-insensitive globs (`*`, `?`) over the model ID, for example
+    /// `claude-*` or `gpt-6*-sol`. A pattern with `:` matches
+    /// `provider:model` instead, for example `openrouter:*`.
+    #[serde(rename = "match")]
+    pub patterns: Vec<String>,
+    pub mode: ModelPromptMode,
+    pub instructions: Option<String>,
+    /// File with the prompt text. `~` expands to the home directory. Wins
+    /// over `instructions` when both are set.
+    pub instructions_file: Option<String>,
+}
+
+/// `[agents.advisor]`: unset `model` disables the advisor entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdvisorConfig {
+    /// Model or `provider:model` route. Unset means no advisor tool.
+    pub model: Option<String>,
+    /// Reasoning effort for advisor calls. Unset means `high`.
+    pub effort: Option<String>,
+    /// Replaces the built-in advisor rubric.
+    pub instructions: Option<String>,
+    pub instructions_file: Option<String>,
+    /// Digest budget in approximate tokens. Unset means 12000.
+    pub max_digest_tokens: Option<usize>,
+    /// Also review every turn that ran tools when it finishes, and deliver a
+    /// CONCERN or BLOCKER verdict to the agent at its next step.
+    pub auto_review: bool,
 }
 
 /// One agent profile as written in config. Every field is optional so a user

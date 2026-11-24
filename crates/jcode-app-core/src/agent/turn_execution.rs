@@ -113,7 +113,10 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
+        let start_message_index = self.message_count();
         let result = self.run_turn(false).await;
+        // Headless and debug turns end here without the lifecycle hook.
+        self.spawn_advisor_auto_review(result.is_ok(), start_message_index);
         if result.is_ok() {
             self.refresh_session_title(None).await;
         }
@@ -650,6 +653,7 @@ impl Agent {
         started_at: Instant,
         start_message_index: usize,
     ) {
+        self.spawn_advisor_auto_review(result.is_ok(), start_message_index);
         if !crate::hooks::hook_configured("turn_end") {
             return;
         }
