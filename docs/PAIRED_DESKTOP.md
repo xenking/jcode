@@ -21,8 +21,8 @@ Run Jcode on the Mac that owns the projects. Run Desktop on the Mac you use. Bot
 
 ## Connect from Desktop
 
-1. In **Machines**, choose **Pair Work Mac**. Enter the remote HTTPS origin, a label such as `Work Mac`, and the invite.
-2. Open the paired machine to list existing sessions. For a new session, enter the absolute path on the remote Mac. Use another remote path to work on a second project in the same Desktop.
+1. In **Machines**, choose **Pair Work Mac**. Enter the HTTPS origin, a label such as `Work Mac`, an absolute default project path on that Mac, and the invite. Choose **Pair and save**. Desktop stores the token in macOS Keychain.
+2. Choose **Sessions** to open an existing session. To work in a second project without pairing again, enter its absolute path in **Remote project path for a new session** and choose **New session in remote project**.
 3. Confirm that a session opens from the remote machine, not a local checkout with a similar path. Disconnect and reconnect to check that Desktop opens the same session ID.
 
 ## Remove access
