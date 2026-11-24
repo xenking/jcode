@@ -107,7 +107,11 @@ impl App {
             // Never let an excluded preferred route hide an approved later one.
             let approved = ranked.iter().map(|index| &routes[*index]).find(|route| {
                 let selection = crate::provider::RouteSelection::from_model_route(route);
-                crate::provider::MultiProvider::is_failover_route_pool_approved(
+                jcode_provider_core::failover::automatic_failover_model_allowed(
+                    error,
+                    &current_model,
+                    &route.model,
+                ) && crate::provider::MultiProvider::is_failover_route_pool_approved(
                     &selection.routed_model_spec(),
                 ) && !config.failover_model_excluded(&route.model)
                     && Self::fallback_pool_identity(&route.api_method) != source_identity
@@ -212,7 +216,18 @@ impl App {
         };
 
         let config = crate::config::Config::load().provider;
-        if config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
+        let mode = if prompt.target_route.as_deref().is_some_and(|target| {
+            !jcode_provider_core::failover::automatic_failover_model_allowed(
+                &prompt.reason,
+                &self.current_model_for_fallback(),
+                target,
+            )
+        }) {
+            crate::config::CrossProviderFailoverMode::Manual
+        } else {
+            config.cross_provider_failover
+        };
+        if mode == crate::config::CrossProviderFailoverMode::Countdown
             && prompt
                 .target_route
                 .as_deref()
@@ -228,7 +243,7 @@ impl App {
         if remote_resend
             .as_ref()
             .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
-            && config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
+            && mode == crate::config::CrossProviderFailoverMode::Countdown
         {
             self.automatic_failover_stopped = true;
             if let Some(payload) = remote_resend {
@@ -241,7 +256,7 @@ impl App {
             self.set_status_notice("Paused: automatic failover retry limit reached");
             return;
         }
-        match config.cross_provider_failover {
+        match mode {
             crate::config::CrossProviderFailoverMode::Manual => {
                 if let Some(payload) = remote_resend {
                     self.restore_failover_payload(payload);

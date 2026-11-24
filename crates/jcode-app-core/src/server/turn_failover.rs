@@ -91,6 +91,18 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         return None;
     }
     let routes = agent.model_routes();
+    let current_model = agent.provider_model();
+    let prompt = crate::provider::parse_failover_prompt_message(error);
+    let reason = prompt
+        .as_ref()
+        .map_or(error, |prompt| prompt.reason.as_str());
+    let model_allowed = |target| {
+        jcode_provider_core::failover::automatic_failover_model_allowed(
+            reason,
+            &current_model,
+            target,
+        )
+    };
     let route_for_spec = |spec: &str| {
         routes
             .iter()
@@ -99,8 +111,9 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     };
 
     // The provider router already chose an exact target. Honor it.
-    if let Some(prompt) = crate::provider::parse_failover_prompt_message(error)
+    if let Some(prompt) = prompt.as_ref()
         && let Some(spec) = prompt.target_route.as_deref()
+        && model_allowed(spec)
         && !config.failover_model_excluded(spec)
         && crate::provider::MultiProvider::is_failover_route_pool_approved(spec)
     {
@@ -120,7 +133,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     let pool = crate::auth::account_pool::AccountPool::load();
     let ranked = jcode_provider_core::rank_fallback_routes(
         &routes,
-        &agent.provider_model(),
+        &current_model,
         &agent.provider_name(),
         &current_api_method,
         crate::provider::FallbackPickOptions {
@@ -133,7 +146,8 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         .map(|index| &routes[index])
         .find(|route| {
             let spec = RouteSelection::from_model_route(route).routed_model_spec();
-            crate::provider::MultiProvider::is_failover_route_pool_approved(&spec)
+            model_allowed(&route.model)
+                && crate::provider::MultiProvider::is_failover_route_pool_approved(&spec)
                 && !config.failover_model_excluded(&route.model)
                 && jcode_provider_core::route_pool_key(&route.api_method) != source_key
         })
@@ -800,13 +814,14 @@ pub(super) async fn retry_turn_with_server_failover(
             break;
         }
         let Some(target) = pick_failover_target(agent, &message) else {
-            if error_wants_failover(&message)
+            if crate::provider::parse_failover_prompt_message(&message).is_none()
+                && error_wants_failover(&message)
                 && crate::config::Config::load()
                     .provider
                     .cross_provider_failover
                     == crate::config::CrossProviderFailoverMode::Countdown
             {
-                result = result.map_err(|error| error.context("Automatic failover has no eligible route (see provider.failover_excluded_models)"));
+                result = result.map_err(|error| error.context("Automatic failover has no eligible route; use /login to restore access or /model to switch explicitly"));
             }
             break;
         };
@@ -983,10 +998,11 @@ mod tests {
 
     /// Fails with a usage limit while on the Anthropic API key, succeeds once
     /// the route switches to the OpenAI API key.
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct TwoAccountProvider {
         on_openai: Arc<StdMutex<bool>>,
         calls: Arc<StdMutex<Vec<(bool, usize)>>>,
+        claude_failure: Option<(&'static str, String)>,
     }
 
     #[async_trait]
@@ -1001,6 +1017,9 @@ mod tests {
             let on_openai = *self.on_openai.lock().unwrap();
             self.calls.lock().unwrap().push((on_openai, messages.len()));
             if !on_openai {
+                if let Some((_, error)) = &self.claude_failure {
+                    anyhow::bail!("{error}");
+                }
                 anyhow::bail!("HTTP 429: usage_limit_reached for this account");
             }
             let events = vec![
@@ -1020,7 +1039,10 @@ mod tests {
             if *self.on_openai.lock().unwrap() {
                 "gpt-6.1-sol".into()
             } else {
-                "claude-sonnet-4-6".into()
+                self.claude_failure
+                    .as_ref()
+                    .map_or("claude-sonnet-4-6", |(model, _)| model)
+                    .into()
             }
         }
         fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
@@ -1088,10 +1110,7 @@ mod tests {
                 };
                 pool.save().unwrap();
 
-                let provider = TwoAccountProvider {
-                    on_openai: Arc::new(StdMutex::new(false)),
-                    calls: Arc::new(StdMutex::new(Vec::new())),
-                };
+                let provider = TwoAccountProvider::default();
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
                 let session = crate::session::Session::create_with_id(
@@ -1200,10 +1219,7 @@ mod tests {
                 };
                 pool.save().unwrap();
 
-                let provider = TwoAccountProvider {
-                    on_openai: Arc::new(StdMutex::new(false)),
-                    calls: Arc::new(StdMutex::new(Vec::new())),
-                };
+                let provider = TwoAccountProvider::default();
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
                 let session = crate::session::Session::create_with_id(
@@ -1244,6 +1260,78 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![false, true]
                 );
+            });
+    }
+
+    #[test]
+    fn server_wake_preserves_opus_after_oauth_refresh_rejection() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev_home = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                crate::config::Config::invalidate_cache();
+                crate::auth::account_pool::AccountPool {
+                    members: vec!["anthropic-api".into(), "openai-api".into()],
+                    ..Default::default()
+                }
+                .save()
+                .unwrap();
+
+                let reason = "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.";
+                let prompt = jcode_provider_core::ProviderFailoverPrompt {
+                    from_provider: "claude".into(),
+                    from_label: "Claude".into(),
+                    to_provider: "openai".into(),
+                    to_label: "OpenAI".into(),
+                    target_route: Some("openai-api:gpt-6.1-sol".into()),
+                    reason: reason.into(),
+                    estimated_input_chars: 0,
+                    estimated_input_tokens: 0,
+                };
+                let mut observations = Vec::new();
+                for (index, error) in [reason.into(), prompt.to_error_message()].into_iter().enumerate() {
+                    let provider = TwoAccountProvider {
+                        claude_failure: Some(("claude-opus-5-5", error)),
+                        ..Default::default()
+                    };
+                    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                    let session = crate::session::Session::create_with_id(
+                        format!("session_wake_oauth_rejection_{index}"),
+                        None,
+                        None,
+                    );
+                    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                        provider_dyn, registry, session, None,
+                    )));
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    let result = process_server_initiated_message(
+                        Arc::clone(&agent), "swarm wake", Vec::new(), None, tx,
+                    ).await;
+                    let model = agent.lock().await.provider_model();
+                    let calls = provider.calls.lock().unwrap().iter().map(|(openai, _)| *openai).collect::<Vec<_>>();
+                    let mut switched = false;
+                    while let Ok(event) = rx.try_recv() {
+                        switched |= matches!(event, ServerEvent::ModelChanged { error: None, .. });
+                    }
+                    observations.push((result, model, calls, switched));
+                }
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+                for (result, model, calls, switched) in observations {
+                    assert_eq!(model, "claude-opus-5-5", "wake must not replace the selected model after an auth failure");
+                    assert_eq!(calls, [false], "turn history must not be resent to OpenAI");
+                    assert!(!switched);
+                    assert!(format!("{:#}", result.unwrap_err()).contains(reason));
+                }
             });
     }
 
@@ -1933,10 +2021,7 @@ mod tests {
             .build()
             .expect("test runtime")
             .block_on(async {
-                let provider = TwoAccountProvider {
-                    on_openai: Arc::new(StdMutex::new(false)),
-                    calls: Arc::new(StdMutex::new(Vec::new())),
-                };
+                let provider = TwoAccountProvider::default();
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
                 let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
@@ -1979,10 +2064,7 @@ mod tests {
             .build()
             .expect("test runtime")
             .block_on(async {
-                let provider: Arc<dyn Provider> = Arc::new(TwoAccountProvider {
-                    on_openai: Arc::new(StdMutex::new(false)),
-                    calls: Arc::new(StdMutex::new(Vec::new())),
-                });
+                let provider: Arc<dyn Provider> = Arc::new(TwoAccountProvider::default());
                 let mut session = crate::session::Session::create_with_id(
                     "session_worker_outside_allowlist".into(),
                     None,

@@ -181,6 +181,39 @@ pub fn usage_limit_details(message: &str) -> Option<UsageLimitDetails> {
     Some(UsageLimitDetails { window, reset })
 }
 
+fn is_auth_or_access_failure(lower: &str) -> bool {
+    [
+        "access denied",
+        "not accessible by integration",
+        "provider not configured",
+        "credentials are not configured",
+        "no credentials",
+        "token exchange failed",
+        "refresh token was previously rejected",
+        "authentication failed",
+        "unauthorized",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || contains_independent_status_code(lower, "401")
+        || contains_independent_status_code(lower, "403")
+}
+
+/// An auth failure can justify rotating credentials, not silently choosing a different model.
+/// `target` may be a bare model ID or a route spec such as `claude-oauth@work:claude-opus-5-5`.
+pub fn automatic_failover_model_allowed(reason: &str, current_model: &str, target: &str) -> bool {
+    if current_model.eq_ignore_ascii_case(target)
+        || target
+            .split_once(':')
+            .is_some_and(|(_, model)| current_model.eq_ignore_ascii_case(model))
+    {
+        return true;
+    }
+    !crate::error_looks_like_credential_failure(reason)
+        && !is_auth_or_access_failure(&reason.to_ascii_lowercase())
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
@@ -229,29 +262,15 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         return FailoverDecision::RetryAndMarkUnavailable;
     }
 
-    let auth_or_access = [
-        "access denied",
-        "not accessible by integration",
+    let provider_unavailable = [
         "provider unavailable",
         "provider not available",
         "provider is unavailable",
         "provider currently unavailable",
-        "provider not configured",
-        "credentials are not configured",
-        "no credentials",
-        "token exchange failed",
-        // Cached permanent refresh rejection no longer carries the original
-        // OAuth error code or HTTP status, but still needs account failover.
-        "refresh token was previously rejected",
-        "authentication failed",
-        "unauthorized",
-        "forbidden",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
-        || contains_independent_status_code(&lower, "401")
-        || contains_independent_status_code(&lower, "403");
-    if auth_or_access {
+    .any(|needle| lower.contains(needle));
+    if provider_unavailable || is_auth_or_access_failure(&lower) {
         return FailoverDecision::RetryAndMarkUnavailable;
     }
 
@@ -261,6 +280,37 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_recovery_requires_confirmation_only_for_a_different_model() {
+        let model = "claude-opus-5-5";
+        for reason in [
+            "Claude OAuth refresh token was previously rejected by Anthropic",
+            "Claude token refresh failed: 503 Service Unavailable",
+            "HTTP 401",
+        ] {
+            assert!(automatic_failover_model_allowed(
+                reason,
+                model,
+                "claude-oauth@backup:claude-opus-5-5"
+            ));
+            assert!(!automatic_failover_model_allowed(
+                reason,
+                model,
+                "claude-sonnet-4-6"
+            ));
+            assert!(!automatic_failover_model_allowed(
+                reason,
+                model,
+                "openai-oauth@backup:gpt-6.1-sol"
+            ));
+        }
+        assert!(automatic_failover_model_allowed(
+            "HTTP 429: usage_limit_reached",
+            model,
+            "openai-oauth@backup:gpt-6.1-sol"
+        ));
+    }
 
     #[test]
     fn usage_limit_details_do_not_confuse_retry_hint_with_reset() {

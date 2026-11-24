@@ -27,10 +27,17 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
 }
 
 fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnection) {
+    remote_exact_failover_for("claude-sonnet-4", "OAuth usage exhausted")
+}
+
+fn remote_exact_failover_for(
+    model: &str,
+    reason: &str,
+) -> (App, crate::tui::backend::RemoteConnection) {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_provider_name = Some("Anthropic".into());
-    app.remote_provider_model = Some("claude-sonnet-4".into());
+    app.remote_provider_model = Some(model.into());
     app.session.route_api_method = Some("claude-oauth@claude-otter".into());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     let mut target = openai_oauth_route("gpt-5.4");
@@ -54,7 +61,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         to_provider: "openai".into(),
         to_label: "OpenAI fox".into(),
         target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
-        reason: "OAuth usage exhausted".into(),
+        reason: reason.into(),
         estimated_input_chars: 400,
         estimated_input_tokens: 100,
     };
@@ -67,6 +74,25 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         &mut remote,
     );
     (app, remote)
+}
+
+#[test]
+fn remote_oauth_rejection_requires_manual_model_change_even_with_countdown_enabled() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (app, _) = remote_exact_failover_for(
+            "claude-opus-5-5",
+            "Claude OAuth refresh token was previously rejected by Anthropic; run /login",
+        );
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(app.input, "hi");
+        assert!(app.display_messages().iter().any(|msg| msg.content.contains("Use /model to switch")));
+    });
 }
 
 #[test]
