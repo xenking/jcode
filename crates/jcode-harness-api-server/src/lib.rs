@@ -65,7 +65,7 @@ fn release_large_frame(buffer: &mut Vec<u8>) {
 }
 
 mod session_controls;
-use session_controls::{DaemonControl, daemon_side_questions};
+use session_controls::{DaemonControl, daemon_routing_view, daemon_side_questions};
 
 const TASK_POLL_MIN: Duration = Duration::from_secs(2);
 const TASK_POLL_QUIET_MAX: Duration = Duration::from_secs(30);
@@ -569,6 +569,9 @@ where
     let background_tasks_supported = daemon_caps
         .iter()
         .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
+    let routing_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::ROUTING_CAPABILITY);
     let side_questions_supported = daemon_caps
         .iter()
         .any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
@@ -641,6 +644,7 @@ where
                 side_questions_supported
                     .then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()),
             )
+            .chain(routing_supported.then(|| jcode_harness_api::ROUTING_CAPABILITY.to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()
@@ -660,6 +664,7 @@ where
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
     state.side_questions_supported = side_questions_supported;
+    state.routing_supported = routing_supported;
     state.force_stop_turn_supported = force_stop_turn_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.supports_applets = hello["supports_applets"].as_bool();
@@ -764,6 +769,16 @@ where
                             message: "This runtime does not support manual Shake tools.".into(),
                         },
                     )).await?;
+                    continue;
+                }
+                if request["req"] == "get_routing_view" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if routing_supported {
+                        daemon_routing_view(&legacy_socket).await
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support account routing.".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
                 if matches!(request["req"].as_str(), Some("list_side_questions" | "get_side_question_history" | "promote_side_question")) {

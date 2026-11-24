@@ -83,6 +83,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("ResumeSession", ClientInternal),
     ("Rewind", Covered),
     ("RewindUndo", Covered),
+    ("RoutingGateAnswer", Covered),
+    ("RoutingIntent", Covered),
     ("RunSubagent", ClientInternal),
     // The same typed runtime-command gateway is exposed by ApiRequest.
     ("RuntimeCommand", Covered),

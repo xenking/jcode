@@ -217,4 +217,9 @@ pub use jcode_harness_api::{
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,
 };
+pub use jcode_harness_api::{
+    ROUTING_CAPABILITY, RoutingAccountView, RoutingApiKeyView, RoutingBudgetView,
+    RoutingGateChoice, RoutingGateOption, RoutingIntentAction, RoutingKeyView, RoutingView,
+    RoutingWindowView,
+};
 pub use jcode_harness_api::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};

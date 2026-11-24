@@ -153,6 +153,56 @@ Both return the effective budget. Live `token_usage` events also carry an option
 `effective_budget` from the daemon, allowing clients to render a context meter
 without treating the model's full window as the active compaction budget.
 
+## Account routing
+
+A daemon that advertises the `routing_v1` capability (harness API minor 24) carries
+account routing: which credential serves a session, a spending-limit gate that
+holds a turn until a person answers, human intents, and a settings view. Clients
+that do not know these events ignore them.
+
+Events, all scoped by `session_id`:
+
+```json
+{"v":1,"ev":"routing_decision","session_id":"s1","account":"claude:team","reason":"priority 1","warnings":["budget hf-month $45.00 of $50.00"],"pending":"claude:spare"}
+{"v":1,"ev":"routing_gate","session_id":"s1","gate_id":"g1","reason":"claude:team reached its 5h limit","options":[{"kind":"switch","account":"claude:spare","detail":"40% used"},{"kind":"wait_until","resets_at":1900000000},{"kind":"ack","account":"claude:team"}]}
+{"v":1,"ev":"routing_gate_closed","session_id":"s1","gate_id":"g1"}
+```
+
+`routing_decision` names the account for the next turn. `pending` is the account a
+warm session moves to at its next cache-cold seam, so a header chip can show the
+intended move. `warnings` and `pending` are omitted when empty. A gate holds the
+turn until `routing_gate_answer` arrives. `routing_gate_closed` follows every
+answer, from any attached client, and also an abandoned gate: close the matching
+card.
+
+Requests:
+
+```json
+{"v":1,"id":7,"req":"routing_gate_answer","session_id":"s1","gate_id":"g1","choice":{"kind":"switch","account":"claude:spare"}}
+{"v":1,"id":8,"req":"routing_intent","session_id":"s1","action":{"action":"hold","account":"claude:team","minutes":90}}
+{"v":1,"id":9,"req":"get_routing_view"}
+```
+
+`choice` is `switch {account}`, `wait`, `ack {minutes}` or `cancel`. An answer
+replies `ok`, or an error when no such gate is waiting, for example because another
+client answered first. `action` is `status`, `pin`, `switch`, `hold`, `ack`, `paid`
+or `unstick`, with the same arguments as the TUI's `/acct`. An omitted `account`
+clears a pin or switch. The reply is `routing_status {text}`, ready to show.
+
+`get_routing_view` needs no attached session. It replies `routing_view {view}` with
+the configured mode and paid setting, every account (kind, priority, per-class
+priority, model globs, egress, `on_limit`) with its measured usage windows, every
+budget with its live `used` next to `limit`, labelled API keys per provider (source,
+active, whether a routing account exists, usage windows) and any configuration
+problems. A meter that cannot be read is absent from the reply, never zero. The view
+holds metadata only: no key or token ever appears.
+
+Rust SDK: `client.answer_routing_gate(session_id, gate_id, choice)`,
+`client.routing_intent(session_id, action)` and `client.routing_view()`.
+TypeScript SDK: `await client.answerRoutingGate(...)`, `await client.routingIntent(...)`
+and `await client.routingView()`. All three fail before sending a frame when the
+runtime does not advertise `routing_v1`.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.

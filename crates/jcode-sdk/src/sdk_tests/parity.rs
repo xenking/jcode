@@ -100,6 +100,9 @@ const CAPABILITIES: &[Capability] = &[
     cap("ack_todo_follow_up", "ackTodoFollowUp"),
     cap("set_model", "setModel"),
     cap("set_context_cap", "setContextCap"),
+    cap("answer_routing_gate", "answerRoutingGate"),
+    cap("routing_intent", "routingIntent"),
+    cap("routing_view", "routingView"),
     cap("configure_tools", "configureTools"),
     cap("list_tools", "listTools"),
     cap("submit_tool_result", "submitToolResult"),
@@ -250,7 +253,12 @@ const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    ["client.rs", "client/side_questions.rs", "structured.rs"]
+    [
+        "client.rs",
+        "client/routing.rs",
+        "client/side_questions.rs",
+        "structured.rs",
+    ]
         .into_iter()
         .map(|file| {
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {

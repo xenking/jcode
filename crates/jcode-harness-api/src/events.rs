@@ -303,6 +303,42 @@ pub enum ApiEvent {
         cache_creation_input: Option<u64>,
     },
 
+    /// The routing policy chose the account that serves the session's next
+    /// turn. `pending` names the account a warm session moves to at its next
+    /// cache-cold seam, so a header chip can show the intended move.
+    /// Advertised by the `routing_v1` capability.
+    RoutingDecision {
+        session_id: String,
+        account: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<String>,
+    },
+
+    /// The session's turn is held on a spending limit until the user answers.
+    /// Reply with `RoutingGateAnswer` carrying the same `gate_id`.
+    RoutingGate {
+        session_id: String,
+        gate_id: String,
+        reason: String,
+        options: Vec<crate::RoutingGateOption>,
+    },
+
+    /// A gate was answered, from this client or another, or abandoned. Close
+    /// the matching card.
+    RoutingGateClosed {
+        session_id: String,
+        gate_id: String,
+    },
+
+    /// Text answer to `RoutingIntent`, ready to show.
+    RoutingStatus { text: String },
+
+    /// Reply to `GetRoutingView`.
+    RoutingView { view: crate::RoutingView },
+
     /// A session context override changed, including its resolved budget.
     ContextCapChanged {
         session_id: String,

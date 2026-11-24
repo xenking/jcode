@@ -8,8 +8,124 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 23;
+export const API_VERSION_MINOR = 24;
 export const SIDE_QUESTIONS_CAPABILITY = "side_questions_v1";
+/** Routing events, gate answers, intents and the routing view. */
+export const ROUTING_CAPABILITY = "routing_v1";
+
+/** The last time a keepalive request warmed a cached prefix. */
+export interface CacheKeepaliveHit {
+  at_ms: number;
+  model: string;
+  ttl_secs: number;
+  cached_tokens: number;
+}
+
+/** Keepalive spend, separate from turn usage. */
+export interface CacheKeepaliveUsage {
+  attempted: number;
+  warmed: number;
+  /** Public-rate equivalent, including for subscription requests. */
+  cost_micros: number;
+  /** Worst-case reservations for requests without a definitive usage response. */
+  unconfirmed_micros: number;
+  last_hit?: CacheKeepaliveHit;
+}
+
+/** One way out of a routing gate. */
+export type RoutingGateOption =
+  | { kind: "switch"; account: string; detail: string }
+  /** Wait for the limit window to reset (unix seconds). */
+  | { kind: "wait_until"; resets_at: number }
+  | { kind: "ack"; account: string };
+
+/** The answer to a gate: move, hold the turn, keep spending, or drop it. */
+export type RoutingGateChoice =
+  | { kind: "switch"; account: string }
+  | { kind: "wait" }
+  | { kind: "ack"; minutes: number }
+  | { kind: "cancel" };
+
+/**
+ * A human routing intent. Session-scoped actions (pin, switch, unstick) apply
+ * to the session the request names. An omitted `account` clears the pin or switch.
+ */
+export type RoutingIntentAction =
+  | { action: "status" }
+  | { action: "pin"; account?: string }
+  | { action: "switch"; account?: string }
+  | { action: "hold"; account?: string; minutes?: number }
+  | { action: "ack"; account: string; minutes?: number }
+  /** `auto`, `off`, or a duration such as `2h`. */
+  | { action: "paid"; mode: string }
+  | { action: "unstick" };
+
+/** A usage window of an account. Unreadable meters are absent, never zero. */
+export interface RoutingWindowView {
+  /** `5h`, `1w`, `month`, ... (a week is `1w`, never `7d`). */
+  window: string;
+  unit: "percent" | "usd" | "credits" | "tokens";
+  used: number;
+  limit?: number;
+  /** Unix seconds. */
+  resets_at?: number;
+  model_class?: string;
+}
+
+export interface RoutingAccountView {
+  /** `provider` or `provider:label`. */
+  id: string;
+  kind: "subscription" | "credits" | "metered";
+  /** Flat priority or the `default` entry of a per-class map. Lower wins. */
+  priority?: number;
+  class_priority?: Record<string, number>;
+  models?: string[];
+  egress?: string;
+  on_limit: "switch" | "ask" | "block";
+  windows?: RoutingWindowView[];
+}
+
+export interface RoutingBudgetView {
+  name: string;
+  scope_kind: "account" | "provider" | "model";
+  scope: string;
+  meter: "provider" | "ledger";
+  window: string;
+  unit: "percent" | "usd" | "credits" | "tokens";
+  warn?: number;
+  limit: number;
+  action: "audit" | "switch" | "ask" | "block";
+  /** Usage in `unit`. Absent when the meter is unreadable. */
+  used?: number;
+}
+
+/** One API key by label. Never carries the key. */
+export interface RoutingKeyView {
+  account: string;
+  label?: string;
+  source: "default" | "stored" | "key_command";
+  /** Requests use this key right now. */
+  active: boolean;
+  /** A routing account is configured for it. */
+  routed: boolean;
+  windows?: RoutingWindowView[];
+}
+
+export interface RoutingApiKeyView {
+  provider: string;
+  keys: RoutingKeyView[];
+}
+
+/** The routing configuration with live usage, for a settings page. */
+export interface RoutingView {
+  mode: "off" | "shadow" | "auto";
+  paid: "auto" | "off";
+  /** Configuration problems. The rest of the view still loads. */
+  problems?: string[];
+  accounts?: RoutingAccountView[];
+  budgets?: RoutingBudgetView[];
+  api_keys?: RoutingApiKeyView[];
+}
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -457,6 +573,9 @@ export type ApiRequest =
   | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_context_cap"; session_id: string; max_context_tokens: number | null }
+  | { req: "routing_gate_answer"; session_id: string; gate_id: string; choice: RoutingGateChoice }
+  | { req: "routing_intent"; session_id: string; action: RoutingIntentAction }
+  | { req: "get_routing_view" }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "set_speed_mode"; session_id: string; speed_mode: SpeedMode }
   | { req: "compact"; session_id: string }
@@ -692,8 +811,19 @@ export type ApiEvent =
       cache_creation_input?: number;
     }
   | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
+  /** The routing policy chose the account for the session's next turn. `pending` is the account a warm session moves to at its next cache-cold seam. */
+  | { ev: "routing_decision"; session_id: string; account: string; reason: string; warnings?: string[]; pending?: string }
+  /** The turn is held on a spending limit. Answer with `routing_gate_answer`. */
+  | { ev: "routing_gate"; session_id: string; gate_id: string; reason: string; options: RoutingGateOption[] }
+  /** A gate was answered or abandoned. Close the matching card. */
+  | { ev: "routing_gate_closed"; session_id: string; gate_id: string }
+  /** Text answer to `routing_intent`. */
+  | { ev: "routing_status"; text: string }
+  | { ev: "routing_view"; view: RoutingView }
   /** Persisted prompt occupancy replayed on attach, so a context meter is filled before the next turn reports usage. Not a turn's usage: no cost or turn stats. */
   | { ev: "context_occupancy"; session_id: string; prompt_tokens: number }
+  /** Cumulative keepalive-only usage. Not a turn or transcript event. */
+  | { ev: "cache_keepalive"; session_id: string; usage: CacheKeepaliveUsage }
   | {
       ev: "kv_cache_miss";
       session_id: string;
@@ -709,6 +839,8 @@ export type ApiEvent =
   | { ev: "provider_guardrail_retry"; session_id: string; turn_id: string; attempt: number; max_attempts: number }
   | { ev: "peer_user_message"; session_id: string; content: string }
   | { ev: "agent_message"; session_id: string; from_session: string; from_name: string | null; message: string }
+  /** A swarm worker posted a notice for the coordinator's session. */
+  | { ev: "swarm_worker_notice"; session_id: string; message: string }
   /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
   | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
   /**
@@ -919,12 +1051,19 @@ export const KNOWN_EVENT_KINDS = [
   "token_usage",
   "request_usage",
   "context_cap_changed",
+  "routing_decision",
+  "routing_gate",
+  "routing_gate_closed",
+  "routing_status",
+  "routing_view",
   "context_occupancy",
+  "cache_keepalive",
   "kv_cache_miss",
   "memory_injected",
   "memory_activity",
   "peer_user_message",
   "agent_message",
+  "swarm_worker_notice",
   "turn_done",
   "provider_guardrail_retry",
   "soft_interrupt_injected",
@@ -1024,6 +1163,9 @@ export const KNOWN_REQUEST_KINDS = [
   "ack_todo_follow_up",
   "set_model",
   "set_context_cap",
+  "routing_gate_answer",
+  "routing_intent",
+  "get_routing_view",
   "set_reasoning_effort",
   "set_speed_mode",
   "compact",

@@ -76,6 +76,8 @@ const REQUIRES_ATTACH: &[&str] = &[
     "list_models",
     "set_model",
     "set_context_cap",
+    "routing_gate_answer",
+    "routing_intent",
     "set_reasoning_effort",
     "set_speed_mode",
     "compact",
@@ -211,6 +213,8 @@ pub struct BridgeState {
     pending_fork_id: Option<(u64, u64)>,
     pending_side_question_forks: BTreeMap<u64, (u64, String)>,
     pub(crate) side_questions_supported: bool,
+    /// The daemon carries routing events, gate answers and intents.
+    pub(crate) routing_supported: bool,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -407,6 +411,14 @@ impl BridgeState {
     fn translate_request(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
+
+        if matches!(req, "routing_gate_answer" | "routing_intent") && !self.routing_supported {
+            return Self::error_reply(
+                api_id,
+                ErrorCode::UnknownRequest,
+                "This runtime does not support account routing.",
+            );
+        }
 
         if req == "fork_side_question" && !self.side_questions_supported {
             return Self::error_reply(
@@ -1737,6 +1749,36 @@ impl BridgeState {
                     json!({"type": "prepare_disconnect", "id": id}),
                 )]
             }
+            "routing_gate_answer" => {
+                let gate_id = request["gate_id"].as_str().unwrap_or("").trim();
+                if gate_id.is_empty() {
+                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing gate ID");
+                }
+                if !request["choice"].is_object() {
+                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing gate choice");
+                }
+                let id = self.legacy_id();
+                // The daemon reports done, or an error when no gate is waiting.
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
+                vec![Outbound::Legacy(json!({
+                    "type": "routing_gate_answer",
+                    "id": id,
+                    "gate_id": gate_id,
+                    "choice": request["choice"],
+                }))]
+            }
+            "routing_intent" => {
+                if !request["action"]["action"].is_string() {
+                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing action");
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Routing));
+                vec![Outbound::Legacy(json!({
+                    "type": "routing_intent",
+                    "id": id,
+                    "action": request["action"],
+                }))]
+            }
             "ask_response" => {
                 let id = self.legacy_id();
                 // The daemon acks receipt, then reports done or error once it
@@ -2408,6 +2450,41 @@ impl BridgeState {
                 message: event["message"].as_str().unwrap_or("").to_string(),
             })],
             // Argument streaming is not an assistant-message boundary.
+            "routing_decision" => vec![ServerFrame::event(ApiEvent::RoutingDecision {
+                session_id: self.event_session_id(),
+                account: event["account"].as_str().unwrap_or("").to_string(),
+                reason: event["reason"].as_str().unwrap_or("").to_string(),
+                warnings: serde_json::from_value(event["warnings"].clone()).unwrap_or_default(),
+                pending: event["pending"].as_str().map(str::to_string),
+            })],
+            "routing_gate" => match serde_json::from_value(event["options"].clone()) {
+                Ok(options) => vec![ServerFrame::event(ApiEvent::RoutingGate {
+                    session_id: self.event_session_id(),
+                    gate_id: event["gate_id"].as_str().unwrap_or("").to_string(),
+                    reason: event["reason"].as_str().unwrap_or("").to_string(),
+                    options,
+                })],
+                Err(error) => Self::invalid_daemon_event(
+                    None,
+                    format!("invalid daemon routing gate options: {error}"),
+                ),
+            },
+            "routing_gate_closed" => vec![ServerFrame::event(ApiEvent::RoutingGateClosed {
+                session_id: self.event_session_id(),
+                gate_id: event["gate_id"].as_str().unwrap_or("").to_string(),
+            })],
+            "routing_status" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                match self.take_simple(id, SimpleKind::Routing) {
+                    Some(api_id) => vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::RoutingStatus {
+                            text: event["text"].as_str().unwrap_or("").to_string(),
+                        },
+                    )],
+                    None => vec![],
+                }
+            }
             "ask_user_request" => match serde_json::from_value(event["questions"].clone()) {
                 Ok(questions) => vec![ServerFrame::event(ApiEvent::AskRequest {
                     // The daemon can replay a pending ask before the correlated
@@ -4547,6 +4624,20 @@ impl BridgeState {
         }
     }
 
+    /// The session an unsolicited daemon event belongs to. The daemon can
+    /// replay a pending event before the attach reply establishes this
+    /// connection's identity, so fall back to the attach target.
+    fn event_session_id(&self) -> String {
+        self.session_id
+            .clone()
+            .or_else(|| {
+                self.pending_attach_id
+                    .as_ref()
+                    .and_then(|(_, _, target)| target.clone())
+            })
+            .unwrap_or_default()
+    }
+
     fn take_simple(&mut self, legacy_id: u64, kind: SimpleKind) -> Option<u64> {
         let index = self
             .pending_simple
@@ -4566,6 +4657,10 @@ pub(crate) use tests::ScopedJcodeHome;
 #[cfg(test)]
 #[path = "side_question_tests.rs"]
 mod side_question_tests;
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;
 
 #[cfg(test)]
 #[path = "session_image_bridge_tests.rs"]

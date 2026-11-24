@@ -514,6 +514,25 @@ pub enum ApiRequest {
         model: String,
     },
 
+    /// Answer a `RoutingGate` event. Replies with `Ok`, or an error when the
+    /// gate is no longer waiting.
+    RoutingGateAnswer {
+        session_id: String,
+        gate_id: String,
+        choice: crate::RoutingGateChoice,
+    },
+
+    /// Set or read a routing intent for the session: pin, switch, hold, ack,
+    /// paid, unstick or status. Replies with `RoutingStatus`.
+    RoutingIntent {
+        session_id: String,
+        action: crate::RoutingIntentAction,
+    },
+
+    /// Read the routing configuration with live usage, for a settings page.
+    /// Needs no attached session. Replies with `RoutingView`.
+    GetRoutingView,
+
     /// Override the session context budget. Null or zero restores the default.
     SetContextCap {
         session_id: String,

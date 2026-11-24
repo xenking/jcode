@@ -21,6 +21,7 @@ import {
 } from "./structured.js";
 import {
   API_VERSION_MAJOR,
+  ROUTING_CAPABILITY,
   SIDE_QUESTIONS_CAPABILITY,
   type AppletAction,
   type AnyApiEvent,
@@ -41,6 +42,9 @@ import {
   type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
+  type RoutingGateChoice,
+  type RoutingIntentAction,
+  type RoutingView,
   type SideQuestionTopic,
   type SessionSearchHit,
   type SessionToolDefinition,
@@ -1205,6 +1209,35 @@ export class JcodeClient extends EventEmitter {
     }
     const frame = await this.expectReply({ req: "set_context_cap", session_id: sessionId, max_context_tokens: maxContextTokens }, "context_cap_changed");
     return frame.effective_budget;
+  }
+
+  private requireRouting(): void {
+    if (!this.supports(ROUTING_CAPABILITY)) {
+      throw new HarnessError("unsupported", "This runtime does not support account routing.");
+    }
+  }
+
+  /**
+   * Answer a `routing_gate` event. Rejects when the gate is no longer waiting,
+   * for example because another client answered first.
+   */
+  async answerRoutingGate(sessionId: string, gateId: string, choice: RoutingGateChoice): Promise<void> {
+    this.requireRouting();
+    await this.requestOk({ req: "routing_gate_answer", session_id: sessionId, gate_id: gateId, choice });
+  }
+
+  /** Set or read a routing intent for a session. Resolves to the status text. */
+  async routingIntent(sessionId: string, action: RoutingIntentAction): Promise<string> {
+    this.requireRouting();
+    const frame = await this.expectReply({ req: "routing_intent", session_id: sessionId, action }, "routing_status");
+    return frame.text;
+  }
+
+  /** The routing configuration with live usage. Needs no attached session. */
+  async routingView(): Promise<RoutingView> {
+    this.requireRouting();
+    const frame = await this.expectReply({ req: "get_routing_view" }, "routing_view");
+    return frame.view;
   }
 
   /**

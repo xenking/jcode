@@ -2149,6 +2149,7 @@ impl TextCollector {
 
 #[path = "client/global_session_workers.rs"]
 mod global_session_workers;
+mod routing;
 mod side_questions;
 use global_session_workers::discover_global_sessions;
 

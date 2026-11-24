@@ -210,3 +210,38 @@ pub(super) async fn daemon_side_questions(socket: &std::path::Path, request: &Va
         },
     }
 }
+
+/// One-shot read of the routing configuration with live usage. Needs no
+/// attached session, so a settings page can load before any session exists.
+pub(super) async fn daemon_routing_view(socket: &std::path::Path) -> ApiEvent {
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(&mut stream, &serde_json::json!({"type":"routing_view", "id":1})).await?;
+        let mut line = String::new();
+        read_frame(&mut BufReader::new(stream), &mut line).await?;
+        let reply: Value = serde_json::from_str(&line)?;
+        anyhow::ensure!(reply["id"] == 1, "Unexpected routing view reply ID");
+        match reply["type"].as_str() {
+            Some("routing_view") => Ok(ApiEvent::RoutingView {
+                view: serde_json::from_value(reply["view"].clone())?,
+            }),
+            Some("error") => anyhow::bail!(
+                "{}",
+                reply["message"].as_str().unwrap_or("Routing view failed")
+            ),
+            _ => anyhow::bail!("Unexpected routing view reply"),
+        }
+    })
+    .await;
+    match response {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+        Err(error) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+    }
+}

@@ -62,6 +62,11 @@ pub use jcode_session_types::{
 pub use jcode_session_types::{
     CodemodeCall, CodemodeCallStatus, CodemodeDirection, CodemodeStatus, CodemodeSummary,
 };
+pub use jcode_session_types::routing::{
+    ROUTING_CAPABILITY, RoutingAccountView, RoutingApiKeyView, RoutingBudgetView,
+    RoutingGateChoice, RoutingGateOption, RoutingIntentAction, RoutingKeyView, RoutingView,
+    RoutingWindowView,
+};
 pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
@@ -82,10 +87,14 @@ mod schema_snapshot_tests;
 #[path = "harness_api_tests/capability_coverage.rs"]
 mod capability_coverage_tests;
 
+#[cfg(test)]
+#[path = "harness_api_tests/routing.rs"]
+mod routing_tests;
+
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 23;
+pub const API_VERSION_MINOR: u32 = 24;
 
 pub use jcode_background_types::{
     BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,

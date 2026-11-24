@@ -32,6 +32,8 @@ pub(super) enum SimpleKind {
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
     ContextCap,
+    /// Awaiting `routing_status`, the text answer to a routing intent.
+    Routing,
     /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
     SpeedMode,
@@ -67,6 +69,7 @@ impl BridgeState {
                             | SimpleKind::Tools
                             | SimpleKind::ToolControl
                             | SimpleKind::OkOnDone
+                            | SimpleKind::Routing
                             | SimpleKind::OkOnHistory
                             | SimpleKind::CompactedHistory
                             | SimpleKind::HistoryPage
