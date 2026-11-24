@@ -218,6 +218,7 @@ export interface HistoryMessage {
 export type CodemodeStatus = "success" | "error";
 
 export interface CodemodeCall {
+  external?: boolean;
   tool: string;
   action?: string;
   actor?: string;

@@ -46,6 +46,9 @@ pub struct CodemodeCall {
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<CodemodeDirection>,
+    /// The daemon resolved this direct message to a different swarm.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
     pub status: CodemodeCallStatus,
     pub duration_ms: u64,
     /// Redacted, single-line excerpt of a successful swarm message.

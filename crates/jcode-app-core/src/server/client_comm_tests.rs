@@ -826,7 +826,7 @@ async fn comm_broadcast_reaches_only_senders_spawned_subtree() {
 
 /// Cross-swarm DMs: `to_swarm` resolves a label (or id) of another live
 /// swarm. Without `to_session` the DM lands on that swarm's coordinator; with
-/// it, on the named agent. Without `to_swarm`, DMs stay swarm-local.
+/// it, on the named agent.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes tests sharing the global swarm label registry
 async fn comm_message_cross_swarm_dm_by_label() {
@@ -931,7 +931,7 @@ async fn comm_message_cross_swarm_dm_by_label() {
         };
     }
 
-    // Without to_swarm, a session in another swarm is unreachable.
+    // Workers in another swarm are not globally addressable by friendly name.
     send!(1, Some("beta-worker".to_string()), None);
     assert!(matches!(
         client_event_rx.recv().await,
@@ -941,6 +941,7 @@ async fn comm_message_cross_swarm_dm_by_label() {
 
     // Label only: delivered to the other swarm's coordinator.
     send!(2, None, Some("backend".to_string()));
+    assert_external_dm_receipt(&mut client_event_rx, 2, "beta-coord").await;
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 2 })
@@ -964,6 +965,7 @@ async fn comm_message_cross_swarm_dm_by_label() {
         Some("beta-worker".to_string()),
         Some("swarm-b".to_string())
     );
+    assert_external_dm_receipt(&mut client_event_rx, 3, "beta-worker").await;
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 3 })
@@ -981,6 +983,23 @@ async fn comm_message_cross_swarm_dm_by_label() {
     ));
 
     crate::server::swarm_labels::reset_swarm_labels_for_test();
+}
+
+async fn assert_external_dm_receipt(
+    events: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    request_id: u64,
+    target: &str,
+) {
+    match events.recv().await {
+        Some(ServerEvent::RuntimeCommandResult {
+            id, command, data, ..
+        }) => {
+            assert_eq!(id, request_id);
+            assert_eq!(command, "swarm_message");
+            assert_eq!(data["external_target"], target);
+        }
+        other => panic!("expected external DM receipt, got {other:?}"),
+    }
 }
 
 fn root_or_worker_member(
@@ -1109,19 +1128,25 @@ async fn comm_message_root_session_reaches_unrelated_session_by_name_or_id() {
 
     // Unique friendly name in another swarm.
     send!(1, "session_alpha_1", "beta");
+    assert_external_dm_receipt(&mut client_event_rx, 1, "beta").await;
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 1 })
     ));
     match beta_rx.try_recv() {
         Ok(ServerEvent::Notification { message, .. }) => {
-            assert!(message.contains("ping from outside"), "{message}");
+            assert!(
+                message.starts_with("Cross-swarm DM from alpha"),
+                "{message}"
+            );
+            assert!(message.ends_with(": ping from outside"), "{message}");
         }
         other => panic!("expected DM to unrelated session, got {other:?}"),
     }
 
     // Exact session id in another swarm.
     send!(2, "session_alpha_1", "session_beta_1");
+    assert_external_dm_receipt(&mut client_event_rx, 2, "beta").await;
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 2 })

@@ -48,6 +48,7 @@ impl CallLedger {
             actor: None,
             target: None,
             direction: None,
+            external: false,
             status: CodemodeCallStatus::Interrupted,
             duration_ms: 0,
             preview: None,
@@ -102,10 +103,18 @@ impl CallLedger {
         };
         call.duration_ms = latency_ms;
         match result {
-            Ok(_) => {
+            Ok(output) => {
                 call.status = CodemodeCallStatus::Success;
                 if call.action.as_deref() == Some("message") {
                     call.preview = input["message"].as_str().and_then(message_preview);
+                    if let Some(target) = output
+                        .metadata
+                        .as_ref()
+                        .and_then(|meta| meta["external_dm_target"].as_str())
+                    {
+                        call.external = true;
+                        call.target = peer_name(target).map(str::to_owned);
+                    }
                 }
             }
             Err(error) => {

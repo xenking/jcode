@@ -482,11 +482,20 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn cross_swarm_confirmation(swarm: &str, to_session: Option<&str>, message: &str) -> String {
-    match to_session {
-        Some(target) => format!("Cross-swarm DM sent to {target} in swarm '{swarm}': {message}"),
-        None => format!("Cross-swarm DM sent to the coordinator of swarm '{swarm}': {message}"),
+fn external_dm_output(response: &ServerEvent, body: &str) -> Option<ToolOutput> {
+    let ServerEvent::RuntimeCommandResult { command, data, .. } = response else {
+        return None;
+    };
+    if command != "swarm_message" {
+        return None;
     }
+    let target = data["external_target"].as_str()?;
+    let text = match data["status"].as_str()? {
+        "queued_cold" => format!("External DM queued for {target}: {body}"),
+        "sent" => format!("External DM sent to {target}: {body}"),
+        _ => return None,
+    };
+    Some(ToolOutput::new(text).with_metadata(json!({"external_dm_target": target})))
 }
 
 /// Render the `list_swarms` directory: one line per live swarm with label,
@@ -1120,15 +1129,11 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
-                        if let Some(output) = queued_cold_output(&response) {
+                        if let Some(output) = external_dm_output(&response, &message) {
                             return Ok(output);
                         }
-                        if let Some(swarm) = to_swarm {
-                            return Ok(ToolOutput::new(cross_swarm_confirmation(
-                                &swarm,
-                                to_session.as_deref(),
-                                &message,
-                            )));
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
                         }
                         let confirmation = match (to_session, channel) {
                             (Some(target), _) => {
@@ -1218,17 +1223,13 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = external_dm_output(&response, &message) {
+                            return Ok(output);
+                        }
                         if let Some(output) = queued_cold_output(&response) {
                             return Ok(output);
                         }
-                        if let Some(swarm) = to_swarm {
-                            return Ok(ToolOutput::new(cross_swarm_confirmation(
-                                &swarm,
-                                to_session.as_deref(),
-                                &message,
-                            )));
-                        }
-                        let to_session = to_session.unwrap_or_default();
+                        let to_session = to_session.or(to_swarm).unwrap_or_default();
                         Ok(ToolOutput::new(format!(
                             "Direct message sent to {}: {}",
                             to_session, message

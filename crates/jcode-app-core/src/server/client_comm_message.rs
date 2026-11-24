@@ -387,6 +387,17 @@ pub(super) async fn handle_comm_message(
         } else {
             None
         };
+        let external_target_name = match resolved_to_session
+            .as_deref()
+            .filter(|_| cross_swarm_id.is_some())
+        {
+            Some(target) => Some(
+                friendly_name_for_session(target, swarm_members)
+                    .await
+                    .unwrap_or_else(|| target.to_owned()),
+            ),
+            None => None,
+        };
 
         if let Some(ref target) = resolved_to_session
             && !swarm_session_ids.contains(target)
@@ -534,12 +545,12 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session.clone());
                 let scope_label = match (scope, channel.as_deref()) {
-                    _ if cross_swarm_id.is_some() && !global_dm => "Cross-swarm DM".to_string(),
+                    _ if cross_swarm_id.is_some() => "Cross-swarm DM".to_string(),
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
                     ("dm", _) => "DM".to_string(),
                     _ => "broadcast".to_string(),
                 };
-                let from_label = if cross_swarm_id.is_some() && !global_dm {
+                let from_label = if cross_swarm_id.is_some() {
                     format!("{} (swarm '{}')", from_label, sender_swarm_display)
                 } else {
                     from_label
@@ -734,13 +745,24 @@ pub(super) async fn handle_comm_message(
                 ServerEvent::RuntimeCommandResult {
                     id,
                     command: "swarm_message".into(),
-                    data: serde_json::json!({"status":"queued_cold", "recipients": queued_cold, "delivered_immediately": delivered_targets}),
+                    data: serde_json::json!({"status":"queued_cold", "recipients": queued_cold, "delivered_immediately": delivered_targets, "external_target": external_target_name}),
                     message: format!(
                         "queued_cold: saved without waking {}; delivered on the next user-started turn",
                         queued_cold.join(", ")
                     ),
                 },
                 "client_comm_message: queued cold",
+            );
+        } else if let Some(target) = external_target_name {
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "swarm_message".into(),
+                    data: serde_json::json!({"status":"sent", "external_target": target}),
+                    message: String::new(),
+                },
+                "client_comm_message: direct receipt",
             );
         }
         send_client_event_best_effort(
