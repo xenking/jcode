@@ -1,4 +1,16 @@
-use crate::client::Transport;
+use crate::client::{ConnectOptions, JcodeClient, Transport};
+
+impl JcodeClient {
+    /// Connect to a separately paired Harness gateway.
+    pub fn connect_paired_harness(
+        base_url: &str,
+        token: &str,
+        options: ConnectOptions,
+    ) -> Result<Self> {
+        let transport = connect(base_url, token)?;
+        Self::connect_with(transport, options)
+    }
+}
 use crate::errors::{Error, ErrorKind, Result};
 use futures::{SinkExt, StreamExt};
 use std::io::{BufRead, BufReader, Read, Write};

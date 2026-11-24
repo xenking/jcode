@@ -2322,17 +2322,10 @@ impl Server {
     /// The runtime task scope owns both the listener and client accept loop so
     /// server shutdown can cancel and join them with the other connection work.
     async fn spawn_gateway(&self, runtime: ServerRuntime) {
-        let config = if let Some(override_config) = &self.gateway_config_override {
-            override_config.clone()
-        } else {
-            let gw_config = &crate::config::config().gateway;
-            crate::gateway::GatewayConfig {
-                port: gw_config.port,
-                bind_addr: gw_config.bind_addr.clone(),
-                enabled: gw_config.enabled,
-                harness_enabled: gw_config.harness_enabled,
-            }
-        };
+        let config = self
+            .gateway_config_override
+            .clone()
+            .unwrap_or_else(|| crate::config::config().gateway.clone());
 
         if !config.enabled {
             return;
