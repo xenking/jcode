@@ -26,6 +26,7 @@ pub(super) fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
+        codemode: None,
     });
 
     let content_blocks = vec![ContentBlock::ToolUse {

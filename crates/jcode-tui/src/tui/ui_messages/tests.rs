@@ -80,6 +80,7 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
     for width in [40, 72, 120] {
         for mode in [
@@ -2091,6 +2092,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
             intent: Some("Track todo card work".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -2175,6 +2177,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
             intent: Some("Refine the todo feedback loop".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -2292,6 +2295,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
             intent: Some("Reassess the user's intent".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -2391,6 +2395,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             duration_secs: None,
             title: Some("1 todos".to_string()),
             tool_data,
+            codemode: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -2515,6 +2520,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
             ),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let rendered = render_tool_message(&msg, 84, crate::config::DiffDisplayMode::Off)
@@ -2596,6 +2602,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
             intent: Some("Complete the full user outcome".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -2679,6 +2686,7 @@ fn render_tool_message_uses_scheduled_card() {
                 "target": "resume"
             }),
             intent: None, thought_signature: None, }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
@@ -2791,6 +2799,7 @@ fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        codemode: None,
     };
     let live = DisplayMessage {
         tool_calls: Vec::new(),
@@ -3052,6 +3061,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 80, crate::config::DiffDisplayMode::Off);
@@ -3083,6 +3093,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3114,6 +3125,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3149,6 +3161,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
             intent: Some("Run the test suite".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3188,6 +3201,7 @@ fn render_tool_message_shows_token_badge() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3233,6 +3247,7 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                     intent: intent.map(str::to_string),
                     thought_signature: None,
                 }),
+                codemode: None,
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
             assert_eq!(lines.len(), 2, "{name}");
@@ -3310,6 +3325,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
                 {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
             ]}), intent: None, thought_signature: None,
         }),
+        codemode: None,
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 4);
@@ -3362,6 +3378,7 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
             intent: Some("Inspect sources".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
@@ -3486,6 +3503,7 @@ fn render_tool_message_hides_bash_output() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3511,6 +3529,7 @@ fn render_tool_message_shows_bash_output_when_enabled() {
             intent: Some("Print output".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let rendered = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
@@ -3558,6 +3577,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)

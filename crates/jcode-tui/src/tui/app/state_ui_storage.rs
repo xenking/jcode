@@ -563,6 +563,7 @@ mod tests {
                 intent: crate::message::ToolCall::intent_from_input(&input),
                 thought_signature: None,
             }),
+            codemode: None,
         }
     }
 

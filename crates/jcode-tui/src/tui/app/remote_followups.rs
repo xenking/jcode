@@ -302,6 +302,7 @@ pub(in super::super) async fn process_remote_followups(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             });
             if let Err(e) = begin_remote_send(
                 app,

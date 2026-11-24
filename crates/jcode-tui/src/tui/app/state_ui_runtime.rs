@@ -178,6 +178,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             });
         }
     }

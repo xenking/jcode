@@ -515,7 +515,7 @@ fn handle_server_event_inner(
             name,
             output,
             error,
-            ..
+            codemode,
         } => {
             if name == "ask"
                 && app
@@ -525,7 +525,9 @@ fn handle_server_event_inner(
             {
                 app.dismiss_ask_picker();
             }
-            super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
+            super::server_event_handlers::handle_tool_done(
+                app, remote, id, name, output, error, codemode,
+            )
         }
         ServerEvent::GeneratedImage {
             id,
@@ -1020,6 +1022,7 @@ fn handle_server_event_inner(
                         duration_secs: app.display_turn_duration_secs(),
                         title: None,
                         tool_data: None,
+                        codemode: None,
                     });
                 }
             }
@@ -1198,6 +1201,7 @@ fn handle_server_event_inner(
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            codemode: None,
                         });
                     }
                     app.push_turn_footer(duration);
@@ -1425,6 +1429,7 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
             }
             app.is_processing = false;
@@ -2365,6 +2370,7 @@ fn handle_server_event_inner(
                                 duration_secs: None,
                                 title: None,
                                 tool_data: msg.tool_data,
+                                codemode: None,
                             })
                             .collect();
                         super::super::remote_notifications::normalize_swarm_delivery_messages(
@@ -2567,6 +2573,7 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title: None,
                     tool_data: msg.tool_data,
+                    codemode: None,
                 })
                 .collect();
             for message in &mut restored_messages {
@@ -3198,6 +3205,7 @@ fn handle_server_event_inner(
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        codemode: None,
                     });
                 }
                 app.push_turn_footer(duration);
@@ -3274,6 +3282,7 @@ fn handle_server_event_inner(
                     duration_secs: None,
                     title,
                     tool_data: None,
+                    codemode: None,
                 });
             }
             if let Some(n) = tools_skipped {

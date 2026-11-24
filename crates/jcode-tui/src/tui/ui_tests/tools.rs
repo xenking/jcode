@@ -75,6 +75,7 @@ fn test_patch_headers_preserve_line_counts_and_token_severity() {
                 duration_secs: None,
                 title: None,
                 tool_data: Some(tool.clone()),
+                codemode: None,
             };
             let standalone =
                 messages::render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -151,6 +152,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                                 intent: None,
                                 thought_signature: None,
                             }),
+                            codemode: None,
                         }],
                         messages_version: version,
                         centered_mode,
@@ -315,6 +317,7 @@ fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -359,6 +362,7 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
                     ]
                 }),
                 intent: None, thought_signature: None, }),
+            codemode: None,
         };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -398,6 +402,7 @@ fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix()
                 ]
             }),
             intent: None, thought_signature: None, }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -434,6 +439,7 @@ fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailin
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -481,6 +487,7 @@ Completed: 2 succeeded, 1 failed"
             intent: Some("Inspect schemas".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -533,6 +540,7 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
                 ]
             }),
             intent: None, thought_signature: None, }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -756,6 +764,7 @@ fn test_render_tool_message_batch_includes_start_end_read_details() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1269,6 +1278,7 @@ fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 32, crate::config::DiffDisplayMode::Off);
@@ -1303,6 +1313,7 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
             ),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 48, crate::config::DiffDisplayMode::Off);
@@ -1334,6 +1345,7 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
             intent: Some("Launch exactly one paid Opus canary".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 60, crate::config::DiffDisplayMode::Off);
@@ -1370,6 +1382,7 @@ fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 18, crate::config::DiffDisplayMode::Off);
@@ -1452,6 +1465,133 @@ fn test_action_tools_degrade_to_tool_name_when_action_absent() {
             "tool={name} summary={summary:?}"
         );
     }
+}
+
+fn codemode_row(calls: Vec<jcode_session_types::CodemodeCall>, omitted: usize) -> DisplayMessage {
+    use jcode_session_types::{CodemodeStatus, CodemodeSummary};
+    DisplayMessage {
+        role: "tool".to_string(),
+        content: "ok".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: Some(ToolCall {
+            id: "call_codemode".to_string(),
+            name: "codemode".to_string(),
+            input: serde_json::json!({ "code": "return 1" }),
+            intent: Some("Sync tickets".to_string()),
+            thought_signature: None,
+        }),
+        codemode: Some(Box::new(CodemodeSummary {
+            status: CodemodeStatus::Error,
+            calls,
+            calls_omitted: omitted,
+            report_body_bytes: None,
+        })),
+    }
+}
+
+fn nested_call(
+    tool: &str,
+    status: jcode_session_types::CodemodeCallStatus,
+    duration_ms: u64,
+) -> jcode_session_types::CodemodeCall {
+    jcode_session_types::CodemodeCall {
+        tool: tool.to_string(),
+        action: None,
+        actor: None,
+        target: None,
+        direction: None,
+        external: false,
+        status,
+        duration_ms,
+        preview: None,
+        diagnostic: None,
+    }
+}
+
+#[test]
+fn test_render_tool_message_codemode_lists_each_nested_call() {
+    use jcode_session_types::CodemodeCallStatus::{Error, Interrupted, Success};
+    let mut failed = nested_call("mcp__srv__write_file", Error, 3);
+    failed.diagnostic = Some("Tool execution failed".to_string());
+    let mut dm = nested_call("swarm", Success, 41);
+    dm.action = Some("message".to_string());
+    dm.target = Some("fish".to_string());
+    let msg = codemode_row(
+        vec![
+            nested_call("mcp__srv__list_files", Success, 1250),
+            dm,
+            failed,
+            nested_call("bash", Interrupted, 0),
+        ],
+        2,
+    );
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+    let find = |needle: &str| {
+        rendered
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle:?}: {rendered:#?}"))
+            .clone()
+    };
+    assert!(find("mcp__srv__list_files").contains("✓"), "{rendered:#?}");
+    assert!(
+        find("mcp__srv__list_files").contains("1.2s"),
+        "{rendered:#?}"
+    );
+    let swarm = find("swarm");
+    assert!(swarm.contains("✓") && swarm.contains("message") && swarm.contains("fish"));
+    let write = find("mcp__srv__write_file");
+    assert!(
+        write.contains("✗") && write.contains("3ms"),
+        "{rendered:#?}"
+    );
+    assert!(
+        find("Tool execution failed").contains("╰─"),
+        "{rendered:#?}"
+    );
+    assert!(find("bash").contains("…"), "interrupted row: {rendered:#?}");
+    assert!(find("2 more").contains("…"), "{rendered:#?}");
+    let first_call = rendered
+        .iter()
+        .position(|line| line.contains("mcp__srv__list_files"))
+        .unwrap();
+    assert!(first_call > 0, "nested rows sit below the codemode header");
+}
+
+#[test]
+fn test_codemode_nested_rows_never_wrap_at_narrow_widths() {
+    use jcode_session_types::CodemodeCallStatus::Error;
+    let mut failed = nested_call(
+        "mcp__a_server_with_a_very_long_name__a_very_long_tool_name",
+        Error,
+        100,
+    );
+    failed.diagnostic = Some("Tool execution failed".to_string());
+    let msg = codemode_row(vec![failed], 0);
+    for width in [16u16, 24, 40] {
+        let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        for line in &lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(extract_line_text(line).as_str())
+                    <= usize::from(width),
+                "width={width} line={:?}",
+                extract_line_text(line)
+            );
+        }
+    }
+}
+
+#[test]
+fn test_codemode_summary_changes_row_cache_hash() {
+    use jcode_session_types::CodemodeCallStatus::Success;
+    let plain = codemode_row(vec![], 0);
+    let with_calls = codemode_row(vec![nested_call("bash", Success, 5)], 0);
+    assert_ne!(plain.stable_cache_hash(), with_calls.stable_cache_hash());
 }
 
 /// The live activity line should surface the model-provided `intent` for any

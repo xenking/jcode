@@ -274,6 +274,7 @@ fn render_tool_message_colors_high_token_badge() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -305,6 +306,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
                 ]
             }),
             intent: None, thought_signature: None, }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -337,6 +339,7 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
             intent: Some("Update example behavior".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -372,6 +375,7 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
             intent: Some("Update both examples".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -414,6 +418,7 @@ fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction()
             intent: Some("Create an honest data-driven benchmark comparison page".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -457,6 +462,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
         };
 
         let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -488,6 +494,7 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
             intent: Some("Replace the benchmark placeholder".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -530,6 +537,7 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::Inline);
@@ -594,6 +602,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::FullInline);
@@ -669,6 +678,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -723,6 +733,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -768,6 +779,7 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -811,6 +823,7 @@ fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -967,6 +980,7 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
             intent: Some("Read the todo list".to_string()),
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -1002,6 +1016,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
                 intent: intent.map(str::to_string),
                 thought_signature: None,
             }),
+            codemode: None,
         };
 
         let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);

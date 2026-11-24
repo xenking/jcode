@@ -688,6 +688,7 @@ async fn submit_remote_transcript_input(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             });
             app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
                 .await?;

@@ -80,6 +80,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -88,6 +89,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
         ];
         self.bump_display_messages_version();
@@ -321,6 +323,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -330,6 +333,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
         ];
         self.bump_display_messages_version();
@@ -747,6 +751,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -755,6 +760,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
         ];
         self.bump_display_messages_version();

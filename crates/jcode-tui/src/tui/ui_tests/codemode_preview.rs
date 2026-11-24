@@ -59,6 +59,7 @@ fn codemode_preview_visible_on_success_and_failure() {
             duration_secs: None,
             title: None,
             tool_data: Some(tool("return 1")),
+            codemode: None,
         };
         let lines = messages::render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
         let all = lines

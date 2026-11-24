@@ -1,5 +1,5 @@
 use jcode_message_types::ToolCall;
-use jcode_session_types::RenderedMessage;
+use jcode_session_types::{CodemodeSummary, RenderedMessage};
 
 pub fn format_attachment_chips(
     mut content: String,
@@ -42,6 +42,8 @@ pub struct DisplayMessage {
     pub title: Option<String>,
     /// Full tool call data for role="tool" messages.
     pub tool_data: Option<ToolCall>,
+    /// Display-only receipt of the calls one codemode run dispatched.
+    pub codemode: Option<Box<CodemodeSummary>>,
 }
 
 impl DisplayMessage {
@@ -70,6 +72,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -82,6 +85,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -94,6 +98,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -107,6 +112,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Usage".to_string()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -120,6 +126,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Overnight".to_string()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -135,6 +142,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Todos".to_string()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -151,6 +159,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(COMPACTION_COLLAPSED_TITLE.to_string()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -163,6 +172,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(COMPACTION_RUNNING_TITLE.to_string()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -206,6 +216,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -218,6 +229,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -230,6 +242,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -242,6 +255,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -254,6 +268,7 @@ impl DisplayMessage {
             duration_secs: Some(duration_secs),
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -266,6 +281,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: Some(tool_data),
+            codemode: None,
         }
     }
 
@@ -278,6 +294,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -290,6 +307,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -305,6 +323,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -319,6 +338,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }
     }
 
@@ -341,6 +361,7 @@ impl DisplayMessage {
             duration_secs,
             title,
             tool_data: item.tool_data,
+            codemode: item.codemode,
         };
         row.normalize_jarvis_role();
         row
@@ -359,6 +380,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: Some(tool_data),
+            codemode: None,
         }
     }
 
@@ -414,6 +436,9 @@ impl DisplayMessage {
             tool.id.hash(&mut hasher);
             tool.name.hash(&mut hasher);
             hash_json_value(&tool.input, &mut hasher);
+        }
+        if let Some(summary) = &self.codemode {
+            format!("{summary:?}").hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -586,6 +611,7 @@ mod tests {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
         }
     }
 

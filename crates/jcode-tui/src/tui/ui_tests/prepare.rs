@@ -94,6 +94,7 @@ fn fork_test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
         anim_elapsed: 0.16,
@@ -174,6 +175,7 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![
             chat_swarm_member(root_id),
@@ -223,6 +225,7 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         // Simulate a stale/missing ownership edge excluding the member from the
         // persistent gallery while the authoritative spawn result still names it.
@@ -259,6 +262,7 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
         ..Default::default()
@@ -293,6 +297,7 @@ fn test_prepare_messages_does_not_attach_member_to_unmatched_spawn_result() {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![chat_swarm_member("spawned-session-123")],
         ..Default::default()
@@ -328,6 +333,7 @@ fn test_prepare_messages_matches_spawn_member_by_unique_label_when_result_is_ref
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![member],
         ..Default::default()
@@ -365,6 +371,7 @@ fn test_prepare_messages_does_not_guess_when_spawn_label_is_ambiguous() {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![first, second],
         ..Default::default()
@@ -524,6 +531,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         }],
         status: ProcessingStatus::RunningTool("batch".to_string()),
         anim_elapsed: 0.0,
@@ -813,6 +821,7 @@ fn test_prepare_messages_centers_meta_footer_in_centered_mode() {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             },
         ],
         ..Default::default()
@@ -891,6 +900,7 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
+        codemode: None,
     };
     let final_message = DisplayMessage {
         role: "tool".to_string(),
@@ -899,6 +909,7 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call),
+        codemode: None,
     };
 
     let first = TestState {
@@ -1060,6 +1071,7 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1097,6 +1109,7 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1136,6 +1149,7 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     };
 
     // In non-centered mode, lines have no alignment set
@@ -1222,6 +1236,7 @@ fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
             intent: Some(title.into()),
             thought_signature: None,
         }),
+        codemode: None,
     };
     let state = TestState {
         display_messages: vec![

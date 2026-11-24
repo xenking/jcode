@@ -131,3 +131,41 @@ fn tool_duration_replay_does_not_measure_playback_clock() {
     );
     assert_eq!(app.display_messages().last().unwrap().duration_secs, None);
 }
+
+#[test]
+fn codemode_receipt_from_tool_done_reaches_the_transcript_row() {
+    use jcode_session_types::{CodemodeCall, CodemodeCallStatus, CodemodeStatus, CodemodeSummary};
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let summary = CodemodeSummary {
+        status: CodemodeStatus::Success,
+        calls: vec![CodemodeCall {
+            tool: "mcp__srv__list_files".into(),
+            action: None,
+            actor: None,
+            target: None,
+            direction: None,
+            external: false,
+            status: CodemodeCallStatus::Success,
+            duration_ms: 12,
+            preview: None,
+            diagnostic: None,
+        }],
+        calls_omitted: 0,
+        report_body_bytes: None,
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            codemode: Some(Box::new(summary.clone())),
+            id: "cm1".into(),
+            name: "codemode".into(),
+            output: "ok".into(),
+            error: None,
+        },
+        &mut remote,
+    );
+    let row = app.display_messages().last().unwrap();
+    assert_eq!(row.codemode.as_deref(), Some(&summary));
+}

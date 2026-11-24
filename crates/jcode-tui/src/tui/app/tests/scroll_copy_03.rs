@@ -54,6 +54,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -62,6 +63,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
     ];
     app.bump_display_messages_version();
@@ -760,6 +762,7 @@ fn test_history_anchor_keeps_distance_from_bottom_after_prepend() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
     );
     app.bump_display_messages_version();
@@ -813,6 +816,7 @@ fn test_history_anchor_reconciles_into_scroll_offset_after_render() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
     );
     app.bump_display_messages_version();
@@ -887,6 +891,7 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
             duration_secs: None,
             title: None,
             tool_data: msg.tool_data,
+            codemode: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -1552,7 +1557,11 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(
-        expanded.split_whitespace().collect::<Vec<_>>().join(" ").contains("race in the setup helper"),
+        expanded
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("race in the setup helper"),
         "expanded card must show the body:\n{expanded}"
     );
     assert!(
@@ -1681,6 +1690,7 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
         msgs.push(DisplayMessage {
             role: "assistant".to_string(),
@@ -1689,6 +1699,7 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
     }
     app.display_messages = msgs;

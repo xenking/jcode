@@ -1377,6 +1377,7 @@ pub(super) fn handle_disconnect(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             });
         }
     }
@@ -1407,6 +1408,7 @@ pub(super) fn handle_disconnect(
         duration_secs: None,
         title: Some(CONNECTION_MESSAGE_TITLE.to_string()),
         tool_data: None,
+        codemode: None,
     });
     state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
     state.reconnect_attempts = 1;
@@ -1766,6 +1768,7 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
                         duration_secs: None,
                         title: None,
                         tool_data: None,
+                        codemode: None,
                     });
                 }
             }

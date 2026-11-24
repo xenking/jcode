@@ -64,6 +64,84 @@ pub(super) fn codemode_preview(tool: &ToolCall, width: usize) -> Vec<Line<'stati
     rows
 }
 
+/// One row per call the codemode script dispatched, like batch subcalls.
+/// Rows are single-line chrome: names truncate, the outcome suffix stays.
+pub(super) fn codemode_call_rows(
+    summary: Option<&jcode_session_types::CodemodeSummary>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    use jcode_session_types::{CodemodeCallStatus, CodemodeDirection};
+    let Some(summary) = summary else {
+        return Vec::new();
+    };
+    if width == 0 {
+        return Vec::new();
+    }
+    let dim = Style::default().fg(dim_color());
+    let mut rows = Vec::new();
+    for call in &summary.calls {
+        let (icon, icon_color) = match call.status {
+            CodemodeCallStatus::Success => ("✓", rgb(100, 180, 100)),
+            CodemodeCallStatus::Error => ("✗", rgb(220, 100, 100)),
+            CodemodeCallStatus::Interrupted => ("…", rgb(214, 184, 92)),
+        };
+        let mut head = vec![
+            Span::styled(format!("    {icon} "), Style::default().fg(icon_color)),
+            Span::styled(
+                resolve_display_tool_name(&call.tool).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ];
+        if let Some(action) = call.action.as_deref().filter(|a| !a.is_empty()) {
+            head.push(Span::styled(format!(" {action}"), dim));
+        }
+        if let Some(target) = call.target.as_deref().filter(|t| !t.is_empty()) {
+            let arrow = match call.direction {
+                Some(CodemodeDirection::Outbound) => " → ",
+                None => " ",
+            };
+            head.push(Span::styled(format!("{arrow}{target}"), dim));
+        }
+        let outcome = match call.status {
+            CodemodeCallStatus::Interrupted => "interrupted".to_string(),
+            _ => crate::message::Message::format_duration(call.duration_ms),
+        };
+        let suffix = Line::from(Span::styled(format!(" · {outcome}"), dim));
+        rows.push(super::truncate_line_preserving_suffix_to_width(
+            &Line::from(head),
+            &suffix,
+            width,
+        ));
+        if let Some(reason) = call.diagnostic.as_deref().filter(|d| !d.is_empty()) {
+            rows.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(format!("╰─{reason}"), dim),
+                ]),
+                width,
+            ));
+        }
+    }
+    if summary.calls_omitted > 0 {
+        let noun = if summary.calls_omitted == 1 {
+            "call"
+        } else {
+            "calls"
+        };
+        rows.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("… {} more {noun} not shown", summary.calls_omitted),
+                    dim,
+                ),
+            ]),
+            width,
+        ));
+    }
+    rows
+}
+
 pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,

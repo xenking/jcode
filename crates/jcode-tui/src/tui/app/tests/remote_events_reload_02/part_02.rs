@@ -71,7 +71,9 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         id: "tool-1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
 
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -80,6 +82,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: Some("old title".to_string()),
         tool_data: Some(tool_call.clone()),
+        codemode: None,
     });
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -88,6 +91,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call),
+        codemode: None,
     });
     let before = app.display_messages_version;
 
@@ -133,6 +137,7 @@ fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() 
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
     });
     let before = app.display_messages_version;
 
@@ -223,6 +228,7 @@ fn test_incremental_display_message_counts_match_full_recompute() {
                     intent: None,
                     thought_signature: None,
                 }),
+                codemode: None,
             });
         }
     }
@@ -313,9 +319,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
             messages_compacted: Some(24),
             summary_chars: Some(987),
             active_messages: Some(10),
-            divider: Some(
-                "compacted · summary · 12k→4k · 1.5s\n\ntrigger: semantic".to_string(),
-            ),
+            divider: Some("compacted · summary · 12k→4k · 1.5s\n\ntrigger: semantic".to_string()),
         },
         &mut remote,
     );
@@ -365,8 +369,7 @@ fn test_handle_server_event_renders_a_shake_divider() {
             summary_chars: None,
             active_messages: None,
             divider: Some(
-                "compacted · shake · 409k→210k · 0.1s\n\ntrigger: shake_cache_expiry"
-                    .to_string(),
+                "compacted · shake · 409k→210k · 0.1s\n\ntrigger: shake_cache_expiry".to_string(),
             ),
         },
         &mut remote,
@@ -667,7 +670,10 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
         &mut remote,
     );
     assert_eq!(native_search_rows(&app), 1);
-    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+    app.handle_server_event(
+        ServerEvent::RetryRollback { attempt: 1, max: 3 },
+        &mut remote,
+    );
 
     assert_eq!(
         native_search_rows(&app),
@@ -728,6 +734,9 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
         },
         &mut remote,
     );
-    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+    app.handle_server_event(
+        ServerEvent::RetryRollback { attempt: 1, max: 3 },
+        &mut remote,
+    );
     assert_eq!(native_search_rows(&app), 1);
 }

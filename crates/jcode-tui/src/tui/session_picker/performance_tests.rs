@@ -68,6 +68,7 @@ fn cold_preview_viewport_matches_full_wide_then_narrow_layout() {
                 tool_data: msg.tool_data.clone(),
                 title: msg.title.clone(),
                 duration_secs: msg.duration_secs,
+                codemode: None,
             })
             .collect();
         for width in [1, 2, 3, 20, 80, 120] {

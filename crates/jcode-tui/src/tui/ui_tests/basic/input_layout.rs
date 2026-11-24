@@ -59,10 +59,16 @@ fn pinned_mode_chrome_is_visible_when_it_fits_and_omitted_when_it_does_not() {
     let wide = buffer_to_text(&render_full(&state, 240, 48));
     let mode_rows: Vec<_> = wide.lines().filter(|line| line.contains("mode:")).collect();
     assert_eq!(mode_rows.len(), 1, "{wide}");
-    let cells: String = mode_rows[0].chars().filter(|ch| !ch.is_whitespace()).collect();
+    let cells: String = mode_rows[0]
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
     assert!(cells.ends_with(&format!("mode:{mode}")), "{wide}");
     let narrow = buffer_to_text(&render_full(&state, 30, 48));
-    assert!(!narrow.contains("mode:"), "mode label must be omitted, not clipped or wrapped: {narrow}");
+    assert!(
+        !narrow.contains("mode:"),
+        "mode label must be omitted, not clipped or wrapped: {narrow}"
+    );
 }
 
 #[test]
@@ -321,6 +327,7 @@ fn test_wrapped_input_line_count_respects_two_digit_prompt_width() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
     }
 
@@ -455,7 +462,10 @@ fn streaming_code_blocks_have_visible_copy_shortcuts_before_turn_finishes() {
                 let target = visible_copy_target_for_key('s')
                     .unwrap_or_else(|| panic!("missing streaming copy shortcut: {frame}"));
                 assert_eq!(target.content, "printf 'hello'");
-                assert!(frame.contains(&format!("[{}⇧S]", viewport::copy_badge_alt_label())), "{frame}");
+                assert!(
+                    frame.contains(&format!("[{}⇧S]", viewport::copy_badge_alt_label())),
+                    "{frame}"
+                );
                 assert!(state.is_processing());
             }
             let preview = super::prepare::prepare_body(&state, width, true);

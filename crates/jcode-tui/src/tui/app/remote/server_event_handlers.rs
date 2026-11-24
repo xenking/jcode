@@ -7,6 +7,7 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
+    codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
 ) -> bool {
     // Read the raw output before client-side diff rendering replaces it.
     let observed_duration = remote.take_tool_duration(&id);
@@ -45,6 +46,7 @@ pub(super) fn handle_tool_done(
         duration_secs,
         title: None,
         tool_data: Some(tool_call.clone()),
+        codemode,
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
@@ -95,6 +97,7 @@ pub(super) fn handle_generated_image(
         duration_secs: None,
         title: Some("Generated image".to_string()),
         tool_data: Some(tool_call),
+        codemode: None,
     });
     app.status = ProcessingStatus::Streaming;
     true

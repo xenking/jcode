@@ -409,6 +409,7 @@ impl App {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
                         });
                     }
                     Ok(restore) => {
@@ -517,6 +518,7 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
             }
         }
@@ -708,6 +710,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
             });
             return true;
         }
@@ -718,6 +721,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
         app.session.provider_session_id = app.provider_session_id.clone();
         app.session
@@ -737,6 +741,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
         app.session.provider_session_id = app.provider_session_id.clone();
         app.session

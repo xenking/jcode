@@ -1804,6 +1804,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: rendered.tool_data,
+                codemode: None,
             });
         }
 
@@ -1885,6 +1886,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         duration_secs: None,
                         title: None,
                         tool_data: rendered.tool_data,
+                        codemode: None,
                     });
                 }
 
@@ -3310,6 +3312,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
                         });
                     }
                     Err(reason) => {
@@ -3324,6 +3327,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
                         });
                     }
                 }
@@ -3336,6 +3340,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
             }
         }
@@ -3365,6 +3370,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
         return true;
     }
@@ -3383,6 +3389,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
             }
             Err(e) => {
@@ -3393,6 +3400,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
             }
         }
@@ -3412,6 +3420,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
                 return true;
             }

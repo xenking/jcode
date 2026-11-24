@@ -8,6 +8,7 @@ fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Test
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -16,6 +17,7 @@ fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Test
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         },
     ];
     app.bump_display_messages_version();
@@ -112,7 +114,10 @@ fn test_copy_selection_over_inline_math_copies_latex_only_when_fully_selected() 
         unicode_width::UnicodeWidthStr::width(partial.as_str()),
         "Euler ".len() + 2
     );
-    assert!(!partial.contains('$') && !partial.contains('\\'), "{partial}");
+    assert!(
+        !partial.contains('$') && !partial.contains('\\'),
+        "{partial}"
+    );
     // The whole formula highlighted: copy its LaTeX source.
     assert_eq!(drag(euler_col, done_col), "Euler $e^{i\\pi_{3}} + 1 = 0$");
 }

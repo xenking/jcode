@@ -467,6 +467,12 @@ pub(crate) fn render_tool_message(
         }
     }
     lines.extend(tools_ui::codemode_preview(tc, row_width));
+    if tools_ui::canonical_tool_name(&tc.name) == "codemode" {
+        lines.extend(tools_ui::codemode_call_rows(
+            msg.codemode.as_deref(),
+            row_width,
+        ));
+    }
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
         lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
         if centered {

@@ -3976,6 +3976,7 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
@@ -3993,6 +3994,7 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
                 });
                 return;
             }
@@ -4022,6 +4024,7 @@ impl App {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
         });
         // Send expanded content (with actual pasted text) to model
         let images = self.take_pending_image_payloads();

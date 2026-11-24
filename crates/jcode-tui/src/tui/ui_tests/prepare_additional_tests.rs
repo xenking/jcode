@@ -49,6 +49,7 @@ fn test_spawn_row_is_stable_across_live_worker_updates() {
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
         anim_elapsed: 0.16,
