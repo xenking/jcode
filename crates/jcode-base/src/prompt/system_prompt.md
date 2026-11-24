@@ -17,7 +17,7 @@ Hesitate for destructive or non-reversible actions. Examples: Completing a payme
 
 ## Coding
 
-<!-- tools: bash -->Commit as you go.
+<!-- tools: edit, apply_patch, write -->Commit as you go.
 <!-- tools: swarm -->Prefer swarm coordination over branches and git worktrees unless isolation is needed.
 <!-- tools: bash -->You can't interact with interactive commands. Use non-interactive instead.
 <!-- tools: edit, apply_patch, write -->Edit files with `edit`, `replace`, `apply_patch`, or `write`, not sed, perl, or Python scripts in bash.
