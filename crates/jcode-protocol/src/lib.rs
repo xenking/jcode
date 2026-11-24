@@ -40,6 +40,8 @@ impl std::fmt::Debug for ProviderOAuthEmail {
     }
 }
 
+mod routing;
+pub use routing::*;
 mod screen;
 pub use screen::*;
 mod notifications;
@@ -989,6 +991,8 @@ impl Request {
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AskUserResponse { id, .. } => *id,
+            Request::RoutingGateAnswer { id, .. } => *id,
+            Request::RoutingIntent { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

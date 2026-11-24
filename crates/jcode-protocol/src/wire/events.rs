@@ -1345,6 +1345,36 @@ pub enum ServerEvent {
         reason: String,
     },
 
+    /// The routing policy chose the account for the turn just decided.
+    /// `pending` names an account a warm session would move to at its next
+    /// cache-cold seam, so the header chip can show the intended move.
+    #[serde(rename = "routing_decision")]
+    RoutingDecision {
+        account: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<String>,
+    },
+
+    /// The turn is held until the user answers. Reply with
+    /// `Request::RoutingGateAnswer` carrying the same `gate_id`.
+    #[serde(rename = "routing_gate")]
+    RoutingGate {
+        gate_id: String,
+        reason: String,
+        options: Vec<RoutingGateOption>,
+    },
+
+    /// A gate was answered or abandoned. Clients close the matching view.
+    #[serde(rename = "routing_gate_closed")]
+    RoutingGateClosed { gate_id: String },
+
+    /// Text answer to `Request::RoutingIntent`, ready to print.
+    #[serde(rename = "routing_status")]
+    RoutingStatus { id: u64, text: String },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

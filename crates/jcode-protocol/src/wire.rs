@@ -818,6 +818,22 @@ pub enum Request {
         response: AskResponse,
     },
 
+    /// Answer a `routing_gate` the daemon raised for the attached session.
+    #[serde(rename = "routing_gate_answer")]
+    RoutingGateAnswer {
+        id: u64,
+        gate_id: String,
+        choice: RoutingGateChoice,
+    },
+
+    /// Set or read account routing intents for the attached session.
+    /// Answered with `routing_status`.
+    #[serde(rename = "routing_intent")]
+    RoutingIntent {
+        id: u64,
+        action: RoutingIntentAction,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {

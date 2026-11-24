@@ -823,3 +823,87 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
 }
+
+#[test]
+fn routing_gate_events_and_answers_roundtrip() -> Result<()> {
+    let gate = ServerEvent::RoutingGate {
+        gate_id: "gate-1".into(),
+        reason: "claude:team reached 95%".into(),
+        options: vec![
+            RoutingGateOption::Switch {
+                account: "openai:fox".into(),
+                detail: "priority 2".into(),
+            },
+            RoutingGateOption::WaitUntil { resets_at: 1_700_000_000 },
+            RoutingGateOption::Ack { account: "claude:team".into() },
+        ],
+    };
+    let json = encode_event(&gate);
+    assert!(json.contains("\"type\":\"routing_gate\""));
+    assert!(json.contains("\"kind\":\"wait_until\""));
+    let ServerEvent::RoutingGate { gate_id, options, .. } = parse_event_json(json.trim())? else {
+        return Err(anyhow!("expected RoutingGate"));
+    };
+    assert_eq!(gate_id, "gate-1");
+    assert_eq!(options.len(), 3);
+
+    let decision = ServerEvent::RoutingDecision {
+        account: "claude:team".into(),
+        reason: "priority 1".into(),
+        warnings: Vec::new(),
+        pending: None,
+    };
+    let json = encode_event(&decision);
+    assert!(!json.contains("warnings") && !json.contains("pending"), "empty extras stay off the wire: {json}");
+    assert!(matches!(
+        parse_event_json(json.trim())?,
+        ServerEvent::RoutingDecision { pending: None, .. }
+    ));
+
+    for choice in [
+        RoutingGateChoice::Switch { account: "openai:fox".into() },
+        RoutingGateChoice::Wait,
+        RoutingGateChoice::Ack { minutes: 30 },
+        RoutingGateChoice::Cancel,
+    ] {
+        let req = Request::RoutingGateAnswer { id: 3, gate_id: "gate-1".into(), choice: choice.clone() };
+        let json = serde_json::to_string(&req)?;
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 3);
+        let Request::RoutingGateAnswer { choice: back, .. } = decoded else {
+            return Err(anyhow!("expected RoutingGateAnswer"));
+        };
+        assert_eq!(back, choice);
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_intent_request_roundtrips_every_action() -> Result<()> {
+    let actions = vec![
+        RoutingIntentAction::Status,
+        RoutingIntentAction::Pin { account: Some("claude:team".into()) },
+        RoutingIntentAction::Pin { account: None },
+        RoutingIntentAction::Switch { account: Some("openai:fox".into()) },
+        RoutingIntentAction::Hold { account: Some("claude:team".into()), minutes: Some(90) },
+        RoutingIntentAction::Ack { account: "claude:team".into(), minutes: None },
+        RoutingIntentAction::Paid { mode: "2h".into() },
+        RoutingIntentAction::Unstick,
+    ];
+    for action in actions {
+        let json = serde_json::to_string(&Request::RoutingIntent { id: 8, action: action.clone() })?;
+        assert!(json.contains("\"type\":\"routing_intent\""));
+        let Request::RoutingIntent { id, action: back } = parse_request_json(&json)? else {
+            return Err(anyhow!("expected RoutingIntent"));
+        };
+        assert_eq!(id, 8);
+        assert_eq!(back, action);
+    }
+    // Hand-written clients may leave the optional fields out.
+    let decoded = parse_request_json(r#"{"type":"routing_intent","id":1,"action":{"action":"hold","account":"a"}}"#)?;
+    assert!(matches!(
+        decoded,
+        Request::RoutingIntent { action: RoutingIntentAction::Hold { minutes: None, .. }, .. }
+    ));
+    Ok(())
+}

@@ -3923,6 +3923,14 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::RoutingGateAnswer { id, gate_id, choice } => {
+                super::routing_requests::handle_gate_answer(id, gate_id, choice, &client_event_tx);
+            }
+
+            Request::RoutingIntent { id, action } => {
+                super::routing_requests::handle_intent(id, action, &client_session_id, &client_event_tx);
+            }
+
             // These are handled via channels, not direct requests from TUI
             Request::ClientDebugCommand { id, .. } => {
                 handle_client_debug_command(id, &client_event_tx).await;
