@@ -240,7 +240,11 @@ pub fn decide(
         Some(best) => {
             let reason = match request.current {
                 Some(current) if current != &best.account.id => {
-                    format!("{current} outranked by {} ({})", best.account.id, tier_label(best, request))
+                    format!(
+                        "{current} outranked by {} ({})",
+                        best.account.id,
+                        tier_label(best, request)
+                    )
                 }
                 _ => tier_label(best, request),
             };
@@ -310,7 +314,10 @@ fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
     match standing.tier {
         0 => "draining before reset".to_string(),
         2 => "behind the month line".to_string(),
-        _ => format!("priority {}", standing.account.priority.for_class(request.model_class)),
+        _ => format!(
+            "priority {}",
+            standing.account.priority.for_class(request.model_class)
+        ),
     }
 }
 
@@ -453,7 +460,9 @@ fn stand<'p>(
             state
                 .readings
                 .iter()
-                .filter(|r| r.model_class.is_none() || r.model_class.as_deref() == request.model_class)
+                .filter(|r| {
+                    r.model_class.is_none() || r.model_class.as_deref() == request.model_class
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -474,7 +483,8 @@ fn stand<'p>(
         readings.iter().any(|r| {
             r.unit == Unit::Percent
                 && r.window == Window::days(7)
-                && r.resets_at.is_some_and(|at| resets_within(at, now, horizon_h))
+                && r.resets_at
+                    .is_some_and(|at| resets_within(at, now, horizon_h))
                 && drains_before_reset(r, now, burn_rate, account.drain_limit_pct)
         })
     });
@@ -525,7 +535,11 @@ fn stand<'p>(
                 };
                 // Hysteresis only shapes the default ceiling: a non-current
                 // account needs more room than the current one needs to stay.
-                let hysteresis = if is_current { 0.0 } else { policy.hysteresis_pct };
+                let hysteresis = if is_current {
+                    0.0
+                } else {
+                    policy.hysteresis_pct
+                };
                 let limit = (base - subagent_reserve - hysteresis).max(0.0);
                 (reading.used >= limit, format!("{limit:.0}%"))
             }
@@ -589,12 +603,17 @@ fn stand<'p>(
     }
 
     if acked && hits.iter().all(|(action, _)| *action != OnLimit::Block) {
-        warnings.extend(hits.drain(..).map(|(_, line)| format!("{line} (acknowledged)")));
+        warnings.extend(
+            hits.drain(..)
+                .map(|(_, line)| format!("{line} (acknowledged)")),
+        );
     }
     let spent = hits.iter().map(|(action, _)| *action).max().map(|action| {
         (
             action,
-            hits.iter().map(|(_, line)| line.clone()).collect::<Vec<_>>(),
+            hits.iter()
+                .map(|(_, line)| line.clone())
+                .collect::<Vec<_>>(),
         )
     });
     let load = readings

@@ -48,7 +48,10 @@ fn allow_turns_off_when_it_expires_and_prune_drops_stale_entries() {
     state.set_pin("old", Some(&id("claude:a")), NOW - 31 * 86_400);
     state.set_switch("cleared", None, NOW);
 
-    assert_eq!(state.intents(None, None, None, NOW).paid, PaidIntent::AllowUntil(NOW + 60));
+    assert_eq!(
+        state.intents(None, None, None, NOW).paid,
+        PaidIntent::AllowUntil(NOW + 60)
+    );
     state.prune(NOW + 61);
     assert_eq!(state.paid, Some(PaidEntry::Off));
     assert!(state.hold.is_none() && state.acks.is_empty());
@@ -74,12 +77,20 @@ fn state_file_round_trips() {
     state.set_pin("s", Some(&id("opencode-go:second")), NOW);
     let text = toml::to_string(&state).unwrap();
     assert_eq!(toml::from_str::<RoutingState>(&text).unwrap(), state);
-    assert_eq!(toml::from_str::<RoutingState>("").unwrap(), RoutingState::default());
+    assert_eq!(
+        toml::from_str::<RoutingState>("").unwrap(),
+        RoutingState::default()
+    );
 }
 
 #[test]
 fn durations_parse() {
-    for (raw, secs) in [("30m", 1_800), ("2h", 7_200), ("1h30m", 5_400), ("1d", 86_400)] {
+    for (raw, secs) in [
+        ("30m", 1_800),
+        ("2h", 7_200),
+        ("1h30m", 5_400),
+        ("1d", 86_400),
+    ] {
         assert_eq!(parse_duration_secs(raw), Some(secs), "{raw}");
     }
     for bad in ["", "0m", "h", "5", "5x", "1h-2m"] {

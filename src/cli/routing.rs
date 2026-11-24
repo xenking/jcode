@@ -34,16 +34,25 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
                 return Ok(());
             }
             let account = known_account(&account)?;
-            let until = now + duration.as_deref().map_or(Ok(DEFAULT_HOLD_SECS as i64), secs)?;
+            let until = now
+                + duration
+                    .as_deref()
+                    .map_or(Ok(DEFAULT_HOLD_SECS as i64), secs)?;
             crate::routing_state::update(now, |state| state.set_hold(Some((&account, until))))?;
             println!("holding {account} for {}", until_text(until, now));
             Ok(())
         }
         RoutingCommand::Ack { account, duration } => {
             let account = known_account(&account)?;
-            let until = now + duration.as_deref().map_or(Ok(DEFAULT_ACK_SECS as i64), secs)?;
+            let until = now
+                + duration
+                    .as_deref()
+                    .map_or(Ok(DEFAULT_ACK_SECS as i64), secs)?;
             crate::routing_state::update(now, |state| state.ack(&account, until))?;
-            println!("spending past ask limits on {account} for {}", until_text(until, now));
+            println!(
+                "spending past ask limits on {account} for {}",
+                until_text(until, now)
+            );
             Ok(())
         }
         RoutingCommand::Unstick => {
@@ -64,7 +73,12 @@ fn secs(raw: &str) -> Result<i64> {
 fn known_account(raw: &str) -> Result<AccountId> {
     let config = crate::config::config();
     let id = AccountId::parse(raw).with_context(|| format!("`{raw}` is not an account id"))?;
-    if !config.routing.accounts.iter().any(|account| account.id.trim() == id.as_str()) {
+    if !config
+        .routing
+        .accounts
+        .iter()
+        .any(|account| account.id.trim() == id.as_str())
+    {
         bail!("`{id}` is not in [[routing.accounts]]");
     }
     Ok(id)
@@ -76,7 +90,10 @@ fn status(json: bool, now: i64) -> Result<()> {
     let mut state = crate::routing_state::load();
     state.prune(now);
     if json {
-        println!("{}", serde_json::to_string_pretty(&status_json(&config.routing.mode, &policy, &state, now))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status_json(&config.routing.mode, &policy, &state, now))?
+        );
         return Ok(());
     }
     let mode = match config.routing.mode {
@@ -100,7 +117,10 @@ fn status(json: bool, now: i64) -> Result<()> {
         jcode_routing_policy::config::PaidMode::Off => "off",
     };
     match state.paid {
-        Some(entry) => println!("paid: {} (config {default_paid})", describe_paid(Some(entry), now)),
+        Some(entry) => println!(
+            "paid: {} (config {default_paid})",
+            describe_paid(Some(entry), now)
+        ),
         None => println!("paid: {default_paid}"),
     }
     if let Some(hold) = &state.hold {
@@ -187,7 +207,10 @@ fn priority_text(priority: &Priority) -> String {
     match priority {
         Priority::Flat(priority) => priority.to_string(),
         Priority::ByClass { classes, default } => {
-            let mut parts: Vec<String> = classes.iter().map(|(class, p)| format!("{class}={p}")).collect();
+            let mut parts: Vec<String> = classes
+                .iter()
+                .map(|(class, p)| format!("{class}={p}"))
+                .collect();
             if let Some(default) = default {
                 parts.push(format!("default={default}"));
             }

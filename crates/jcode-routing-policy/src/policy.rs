@@ -101,7 +101,9 @@ impl Window {
     }
 
     pub const fn hours(hours: u64) -> Self {
-        Self::Span { secs: hours * 3_600 }
+        Self::Span {
+            secs: hours * 3_600,
+        }
     }
 
     pub const fn days(days: u64) -> Self {

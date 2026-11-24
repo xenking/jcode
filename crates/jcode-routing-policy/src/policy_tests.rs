@@ -56,7 +56,10 @@ fn full_example_validates() {
     )
     .expect("valid");
     assert_eq!(policy.accounts.len(), 3);
-    assert!(policy.egress["corp"].required, "egress fails closed by default");
+    assert!(
+        policy.egress["corp"].required,
+        "egress fails closed by default"
+    );
     let team = &policy.accounts[0];
     assert_eq!(team.id.provider(), "claude");
     assert_eq!(team.id.label(), Some("team"));
@@ -64,7 +67,10 @@ fn full_example_validates() {
     assert_eq!(team.priority.for_class(Some("sonnet")), 2);
     assert!(team.serves("claude-opus-5-5") && !team.serves("gpt-6.2-sol"));
     assert_eq!(policy.budgets[0].window, Window::CalendarMonth);
-    assert_eq!(policy.budgets[0].scope, Scope::Provider("huggingface".into()));
+    assert_eq!(
+        policy.budgets[0].scope,
+        Scope::Provider("huggingface".into())
+    );
 }
 
 #[test]
@@ -139,7 +145,10 @@ fn budget_must_name_a_known_account() {
 #[test]
 fn windows_parse_and_print() {
     for (raw, shown) in [("5h", "5h"), ("7d", "1w"), ("30m", "30m"), ("2w", "2w")] {
-        assert_eq!(Window::parse(raw).map(|w| w.to_string()).as_deref(), Some(shown));
+        assert_eq!(
+            Window::parse(raw).map(|w| w.to_string()).as_deref(),
+            Some(shown)
+        );
     }
     assert_eq!(Window::parse("calendar-month"), Some(Window::CalendarMonth));
     for bad in ["", "h", "0h", "5x", "-1d"] {
