@@ -631,34 +631,3 @@ async fn a_single_account_has_no_alternative() {
     };
     assert!(!outcome.alternative);
 }
-
-#[tokio::test]
-async fn a_limit_rests_the_account_briefly_so_the_turn_moves_and_it_returns() {
-    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
-    env.set_used("claude:a", 10.0);
-    env.set_used("claude:b", 10.0);
-    let service = RoutingService::new(env.clone());
-
-    // One rate limit is enough: it is not the three-strikes eviction of a
-    // broken credential, and it does not last as long.
-    assert_eq!(
-        service.record_limit(&account("claude:a")),
-        Availability::Evicted { until: NOW + 300 }
-    );
-    let Plan::Move(outcome) = service
-        .plan(&input("claude:a", Seam::Cold, Role::Interactive))
-        .await
-    else {
-        panic!("the limited account must hand the turn over");
-    };
-    assert_eq!(outcome.account, account("claude:b"));
-
-    env.now.store(NOW + 301, Ordering::SeqCst);
-    let Plan::Move(outcome) = service
-        .plan(&input("claude:b", Seam::Cold, Role::Interactive))
-        .await
-    else {
-        panic!("the rested account is preferred again");
-    };
-    assert_eq!(outcome.account, account("claude:a"));
-}

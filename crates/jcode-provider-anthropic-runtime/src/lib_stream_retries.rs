@@ -387,12 +387,17 @@ pub(super) async fn run_stream_with_retries(
                     return;
                 }
 
-                // A routed session with another eligible account hands any
-                // account limit to routing at once, burst throttles included.
+                // A routed session with another eligible account hands a spent
+                // allowance (or rejected credential) to routing at once. A
+                // short throttle is left to the retry below: same account, warm
+                // prompt cache.
                 if retry_settings.fail_fast_limits
                     && !saw_output
                     && !response_accepted
-                    && jcode_provider_core::is_account_limit_error(&error_str)
+                    && jcode_provider_core::is_exhausted_account_limit(
+                        &error_str,
+                        jcode_provider_core::retry_after::retry_after_from_error(&e),
+                    )
                 {
                     let _ = tx.send(Err(e)).await;
                     return;

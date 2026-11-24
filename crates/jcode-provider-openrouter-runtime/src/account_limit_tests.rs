@@ -28,11 +28,19 @@ fn serve(script: &'static [u16]) -> (String, Arc<AtomicUsize>) {
             let (status, content_type, extra, body) = if request.starts_with("post ") {
                 let seen = counter.fetch_add(1, Ordering::SeqCst);
                 match script.get(seen).copied().unwrap_or(200) {
+                    // A throttle: the wait is short, the allowance is intact.
                     429 => (
                         "429 Too Many Requests",
                         "application/json",
                         "Retry-After: 0\r\n",
                         r#"{"error":{"message":"Too many requests, rate limit exceeded","code":"rate_limit_exceeded"}}"#,
+                    ),
+                    // A spent window: waiting on this account will not help.
+                    430 => (
+                        "429 Too Many Requests",
+                        "application/json",
+                        "Retry-After: 0\r\n",
+                        r#"{"error":{"message":"Weekly rate limit exceeded, resets at 2099-01-01T00:00:00Z","code":"rate_limit_exceeded"}}"#,
                     ),
                     503 => (
                         "503 Service Unavailable",
@@ -91,22 +99,33 @@ fn run(provider: &OpenRouterProvider, fail_fast: bool) -> anyhow::Result<()> {
 }
 
 #[test]
-fn an_account_limit_reaches_routing_on_the_first_request() {
-    let (base, posts) = serve(&[429; 16]);
+fn a_spent_window_reaches_routing_on_the_first_request() {
+    let (base, posts) = serve(&[430; 16]);
     let (_sandbox, provider) = provider(&base);
     let error = run(&provider, true).unwrap_err();
     assert!(format!("{error:#}").contains("429"), "{error:#}");
     assert_eq!(
         posts.load(Ordering::SeqCst),
         1,
-        "the limited account must not be retried"
+        "the spent account must not be retried"
     );
     jcode_base::config::invalidate_config_cache();
 }
 
 #[test]
-fn without_routing_a_rate_limit_is_still_retried() {
+fn a_throttle_is_retried_on_the_same_account_even_under_routing() {
+    // A short 429 clears in place. Leaving the account would throw away a
+    // warm prompt cache for nothing.
     let (base, posts) = serve(&[429, 429]);
+    let (_sandbox, provider) = provider(&base);
+    run(&provider, true).expect("the third attempt is served by the same account");
+    assert_eq!(posts.load(Ordering::SeqCst), 3);
+    jcode_base::config::invalidate_config_cache();
+}
+
+#[test]
+fn without_routing_a_spent_window_is_still_retried() {
+    let (base, posts) = serve(&[430, 430]);
     let (_sandbox, provider) = provider(&base);
     run(&provider, false).expect("the third attempt is served");
     assert_eq!(posts.load(Ordering::SeqCst), 3);

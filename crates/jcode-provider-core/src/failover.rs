@@ -181,11 +181,31 @@ pub fn usage_limit_details(message: &str) -> Option<UsageLimitDetails> {
     Some(UsageLimitDetails { window, reset })
 }
 
-/// Whether `message` reports an account limit: a rate limit, usage window or
-/// quota exhaustion, billing block. Retrying the same account cannot be
-/// expected to help soon, which is what routing relies on to fail fast.
-pub fn is_account_limit_error(message: &str) -> bool {
-    usage_limit_details(message).is_some()
+/// A limit that clears within this long is a throttle (per-minute or
+/// concurrency), not an exhausted allowance. The provider's own retry on the
+/// same account serves it and keeps the prompt cache.
+pub const TRANSIENT_LIMIT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether `message` reports an account that cannot serve for a while, so a
+/// retry on the same account is wasted: an exhausted usage allowance or
+/// window (weekly, daily, hourly, 5h), a reset further out than
+/// [`TRANSIENT_LIMIT_MAX_WAIT`] (by `retry_after` or a stated reset time), or
+/// a rejected credential. A plain rate limit or 429 that asks for a short wait
+/// is not exhausted: the same account serves it after the provider's retry.
+pub fn is_exhausted_account_limit(message: &str, retry_after: Option<std::time::Duration>) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if is_definitive_usage_exhaustion(message) || is_auth_or_access_failure(&lower) {
+        return true;
+    }
+    let Some(details) = usage_limit_details(message) else {
+        return false;
+    };
+    retry_after.is_some_and(|wait| wait > TRANSIENT_LIMIT_MAX_WAIT)
+        || details.window != "unknown"
+        || details.reset.is_some()
+        || ["5h", "5-hour", "5 hour", "five hour", "five-hour"]
+            .iter()
+            .any(|needle| lower.contains(needle))
 }
 
 fn is_auth_or_access_failure(lower: &str) -> bool {
@@ -449,5 +469,48 @@ mod tests {
             classify_failover_error_message("model version 4130 failed"),
             FailoverDecision::None
         );
+    }
+}
+
+#[cfg(test)]
+mod exhausted_limit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn throttles_that_clear_shortly_are_not_exhausted() {
+        for message in [
+            "429 Too Many Requests: rate limit exceeded",
+            "Too many requests, please slow down",
+            "429: concurrency limit reached, retry after 5 seconds",
+        ] {
+            assert!(
+                !is_exhausted_account_limit(message, Some(Duration::from_secs(5))),
+                "{message}"
+            );
+            assert!(!is_exhausted_account_limit(message, None), "{message}");
+        }
+    }
+
+    #[test]
+    fn spent_allowances_and_far_resets_are_exhausted() {
+        for message in [
+            "HTTP 429: usage_limit_reached",
+            "Weekly rate limit exceeded",
+            "429: 5h window spent, try later",
+            "Rate limit: resets at 2099-01-01T00:00:00Z",
+            "insufficient_quota: you exceeded your current quota",
+            "HTTP 401 invalid token",
+        ] {
+            assert!(is_exhausted_account_limit(message, None), "{message}");
+        }
+        assert!(is_exhausted_account_limit(
+            "429 too many requests",
+            Some(Duration::from_secs(3_600))
+        ));
+        assert!(!is_exhausted_account_limit(
+            "429 too many requests",
+            Some(TRANSIENT_LIMIT_MAX_WAIT)
+        ));
     }
 }

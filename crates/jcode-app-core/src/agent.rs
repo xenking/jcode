@@ -362,9 +362,10 @@ pub struct Agent {
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
-    /// The routing service has another account for this session, so a rate
-    /// or usage limit must reach it on the first occurrence, not after the
-    /// provider's own same-account retries.
+    /// The routing service has another account for this session, so a spent
+    /// allowance or rejected credential must reach it on the first occurrence,
+    /// not after the provider's own same-account retries. A throttle that
+    /// clears shortly is still retried in place, which keeps the prompt cache.
     routing_fail_fast_limits: bool,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,

@@ -171,10 +171,15 @@ pub(super) async fn run_stream_with_retries(
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
                 let server_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
-                // Routing has another account for this turn: an account limit
-                // goes to it now. Retrying the limited key only delays that.
+                // Routing has another account for this turn and this one is
+                // spent (or rejected): hand it over now. A throttle that clears
+                // shortly is not matched, so the retry below keeps the account
+                // and its prompt cache.
                 if jcode_provider_core::account_limit_fail_fast()
-                    && jcode_provider_core::is_account_limit_error(&format!("{e:#}"))
+                    && jcode_provider_core::is_exhausted_account_limit(
+                        &format!("{e:#}"),
+                        server_delay,
+                    )
                 {
                     let _ = tx.send(Err(e)).await;
                     return;

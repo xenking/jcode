@@ -260,17 +260,12 @@ pub(super) async fn on_failure(
         return None;
     }
     if let Some(current) = &input.current {
-        let definitive = jcode_provider_core::failover::is_definitive_usage_exhaustion(message);
-        // The turn was handed over at the first limit because another account
-        // can serve it: rest this one, so the decision below moves on.
-        if !definitive
-            && agent.routing_fail_fast_limits()
-            && jcode_provider_core::is_account_limit_error(message)
-        {
-            service.record_limit(current);
-        } else {
-            service.record_failure(current, definitive);
-        }
+        // A spent allowance or rejected credential takes the account out for
+        // the eviction window at once. A throttle that reached here after the
+        // provider's own retries counts toward `evict_after` like any failure.
+        let definitive = jcode_provider_core::failover::is_definitive_usage_exhaustion(message)
+            || jcode_provider_core::is_exhausted_account_limit(message, None);
+        service.record_failure(current, definitive);
     }
     match service.route(&input, &EventSink(event_tx)).await {
         Ok(Plan::Move(outcome)) => {

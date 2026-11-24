@@ -814,7 +814,12 @@ impl Provider for OpenAIProvider {
                             let error_str = format!("{error:#}").to_lowercase();
                             if is_retryable_error(&error_str)
                                 && !(fail_fast_limits
-                                    && jcode_provider_core::is_account_limit_error(&error_str))
+                                    && jcode_provider_core::is_exhausted_account_limit(
+                                        &error_str,
+                                        jcode_provider_core::retry_after::retry_after_from_error(
+                                            &error,
+                                        ),
+                                    ))
                                 && attempt + 1 < MAX_RETRIES
                             {
                                 if saw_output {
