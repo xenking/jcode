@@ -701,6 +701,14 @@ pub struct Config {
     /// api_key_env = "MY_GATEWAY_API_KEY"
     pub providers: BTreeMap<String, NamedProviderConfig>,
 
+    /// Account routing policy: priorities, limits and budgets.
+    #[serde(skip_serializing_if = "jcode_routing_policy::config::RoutingConfig::is_default")]
+    pub routing: jcode_routing_policy::config::RoutingConfig,
+
+    /// Named egress proxies referenced by `[[routing.accounts]] egress`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress: BTreeMap<String, jcode_routing_policy::config::EgressConfig>,
+
     /// Agent-specific model defaults
     pub agents: AgentsConfig,
 

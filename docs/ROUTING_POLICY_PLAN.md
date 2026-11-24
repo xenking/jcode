@@ -51,7 +51,6 @@ priority = { fable = 1, default = 2 }
 models = ["claude-*"]
 egress = "corp"
 on_limit = "switch"             # switch | ask | block
-drain_before_reset_h = 24
 
 [[routing.accounts]]
 id = "opencode-go:second"
@@ -62,22 +61,27 @@ priority = 3
 id = "huggingface"
 kind = "metered"
 priority = 5
-key_command = ["security", "find-generic-password", "-s", "jcode-huggingface", "-w"]
 
 [[routing.budgets]]
-scope = "huggingface"           # account id, provider:*, or model glob
+name = "hf-month"               # stable; ledger usage is recorded under it
+provider = "huggingface"        # exactly one of account, provider, model (glob)
 meter = "ledger"                # provider (live meter) | ledger (local priced usage)
-window = "calendar-month"       # 5h | 7d | calendar-month | rolling:<dur>
+window = "calendar-month"       # 30m | 5h | 7d | 2w | calendar-month
 unit = "usd"                    # percent | usd | credits | tokens
 warn = 90
 limit = 100
-action = "ask"                  # ask | block | audit
-pacing = "none"                 # none | month-line
+action = "ask"                  # audit | switch | ask | block
 ```
 
-Parse-time validation rejects illegal combinations: `pacing = "month-line"` needs
-`unit` in `usd | credits`, `meter = "provider"` needs a provider that reports that
-unit, `egress` must name a defined proxy.
+Parse-time validation reports every problem at once and never breaks loading the
+rest of the config: unknown egress or account, duplicate ids or budget names, a
+budget with zero or several scopes, a ledger budget in percent or credits, percent
+above 100, `warn` above `limit`.
+
+The effective action at a limit is the strictest of the account's `on_limit` and
+the budget's `action`. `ack` clears `ask` limits for a while, never `block`.
+Phase 6 adds `drain_before_reset_h`, `pacing = "month-line"`, hysteresis and
+eviction settings. Phase 3 adds `key_command`.
 
 ## Engine
 
@@ -104,7 +108,7 @@ accounts are skipped.
 
 Each phase ends in a check that runs on fixtures.
 
-1. **Types and engine.** Config types with parse-time validation, `jcode-routing-policy` with table tests. Check: `justrust test -p jcode-routing-policy`.
+1. **Types and engine.** Done: `crates/jcode-routing-policy` (raw config, validated `Policy`, pure `decide`), `[routing]` and `[egress.*]` on `Config`. Check: `justrust test -p jcode-routing-policy`.
 2. **Egress.** Named proxies, one shared client per egress, assignment per provider and account, fail-closed, probe. Check: a loopback CONNECT proxy fixture sees only the assigned account's requests, and a required account is skipped while the proxy is down.
 3. **Several credentials per API-key provider.** Labelled keys for OpenCode Go, Hugging Face and named providers, `key_command`, per-model cost and compat overrides. Check: two OpenCode Go fixture keys with different `/usage` payloads both appear in `/account` and `/usage`.
 4. **Meters, ledger, budgets.** One meter view over provider windows (Claude, OpenAI, OpenCode, Codex credits, Cursor pool) and the local priced ledger. Check: fixture spend crosses `warn`, then `limit`, and the verdict changes.

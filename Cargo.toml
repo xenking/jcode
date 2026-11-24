@@ -72,6 +72,7 @@ members = [
     "crates/jcode-tui-markdown",
     "crates/jcode-tui-messages",
     "crates/jcode-usage-types",
+    "crates/jcode-routing-policy",
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",

@@ -1796,5 +1796,44 @@ fn browser_handoff_defaults_off_and_roundtrips() {
     }
 }
 
+#[test]
+fn routing_and_egress_sections_roundtrip_and_stay_out_of_default_saves() {
+    let empty = toml::to_string(&Config::default()).unwrap();
+    assert!(!empty.contains("[routing"), "{empty}");
+    assert!(!empty.contains("[egress"), "{empty}");
+
+    let config: Config = toml::from_str(
+        r#"
+        [egress.corp]
+        url = "http://127.0.0.1:8899"
+
+        [routing]
+        mode = "shadow"
+
+        [[routing.accounts]]
+        id = "claude:team"
+        priority = { fable = 1, default = 2 }
+        egress = "corp"
+        "#,
+    )
+    .unwrap();
+    let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(restored.routing, config.routing);
+    assert_eq!(restored.egress, config.egress);
+    let policy =
+        jcode_routing_policy::Policy::from_config(&restored.routing, &restored.egress).unwrap();
+    assert_eq!(policy.accounts[0].egress.as_deref(), Some("corp"));
+}
+
+#[test]
+fn invalid_routing_section_does_not_break_config_loading() {
+    let config: Config = toml::from_str(
+        "[provider]\ndefault_provider = \"claude\"\n[[routing.accounts]]\nid = \"claude:a\"\negress = \"missing\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.provider.default_provider.as_deref(), Some("claude"));
+    assert!(jcode_routing_policy::Policy::from_config(&config.routing, &config.egress).is_err());
+}
+
 #[path = "config_tests_additional_tests.rs"]
 mod additional_hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values;

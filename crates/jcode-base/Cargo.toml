@@ -88,6 +88,7 @@ jcode-terminal-launch = { path = "../jcode-terminal-launch" }
 jcode-terminal-image = { path = "../jcode-terminal-image" }
 jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
+jcode-routing-policy = { path = "../jcode-routing-policy" }
 
 # NOTE: microphone capture and transcription live in `jcode-voice`, a
 # client-only crate. The shared runtime never opens a microphone.
