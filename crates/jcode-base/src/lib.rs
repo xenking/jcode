@@ -35,6 +35,7 @@ pub mod cloud_environment;
 pub mod compaction;
 pub mod companion_client;
 pub mod config;
+pub mod egress;
 pub mod console;
 pub mod copilot_usage;
 pub mod detected_emails;
