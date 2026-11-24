@@ -973,6 +973,10 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        // A standard Claude login restores access, it is not consent to move
+        // an existing session (and its next prompt) to another model.
+        let require_model_confirmation =
+            !prefer_strongest && activation.provider_id.as_deref() == Some("claude");
         super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
@@ -1012,12 +1016,15 @@ pub(super) async fn handle_notify_auth_changed(
         // configured credentials, but the automatic post-login model switch is
         // session-local. A user logging Groq/Cerebras into one workspace should
         // not silently move unrelated sessions off their chosen provider/model.
-        if auth_refresh_is_current(&session_id, auth_refresh_generation) {
+        if !require_model_confirmation
+            && auth_refresh_is_current(&session_id, auth_refresh_generation)
+        {
             apply_auth_runtime_model_to_agent(
                 &activation,
                 activation.activated_model.as_deref(),
                 &agent_clone,
                 None,
+                &client_event_tx_clone,
             )
             .await;
         }
@@ -1105,6 +1112,7 @@ pub(super) async fn handle_notify_auth_changed(
             let agent_guard = agent_clone.lock().await;
             agent_guard.user_selected_provider_model_after(auth_selection_generation)
         };
+        let mut restored_model = None;
         if manual_model_selected_during_auth_refresh {
             crate::logging::auth_event(
                 "auth_changed_auto_model_skipped_after_manual_switch",
@@ -1124,6 +1132,7 @@ pub(super) async fn handle_notify_auth_changed(
                         &route,
                         &agent_clone,
                         Some(auth_selection_generation),
+                        &client_event_tx_clone,
                     )
                     .await;
                 }
@@ -1135,13 +1144,18 @@ pub(super) async fn handle_notify_auth_changed(
                     &latest_snapshot.model_routes,
                 )
             {
-                apply_auth_runtime_model_to_agent(
-                    &activation,
-                    Some(&model_to_select),
-                    &agent_clone,
-                    Some(auth_selection_generation),
-                )
-                .await;
+                if require_model_confirmation {
+                    restored_model = Some(model_to_select);
+                } else {
+                    apply_auth_runtime_model_to_agent(
+                        &activation,
+                        Some(&model_to_select),
+                        &agent_clone,
+                        Some(auth_selection_generation),
+                        &client_event_tx_clone,
+                    )
+                    .await;
+                }
             }
             latest_snapshot = available_models_snapshot(&agent_clone).await;
             let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
@@ -1160,8 +1174,10 @@ pub(super) async fn handle_notify_auth_changed(
             latest_snapshot.provider_model.as_deref(),
             &latest_snapshot.model_routes,
         );
-        let catalog_warning = catalog_invariants.warning_message();
-        let catalog_message = format_auth_catalog_refresh_complete(
+        let catalog_warning = catalog_invariants.warning_message().filter(|_| {
+            !require_model_confirmation || catalog_invariants.selectable_provider_routes == 0
+        });
+        let mut catalog_message = format_auth_catalog_refresh_complete(
             activation
                 .provider_label
                 .as_deref()
@@ -1170,6 +1186,11 @@ pub(super) async fn handle_notify_auth_changed(
             &summary,
             catalog_warning.is_some(),
         );
+        if let Some(model) = restored_model {
+            catalog_message.push_str(&format!(
+                "\nClaude model `{model}` is available. Use `/model` to switch."
+            ));
+        }
         if let Some(warning) = catalog_warning.as_deref() {
             crate::logging::warn(&format!("Auth catalog invariant warning: {warning}"));
         }

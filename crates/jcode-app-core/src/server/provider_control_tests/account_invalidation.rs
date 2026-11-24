@@ -112,6 +112,71 @@ async fn account_switch_clears_only_selected_login_failure_even_when_agent_is_bu
 }
 
 #[tokio::test]
+async fn claude_login_restores_opus_in_catalog_without_switching_the_session() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let fixture = AuthChangeMockProvider::new();
+    *fixture.state.selected_model.write().unwrap() = Some("gpt-6.1-sol".into());
+    *fixture.state.routes_override.write().unwrap() = Some(vec![
+        crate::provider::build_anthropic_oauth_route("claude-opus-5-5", true, ""),
+        crate::provider::build_openai_oauth_route("gpt-6.1-sol", true, ""),
+    ]);
+    let provider: Arc<dyn Provider> = Arc::new(fixture);
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    handle_notify_auth_changed(
+        73,
+        Some("claude".to_string()),
+        None,
+        false,
+        &provider,
+        &provider,
+        &sessions,
+        &session_id,
+        &agent,
+        &tx,
+    )
+    .await;
+    let notice = recv_final_catalog_notification(&mut rx).await;
+    assert_eq!(agent.lock().await.provider_model(), "gpt-6.1-sol");
+    assert!(notice.contains("`claude-opus-5-5`"));
+    assert!(notice.contains("`/model`"));
+    let ServerEvent::AvailableModelsUpdated {
+        available_model_routes,
+        ..
+    } = available_models_updated_event(&agent).await
+    else {
+        panic!("expected catalog snapshot");
+    };
+    let opus = available_model_routes
+        .iter()
+        .find(|route| route.model == "claude-opus-5-5" && route.available)
+        .expect("renewed Claude login exposes Opus in the picker");
+    handle_set_route(
+        74,
+        RouteSelection::from_model_route(opus),
+        false,
+        &agent,
+        &tx,
+    )
+    .await;
+    assert_eq!(agent.lock().await.provider_model(), "claude-opus-5-5");
+    assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+        event,
+        ServerEvent::ModelChanged { id: 74, model, error: None, reasoning_effort: Some(effort), .. }
+            if model == "claude-opus-5-5" && effort == "xhigh"
+    )));
+}
+
+#[tokio::test]
 async fn notify_auth_changed_clears_renewed_claude_login_failure() {
     let _guard = EnvGuard::save(&[
         "JCODE_RUNTIME_PROVIDER",

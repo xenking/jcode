@@ -298,6 +298,14 @@ impl Provider for AuthChangeMockProvider {
         }
     }
 
+    fn reasoning_effort(&self) -> Option<String> {
+        match self.model().as_str() {
+            "claude-opus-5-5" => Some("xhigh".into()),
+            "gpt-5.6-sol" => Some("high".into()),
+            _ => None,
+        }
+    }
+
     fn available_models_display(&self) -> Vec<String> {
         if let Some(routes) = self.state.routes_override.read().unwrap().as_ref() {
             return routes.iter().map(|route| route.model.clone()).collect();
@@ -1108,8 +1116,33 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     )
     .await;
 
-    recv_final_catalog_notification(&mut client_event_rx).await;
-
+    let mut saw_identity = false;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(event) = client_event_rx.recv().await {
+            match event {
+                ServerEvent::ModelChanged {
+                    model,
+                    reasoning_effort,
+                    error: None,
+                    ..
+                } => {
+                    assert_eq!(model, "gpt-5.6-sol");
+                    assert_eq!(reasoning_effort.as_deref(), Some("high"));
+                    saw_identity = true;
+                }
+                ServerEvent::Notification { message, .. } if message.contains("Model ready:") => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        saw_identity,
+        "auth-driven switches must publish model identity and effort"
+    );
     assert_eq!(agent.lock().await.provider_model(), "gpt-5.6-sol");
 }
 

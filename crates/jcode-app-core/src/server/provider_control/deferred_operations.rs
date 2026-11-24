@@ -150,11 +150,32 @@ pub(super) fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     }
 }
 
+fn report_auth_model_change(
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    agent.reset_provider_session();
+    let model = agent.provider_model();
+    super::send_model_changed_result(
+        0,
+        Ok((
+            model.clone(),
+            agent.provider_name(),
+            agent.active_resolved_credential(),
+            agent.provider_reasoning_effort(),
+        )),
+        model,
+        agent,
+        client_event_tx,
+    );
+}
+
 pub(super) async fn apply_auth_runtime_model_to_agent(
     activation: &AuthActivationResult,
     model: Option<&str>,
     agent: &Arc<Mutex<Agent>>,
     unless_user_selected_after: Option<u64>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
         return;
@@ -177,7 +198,7 @@ pub(super) async fn apply_auth_runtime_model_to_agent(
         let model_request = activation.model_switch_request(&provider_name, model);
         let result = agent_guard.set_model_from_auth(&model_request);
         if result.is_ok() {
-            agent_guard.reset_provider_session();
+            report_auth_model_change(&mut agent_guard, client_event_tx);
         }
         result.map(|_| agent_guard.provider_model())
     };
@@ -207,6 +228,7 @@ pub(super) async fn apply_auth_route_to_agent(
     route: &ModelRoute,
     agent: &Arc<Mutex<Agent>>,
     unless_user_selected_after: Option<u64>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let selection = RouteSelection::from_model_route(route);
     let requested_model = selection.routed_model_spec();
@@ -224,7 +246,7 @@ pub(super) async fn apply_auth_route_to_agent(
         }
         let result = agent_guard.set_route_selection_from_auth(&selection);
         if result.is_ok() {
-            agent_guard.reset_provider_session();
+            report_auth_model_change(&mut agent_guard, client_event_tx);
         }
         result.map(|_| agent_guard.provider_model())
     };
