@@ -1692,6 +1692,9 @@ pub struct App {
     routing_gate: Option<routing_gate::RoutingGateState>,
     /// The account this session runs on, from the daemon's latest decision.
     routing_chip: Option<super::RoutingChip>,
+    /// The daemon reported a routing decision on this connection, so it owns
+    /// account failover and the client never starts its own countdown.
+    routing_owns_failover: bool,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
     /// The model list the picker's effort step came from, kept so Esc can go

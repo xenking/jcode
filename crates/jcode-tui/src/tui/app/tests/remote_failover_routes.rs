@@ -34,7 +34,18 @@ fn remote_exact_failover_for(
     model: &str,
     reason: &str,
 ) -> (App, crate::tui::backend::RemoteConnection) {
-    let mut app = create_test_app();
+    remote_exact_failover_on(create_test_app(), model, reason)
+}
+
+fn remote_exact_failover_with(app: App) -> (App, crate::tui::backend::RemoteConnection) {
+    remote_exact_failover_on(app, "claude-sonnet-4", "OAuth usage exhausted")
+}
+
+fn remote_exact_failover_on(
+    mut app: App,
+    model: &str,
+    reason: &str,
+) -> (App, crate::tui::backend::RemoteConnection) {
     app.is_remote = true;
     app.remote_provider_name = Some("Anthropic".into());
     app.remote_provider_model = Some(model.into());
@@ -1442,3 +1453,74 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
 
 #[path = "remote_failover_routes_additional_tests.rs"]
 mod additional_test_remote_background_shortcut_during_connection_phase;
+
+fn routing_decision() -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::RoutingDecision {
+        account: "claude:work".into(),
+        reason: "priority".into(),
+        warnings: Vec::new(),
+        pending: None,
+    }
+}
+
+#[test]
+fn remote_failover_countdown_stays_off_while_the_daemon_routes_the_session() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(routing_decision(), &mut remote);
+        let (app, _) = remote_exact_failover_with(app);
+        assert!(
+            app.pending_provider_failover.is_none(),
+            "the daemon owns failover, the client must not count down"
+        );
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Use /model to switch")),
+            "the user is still told how to switch by hand"
+        );
+        assert_eq!(app.input, "hi", "the held message returns to the input box");
+    });
+}
+
+#[test]
+fn remote_failover_countdown_resumes_after_a_manual_model_change_or_reconnect() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(routing_decision(), &mut remote);
+        assert!(app.routing_owns_failover);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 77,
+                model: "claude-sonnet-4".into(),
+                provider_name: Some("Anthropic".into()),
+                context_window: None,
+                error: None,
+                resolved_credential: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                reasoning_effort: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.routing_owns_failover,
+            "a user's model switch may leave the routed provider"
+        );
+        let (app, _) = remote_exact_failover_with(app);
+        assert!(app.pending_provider_failover.is_some());
+    });
+}

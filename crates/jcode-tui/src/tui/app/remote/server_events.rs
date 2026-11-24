@@ -2771,6 +2771,12 @@ fn handle_server_event_inner(
             context_window,
             ..
         } => {
+            // The user chose a model, possibly on a provider the routing
+            // policy does not cover. The next routing decision confirms
+            // ownership again. Routing's own moves report with id 0.
+            if id != 0 {
+                app.routing_owns_failover = false;
+            }
             // A resume/catalog acknowledgement can arrive before the staged
             // route request has even been sent. It cannot authorize a resend.
             if app.pending_automatic_failover_request_id.is_none()

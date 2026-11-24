@@ -85,6 +85,7 @@ impl App {
             }
         };
         let automatic = crate::provider::parse_failover_prompt_message(error).is_none()
+            && !self.routing_owns_failover
             && (options.credential_failure || failover_decision.should_failover())
             && source_is_pooled
             && !crate::tui::is_ssh_remote()
@@ -216,13 +217,17 @@ impl App {
         };
 
         let config = crate::config::Config::load().provider;
-        let mode = if prompt.target_route.as_deref().is_some_and(|target| {
-            !jcode_provider_core::failover::automatic_failover_model_allowed(
-                &prompt.reason,
-                &self.current_model_for_fallback(),
-                target,
-            )
-        }) {
+        // When the daemon's routing policy owns this session's account choice,
+        // the client never runs its own rotation: the policy already tried the
+        // eligible accounts, so the user only gets the manual suggestion.
+        let mode = if self.routing_owns_failover
+            || prompt.target_route.as_deref().is_some_and(|target| {
+                !jcode_provider_core::failover::automatic_failover_model_allowed(
+                    &prompt.reason,
+                    &self.current_model_for_fallback(),
+                    target,
+                )
+            }) {
             crate::config::CrossProviderFailoverMode::Manual
         } else {
             config.cross_provider_failover

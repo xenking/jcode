@@ -42,6 +42,9 @@ impl super::App {
             self.routing_chip = Some(chip);
             crate::tui::ui::prepare::invalidate_header_prep_cache();
         }
+        // A decision means routing runs in `auto` for this session, so the
+        // daemon, not this client, rotates accounts when one fails.
+        self.routing_owns_failover = true;
     }
 }
 

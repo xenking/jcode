@@ -516,6 +516,8 @@ pub(in crate::tui::app) async fn connect_with_retry(
     session_to_resume: Option<&str>,
     remote_working_dir: Option<&str>,
 ) -> Result<ConnectOutcome> {
+    // A new connection knows nothing about routing until the next decision.
+    app.routing_owns_failover = false;
     if let Some(outcome) =
         wait_for_reload_handoff_before_reconnect(app, terminal, event_stream, state).await?
     {
