@@ -8,6 +8,7 @@
 pub mod config;
 mod engine;
 mod policy;
+pub mod state;
 
 pub use engine::{
     AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Reading, Request, Role,
@@ -22,3 +23,5 @@ pub use policy::{
 mod engine_tests;
 #[cfg(test)]
 mod policy_tests;
+#[cfg(test)]
+mod state_tests;

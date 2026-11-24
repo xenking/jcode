@@ -3695,6 +3695,7 @@ dependencies = [
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
+ "jcode-routing-policy",
  "jcode-sdk",
  "jcode-selfdev-types",
  "jcode-session-types",

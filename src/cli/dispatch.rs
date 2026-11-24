@@ -392,6 +392,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Titles { action }) => {
             commands::run_titles_command(action).await?;
         }
+        Some(Command::Routing { action }) => super::routing::run(action)?,
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
             selfdev::run_self_dev(build, args.resume).await?;

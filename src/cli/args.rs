@@ -394,6 +394,12 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Inspect and steer account routing: policy, holds, paid accounts, acknowledgements
+    Routing {
+        #[command(subcommand)]
+        action: RoutingCommand,
+    },
+
     /// Maintain generated session titles
     Titles {
         #[command(subcommand)]
@@ -769,6 +775,31 @@ pub(crate) enum TelemetryCommand {
     Enable,
     /// Disable all telemetry persistently
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RoutingCommand {
+    /// Show the routing policy, its problems and the active intents
+    Status {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// May automatic routing use credits and metered accounts: `auto`, `off`, or a
+    /// duration such as `1h` (allowed until then, then off)
+    Paid { mode: String },
+    /// Prefer an account in interactive sessions for a while (default 4h). `off` clears it
+    Hold {
+        account: String,
+        duration: Option<String>,
+    },
+    /// Keep spending past an `ask` limit on an account for a while (default 30m)
+    Ack {
+        account: String,
+        duration: Option<String>,
+    },
+    /// Drop the hold
+    Unstick,
 }
 
 #[derive(Subcommand, Debug)]

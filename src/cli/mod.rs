@@ -35,6 +35,7 @@ pub mod ssh;
 #[cfg(unix)]
 pub mod ssh_transport;
 pub mod startup;
+pub mod routing;
 pub mod telemetry;
 pub mod terminal;
 #[cfg(test)]
