@@ -69,6 +69,16 @@ keeps its foreground (up to the 15 minute blocking ceiling) whenever some MCP
 tool is gated, because the prompt belongs to the live turn. Inside `codemode`
 the wait is also not counted against the script's 300 s limit.
 
+`jcode mcp test <server>` shows what jcode learned from the server and what
+will ask:
+
+```
+Approval: annotations (2 of 3 tools ask a human first)
+  bare  (unannotated, asks first)
+  read-item  (read-only, typed result)
+  write-item  (writes, asks first)
+```
+
 Annotations are hints from the server. Opt in only for servers you trust to
 label their own tools. A server that mislabels a write as read-only gets no
 prompt.
