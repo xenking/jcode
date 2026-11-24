@@ -25,7 +25,9 @@ fn description_is_compact_and_preserves_execution_contract() {
     ] {
         assert!(description.contains(clause), "Missing contract: {clause}");
     }
-    assert!(description.len() <= 1100);
+    // Typed MCP results are only found if the description says where MCP tools
+    // live, so this carries one sentence more than it used to.
+    assert!(description.len() <= 1150);
 }
 
 /// The description is the only steering a model gets when it reads the tool

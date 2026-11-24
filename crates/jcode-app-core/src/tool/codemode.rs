@@ -35,7 +35,7 @@ const MIN_OUTPUT_TOKENS: usize = 512;
 const MAX_OUTPUT_TOKENS: usize = 15_000;
 
 const DESCRIPTION: &str = "Run one JavaScript or TypeScript program that calls tools itself. Reach for it when work needs several calls: dependent chains, loops over a previous result, 5+ calls, or big outputs you only want summarized. Only your return value and console.log output reach the conversation, so intermediate data costs no context. Prefer it over repeated single calls or `batch`; use `batch` for 1-10 independent calls whose results you want verbatim, and `bash` for shell work.\n\
-Supply an async function body using await/return; tools.<name>(args) or callTool(name, args) takes normal tool arguments, JSON output becomes objects, and failures throw. Use Promise.all for independent calls. Write JS or TS: type annotations, interfaces, `as`, generics and `satisfies` are erased first, so `types()` output is safe to copy.\n\
+Supply an async function body using await/return; tools.<name>(args) or callTool(name, args) takes normal tool arguments, JSON output becomes objects, and failures throw. Use Promise.all for independent calls. Write JS or TS: types are erased, so `types()` output is safe to copy. MCP tools are tools.mcp__<server>__<tool>, typed when the server declares a result schema.\n\
 listTools(filter?) lists names; types(filter?) and describeTool(name) give TypeScript declarations and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
 No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
 

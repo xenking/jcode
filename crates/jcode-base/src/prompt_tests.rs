@@ -91,6 +91,9 @@ fn codemode_prompt_names_the_conditions_where_it_beats_other_tools() {
         "`codemode` for dependent swarm reads or to return only needed fields",
         "`batch` for a handful (1-10) independent calls",
         "`bash` for shell work",
+        // Deferred MCP tools are invisible in the tool list; this is the only
+        // pointer to how a script finds and types them.
+        "MCP tools included (`listTools('mcp__')`, `types(name)`)",
     ] {
         assert!(
             CODEMODE_PROMPT.contains(clause),
@@ -98,7 +101,7 @@ fn codemode_prompt_names_the_conditions_where_it_beats_other_tools() {
         );
     }
     assert!(
-        CODEMODE_PROMPT.len() <= 900,
+        CODEMODE_PROMPT.len() <= 920,
         "prompt module must stay cheap"
     );
 }

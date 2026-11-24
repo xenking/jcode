@@ -46,7 +46,7 @@ pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks in
 /// `batch` instead (codemode was 0.14% of 7,884 tool calls).
 pub const CODEMODE_PROMPT: &str = "# Tool calls
 
-`codemode` runs one JavaScript or TypeScript program that calls tools itself. Copy `types()` output as-is. Use it when:
+`codemode` runs one JavaScript or TypeScript program that calls tools itself, MCP tools included (`listTools('mcp__')`, `types(name)`). Use it when:
 - the task needs 5 or more tool calls,
 - each call needs the previous call's result,
 - you would loop over a list another tool returned,
