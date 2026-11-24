@@ -1465,6 +1465,22 @@ fn import_summary_defaults_to_continue_and_enter_imports_all() {
 }
 
 #[test]
+fn local_claude_login_keeps_the_selected_model_and_offers_manual_switch() {
+    with_temp_jcode_home(|| {
+        let mut app = quality_first_openai_test_app();
+        app.onboarding_flow = None;
+        assert!(!app.onboarding_should_prefer_strongest_model());
+        app.handle_login_completed(crate::bus::LoginCompleted {
+            provider: "claude".into(),
+            success: true,
+            message: "Claude login complete".into(),
+        });
+        assert_eq!(app.provider.model(), "gpt-5.1");
+        assert!(app.display_messages().iter().any(|message| message.content.contains("Use /model to switch")));
+    });
+}
+
+#[test]
 fn import_continue_reaches_ready_quality_first_openai_model() {
     use crate::external_auth::ExternalAuthReviewCandidate;
     use crate::tui::app::onboarding_flow::ImportReview;

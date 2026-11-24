@@ -3730,10 +3730,18 @@ impl App {
                 } else {
                     false
                 };
+                let require_model_confirmation = !prefer_strongest
+                    && crate::auth::lifecycle::normalized_auth_provider_id(Some(&login.provider))
+                        == Some("claude");
+                if require_model_confirmation {
+                    self.push_display_message(DisplayMessage::system(
+                        "Claude access restored. Use /model to switch if desired.",
+                    ));
+                }
                 self.trigger_provider_auth_changed(
                     Some(&login.provider),
                     prefer_strongest,
-                    !profile_activation_owns_selection,
+                    !profile_activation_owns_selection && !require_model_confirmation,
                 );
             }
             // First-run onboarding: once the user has authenticated on a fresh
