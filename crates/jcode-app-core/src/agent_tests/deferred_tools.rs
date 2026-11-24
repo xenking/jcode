@@ -422,3 +422,64 @@ async fn an_allowlist_without_the_loader_defers_nothing() {
     let tools = agent.tool_definitions().await;
     assert_eq!(eager_names(&tools), ["bash", "gmail"]);
 }
+
+/// A server with ~150 tools must not inflate the cached tool list in the
+/// default mode, on either provider family. The tools stay reachable through
+/// `mcp` search/call and `codemode` (`listTools`/`types`), and the one-time
+/// transcript note that names late tools stays bounded.
+#[tokio::test]
+async fn a_150_tool_server_adds_nothing_to_the_default_tool_list() {
+    let _guard = crate::storage::lock_test_env();
+    let register_big_server = |registry: Registry| async move {
+        for i in 0..150 {
+            let raw = format!("tool_{i:03}");
+            registry
+                .register(
+                    format!("mcp__big__{raw}"),
+                    Arc::new(IdentifiedFakeMcpTool {
+                        server: "big".into(),
+                        raw,
+                    }) as Arc<dyn crate::tool::Tool>,
+                )
+                .await;
+        }
+    };
+
+    // No native deferral: the fixed `mcp` surface, no per-server definitions.
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry.clone());
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    let before = agent.tool_definitions().await;
+    register_big_server(registry).await;
+    agent.announce_late_mcp_tools().await;
+    let after = agent.tool_definitions().await;
+    assert!(after.iter().all(|t| !t.name.starts_with("mcp__")));
+    assert_eq!(
+        serde_json::to_string(&before).unwrap(),
+        serde_json::to_string(&after).unwrap(),
+        "150 tools changed the cached tool list"
+    );
+    let note: usize = transcript_texts(&agent)
+        .iter()
+        .filter(|t| t.contains("New MCP tools are available."))
+        .map(String::len)
+        .sum();
+    assert!(note > 0 && note < 16_000, "announcement is {note} bytes");
+
+    // Native deferral: every per-server definition is deferred, the eager
+    // prefix is unchanged.
+    let mut native = native_deferred_agent(crate::config::McpToolsMode::Auto).await;
+    let eager_before = eager_names(&native.tool_definitions().await);
+    register_big_server(native.registry.clone()).await;
+    native.unlock_tools_if_needed("mcp");
+    let tools = native.tool_definitions().await;
+    assert_eq!(eager_names(&tools), eager_before);
+    let big: Vec<_> = tools
+        .iter()
+        .filter(|t| t.name.starts_with("mcp__big__"))
+        .collect();
+    assert_eq!(big.len(), 150);
+    assert!(big.iter().all(|t| t.defer_loading));
+}
