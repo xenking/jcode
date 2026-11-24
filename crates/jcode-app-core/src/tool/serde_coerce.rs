@@ -121,6 +121,11 @@ impl<'de> de::Visitor<'de> for BoolOrString {
     fn visit_i64<E: de::Error>(self, v: i64) -> Result<bool, E> {
         Ok(v != 0)
     }
+
+    /// Strict-schema providers send `null` for every optional field they omit.
+    fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+        Ok(false)
+    }
 }
 
 /// Deserialize a `bool` from either a JSON bool or a string/number representation.

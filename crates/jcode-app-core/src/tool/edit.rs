@@ -31,7 +31,10 @@ struct EditInput {
     old_string: Option<String>,
     #[serde(default)]
     new_string: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::bool_from_string_or_bool"
+    )]
     replace_all: bool,
 }
 
@@ -39,7 +42,10 @@ struct EditInput {
 struct EditOperation {
     old_string: String,
     new_string: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::bool_from_string_or_bool"
+    )]
     replace_all: bool,
 }
 
@@ -517,6 +523,17 @@ mod tests {
         for field in ["old_string", "new_string"] {
             assert_eq!(edits["items"]["properties"][field]["type"], "string");
         }
+    }
+
+    #[test]
+    fn strict_schema_nulls_mean_absent_optional_fields() {
+        let input: EditInput = serde_json::from_value(json!({
+            "file_path": "f", "anchor": null, "replace_all": null,
+            "edits": [{"old_string": "a", "new_string": "b", "replace_all": null}]
+        }))
+        .unwrap();
+        let (updated, _) = apply_edits("a", &input.operations().unwrap(), "f").unwrap();
+        assert_eq!(updated, "b");
     }
 
     #[test]
