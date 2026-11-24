@@ -629,7 +629,7 @@ impl CommunicateTool {
     }
 }
 
-const SWARM_DESCRIPTION: &str = "Coordinate agents: spawn todo-lane workers and exchange messages.";
+const SWARM_DESCRIPTION: &str = "Coordinate agents: spawn todo-lane workers and exchange messages. Use set_model (to_session, model, optional effort) or compact (to_session) on an owned running or idle worker. Both keep its session, worktree, and conversation. If busy, the change is scheduled for the next turn boundary.";
 const SWARM_PROMPT_SEPARATOR: &str = "\n\nSwarm prompt:\n";
 
 pub(crate) fn swarm_instruction_tokens(tool: &crate::message::ToolDefinition) -> usize {
@@ -661,6 +661,8 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "summary",
     "await_members",
     "stop",
+    "set_model",
+    "compact",
     "resume",
     "retry",
     "list_models",
@@ -749,6 +751,8 @@ struct CommunicateInput {
     /// Optional model override, authorized by the user's opt-in and exact allowlist.
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
@@ -890,6 +894,10 @@ impl Tool for CommunicateTool {
                 "to_session": {
                     "type": "string",
                     "description": "Agent ID/unique name. summary requires one exact same-swarm session ID from list."
+                },
+                "effort": {
+                    "type": "string",
+                    "description": "Optional reasoning effort for set_model. Subject to the worker's provider, swarm pool, and configured caps."
                 },
                 "to_swarm": {
                     "type": "string",
@@ -1633,6 +1641,46 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            action @ ("set_model" | "compact") => {
+                use crate::protocol::SwarmWorkerControl;
+                let target_session = params
+                    .to_session
+                    .filter(|target| !target.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("'to_session' is required for {action} action")
+                    })?;
+                let control = if action == "set_model" {
+                    let model = params
+                        .model
+                        .filter(|model| !model.trim().is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("'model' is required for set_model action")
+                        })?;
+                    SwarmWorkerControl::SetModel {
+                        model,
+                        effort: params.effort,
+                    }
+                } else {
+                    SwarmWorkerControl::Compact
+                };
+                match send_request(Request::CommWorkerControl {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session,
+                    control,
+                })
+                .await?
+                {
+                    ServerEvent::CommWorkerControlResponse { message, .. } => {
+                        Ok(ToolOutput::new(message))
+                    }
+                    response => {
+                        ensure_success(&response)?;
+                        anyhow::bail!("No worker control result returned")
+                    }
+                }
+            }
+
             "stop" => {
                 let target = params.target_session.ok_or_else(|| {
                     anyhow::anyhow!("'target_session' is required for stop action")
@@ -2138,7 +2186,7 @@ impl Tool for CommunicateTool {
             _ => Err(anyhow::anyhow!(
                 "Unknown action '{}'. Valid actions: share, share_append, read, message, broadcast, dm, channel, list, list_channels, channel_members, \
                  propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, plan_status, summary, read_context, \
-                 resync_plan, assign_task, assign_next, cleanup, start, start_task, wake, resume, retry, reassign, replace, salvage, subscribe_channel, unsubscribe_channel, await_members. \
+                 resync_plan, assign_task, assign_next, cleanup, start, start_task, wake, resume, retry, reassign, replace, salvage, subscribe_channel, unsubscribe_channel, await_members, set_model, compact. \
                  To read messages addressed to you, use action='read'.",
                 params.action
             )),

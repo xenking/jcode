@@ -2185,6 +2185,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | BackgroundTasks { session_id, .. }
         | PeerUserMessage { session_id, .. }
         | AgentMessage { session_id, .. }
+        | SwarmWorkerNotice { session_id, .. }
         | MessageAccepted { session_id, .. }
         | AskRequest { session_id, .. }
         | PermissionRequest { session_id, .. }

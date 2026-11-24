@@ -2,15 +2,17 @@
 
 use super::*;
 
-pub(super) fn swarm_stop_allowed_by_owner(
-    req_session_id: &str,
-    target_member: &SwarmMember,
-    force: bool,
+pub(in crate::server) fn owns_worker(
+    members: &HashMap<String, SwarmMember>,
+    requester: &str,
+    target: &SwarmMember,
 ) -> bool {
-    force || target_member.report_back_to_session_id.as_deref() == Some(req_session_id)
+    requester != target.session_id
+        && target.report_back_to_session_id.is_some()
+        && crate::server::swarm_is_self_or_ancestor(members, requester, &target.session_id)
 }
 
-pub(super) async fn resolve_stop_target_session(
+pub(in crate::server) async fn resolve_stop_target_session(
     swarm_id: &str,
     target: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,

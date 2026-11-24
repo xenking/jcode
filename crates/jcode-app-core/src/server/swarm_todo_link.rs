@@ -396,9 +396,10 @@ pub(crate) fn open_spawn_lane_owner(
     Ok(crate::todo::load_todos(coordinator_session)?
         .into_iter()
         .find(|todo| {
-            is_open(todo)
-                && crate::todo::stages::lane_id(todo) == lane_id
-                && todo.assigned_to.is_some()
+            crate::todo::stages::lane_id(todo) == lane_id
+                && todo.assigned_to.as_deref().is_some_and(|worker| {
+                    is_open(todo) || crate::turn_activity::session_is_stopped(worker)
+                })
         })
         .and_then(|todo| todo.assigned_to))
 }

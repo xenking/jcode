@@ -134,6 +134,7 @@ use request_watchdog::{
 };
 #[path = "client_event_control.rs"]
 mod client_event_control;
+pub(super) use client_event_control::poll_agent_compaction_completion as poll_worker_compaction_completion;
 use client_event_control::*;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3538,6 +3539,24 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::CommWorkerControl {
+                id,
+                session_id: req_session_id,
+                target_session,
+                control,
+            } => {
+                super::comm_worker_control::handle(
+                    id,
+                    req_session_id,
+                    target_session,
+                    control,
+                    &client_event_tx,
+                    &sessions,
+                    &swarm_members,
+                    &swarms_by_id,
+                )
+                .await;
+            }
             Request::CommAnswerEscalatedAsk {
                 id,
                 session_id: req_session_id,

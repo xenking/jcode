@@ -1119,28 +1119,34 @@ mod tests {
 
     #[tokio::test]
     async fn cold_route_switch_compacts_before_first_provider_request() {
-        check_cold_route_switch(false, None, None).await;
+        check_cold_route_switch(false, None, None, false).await;
+    }
+
+    #[tokio::test]
+    async fn cold_route_switch_compacts_before_retuned_worker_request() {
+        check_cold_route_switch(false, None, None, true).await;
     }
 
     #[tokio::test]
     async fn cold_route_switch_compacts_before_failover_retry() {
-        check_cold_route_switch(true, None, None).await;
+        check_cold_route_switch(true, None, None, false).await;
     }
 
     #[tokio::test]
     async fn cold_route_switch_compacts_to_the_target_model_window() {
-        check_cold_route_switch(false, Some(64_000), None).await;
+        check_cold_route_switch(false, Some(64_000), None, false).await;
     }
 
     #[tokio::test]
     async fn cold_route_switch_compacts_at_the_target_model_override() {
-        check_cold_route_switch(false, None, Some(90_000)).await;
+        check_cold_route_switch(false, None, Some(90_000), false).await;
     }
 
     async fn check_cold_route_switch(
         failover: bool,
         target_window: Option<usize>,
         target_threshold: Option<usize>,
+        worker: bool,
     ) {
         let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         let mut config = crate::config::Config::load();
@@ -1169,6 +1175,9 @@ mod tests {
             ..Default::default()
         };
         let mut agent = Agent::new(Arc::new(provider.clone()), crate::tool::Registry::empty());
+        if worker {
+            agent.mark_swarm_worker().unwrap();
+        }
         use crate::message::{ContentBlock, Role};
         for i in 0..24 {
             agent.add_message(
@@ -1204,8 +1213,11 @@ mod tests {
             .await
             .unwrap();
             let mut agent = agent.lock().await;
-            agent.set_model("openai-api:gpt-6.1-sol").unwrap();
-            agent.reset_provider_session();
+            crate::server::provider_control::switch_session_model(
+                &mut agent,
+                "openai-api:gpt-6.1-sol",
+            )
+            .unwrap();
         }
         process_message_with_server_failover(agent, "continue", Vec::new(), None, tx, failover)
             .await

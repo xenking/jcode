@@ -4,6 +4,14 @@ use crate::kv_cache_monitor::{MissReason, RequestCacheDomain};
 
 const SWITCHED_ROUTE_COLD_LIMIT: usize = 150_000;
 
+fn cold_route_limit(manager: &crate::compaction::CompactionManager) -> usize {
+    manager.token_budget().min(SWITCHED_ROUTE_COLD_LIMIT).min(
+        manager
+            .resolved_compaction_threshold_tokens()
+            .unwrap_or(usize::MAX),
+    )
+}
+
 pub(super) struct SwitchedRouteBudget {
     pub(super) limit: usize,
     pub(super) reduction: Option<(u64, u64)>,
@@ -93,11 +101,7 @@ impl Agent {
         reason: MissReason,
         event_tx: Option<&crate::stream_batching::BatchingSender>,
     ) -> Result<SwitchedRouteBudget> {
-        let target = manager.token_budget().min(SWITCHED_ROUTE_COLD_LIMIT).min(
-            manager
-                .resolved_compaction_threshold_tokens()
-                .unwrap_or(usize::MAX),
-        );
+        let target = cold_route_limit(manager);
         let messages = self.session.provider_messages();
         let before = manager.effective_token_count_with(messages);
         if before < target {
@@ -329,20 +333,19 @@ impl Agent {
     }
 
     pub fn request_manual_compaction(&mut self) -> (String, bool) {
-        if self.is_swarm_worker() {
-            return (
-                "Separate model-assisted compaction is not available for swarm workers.".into(),
-                false,
-            );
-        }
         if !self.provider.supports_compaction() {
             return (
                 "Manual compaction is not available for this provider.".to_string(),
                 false,
             );
         }
+        let worker = self.is_swarm_worker();
+        if worker && let Err(error) = self.enforce_worker_request() {
+            return (error.to_string(), false);
+        }
 
         let provider = self.provider.fork();
+        let cold = worker && self.request_cache_domain_switch().is_some();
         let messages = self.session.messages_for_provider();
         let compaction = self.registry.compaction();
 
@@ -369,7 +372,15 @@ impl Agent {
                     }
                 );
 
-                match manager.force_compact_with(&messages, provider) {
+                use crate::compaction::ManualCompactionPolicy;
+                let policy = if worker {
+                    ManualCompactionPolicy::Worker {
+                        cold_limit: cold.then(|| cold_route_limit(&manager)),
+                    }
+                } else {
+                    ManualCompactionPolicy::Standard
+                };
+                match manager.force_compact_with_policy(&messages, provider, policy) {
                     Ok(()) => (
                         format!(
                             "{}\n\n📦 **Compacting context** (manual) — summarizing older messages in the background to stay within the context window.\n\

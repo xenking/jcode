@@ -1,7 +1,7 @@
 use super::ClientConnectionInfo;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
-    request_key,
+    load_state, request_key,
 };
 use super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks;
 use super::{
@@ -408,6 +408,34 @@ use spawn_policy::inherit_coordinator_selection;
 pub(super) use spawn_policy::{
     is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
 };
+
+pub(super) fn stopped_spawn_message(worker: &str) -> Option<String> {
+    crate::turn_activity::session_is_stopped(worker).then(|| stopped_spawn_detail(worker))
+}
+
+fn stopped_spawn_detail(worker: &str) -> String {
+    format!(
+        "Worker '{worker}' for this spawn is stopped. Resume it explicitly to keep its context, or use a new lane label."
+    )
+}
+
+async fn existing_spawn_worker(
+    worker: String,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !crate::turn_activity::session_is_stopped(&worker)
+            && swarm_members
+                .read()
+                .await
+                .get(&worker)
+                .is_none_or(|member| member.status != "stopped"),
+        "{}",
+        stopped_spawn_detail(&worker),
+    );
+    Ok(worker)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -449,13 +477,13 @@ pub(super) async fn spawn_swarm_agent(
     // another worker, even if the configured default changed after the first run.
     let (replay, existing_worker) = super::premium_spawn::SpawnReplay::load(spawn_key)?;
     if let Some(worker) = existing_worker {
-        return Ok(worker);
+        return existing_spawn_worker(worker, swarm_members).await;
     }
     if let Some(lane_id) = lane_id.as_deref()
         && let Some(worker) =
             super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
     {
-        return Ok(worker);
+        return existing_spawn_worker(worker, swarm_members).await;
     }
     let agents_config = &crate::config::config().agents;
     // Agent profile: the explicit spawn choice, then the lane's. Resolved
@@ -605,7 +633,7 @@ pub(super) async fn spawn_swarm_agent(
         && let Some(worker) =
             super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
     {
-        return Ok(worker);
+        return existing_spawn_worker(worker, swarm_members).await;
     }
     let replay = if prepared.approval.is_some() {
         prepared.recheck_approved_route()?;
@@ -950,6 +978,17 @@ pub(super) async fn handle_comm_spawn(
         key_fields.push(format!("profile:{profile}"));
     }
     let mutation_key = request_key(&req_session_id, "spawn", &key_fields);
+    if let Some(PersistedSwarmMutationResponse::Spawn { new_session_id, .. }) =
+        load_state(&mutation_key).and_then(|state| state.final_response)
+        && let Err(error) = existing_spawn_worker(new_session_id, swarm_members).await
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: error.to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
     let Some(mutation_state) = begin_or_replay(
         swarm_mutation_runtime,
         &mutation_key,
@@ -1118,13 +1157,9 @@ pub(super) async fn handle_comm_stop(
         members
             .get(&target_session)
             .map(|member| {
-                swarm_stop_allowed_by_owner(&req_session_id, member, force)
-                    || (!force
-                        && super::swarm_is_self_or_ancestor(
-                            &members,
-                            &req_session_id,
-                            &target_session,
-                        ))
+                force
+                    || req_session_id == target_session
+                    || owns_worker(&members, &req_session_id, member)
             })
             .unwrap_or(false)
     };
@@ -1282,7 +1317,7 @@ pub(super) async fn handle_comm_stop(
 mod stop_cleanup;
 
 #[path = "swarm_stop_target.rs"]
-mod swarm_stop_target;
+pub(super) mod swarm_stop_target;
 use swarm_stop_target::*;
 
 fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {

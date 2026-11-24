@@ -31,6 +31,7 @@ mod comm_control;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod comm_worker_control;
 mod configured_name;
 mod context_breakdown;
 mod shake_tools;

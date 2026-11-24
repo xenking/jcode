@@ -327,7 +327,7 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
 }
 
 #[tokio::test]
-async fn communicate_spawn_reports_completion_back_to_spawner() {
+async fn communicate_spawn_reports_completion_and_refuses_stopped_worker_replay() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
@@ -364,15 +364,13 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
     let tool = CommunicateTool::new();
     let ctx = test_ctx(&watcher_session, &repo_dir);
 
+    let spawn = json!({
+        "action": "spawn",
+        "label": "report-back worker",
+        "prompt": "Reply with exactly AUTH_TEST_OK and nothing else."
+    });
     let spawn_output = tool
-        .execute(
-            json!({
-                "action": "spawn",
-                "label": "report-back worker",
-                "prompt": "Reply with exactly AUTH_TEST_OK and nothing else."
-            }),
-            ctx,
-        )
+        .execute(spawn.clone(), ctx.clone())
         .await
         .expect("spawn with prompt should succeed");
     let spawned_session = spawn_output
@@ -403,6 +401,44 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
         })
         .await
         .expect("spawner should receive completion report-back notification");
+
+    let compact = tool
+        .execute(
+            json!({"action": "compact", "to_session": spawned_session}),
+            ctx.clone(),
+        )
+        .await;
+    assert!(
+        compact
+            .unwrap_err()
+            .to_string()
+            .contains("Manual compaction is not available for this provider")
+    );
+    tool.execute(
+        json!({"action": "stop", "to_session": spawned_session}),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let stopped = tool
+        .execute(spawn.clone(), ctx.clone())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        stopped.contains(&spawned_session) && stopped.contains("is stopped"),
+        "{stopped}"
+    );
+    let renamed_prompt = json!({"action": "spawn", "label": spawn["label"], "prompt": "Attempt with different request identity"});
+    let stopped = tool
+        .execute(renamed_prompt, ctx)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        stopped.contains(&spawned_session) && stopped.contains("is stopped"),
+        "{stopped}"
+    );
 
     server_task.abort();
 }

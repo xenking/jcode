@@ -427,6 +427,17 @@ pub use wire::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SwarmWorkerControl {
+    SetModel {
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    Compact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
     pub tool_name: String,
     pub brief_output: String,
@@ -997,7 +1008,7 @@ impl Request {
             Request::CommRejectPlan { id, .. } => *id,
             Request::CommSpawn { id, .. } => *id,
             Request::CommListModels { id, .. } => *id,
-            Request::CommStop { id, .. } => *id,
+            Request::CommStop { id, .. } | Request::CommWorkerControl { id, .. } => *id,
             Request::CommAssignRole { id, .. } => *id,
             Request::CommSummary { id, .. } => *id,
             Request::CommStatus { id, .. } => *id,
@@ -1054,6 +1065,7 @@ impl Request {
                 | Request::CommSpawn { .. }
                 | Request::CommListModels { .. }
                 | Request::CommStop { .. }
+                | Request::CommWorkerControl { .. }
                 | Request::CommAssignRole { .. }
                 | Request::CommSummary { .. }
                 | Request::CommStatus { .. }

@@ -743,6 +743,76 @@ impl Agent {
         )
     }
 
+    pub(crate) fn preview_swarm_retune(&self, model: &str, effort: Option<&str>) -> Result<()> {
+        use jcode_provider_core::SpeedMode;
+        let candidate = self.provider.fork();
+        crate::provider::set_model_with_auth_refresh(candidate.as_ref(), model)?;
+        let speed = self.session.speed_selection.as_ref().filter(|choice| {
+            choice.mode != SpeedMode::Standard
+                && choice.model == candidate.model()
+                && candidate.speed_route_identity().as_deref() == Some(choice.route.as_str())
+        });
+        let candidate_model = candidate.model();
+        let candidate_model = candidate
+            .explicit_provider_pin_for_current_model()
+            .map(|pin| format!("{candidate_model}@{pin}"))
+            .unwrap_or(candidate_model);
+        let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+            model,
+            candidate.name(),
+            self.session.provider_key.as_deref(),
+        );
+        Self::validate_worker_route(
+            provider_key.as_deref().unwrap_or_else(|| candidate.name()),
+            &candidate_model,
+        )?;
+        let previous = self.provider.reasoning_effort();
+        let inherited = previous.as_deref().filter(|_| {
+            Self::worker_effort_is_constrained(
+                candidate.as_ref(),
+                provider_key.as_deref(),
+                &candidate_model,
+            )
+        });
+        if let Some(requested) = effort.or(inherited) {
+            let capped = Self::worker_effort_for_provider(
+                candidate.as_ref(),
+                provider_key.as_deref(),
+                requested,
+            )?;
+            candidate.set_reasoning_effort(&capped)?;
+        }
+        let candidate_model = candidate.model();
+        if let Some(choice) = speed {
+            anyhow::ensure!(
+                choice.model == candidate_model
+                    && candidate.speed_route_identity().as_deref() == Some(choice.route.as_str())
+                    && Self::cap_worker_speed(
+                        candidate.as_ref(),
+                        provider_key.as_deref(),
+                        choice.mode
+                    ) == choice.mode
+                    && self.session.is_worker_speed_approved(choice),
+                "This retune would invalidate the worker's approved speed. Select Standard before retuning."
+            );
+        }
+        Self::validate_worker_route(
+            provider_key.as_deref().unwrap_or_else(|| candidate.name()),
+            &candidate_model,
+        )?;
+        anyhow::ensure!(
+            (speed.is_none()
+                && !crate::session::WorkerModelApproval::required_for(&candidate_model))
+                || self.session.is_worker_model_approved(
+                    &candidate_model,
+                    candidate.name(),
+                    candidate.reasoning_effort().as_deref(),
+                ),
+            "This model and effort require matching owner approval for this worker"
+        );
+        Ok(())
+    }
+
     pub fn set_route_selection(
         &mut self,
         selection: &crate::provider::RouteSelection,

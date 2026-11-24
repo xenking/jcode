@@ -261,10 +261,7 @@ fn apply_set_model(
 
     let current = agent.provider_model();
     let result = {
-        let result = agent.set_model(&model);
-        if result.is_ok() {
-            agent.reset_provider_session();
-        }
+        let result = switch_session_model(agent, &model);
         result.map(|_| {
             (
                 agent.provider_model(),
@@ -275,6 +272,12 @@ fn apply_set_model(
         })
     };
     send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
+pub(super) fn switch_session_model(agent: &mut Agent, model: &str) -> anyhow::Result<()> {
+    agent.set_model(model)?;
+    agent.reset_provider_session();
+    Ok(())
 }
 
 pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {

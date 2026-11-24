@@ -18,6 +18,48 @@ pub use jcode_session_types::{
 };
 use std::collections::HashMap;
 
+fn display_replay_rows(
+    session: &Session,
+    start: usize,
+) -> Vec<(chrono::DateTime<chrono::Utc>, RenderedMessage)> {
+    let boundary = if start == 0 {
+        None
+    } else {
+        session.messages.get(start).and_then(|msg| msg.timestamp)
+    };
+    let mut rows: Vec<_> = session
+        .replay_events
+        .iter()
+        .filter_map(|event| {
+            let super::StoredReplayEventKind::DisplayMessage { role, content, .. } = &event.kind
+            else {
+                return None;
+            };
+            if !matches!(role.as_str(), "error" | "swarm_worker_notice")
+                || boundary.is_some_and(|start| event.timestamp < start)
+            {
+                return None;
+            }
+            Some((
+                event.timestamp,
+                RenderedMessage {
+                    role: role.clone(),
+                    content: content.clone(),
+                    codemode: None,
+                    response_stats: None,
+                    tool_duration_ms: None,
+                    tool_calls: Vec::new(),
+                    tool_data: None,
+                    stored_index: None,
+                    timestamp_ms: None,
+                    attachments: Vec::new(),
+                },
+            ))
+        })
+        .collect();
+    rows.sort_by_key(|(timestamp, _)| *timestamp);
+    rows
+}
 /// Number of compacted historical messages shown by default in the UI.
 ///
 /// Compaction still keeps older history out of the active model context, but
@@ -524,28 +566,9 @@ fn render_messages_and_images_internal(
     // Completed compactions ride the same channel: they are transcript rows for
     // humans only, and deriving them from the stored session is what makes the
     // divider survive reloads instead of living in one client's memory.
-    let mut errors: Vec<_> = session
-        .replay_events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            super::StoredReplayEventKind::DisplayMessage { role, content, .. }
-                if role == "error" =>
-            {
-                Some((event.timestamp, content.clone()))
-            }
-            _ => None,
-        })
-        .filter(|(timestamp, _)| {
-            render_start_idx == 0
-                || session
-                    .messages
-                    .get(render_start_idx)
-                    .and_then(|msg| msg.timestamp)
-                    .is_none_or(|start| *timestamp >= start)
-        })
-        .collect();
-    errors.sort_by_key(|(timestamp, _)| *timestamp);
-    let mut errors = errors.into_iter().peekable();
+    let mut replay_rows = display_replay_rows(session, render_start_idx)
+        .into_iter()
+        .peekable();
     // Automatic memory injections are transcript rows for humans only, exactly
     // like errors: the recalled text reached the model as a system reminder, so
     // re-rendering it here must not turn it into user context. Deriving the row
@@ -575,18 +598,7 @@ fn render_messages_and_images_internal(
         .collect();
     memory_rows.sort_by_key(|injection| injection.before_message.unwrap_or(usize::MAX));
     let mut memory_rows = memory_rows.into_iter().peekable();
-    let render_error = |content: String| RenderedMessage {
-        codemode: None,
-        attachments: Vec::new(),
-        response_stats: None,
-        tool_duration_ms: None,
-        role: "error".to_string(),
-        content: content.clone(),
-        tool_calls: Vec::new(),
-        tool_data: None,
-        stored_index: None,
-        timestamp_ms: None,
-    };
+
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
         while memory_rows.peek().is_some_and(|injection| {
             injection
@@ -597,12 +609,12 @@ fn render_messages_and_images_internal(
                 rendered.push(memory_injection_row(injection));
             }
         }
-        while errors
+        while replay_rows
             .peek()
             .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
         {
-            if let Some((_, content)) = errors.next() {
-                rendered.push(render_error(content));
+            if let Some((_, row)) = replay_rows.next() {
+                rendered.push(row);
             }
         }
         if is_internal_system_reminder(msg) {
@@ -972,7 +984,7 @@ fn render_messages_and_images_internal(
     for injection in memory_rows {
         rendered.push(memory_injection_row(injection));
     }
-    rendered.extend(errors.map(|(_, content)| render_error(content)));
+    rendered.extend(replay_rows.map(|(_, row)| row));
     insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info, image_ids)

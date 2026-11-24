@@ -57,7 +57,7 @@ fn swarm_spawn_ready_then_running_is_forwarded_without_dropping_either_snapshot(
             "members": [{
                 "session_id": "gorilla", "status": status,
                 "report_back_to_session_id": "s1", "task_label": "worker",
-                "runtime": {"snapshot_at_unix_ms": timestamp}
+                "runtime": {"snapshot_at_unix_ms": timestamp, "model": "test-model", "effort": "medium"}
             }]
         }));
         assert_eq!(frames.len(), 1, "must forward {status}, not drop it");
@@ -65,8 +65,27 @@ fn swarm_spawn_ready_then_running_is_forwarded_without_dropping_either_snapshot(
         assert_eq!(event["ev"], "swarm_status");
         assert_eq!(event["session_id"], "s1");
         assert_eq!(event["members"][0]["status"], status);
+        assert_eq!(event["members"][0]["model"], "test-model");
+        assert_eq!(event["members"][0]["effort"], "medium");
         assert_eq!(event["updated_at_unix_ms"], timestamp);
     }
+}
+
+#[test]
+fn swarm_worker_control_notice_is_session_scoped_and_not_a_chat_message() {
+    let mut state = state_with_session();
+    let mut event = json!({
+        "type": "notification",
+        "from_session": "jcode",
+        "notification_type": {"kind": "message", "scope": "swarm_worker_control"},
+        "message": "worker: model set to test-model · medium"
+    });
+    let frames = state.legacy_event_to_api(&event);
+    assert!(matches!(&frames[..], [frame] if matches!(&frame.event,
+        ApiEvent::SwarmWorkerNotice { session_id, message }
+            if session_id == "s1" && message == "worker: model set to test-model · medium")));
+    event["from_session"] = json!("sibling");
+    assert!(state.legacy_event_to_api(&event).is_empty());
 }
 
 #[test]

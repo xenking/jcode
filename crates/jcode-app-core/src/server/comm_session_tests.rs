@@ -1,10 +1,10 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    CoordinatorSpawnIdentity, ensure_spawn_coordinator_swarm, prepare_visible_spawn_session,
-    register_visible_spawned_member, resolve_coordinator_spawn_identity, resolve_spawn_working_dir,
-    resolve_stop_target_session, resolve_swarm_spawn_selection, spawn_admission_lock,
-    swarm_stop_allowed_by_owner,
+    CoordinatorSpawnIdentity, ensure_spawn_coordinator_swarm, owns_worker,
+    prepare_visible_spawn_session, register_visible_spawned_member,
+    resolve_coordinator_spawn_identity, resolve_spawn_working_dir, resolve_stop_target_session,
+    resolve_swarm_spawn_selection, spawn_admission_lock,
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
@@ -136,6 +136,10 @@ impl Provider for RoutingProvider {
             requests: self.requests.clone(),
         })
     }
+
+    fn supports_compaction(&self) -> bool {
+        self.requests.is_some()
+    }
 }
 
 #[async_trait]
@@ -190,6 +194,198 @@ fn member(
         },
         event_rx,
     )
+}
+
+#[tokio::test]
+async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_policy() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"
+        [agents]
+        swarm_model_selection = true
+        swarm_pool = { "openai:beta" = ["low", "medium", "high"] }
+        swarm_effort_caps = { "openai:beta" = "medium" }
+        [compaction]
+        snapcompact = false
+    "#,
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+
+    let (owner, worker, sibling, swarm) = (
+        "session_retune_owner",
+        "session_retune_worker",
+        "session_retune_sibling",
+        "retune-swarm",
+    );
+    let (lead, mut lead_events) = member(owner, Some(swarm), "coordinator");
+    let (mut child, mut worker_events) = member(worker, Some(swarm), "worker");
+    child.report_back_to_session_id = Some(owner.into());
+    let (sibling_member, _sibling_events) = member(sibling, Some(swarm), "worker");
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (owner.into(), lead),
+        (worker.into(), child),
+        (sibling.into(), sibling_member),
+    ])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        swarm.into(),
+        HashSet::from([owner.into(), worker.into(), sibling.into()]),
+    )])));
+    let requests: FakeRequests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider {
+        name: "openai",
+        model: std::sync::Mutex::new("alpha".into()),
+        effort: std::sync::Mutex::new("low".into()),
+        speed: std::sync::Mutex::new(SpeedMode::Standard),
+        requests: Some(Arc::clone(&requests)),
+    });
+    let worktree = home.path().to_str().unwrap();
+    let mut session = crate::session::Session::create_with_id(worker.into(), None, None);
+    session.working_dir = Some(worktree.into());
+    for index in 0..30 {
+        session.add_message(
+            if index % 2 == 0 {
+                crate::message::Role::User
+            } else {
+                crate::message::Role::Assistant
+            },
+            vec![crate::message::ContentBlock::Text {
+                text: format!(
+                    "worker context {index}: {}",
+                    "preserve this earlier conversation. ".repeat(200)
+                ),
+                cache_control: None,
+            }],
+        );
+    }
+    session.save().unwrap();
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        Arc::clone(&provider),
+        registry,
+        session,
+        None,
+    )));
+    let sessions = Arc::new(crate::server::SessionManager::from_agents(HashMap::from([
+        (worker.into(), Arc::clone(&agent)),
+    ])));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    use crate::protocol::SwarmWorkerControl::{Compact, SetModel};
+    let retune = || SetModel {
+        model: "openai:beta".into(),
+        effort: Some("xhigh".into()),
+    };
+    let command = async |id, requester: &str, control| {
+        crate::server::comm_worker_control::handle(
+            id,
+            requester.into(),
+            worker.into(),
+            control,
+            &tx,
+            &sessions,
+            &members,
+            &swarms,
+        )
+        .await;
+    };
+
+    command(1, sibling, retune()).await;
+    assert!(
+        matches!(rx.recv().await, Some(ServerEvent::Error { id: 1, message, .. }) if message.contains("not an owned worker"))
+    );
+    command(
+        2,
+        owner,
+        SetModel {
+            model: "openai:outside-pool".into(),
+            effort: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(rx.recv().await, Some(ServerEvent::Error { id: 2, message, .. }) if message.contains("swarm_model_allowlist"))
+    );
+    let active_turn = agent.lock().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        command(3, owner, retune()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(rx.recv().await, Some(ServerEvent::CommWorkerControlResponse { id: 3, scheduled: true, target_session, .. }) if target_session == worker)
+    );
+    assert_eq!(active_turn.provider_model(), "alpha");
+    drop(active_turn);
+    let changed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            biased;
+            worker = worker_events.recv() => worker,
+            owner = lead_events.recv() => owner,
+        }
+    })
+    .await
+    .expect("scheduled worker change must emit its outcome");
+    assert!(
+        matches!(&changed, Some(ServerEvent::ModelChanged { model, reasoning_effort: Some(effort), .. }) if model == "beta" && effort == "medium"),
+        "{changed:?}"
+    );
+    let persisted = crate::session::Session::load(worker).unwrap();
+    assert_eq!(persisted.working_dir.as_deref(), Some(worktree));
+    assert_eq!(persisted.messages.len(), 30);
+    assert_eq!(persisted.reasoning_effort.as_deref(), Some("medium"));
+    assert!(Arc::ptr_eq(&sessions.read().await[worker], &agent));
+    assert_eq!(
+        members.read().await[worker].runtime.model.as_deref(),
+        Some("beta")
+    );
+    assert!(requests.lock().unwrap().is_empty());
+
+    let active_turn = agent.lock().await;
+    command(4, owner, Compact).await;
+    assert!(
+        matches!(rx.recv().await, Some(ServerEvent::CommWorkerControlResponse { id: 4, scheduled: true, message, .. }) if message.contains("compaction scheduled"))
+    );
+    assert!(!active_turn.is_compacting_now());
+    drop(active_turn);
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        while let Some(event) = lead_events.recv().await {
+            if matches!(event, ServerEvent::Notification { message, .. } if message.contains("context compacted")) {
+                break;
+            }
+        }
+    }).await.expect("headless compaction reaches the coordinator");
+    let persisted = crate::session::Session::load(worker).unwrap();
+    assert_eq!(
+        persisted.messages.len(),
+        30,
+        "compaction must not erase the original transcript"
+    );
+    assert!(
+        persisted.compaction.is_some(),
+        "manual compaction must be applied, not only acknowledged"
+    );
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(model, effort, _)| model == "beta" && effort == "medium")
+    );
 }
 
 async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc<Mutex<Agent>> {
@@ -368,10 +564,12 @@ fn stop_permission_defaults_to_sessions_spawned_by_requesting_coordinator() {
     let (mut other_owned, _other_rx) = member("worker-other", Some("swarm-1"), "agent");
     other_owned.report_back_to_session_id = Some("other-coord".to_string());
 
-    assert!(swarm_stop_allowed_by_owner("coord", &owned, false));
-    assert!(!swarm_stop_allowed_by_owner("coord", &user_created, false));
-    assert!(!swarm_stop_allowed_by_owner("coord", &other_owned, false));
-    assert!(swarm_stop_allowed_by_owner("coord", &user_created, true));
+    let members = HashMap::from(
+        [owned, user_created, other_owned].map(|member| (member.session_id.clone(), member)),
+    );
+    assert!(owns_worker(&members, "coord", &members["worker-owned"]));
+    assert!(!owns_worker(&members, "coord", &members["worker-user"]));
+    assert!(!owns_worker(&members, "coord", &members["worker-other"]));
 }
 
 #[tokio::test]

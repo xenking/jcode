@@ -1,6 +1,11 @@
 use super::*;
 
 impl Agent {
+    pub(crate) fn record_swarm_worker_notice(&mut self, message: &str) {
+        self.session
+            .record_replay_display_message("swarm_worker_notice", None, message);
+        self.persist_session_best_effort("swarm worker control notice");
+    }
     pub(super) fn refresh_tool_call_snapshot(&self) {
         self.turn_ownership.replace_tool_call_snapshot(
             &self.session.id,

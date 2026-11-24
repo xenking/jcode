@@ -10,6 +10,9 @@ fn scoped_sdk_stream_preserves_ready_then_running_within_100_ms() {
                         session_id: "lead".into(),
                         updated_at_unix_ms,
                         members: vec![jcode_sdk::SwarmMemberInfo {
+                            model: None,
+                            provider: None,
+                            effort: None,
                             session_id: "worker".into(),
                             status: status.into(),
                             parent_session_id: Some("lead".into()),

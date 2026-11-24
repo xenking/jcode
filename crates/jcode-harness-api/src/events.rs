@@ -530,6 +530,10 @@ pub enum ApiEvent {
         from_name: Option<String>,
         message: String,
     },
+    SwarmWorkerNotice {
+        session_id: String,
+        message: String,
+    },
 
     /// The agent accepted a user message: it is in the session's queue and
     /// will be processed. Sent once per `SendMessage` that the daemon acks.
@@ -902,6 +906,13 @@ pub struct SwarmMemberInfo {
     pub parent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
+    /// The live route, when the daemon supplied a model in this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// What a session's own record says about it: the model and effort it runs

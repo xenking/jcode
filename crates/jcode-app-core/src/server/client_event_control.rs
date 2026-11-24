@@ -98,7 +98,7 @@ pub(super) async fn maybe_idle_compact(
     }
 }
 
-pub(super) async fn poll_agent_compaction_completion(
+pub(in crate::server) async fn poll_agent_compaction_completion(
     agent: Arc<Mutex<Agent>>,
 ) -> Option<ServerEvent> {
     // CompactionFinished is published from inside the worker, just before its

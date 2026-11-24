@@ -16,7 +16,7 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
             json!({
                 "type": "string",
                 "enum": agents.spawn_allowed_models,
-                "description": "Exact user-allowlisted worker model; omit for agents.swarm_model."
+                "description": "Exact user-allowlisted worker model. Required for set_model; omit for the spawn default."
             }),
         );
         return;
@@ -29,7 +29,7 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
             json!({
                 "type": "string",
                 "enum": agents.swarm_model_allowlist,
-                "description": "Exact user-allowlisted route; omit for configured default."
+                "description": "Exact user-allowlisted route. Required for set_model; omit for the spawn default."
             }),
         );
     }

@@ -1202,6 +1202,14 @@ pub enum ServerEvent {
         worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     },
 
+    #[serde(rename = "comm_worker_control_response")]
+    CommWorkerControlResponse {
+        id: u64,
+        target_session: String,
+        scheduled: bool,
+        message: String,
+    },
+
     /// Response to comm_list_models request
     #[serde(rename = "comm_list_models_response")]
     CommListModelsResponse {

@@ -216,6 +216,7 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
         | Request::CommSpawn { session_id, .. }
         | Request::CommListModels { session_id, .. }
         | Request::CommStop { session_id, .. }
+        | Request::CommWorkerControl { session_id, .. }
         | Request::CommAssignRole { session_id, .. }
         | Request::CommSummary { session_id, .. }
         | Request::CommStatus { session_id, .. }
@@ -932,6 +933,24 @@ pub(super) async fn handle_lightweight_control_request(
                 swarm_event_tx,
                 soft_interrupt_queues,
                 await_members_runtime,
+            )
+            .await;
+        }
+        Request::CommWorkerControl {
+            id,
+            session_id,
+            target_session,
+            control,
+        } => {
+            super::comm_worker_control::handle(
+                id,
+                session_id,
+                target_session,
+                control,
+                &client_event_tx,
+                sessions,
+                swarm_members,
+                swarms_by_id,
             )
             .await;
         }

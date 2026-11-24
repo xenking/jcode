@@ -84,47 +84,16 @@ pub fn render_messages_and_images_with_compacted_history(
     // Error replay records are display-only: never turn provider diagnostics
     // into assistant/user context. Merge them at their original turn boundary
     // so a reconnect shows the failure beneath its wake, not at the latest turn.
-    let mut errors: Vec<_> = session
-        .replay_events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            crate::session::StoredReplayEventKind::DisplayMessage { role, content, .. }
-                if role == "error" =>
-            {
-                Some((event.timestamp, content))
-            }
-            _ => None,
-        })
-        .filter(|(timestamp, _)| {
-            render_start_idx == 0
-                || session
-                    .messages
-                    .get(render_start_idx)
-                    .and_then(|msg| msg.timestamp)
-                    .is_none_or(|start| *timestamp >= start)
-        })
-        .collect();
-    errors.sort_by_key(|(timestamp, _)| *timestamp);
-    let mut errors = errors.into_iter().peekable();
-    let render_error = |content: &String| RenderedMessage {
-        codemode: None,
-        response_stats: None,
-        tool_duration_ms: None,
-        role: "error".to_string(),
-        content: content.clone(),
-        tool_calls: Vec::new(),
-        tool_data: None,
-        stored_index: None,
-        timestamp_ms: None,
-        attachments: Vec::new(),
-    };
+    let mut replay_rows = super::display_replay_rows(session, render_start_idx)
+        .into_iter()
+        .peekable();
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
-        while errors
+        while replay_rows
             .peek()
             .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
         {
-            if let Some((_, content)) = errors.next() {
-                rendered.push(render_error(content));
+            if let Some((_, row)) = replay_rows.next() {
+                rendered.push(row);
             }
         }
         if is_internal_system_reminder(msg) {
@@ -420,7 +389,7 @@ pub fn render_messages_and_images_with_compacted_history(
         }
     }
 
-    rendered.extend(errors.map(|(_, content)| render_error(content)));
+    rendered.extend(replay_rows.map(|(_, row)| row));
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info)
 }

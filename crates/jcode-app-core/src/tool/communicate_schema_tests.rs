@@ -309,6 +309,25 @@ async fn spawn_execute_rejects_missing_label_before_sending_request() {
     assert_eq!(error.to_string(), "'label' is required for spawn action");
 }
 
+#[tokio::test]
+async fn swarm_worker_controls_require_an_explicit_target() {
+    let working_dir = tempfile::tempdir().unwrap();
+    let tool = CommunicateTool::new();
+    for action in ["set_model", "compact"] {
+        let error = tool
+            .execute(
+                json!({"action": action}),
+                test_ctx("session-parent", working_dir.path()),
+            )
+            .await
+            .expect_err("worker control must not default to a target");
+        assert_eq!(
+            error.to_string(),
+            format!("'to_session' is required for {action} action")
+        );
+    }
+}
+
 #[test]
 fn description_includes_swarm_prompt_guidance() {
     let tool = CommunicateTool::new();

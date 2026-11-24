@@ -3384,6 +3384,15 @@ impl BridgeState {
             "notification" => {
                 let message = event["message"].as_str().unwrap_or("");
                 let notification = &event["notification_type"];
+                if notification["kind"] == "message"
+                    && notification["scope"] == "swarm_worker_control"
+                    && event["from_session"] == "jcode"
+                {
+                    return vec![ServerFrame::event(ApiEvent::SwarmWorkerNotice {
+                        session_id: session(self),
+                        message: message.to_owned(),
+                    })];
+                }
                 if notification["kind"] == "message" && notification["scope"] == "dm" {
                     return match event["from_session"].as_str().filter(|id| !id.is_empty()) {
                         Some(from_session) => vec![ServerFrame::event(ApiEvent::AgentMessage {
@@ -3720,6 +3729,9 @@ impl BridgeState {
                                 .as_str()
                                 .map(str::to_owned),
                             agent_label: member["task_label"].as_str().map(str::to_owned),
+                            model: member["runtime"]["model"].as_str().map(str::to_owned),
+                            provider: member["runtime"]["provider"].as_str().map(str::to_owned),
+                            effort: member["runtime"]["effort"].as_str().map(str::to_owned),
                         })
                     })
                     .collect();

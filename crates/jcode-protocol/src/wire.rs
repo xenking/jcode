@@ -1036,6 +1036,14 @@ pub enum Request {
         force: Option<bool>,
     },
 
+    #[serde(rename = "comm_worker_control")]
+    CommWorkerControl {
+        id: u64,
+        session_id: String,
+        target_session: String,
+        control: SwarmWorkerControl,
+    },
+
     /// Assign a role to an agent (coordinator only)
     #[serde(rename = "comm_assign_role")]
     CommAssignRole {
