@@ -1,0 +1,16 @@
+slug | template tok | persistent | multi_agent | token_budget | collab | confirm | auto_review
+gpt-6.2-sol [5059, 0, 572, 754, 215, 4624, 103] reasoning_default= low verbosity= low
+gpt-6.2-astra [5059, 0, 453, 754, 215, 4847, 85] reasoning_default= low verbosity= low
+gpt-6-astra [4079, 1077, 572, 754, 192, 4452, 103] reasoning_default= low verbosity= low
+gpt-6.1-sol [4143, 1077, 572, 754, 192, 4452, 103] reasoning_default= low verbosity= low
+gpt-6.1-terra [4079, 1077, 572, 754, 215, 4624, 103] reasoning_default= low verbosity= low
+gpt-6-sol [3631, 1077, 572, 754, 192, 4452, 103] reasoning_default= medium verbosity= low
+gpt-6-luna [3452, 1077, 572, 754, 192, 4452, 103] reasoning_default= medium verbosity= low
+gpt-5.6-sol [3552, 0, 0, 754, 0, 0, 0] reasoning_default= low verbosity= low
+gpt-5.6-terra [3552, 0, 0, 754, 0, 0, 0] reasoning_default= medium verbosity= low
+gpt-5.6-luna [3552, 0, 0, 754, 0, 0, 4231] reasoning_default= medium verbosity= low
+gpt-daybreak-blue-latest [3552, 0, 0, 741, 0, 0, 0] reasoning_default= low verbosity= low
+gpt-daybreak-red-latest [3552, 0, 0, 0, 0, 0, 0] reasoning_default= medium verbosity= high
+gpt-5.5 [4429, 0, 0, 0, 0, 0, 0] reasoning_default= medium verbosity= low
+codex-auto-review [3552, 0, 0, 0, 0, 0, 4246] reasoning_default= medium verbosity= low
+

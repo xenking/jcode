@@ -1,0 +1,85 @@
+files 1293 claude-tks 657271 o200k 422877 ratio claude/o200k=1.554
+data [316, 176663]
+skill [100, 113285]
+tool-description [270, 108571]
+system-prompt [212, 89437]
+agent-prompt [101, 88194]
+system [260, 73111]
+tool [34, 8010]
+
+agent-prompt-explore.md 862
+agent-prompt-plan-mode-enhanced.md 1066
+agent-prompt-general-purpose.md 446
+agent-prompt-coordinator-worker-instructions.md 830
+system-prompt-coordinator-mode-orchestration.md 5921
+system-prompt-advisor-tool-instructions.md 443
+agent-prompt-worker-fork.md 412
+agent-prompt-read-only-search-agent.md 93
+agent-prompt-web-reading-specialist.md 1340
+system-prompt-worker-instructions.md 356
+agent-prompt-conversation-summarization.md 292
+agent-prompt-coding-session-title-generator.md 898
+tool-description-agent.md None
+tool-description-task.md None
+
+tool-description-agent-explicit-spawn-restriction.md 251
+tool-description-edit-single-replacement.md 178
+tool-description-edit.md 311
+tool-description-readfile-compact.md 285
+tool-description-readfile.md 578
+tool-description-readmcpresourcedirtool-prompt.md 177
+tool-description-readnotifications.md 626
+tool-description-readwidgetcontext.md 428
+tool-description-sendmessage-cross-session-guidance.md 1182
+tool-description-sendmessage.md 813
+tool-description-task-get.md 182
+tool-description-taskcreate.md 710
+tool-description-tasklist.md 267
+tool-description-taskupdate.md 586
+tool-description-todowrite-compact.md 108
+tool-description-todowrite-proactive-update-guidance.md 65
+tool-description-todowrite.md 2037
+tool-description-agent-usage-notes.md 2250
+tool-description-agent-when-to-launch-subagents.md 575
+tool-description-bash-git-commit-instructions.md 1571
+tool-description-bash-pr-creation-instructions.md 959
+tool-description-bash-alternative-communication.md 18
+tool-description-bash-alternative-content-search.md 27
+tool-description-bash-alternative-edit-files.md 27
+tool-description-bash-alternative-file-search.md 26
+tool-description-bash-alternative-read-files.md 27
+tool-description-bash-alternative-write-files.md 29
+tool-description-bash-attached-machines.md 350
+tool-description-bash-built-in-tools-note.md 53
+tool-description-bash-git-avoid-destructive-ops.md 58
+tool-description-bash-git-never-skip-hooks.md 59
+tool-description-bash-git-prefer-new-commits.md 22
+tool-description-bash-maintain-cwd.md 81
+tool-description-bash-overview.md 19
+tool-description-bash-prefer-dedicated-tools-bullet.md 72
+tool-description-bash-prefer-dedicated-tools.md 71
+tool-description-bash-quote-file-paths.md 35
+tool-description-bash-sandbox-default-to-sandbox.md 38
+tool-description-bash-sandbox-evidence-list-header.md 15
+tool-description-bash-sandbox-evidence-access-denied.md 15
+tool-description-bash-sandbox-evidence-network-failures.md 17
+tool-description-bash-sandbox-evidence-operation-not-permitted.md 18
+tool-description-bash-sandbox-evidence-unix-socket-errors.md 11
+tool-description-bash-sandbox-explain-restriction.md 110
+tool-description-bash-sandbox-failure-evidence-condition.md 48
+tool-description-bash-sandbox-local-port-binding-eperm-no-override.md 140
+tool-description-bash-sandbox-local-port-binding-eperm-override-available.md 119
+tool-description-bash-sandbox-macos-process-visibility-no-override.md 253
+tool-description-bash-sandbox-macos-process-visibility-override-available.md 237
+tool-description-bash-sandbox-no-sensitive-paths.md 36
+tool-description-bash-sandbox-per-command.md 52
+tool-description-bash-sandbox-response-header.md 17
+tool-description-bash-sandbox-retry-without-sandbox.md 33
+tool-description-bash-sandbox-tmpdir.md 121
+tool-description-bash-sleep-keep-short.md 22
+tool-description-bash-sleep-no-polling-background-tasks.md 88
+tool-description-bash-sleep-run-immediately.md 21
+tool-description-bash-sleep-use-check-commands.md 34
+tool-description-bash-timeout.md 150
+tool-description-bash-verify-parent-directory.md 38
+tool-description-tasklist-teammate-workflow.md 133
