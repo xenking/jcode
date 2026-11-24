@@ -4883,6 +4883,7 @@ dependencies = [
  "jcode-logging",
  "jcode-productivity-core",
  "jcode-provider-core",
+ "jcode-routing-policy",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-slash-command",

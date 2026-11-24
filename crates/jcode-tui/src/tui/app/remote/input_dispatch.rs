@@ -378,7 +378,10 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
 
-    if prepared.expanded.split_whitespace().next() == Some("/mode") {
+    if matches!(
+        prepared.expanded.split_whitespace().next(),
+        Some("/mode" | "/acct")
+    ) {
         return Box::pin(super::key_handling::submit_prepared_remote_enter_input(
             app, remote, prepared,
         ))
@@ -957,6 +960,7 @@ mod ssh_slash_tests {
                 ("/logout openai", "runtime_command"),
                 ("/context", "runtime_command"),
                 ("/overnight status", "runtime_command"),
+                ("/acct hold claude:team 2h", "routing_intent"),
             ] {
                 submit_remote_slash_input(
                     &mut app,

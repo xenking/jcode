@@ -821,6 +821,10 @@ impl crate::tui::TuiState for App {
         self.upstream_provider.clone()
     }
 
+    fn routing_chip(&self) -> Option<super::super::RoutingChip> {
+        self.routing_chip.clone()
+    }
+
     fn connection_type(&self) -> Option<String> {
         self.connection_type.clone()
     }

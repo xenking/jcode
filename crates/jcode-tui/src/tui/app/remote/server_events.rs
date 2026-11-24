@@ -988,6 +988,7 @@ fn handle_server_event_inner(
         ServerEvent::Interrupted => {
             app.record_rex_turn_outcome(None);
             app.dismiss_ask_picker();
+            app.dismiss_routing_gate();
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
                 app.remote_session_id,
@@ -1341,6 +1342,7 @@ fn handle_server_event_inner(
             if app.is_processing || app.current_message_id == Some(id) {
                 app.record_rex_turn_outcome(Some(crate::tui::rex::TurnOutcome::Error));
                 app.dismiss_ask_picker();
+                app.dismiss_routing_gate();
             }
             // Clamp server hints so a bogus value cannot park the turn for days.
             // Account rotation already ran on the server. A structured offer
@@ -3756,6 +3758,32 @@ fn handle_server_event_inner(
                 }
             }
             app.open_ask_picker(request_id, tool_call_id, questions);
+            true
+        }
+        ServerEvent::RoutingDecision {
+            account,
+            reason,
+            warnings,
+            pending,
+        } => {
+            app.apply_routing_decision(account, reason, warnings.len(), pending);
+            true
+        }
+        ServerEvent::RoutingGate {
+            gate_id,
+            reason,
+            options,
+        } => {
+            app.open_routing_gate(gate_id, reason, options);
+            true
+        }
+        ServerEvent::RoutingGateClosed { gate_id } => {
+            app.close_routing_gate(&gate_id);
+            true
+        }
+        ServerEvent::RoutingStatus { id, text } => {
+            remote.finish_runtime_command(id);
+            app.push_display_message(DisplayMessage::system(text));
             true
         }
         ServerEvent::StdinRequest { .. } => {

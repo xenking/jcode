@@ -80,6 +80,7 @@ jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-session-types = { path = "../jcode-session-types" }
 jcode-slash-command = { path = "../jcode-slash-command" }
 jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-routing-policy = { path = "../jcode-routing-policy" }
 jcode-tui-markdown = { path = "../jcode-tui-markdown" }
 jcode-tui-messages = { path = "../jcode-tui-messages" }
 jcode-tui-core = { path = "../jcode-tui-core" }

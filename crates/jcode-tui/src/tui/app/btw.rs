@@ -454,7 +454,7 @@ impl App {
         };
         // An `ask` picker is a modal the user must answer; never hide it behind
         // a card that opened mid-turn.
-        if self.ask_picker.is_some() && !self.inline_view_is_btw {
+        if (self.ask_picker.is_some() || self.routing_gate.is_some()) && !self.inline_view_is_btw {
             return;
         }
         let mut lines: Vec<_> = card

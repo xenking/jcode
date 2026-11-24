@@ -59,6 +59,8 @@ pub enum AppRuntimeMode {
 }
 
 mod ask_picker;
+mod routing_acct;
+mod routing_gate;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
@@ -1684,6 +1686,10 @@ pub struct App {
     pending_btw_turn: bool,
     // Pending `ask` tool questions; mirrored into inline_view_state for rendering.
     ask_picker: Option<ask_picker::AskPickerState>,
+    /// Open routing spending-limit gate, mirrored into `inline_view_state`.
+    routing_gate: Option<routing_gate::RoutingGateState>,
+    /// The account this session runs on, from the daemon's latest decision.
+    routing_chip: Option<super::RoutingChip>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
     /// The model list the picker's effort step came from, kept so Esc can go

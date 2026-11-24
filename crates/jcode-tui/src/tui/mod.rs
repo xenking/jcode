@@ -849,6 +849,10 @@ pub trait TuiState {
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
     fn upstream_provider(&self) -> Option<String>;
+    /// The routed account for this session, when the daemon reported one.
+    fn routing_chip(&self) -> Option<RoutingChip> {
+        None
+    }
     /// Active transport/connection type (websocket/https/etc.)
     fn connection_type(&self) -> Option<String>;
     /// Provider-supplied human-readable status detail for the current stream.
@@ -1642,6 +1646,16 @@ pub struct InlineInteractiveSchema {
     pub active_submit_hint: &'static str,
     pub shows_default_shortcut_hint: bool,
     pub preview_activation_column: usize,
+}
+
+/// What the header shows about account routing: where the session runs, why,
+/// how many warnings the daemon raised, and where a pending move goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct RoutingChip {
+    pub account: String,
+    pub reason: String,
+    pub warnings: usize,
+    pub pending: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -91,6 +91,16 @@ fn draw_inline_view(
         return;
     }
 
+    let btw = app.btw_card_open();
+    // Notices and pickers are chrome: one logical row per visual row, cut
+    // with an ellipsis at the border. Only the `/btw` answer wraps.
+    let fit = |line: Line<'static>| {
+        if btw {
+            line
+        } else {
+            super::truncate_line_with_ellipsis_to_width(&line, inner.width as usize)
+        }
+    };
     let mut lines: Vec<Line> = Vec::new();
     let mut header_spans = vec![Span::styled(
         view.title.clone(),
@@ -102,19 +112,19 @@ fn draw_inline_view(
             Style::default().fg(dim_color()).italic(),
         ));
     }
-    lines.push(Line::from(header_spans));
+    lines.push(fit(Line::from(header_spans)));
 
     for line in &view.lines {
-        lines.push(Line::from(Span::styled(
+        lines.push(fit(Line::from(Span::styled(
             line.clone(),
             Style::default().fg(rgb(200, 200, 220)),
-        )));
+        ))));
     }
 
     // A `/btw` answer is prose that streams into a fixed-width card: wrap it
     // instead of clipping every line at the border. Every other inline view is
     // a short notice that already fits.
-    let paragraph = if app.btw_card_open() {
+    let paragraph = if btw {
         Paragraph::new(lines).wrap(Wrap { trim: false })
     } else {
         Paragraph::new(lines)

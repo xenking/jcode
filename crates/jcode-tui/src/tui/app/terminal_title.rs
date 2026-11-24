@@ -68,7 +68,7 @@ impl App {
     }
 
     pub(super) fn rex_agent_state(&self) -> AgentState {
-        if self.ask_picker.is_some() {
+        if self.ask_picker.is_some() || self.routing_gate.is_some() {
             AgentState::BlockedQuestion
         } else if self.is_processing()
             || (self.rate_limit_reset.is_some() && self.rate_limit_pending_message.is_some())

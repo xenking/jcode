@@ -244,6 +244,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/logout", "Log out of a provider"),
     RegisteredCommand::public("/account", "Open the combined account picker"),
     RegisteredCommand::public("/accounts", "Alias for /account"),
+    RegisteredCommand::public("/acct", "Steer account routing: pin, switch, hold, ack, paid"),
     RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
@@ -672,6 +673,13 @@ impl App {
                     ("/autoreview off".into(), "Disable end-of-turn autoreview"),
                     ("/autoreview now".into(), "Launch a reviewer immediately"),
                 ],
+            );
+        }
+
+        if input.starts_with("/acct ") {
+            return super::routing_acct::complete_acct(
+                input,
+                &super::routing_acct::configured_account_ids(),
             );
         }
 
@@ -1680,6 +1688,7 @@ impl App {
                 | "/transport"
                 | "/login"
                 | "/auth"
+                | "/acct"
                 | "/account"
                 | "/account claude"
                 | "/account switch"

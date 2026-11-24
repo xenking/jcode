@@ -35,6 +35,13 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.routing_gate.is_some() {
+        if let Some((gate_id, choice)) = app.handle_routing_gate_key(code) {
+            remote.send_routing_gate_answer(&gate_id, choice).await?;
+        }
+        return Ok(());
+    }
+
     // A `/btw` card owns Esc and Ctrl+P, the same as an in-process session.
     if app.btw_open() {
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {

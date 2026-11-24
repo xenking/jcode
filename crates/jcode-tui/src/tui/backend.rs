@@ -1257,6 +1257,37 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Answer a routing spending-limit gate.
+    pub async fn send_routing_gate_answer(
+        &mut self,
+        gate_id: &str,
+        choice: crate::protocol::RoutingGateChoice,
+    ) -> Result<()> {
+        let request = Request::RoutingGateAnswer {
+            id: self.next_request_id,
+            gate_id: gate_id.to_string(),
+            choice,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Send a routing intent and return its request id. The daemon answers
+    /// with `ServerEvent::RoutingIntentResult` carrying the same id.
+    pub async fn send_routing_intent(
+        &mut self,
+        action: crate::protocol::RoutingIntentAction,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RoutingIntent { id, action })
+            .await?;
+        // Failures share the Error wire shape. Track the id so they print
+        // as notices instead of ending an unrelated turn.
+        self.pending_runtime_commands.insert(id);
+        Ok(id)
+    }
+
     /// Send stdin input back to a running command
     pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
         let request = Request::StdinResponse {

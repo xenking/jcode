@@ -1439,3 +1439,6 @@ include!("remote_tests/recall_cancellation.rs");
 
 #[path = "remote_tests_additional_tests.rs"]
 mod additional_reload_handoff_active_when_server_flag_is_set;
+
+#[path = "remote_tests/routing_flow.rs"]
+mod routing_flow;

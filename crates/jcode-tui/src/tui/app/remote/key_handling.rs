@@ -291,6 +291,17 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed.split_whitespace().next() == Some("/acct") {
+            match app_mod::routing_acct::parse_acct(trimmed) {
+                Ok(Some(action)) => {
+                    remote.send_routing_intent(action).await?;
+                }
+                Ok(None) => {}
+                Err(message) => app.push_display_message(DisplayMessage::error(message)),
+            }
+            return Ok(());
+        }
+
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
         if app_mod::commands_cloud::parse_cloud_command(trimmed).is_some() {

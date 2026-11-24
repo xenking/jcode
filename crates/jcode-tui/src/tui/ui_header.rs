@@ -10,6 +10,8 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 #[path = "ui_header/account_router.rs"]
 mod account_router;
+#[path = "ui_header/routing_chip.rs"]
+mod routing_chip;
 
 pub(super) fn status_usage_accounts(
     remote: bool,
@@ -107,11 +109,21 @@ fn model_header_line(
     upstream: Option<&str>,
     width: usize,
     placeholder: bool,
+    chip: Option<&crate::tui::RoutingChip>,
 ) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
     let mut spans = Vec::new();
     let mut used = nice_model.width();
-    let budget = width.saturating_sub(4);
+    let mut budget = width.saturating_sub(4);
+    // The routed account outranks the hint, provider and upstream text, so it
+    // is sized first and they give way to it. It never displaces the model.
+    let chip_spans = chip.filter(|_| !placeholder).and_then(|chip| {
+        let sep = routing_chip::CHIP_SEPARATOR.width();
+        routing_chip::fit(chip, budget.saturating_sub(used + sep))
+    });
+    if let Some(chip_spans) = &chip_spans {
+        budget -= routing_chip::CHIP_SEPARATOR.width() + routing_chip::spans_width(chip_spans);
+    }
     if !placeholder && !nice_model.is_empty() {
         let hint = "/model to switch · ";
         if used + hint.width() <= budget {
@@ -132,6 +144,10 @@ fn model_header_line(
         if used + suffix.width() <= budget {
             spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
         }
+    }
+    if let Some(chip_spans) = chip_spans {
+        spans.push(Span::raw(routing_chip::CHIP_SEPARATOR));
+        spans.extend(chip_spans);
     }
     Line::from(spans).alignment(Alignment::Left)
 }
@@ -188,6 +204,7 @@ pub(crate) fn build_preview_header(
             None,
             width as usize,
             model_is_placeholder(model),
+            None,
         ));
     }
     // Resuming a local transcript runs in this client, so its version belongs
@@ -866,6 +883,7 @@ fn build_persistent_header_with_auth(
             upstream.as_deref(),
             w,
             model_is_placeholder,
+            app.routing_chip().as_ref(),
         ));
     }
 
