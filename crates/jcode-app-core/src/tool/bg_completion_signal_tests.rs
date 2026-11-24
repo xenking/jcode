@@ -14,7 +14,15 @@ async fn completion_signal_releases_multi_wait_before_reconciliation() -> Result
         .await;
     let second = manager.spawn("test", sid, |_| std::future::pending()).await;
     let ids = [first.task_id.clone(), second.task_id.clone()];
-    let waiter = wait_many(&manager, sid, &ids, Duration::from_secs(3), false, "any");
+    let waiter = wait_many(
+        &manager,
+        sid,
+        &ids,
+        Duration::from_secs(3),
+        false,
+        "any",
+        false,
+    );
     tokio::pin!(waiter);
     tokio::time::timeout(Duration::from_secs(5), async {
         while crate::wait_registry::current(sid).is_none() {

@@ -74,14 +74,7 @@ pub(super) async fn stream_response(
                 .map_err(anyhow::Error::msg)?,
         );
     }
-    req = req.header("anthropic-version", API_VERSION).header(
-        "accept",
-        if is_oauth {
-            "application/json"
-        } else {
-            "text/event-stream"
-        },
-    );
+    req = req.header("anthropic-version", API_VERSION);
 
     if is_oauth {
         // OAuth tokens require:
@@ -136,8 +129,20 @@ pub(super) async fn stream_response(
         req = req.header("anthropic-beta", beta_header);
     }
 
+    let replay = cache_keepalive::prepare(
+        &req,
+        request,
+        is_oauth || direct_transport.api_url == API_URL,
+    );
     let req = jcode_provider_core::request_compression::json_body(
-        req,
+        req.header(
+            "accept",
+            if is_oauth {
+                "application/json"
+            } else {
+                "text/event-stream"
+            },
+        ),
         url,
         request,
         jcode_base::provider::request_compression_mode(),
@@ -212,6 +217,7 @@ pub(super) async fn stream_response(
         fast_requested: fast.is_some(),
         ..SseStreamState::default()
     };
+    let mut touched_at = None;
 
     // Idle timeout between streamed chunks. Configurable via
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
@@ -235,6 +241,9 @@ pub(super) async fn stream_response(
 
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
+            if replay.is_some() && event.event_type == "message_start" {
+                touched_at = Some(std::time::SystemTime::now());
+            }
             let events = process_sse_event(&event, &mut sse_state, is_oauth);
             if event.event_type == "message_stop" {
                 // Record the effort this request ran at with its response, so
@@ -251,6 +260,9 @@ pub(super) async fn stream_response(
                         .is_err()
                 {
                     return Ok(sse_state.served_speed);
+                }
+                if let (Some(replay), Some(touched_at)) = (replay, touched_at) {
+                    replay.capture(request, &sse_state, touched_at, usage_label);
                 }
                 usage_recording::record(usage_label, &request.model, &sse_state).await;
                 usage_recording::send_final_usage(&tx, &sse_state).await;

@@ -295,6 +295,13 @@ pub enum ServerEvent {
         prompt_tokens: u64,
     },
 
+    /// Cumulative keepalive-only usage, sent live and on attach.
+    #[serde(rename = "cache_keepalive")]
+    CacheKeepalive {
+        session_id: String,
+        usage: jcode_message_types::CacheKeepaliveUsage,
+    },
+
     /// Prompt-shape signature for the API request that will later report token
     /// usage. Remote clients use this to diagnose KV-cache misses.
     #[serde(rename = "kv_cache_request")]

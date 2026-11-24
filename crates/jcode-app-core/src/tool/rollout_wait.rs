@@ -66,6 +66,13 @@ impl Tool for RolloutWait {
         };
         let mut journal = read()?;
         if !journal.phase.terminal() {
+            let _cache_pause = crate::cache_keepalive::Pause::foreground(
+                &ctx.session_id,
+                jcode_provider_core::cache_keepalive::Wait::Automatic,
+                Some(Duration::from_secs(
+                    crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS,
+                )),
+            );
             let _wait = crate::turn_activity::global().rollout_wait(
                 &ctx.session_id,
                 &ctx.tool_call_id,

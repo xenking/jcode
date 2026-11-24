@@ -462,6 +462,10 @@ pub enum BusEvent {
     BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
+    CacheKeepalive {
+        session_id: String,
+        usage: jcode_message_types::CacheKeepaliveUsage,
+    },
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
     /// A headless worker parked on `ask`; the root coordinator must decide.
@@ -565,6 +569,7 @@ impl BusEvent {
             Self::BackgroundTaskProgress(event) => Some(&event.session_id),
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
+            Self::CacheKeepalive { session_id, .. } => Some(session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
             Self::SwarmAskEscalated(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
@@ -705,6 +710,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskProgress(_)
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
+                | BusEvent::CacheKeepalive { .. }
                 | BusEvent::SwarmWorkerReported(_)
                 | BusEvent::SwarmAskEscalated(_)
                 | BusEvent::UiActivity(_)

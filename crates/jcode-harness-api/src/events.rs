@@ -1,6 +1,7 @@
 //! Server-to-client events: replies and streaming.
 
 use crate::{SessionImageRef, search::SessionSearchHit};
+pub use jcode_message_types::{CacheKeepaliveHit, CacheKeepaliveUsage};
 use serde::{Deserialize, Serialize};
 
 /// Curated event surface. Internally-tagged on `"ev"`.
@@ -318,6 +319,12 @@ pub enum ApiEvent {
     ContextOccupancy {
         session_id: String,
         prompt_tokens: u64,
+    },
+
+    /// Cumulative keepalive-only usage. This is not a turn or transcript event.
+    CacheKeepalive {
+        session_id: String,
+        usage: CacheKeepaliveUsage,
     },
 
     /// The completed provider request reported substantially fewer prompt cache

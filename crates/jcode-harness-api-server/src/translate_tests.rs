@@ -521,6 +521,30 @@ fn unattributable_context_occupancy_is_dropped() {
 }
 
 #[test]
+fn cache_keepalive_is_an_attach_safe_usage_snapshot() {
+    let mut state = BridgeState::default();
+    let usage = jcode_harness_api::CacheKeepaliveUsage {
+        attempted: 2,
+        warmed: 1,
+        cost_micros: 180_000,
+        unconfirmed_micros: 7_200_000,
+        last_hit: None,
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "cache_keepalive", "session_id": "observed", "usage": usage,
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::CacheKeepalive {
+            session_id: "observed".into(),
+            usage
+        }
+    );
+    assert!(state.session_id.is_none());
+}
+
+#[test]
 fn kv_cache_miss_is_forwarded_with_session() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

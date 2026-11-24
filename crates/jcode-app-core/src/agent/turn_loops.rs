@@ -131,6 +131,8 @@ impl Agent {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
+        let mut cache_turn =
+            crate::cache_keepalive::Turn::begin(&self.session, self.registry.compaction());
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
         self.provider.begin_turn(&usage_turn_id).await;
@@ -324,14 +326,20 @@ impl Agent {
             self.enforce_worker_request()?;
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
-            let completion = jcode_provider_core::with_pinned_worker_request(
-                self.session.is_swarm_worker,
-                self.provider.complete_split(
-                    send_messages,
-                    &tools,
-                    &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
-                    self.provider_session_id.as_deref(),
+            let cache_capture = cache_turn
+                .as_ref()
+                .map(crate::cache_keepalive::Turn::request);
+            let completion = jcode_provider_core::cache_keepalive::Capture::scope(
+                cache_capture.clone(),
+                jcode_provider_core::with_pinned_worker_request(
+                    self.session.is_swarm_worker,
+                    self.provider.complete_split(
+                        send_messages,
+                        &tools,
+                        &split_prompt.static_part,
+                        &split_prompt.dynamic_part,
+                        self.provider_session_id.as_deref(),
+                    ),
                 ),
             )
             .await;
@@ -1162,6 +1170,9 @@ impl Agent {
             }
 
             if saw_message_end {
+                if let (Some(turn), Some(capture)) = (&cache_turn, cache_capture) {
+                    turn.accept(capture);
+                }
                 self.note_shake_provider_response(usage_cache_read).await;
             }
             // Store usage for debug queries
@@ -1289,6 +1300,13 @@ impl Agent {
                     println!();
                 }
                 final_text = text_content;
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && matches!(stop_reason.as_deref(), Some("end_turn" | "stop_sequence"))
+                    && let Some(turn) = &mut cache_turn
+                {
+                    turn.park_on_drop();
+                }
                 break;
             }
 

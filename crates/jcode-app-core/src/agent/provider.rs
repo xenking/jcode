@@ -839,6 +839,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
+        crate::cache_keepalive::invalidate(&self.session.id);
         self.provider.set_route_selection(selection)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
@@ -867,6 +868,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
+        crate::cache_keepalive::invalidate(&self.session.id);
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
@@ -1034,6 +1036,7 @@ impl Agent {
         use jcode_provider_core::SpeedMode;
         self.ensure_worker_speed_allowed(mode)?;
         let previous_mode = self.provider.speed_mode();
+        crate::cache_keepalive::invalidate(&self.session.id);
         let next = Self::apply_speed_to_provider(self.provider.as_ref(), mode)?;
         let previous = std::mem::replace(&mut self.session.speed_selection, next);
         let previous_worker_speed = self.session.worker_speed.clone();
@@ -1058,6 +1061,7 @@ impl Agent {
                 !self.session.is_swarm_worker,
                 "Workers must use an approved speed mode, not a service tier override"
             );
+            crate::cache_keepalive::invalidate(&self.session.id);
             self.provider.set_service_tier(tier)?;
         }
         Ok(())
@@ -1117,6 +1121,7 @@ impl Agent {
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         let prev_model = self.provider.model();
         let effort = self.worker_effort(effort)?;
+        crate::cache_keepalive::invalidate(&self.session.id);
         self.provider.set_reasoning_effort(&effort)?;
         // This choice supersedes any older one still waiting for a busy turn.
         crate::session_effort::clear_pending_effort(&self.session.id);

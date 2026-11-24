@@ -189,6 +189,7 @@ impl Agent {
     }
 
     pub(super) fn note_compaction_applied(&mut self) {
+        crate::cache_keepalive::invalidate(&self.session.id);
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;

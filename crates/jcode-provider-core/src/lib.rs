@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
+pub mod cache_keepalive;
 pub mod catalog_refresh;
 pub mod context_pricing;
 pub mod failover;

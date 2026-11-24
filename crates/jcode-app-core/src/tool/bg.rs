@@ -605,6 +605,16 @@ struct WaitManyOutcome {
     unknown: Vec<String>,
 }
 
+fn cache_wait(session_id: &str, max_wait: Duration) -> Option<crate::cache_keepalive::Pause> {
+    crate::cache_keepalive::Pause::foreground(
+        session_id,
+        jcode_provider_core::cache_keepalive::Wait::Automatic,
+        Some(max_wait.min(Duration::from_secs(
+            crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS,
+        ))),
+    )
+}
+
 async fn wait_many(
     manager: &background::BackgroundTaskManager,
     session_id: &str,
@@ -612,11 +622,13 @@ async fn wait_many(
     max_wait: Duration,
     return_on_progress: bool,
     mode: &str,
+    allow_cache_wait: bool,
 ) -> Result<WaitManyOutcome> {
     let incoming = crate::incoming_message::watch(session_id);
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
     let mut wait_guard = None;
+    let mut cache_pause = None;
     let mut task_changes = manager.subscribe_status_changes();
     let mut await_completions = crate::server::await_members_state::subscribe_await_completion();
     for task_id in task_ids {
@@ -728,6 +740,14 @@ async fn wait_many(
             };
             crate::wait_registry::register(session_id, &reason)
         });
+        if allow_cache_wait {
+            cache_pause.get_or_insert_with(|| {
+                cache_wait(
+                    session_id,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            });
+        }
         // External writers and detached process exits cannot signal our watches.
         let reconcile_external = !unknown.is_empty()
             || !dependencies.is_empty()
@@ -1059,6 +1079,7 @@ impl Tool for BgTool {
                             .return_on_progress
                             .unwrap_or_else(default_wait_return_on_progress),
                         mode,
+                        ctx.tool_call_id == ctx.root_invocation_id(),
                     )
                     .await?;
                     let reason = outcome.reason.clone();
@@ -1122,6 +1143,9 @@ impl Tool for BgTool {
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
                 let incoming = crate::incoming_message::watch(&ctx.session_id);
                 let wait_result = if blocking {
+                    let _cache_pause = (ctx.tool_call_id == ctx.root_invocation_id())
+                        .then(|| cache_wait(&ctx.session_id, wait_duration))
+                        .flatten();
                     tokio::select! {
                         biased;
                         _ = incoming.arrived() => None,
@@ -1278,7 +1302,7 @@ mod tests {
             })
             .await;
         let ids = vec![task.task_id.clone()];
-        let result = wait_many(&manager, sid, &ids, Duration::ZERO, false, "all")
+        let result = wait_many(&manager, sid, &ids, Duration::ZERO, false, "all", false)
             .await
             .unwrap();
         assert_eq!(result.reason, "timeout");
@@ -1291,6 +1315,7 @@ mod tests {
             Duration::from_secs(30),
             false,
             "all",
+            false,
         ));
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -1457,10 +1482,18 @@ mod tests {
             crate::incoming_message::notify(sid);
         });
         let started = Instant::now();
-        let reason = wait_many(&manager, sid, &ids, Duration::from_secs(120), false, "all")
-            .await
-            .unwrap()
-            .reason;
+        let reason = wait_many(
+            &manager,
+            sid,
+            &ids,
+            Duration::from_secs(120),
+            false,
+            "all",
+            false,
+        )
+        .await
+        .unwrap()
+        .reason;
         notifier.await.unwrap();
         assert_eq!(reason, "user_message");
         assert!(started.elapsed() < Duration::from_secs(5));

@@ -2525,6 +2525,19 @@ impl BridgeState {
                     cache_creation_input: event["cache_creation_input"].as_u64(),
                 })]
             }
+            "cache_keepalive" => {
+                let Some(session_id) = event["session_id"].as_str().filter(|id| !id.is_empty())
+                else {
+                    return vec![];
+                };
+                let Ok(usage) = serde_json::from_value(event["usage"].clone()) else {
+                    return vec![];
+                };
+                vec![ServerFrame::event(ApiEvent::CacheKeepalive {
+                    session_id: session_id.into(),
+                    usage,
+                })]
+            }
             "kv_cache_miss" => vec![ServerFrame::event(ApiEvent::KvCacheMiss {
                 session_id: session(self),
                 reason: event["reason"].as_str().unwrap_or("unknown").to_string(),

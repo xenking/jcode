@@ -694,6 +694,10 @@ pub struct Config {
     /// Provider configuration
     pub provider: ProviderConfig,
 
+    /// Bounded Anthropic prompt-cache reuse during confirmed waits.
+    #[serde(skip_serializing_if = "jcode_provider_core::cache_keepalive::Config::is_default")]
+    pub cache: jcode_provider_core::cache_keepalive::Config,
+
     /// Named provider profiles, keyed by profile name.
     ///
     /// Example:

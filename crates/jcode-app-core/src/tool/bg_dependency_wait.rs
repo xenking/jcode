@@ -8,6 +8,7 @@ pub(super) async fn wait_on_await_dependency(
     let deadline = Instant::now() + wait_duration;
     let incoming = crate::incoming_message::watch(&ctx.session_id);
     let mut completions = crate::server::await_members_state::subscribe_await_completion();
+    let mut cache_pause = None;
     let _wait_guard = crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members");
     let metadata = |reason: &str| {
         json!({
@@ -47,6 +48,14 @@ pub(super) async fn wait_on_await_dependency(
             .with_metadata(metadata("timeout")));
         }
         // A different process may commit the file after a daemon replacement.
+        if ctx.tool_call_id == ctx.root_invocation_id() {
+            cache_pause.get_or_insert_with(|| {
+                cache_wait(
+                    &ctx.session_id,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            });
+        }
         let recheck = deadline.min(Instant::now() + Duration::from_millis(250));
         tokio::select! {
             _ = completions.changed() => {}

@@ -696,6 +696,19 @@ impl Agent {
         // manager; otherwise every restored session looks like it never made a
         // request and the cache-expiry shake is skipped on a fully cold prompt.
         manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
+        if (self.provider.name().eq_ignore_ascii_case("anthropic")
+            || self.provider.name().eq_ignore_ascii_case("claude"))
+            && let Some(previous) = self.session.last_provider_cache_domain.as_ref()
+            && self.request_cache_domain().switch_from(previous).is_none()
+            && let Some(hit) = crate::cache_keepalive::load_usage(&self.session.id)
+                .and_then(|usage| usage.last_hit)
+            && let Some(at) = chrono::DateTime::from_timestamp_millis(hit.at_ms)
+        {
+            let model = self.provider.model();
+            if model.strip_suffix("[1m]").unwrap_or(&model) == hit.model {
+                manager.note_cache_keepalive(at.into());
+            }
+        }
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {

@@ -2091,6 +2091,17 @@ impl Server {
                     )
                     .await;
                 }
+                BusEvent::CacheKeepalive { session_id, usage } => {
+                    fanout_session_event(
+                        &swarm_members,
+                        &session_id,
+                        ServerEvent::CacheKeepalive {
+                            session_id: session_id.clone(),
+                            usage,
+                        },
+                    )
+                    .await;
+                }
                 BusEvent::SwarmWorkerReported(event) => {
                     background_tasks::dispatch_swarm_worker_report(
                         &event,

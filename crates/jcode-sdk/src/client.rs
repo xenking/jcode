@@ -2175,6 +2175,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | RequestUsage { session_id, .. }
         | ContextCapChanged { session_id, .. }
         | ContextOccupancy { session_id, .. }
+        | CacheKeepalive { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | MemoryInjected { session_id, .. }
         | MemoryActivity { session_id, .. }

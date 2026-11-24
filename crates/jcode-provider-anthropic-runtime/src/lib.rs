@@ -1605,7 +1605,8 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
-        tokio::spawn(async move {
+        let cache_capture = jcode_provider_core::cache_keepalive::Capture::current();
+        let stream_task = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1632,7 +1633,11 @@ impl Provider for AnthropicProvider {
                 fast,
             )
             .await;
-        });
+        };
+        tokio::spawn(jcode_provider_core::cache_keepalive::Capture::scope(
+            cache_capture,
+            stream_task,
+        ));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -2118,7 +2123,8 @@ impl Provider for AnthropicProvider {
         let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic
-        tokio::spawn(async move {
+        let cache_capture = jcode_provider_core::cache_keepalive::Capture::current();
+        let stream_task = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -2145,7 +2151,11 @@ impl Provider for AnthropicProvider {
                 fast,
             )
             .await;
-        });
+        };
+        tokio::spawn(jcode_provider_core::cache_keepalive::Capture::scope(
+            cache_capture,
+            stream_task,
+        ));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -2203,6 +2213,7 @@ async fn force_refresh_oauth_token(
     Ok(refreshed.access_token)
 }
 
+mod cache_keepalive;
 mod messages_http;
 use messages_http::stream_response;
 

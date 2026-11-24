@@ -1432,6 +1432,14 @@ impl CompactionManager {
         self.last_response_cache_read = cache_read_tokens.unwrap_or(0) > 0;
     }
 
+    /// A confirmed cache hit extends the current episode without changing usage or history.
+    pub fn note_cache_keepalive(&mut self, at: SystemTime) {
+        if self.last_response_at.is_none_or(|last| at > last) {
+            self.last_response_at = Some(at);
+            self.last_response_cache_read = true;
+        }
+    }
+
     /// Index of the first non-compacted message.
     pub fn active_start(&self, all_messages: &[Message]) -> usize {
         self.compacted_count.min(all_messages.len())

@@ -30,6 +30,7 @@ pub mod ambient;
 pub mod ambient_runner;
 pub mod ambient_scheduler;
 pub mod build;
+mod cache_keepalive;
 pub mod catchup;
 pub mod channel;
 mod comm_format;

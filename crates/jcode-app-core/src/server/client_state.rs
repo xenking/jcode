@@ -895,6 +895,12 @@ async fn send_history_from_persisted_session(
     let json = encode_event(&history_event);
     let occupancy_json =
         context_occupancy_event(session_id, context_occupancy).map(|event| encode_event(&event));
+    let keepalive_json = crate::cache_keepalive::load_usage(session_id).map(|usage| {
+        encode_event(&ServerEvent::CacheKeepalive {
+            session_id: session_id.into(),
+            usage,
+        })
+    });
     timing.stage("writer_lock");
     let mut writer_guard = writer.lock().await;
     timing.stage("write");
@@ -912,6 +918,11 @@ async fn send_history_from_persisted_session(
         && let Some(occupancy_json) = occupancy_json.as_ref()
     {
         result = writer_guard.write_all(occupancy_json.as_bytes()).await;
+    }
+    if result.is_ok()
+        && let Some(keepalive_json) = keepalive_json.as_ref()
+    {
+        result = writer_guard.write_all(keepalive_json.as_bytes()).await;
     }
     timing.result(&result);
     result.map_err(Into::into)

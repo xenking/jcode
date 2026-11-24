@@ -373,6 +373,7 @@ pub(super) async fn spawn_or_resume_await_members(
         let mut recheck = tokio::time::interval(Duration::from_secs(1));
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         recheck.tick().await;
+        let mut cache_pause = None;
 
         loop {
             let mut snapshot = awaited_member_snapshot(
@@ -392,6 +393,7 @@ pub(super) async fn spawn_or_resume_await_members(
 
             // Empty membership during startup is not successful completion.
             if !member_statuses.is_empty() && mode_satisfied(&member_statuses, mode.as_deref()) {
+                drop(cache_pause.take());
                 let summary = mode_summary(&member_statuses, mode.as_deref());
                 finalize_await(
                     &await_members_runtime,
@@ -415,8 +417,23 @@ pub(super) async fn spawn_or_resume_await_members(
                 return;
             }
 
+            if latest.background
+                && latest.wake
+                && crate::config::config().server.wake_mode == crate::config::WakeMode::Internal
+            {
+                if cache_pause.is_none() {
+                    cache_pause = crate::cache_keepalive::Pause::detached(
+                        &req_session_id,
+                        latest.deadline_unix_ms,
+                    );
+                }
+            } else {
+                drop(cache_pause.take());
+            }
+
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
+                    drop(cache_pause.take());
                     let summary = timeout_summary(&member_statuses);
                     finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
                     return;

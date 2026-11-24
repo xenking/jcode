@@ -133,6 +133,116 @@ fn assert_beta(request: &Captured, expected: bool) {
     );
 }
 
+#[test]
+fn cache_keepalive_replays_the_accepted_messages_request_without_generation() {
+    use jcode_provider_anthropic::{
+        ApiContentBlock, ApiMessage, ApiOutputConfig, ApiThinking, CacheControlParam,
+    };
+    use jcode_provider_core::cache_keepalive::Capture;
+    let _guard = jcode_base::storage::lock_test_env();
+    let (url, server) = capture([
+        (
+            "200 OK",
+            SSE,
+            concat!(
+                "event: message_start\ndata: {\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":80,\"cache_read_input_tokens\":900000,\"cache_creation_input_tokens\":0}}}\n\n",
+                "event: message_stop\ndata: {}\n\n",
+            ),
+        ),
+        (
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            r#"{"model":"claude-opus-5-5","usage":{"input_tokens":80,"cache_read_input_tokens":900000,"cache_creation_input_tokens":0,"output_tokens":0}}"#,
+        ),
+    ]);
+    let provider = api_provider(&url, true);
+    let request = ApiRequest {
+        model: "claude-opus-5-5".into(),
+        max_tokens: 4096,
+        system: jcode_provider_anthropic::build_system_param("persistent system", false, true),
+        messages: vec![ApiMessage {
+            role: "user".into(),
+            content: vec![
+                ApiContentBlock::Text {
+                    text: "the cached prompt".into(),
+                    cache_control: Some(CacheControlParam {
+                        kind: "ephemeral",
+                        ttl: Some("1h"),
+                    }),
+                },
+                ApiContentBlock::Text {
+                    text: "uncached tail".into(),
+                    cache_control: None,
+                },
+            ],
+        }],
+        tools: jcode_provider_anthropic::request_tools(
+            jcode_provider_anthropic::format_tools(
+                &[ToolDefinition::new(
+                    "fixture",
+                    "a tool",
+                    serde_json::json!({"type": "object"}),
+                )],
+                false,
+                true,
+            ),
+            vec![],
+        ),
+        metadata: None,
+        thinking: Some(ApiThinking::Adaptive {
+            display: None,
+            block_binding: None,
+        }),
+        output_config: Some(ApiOutputConfig {
+            effort: "high".into(),
+        }),
+        temperature: None,
+        service_tier: None,
+        speed: None,
+        stream: true,
+        effort_record: None,
+    };
+    let capture = Capture::default();
+    runtime().block_on(async {
+        let (tx, _rx) = mpsc::channel(100);
+        let mut accepted = false;
+        Capture::scope(
+            Some(capture.clone()),
+            stream_response(
+                provider.client.clone(),
+                "offline-fixture-api-key".into(),
+                false,
+                &request,
+                tx,
+                &request.model,
+                "offline",
+                &provider.direct_transport,
+                &mut accepted,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(accepted);
+        let replay = capture.take().expect("terminal cache usage enables replay");
+        assert_eq!(replay.cache.cached_tokens, 900_000);
+        let usage = (replay.send)().await.unwrap();
+        assert_eq!((usage.read, usage.output), (900_000, 0));
+    });
+    let [normal, ping] = server.join().unwrap();
+    assert_eq!(normal.request_line, ping.request_line);
+    for header in ["x-api-key", "anthropic-version", "anthropic-beta"] {
+        assert_eq!(normal.headers[header], ping.headers[header], "{header}");
+    }
+    assert_eq!(ping.headers["accept"], "application/json");
+    let mut expected = normal.body;
+    expected["max_tokens"] = serde_json::json!(0);
+    expected["stream"] = serde_json::json!(false);
+    assert_eq!(ping.body, expected);
+    assert_eq!(request.max_tokens, 4096);
+    assert!(request.stream);
+}
+
 fn assert_standard(request: &Captured) {
     assert!(request.body.get("speed").is_none());
     assert_beta(request, false);

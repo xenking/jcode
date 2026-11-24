@@ -1274,3 +1274,23 @@ mod tool_use_block_tests {
         );
     }
 }
+/// Keepalive usage is separate from turn usage and never becomes transcript data.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CacheKeepaliveUsage {
+    pub attempted: u64,
+    pub warmed: u64,
+    /// Public-rate equivalent, including for subscription requests.
+    pub cost_micros: u64,
+    /// Worst-case reservations for requests without a definitive usage response.
+    pub unconfirmed_micros: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hit: Option<CacheKeepaliveHit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CacheKeepaliveHit {
+    pub at_ms: i64,
+    pub model: String,
+    pub ttl_secs: u64,
+    pub cached_tokens: u64,
+}

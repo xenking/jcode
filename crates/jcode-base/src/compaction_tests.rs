@@ -2601,6 +2601,25 @@ fn cache_expiry_snapcompact_never_runs_while_cache_is_warm() {
     assert!(!m.plan_cache_expiry_compaction(&msgs, t0 + Duration::from_secs(900), Some(300)));
 }
 
+#[test]
+fn cache_keepalive_defers_cold_compaction_until_the_extended_expiry() {
+    let msgs = shake_session(20, 2000);
+    let mut manager = cache_expiry_manager();
+    let start = SystemTime::now();
+    manager.note_provider_response(start, Some(100));
+    let before_expiry = start + Duration::from_secs(3300);
+    let old_expiry = start + Duration::from_secs(3600);
+    assert!(manager.plan_cache_expiry_compaction(&msgs, old_expiry, Some(3600)));
+    manager.note_cache_keepalive(before_expiry);
+    manager.note_cache_keepalive(start);
+    assert!(!manager.plan_cache_expiry_compaction(&msgs, old_expiry, Some(3600)));
+    assert!(manager.plan_cache_expiry_compaction(
+        &msgs,
+        before_expiry + Duration::from_secs(3600),
+        Some(3600)
+    ));
+}
+
 #[tokio::test]
 async fn cache_expiry_snapcompact_runs_on_first_turn_after_ttl_once() {
     let msgs = shake_session(20, 2000);
