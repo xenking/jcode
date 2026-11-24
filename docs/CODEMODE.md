@@ -118,7 +118,14 @@ An MCP server can opt in to a human yes per call (`approval = "annotations"`).
 The gate is part of this same path, so a script cannot reach a tool it could not
 reach directly: `tools.mcp__srv__write(...)` asks the user and throws when there
 is nobody to ask. The time a script spends waiting for a person is added to its
-deadline, so slow approvals do not time it out. See [MCP_TOOLS.md](MCP_TOOLS.md).
+deadline, so slow approvals do not time it out. While a prompt is open the run
+stays in the foreground: Alt+B/Ctrl+B is ignored (the prompt owns the keys, as
+with `ask`) and a `background_tool` request from another client is answered
+`moved: false`. See [MCP_TOOLS.md](MCP_TOOLS.md).
+
+The TUI lists every call a run dispatched under its row, one line each: status,
+tool, swarm action and target, duration, a safe failure category, and a count
+of calls past the first 40.
 
 One deliberate difference: nested calls set `accept_large_output: true`. A
 tool's output goes into the VM, not into the model context, so the per-call

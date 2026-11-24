@@ -348,6 +348,17 @@ pub(crate) fn attach_client(
     }
 }
 
+/// Whether `session_id` has a question waiting for a person. A tool blocked on
+/// an answer is not work to background: the prompt is the turn's, and the
+/// native `ask` picker already swallows Alt+B while it is open.
+pub(crate) fn has_pending(session_id: &str) -> bool {
+    PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .is_some_and(|requests| !requests.is_empty())
+}
+
 pub(crate) fn sender(session_id: &str) -> Option<UnboundedSender<StdinInputRequest>> {
     sender_for(session_id, false)
 }

@@ -166,6 +166,55 @@ async fn busy_missing_queue_fails_closed_without_waiting() {
 }
 
 #[tokio::test]
+async fn background_request_is_refused_while_a_prompt_waits_for_a_person() {
+    // A tool blocked on an `ask` or an MCP approval must stay in the
+    // foreground: moving it ends the turn with the prompt still open, and a
+    // queued message then answers the prompt as free text (a silent denial).
+    let session_id = "session_background_refused_while_prompt_pending";
+    let background_signal = InterruptSignal::new();
+    let stop_signal = InterruptSignal::new();
+    let control = SessionControlHandle::new(
+        session_id,
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        background_signal.clone(),
+        stop_signal,
+    );
+
+    let (client, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let _attachment = crate::tool::interactive::attach(session_id, client);
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    crate::tool::interactive::sender(session_id)
+        .unwrap()
+        .send(crate::tool::StdinInputRequest {
+            request_id: "ask-mcp-approval-test".into(),
+            prompt: "approve?".into(),
+            is_password: false,
+            ask_questions: Some(serde_json::json!([{}])),
+            response_tx: reply,
+        })
+        .unwrap();
+    let _shown = requests.recv().await.unwrap();
+
+    assert!(
+        !control.request_background_current_tool(),
+        "a pending prompt must refuse the move"
+    );
+    assert!(!background_signal.is_set());
+
+    assert!(crate::tool::interactive::answer_with_text(
+        session_id, "no", vec![]
+    ));
+    let _ = answer.await;
+    assert!(
+        control.request_background_current_tool(),
+        "once the prompt is answered the tool can be moved again"
+    );
+    assert!(background_signal.is_set());
+
+    crate::server::state::remove_background_tool_signal(session_id);
+}
+
+#[tokio::test]
 async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
     // Regression: pressing Alt+B/Ctrl+B while a turn owns the agent mutex (e.g.
     // running `await_members`) used to silently no-op because the lock-free

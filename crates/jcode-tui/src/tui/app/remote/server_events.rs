@@ -901,6 +901,8 @@ fn handle_server_event_inner(
         ServerEvent::BackgroundToolResult { moved, .. } => {
             app.set_status_notice(if moved {
                 "Tool signalled to move to background"
+            } else if app.ask_picker.is_some() {
+                "Answer the prompt first: the tool is waiting for you"
             } else {
                 "No running tool to move to background"
             });

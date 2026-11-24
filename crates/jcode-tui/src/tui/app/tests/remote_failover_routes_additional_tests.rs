@@ -64,6 +64,81 @@ fn test_remote_background_result_notice() {
     }
 }
 
+fn open_approval_prompt(app: &mut App) {
+    app.open_ask_picker(
+        "ask-mcp-approval-test".into(),
+        "call-1".into(),
+        vec![crate::protocol::AskQuestion {
+            question: "Allow MCP tool?".into(),
+            header: Some("MCP approval".into()),
+            options: vec![crate::protocol::AskOption {
+                label: "Deny".into(),
+                description: None,
+            }],
+            multi_select: false,
+            allow_other: false,
+        }],
+    );
+}
+
+#[test]
+fn test_remote_background_shortcut_is_swallowed_by_an_open_ask_prompt() {
+    // An MCP approval and the native `ask` share one picker. While it is open
+    // Alt+B/Ctrl+B belong to it, so the tool waiting on the answer is never
+    // moved to the background behind the user's back.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        app.is_remote = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::RunningTool("codemode".into());
+        open_approval_prompt(&mut app);
+        rt.block_on(async {
+            remote::handle_remote_key_event(
+                &mut app,
+                crossterm::event::KeyEvent::new(KeyCode::Char('b'), modifiers),
+                &mut remote,
+            )
+            .await
+            .unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut byte = [0u8; 1];
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), peer.read(&mut byte))
+                    .await
+                    .is_err(),
+                "no request may reach the server"
+            );
+        });
+        assert!(app.ask_picker.is_some());
+    }
+}
+
+#[test]
+fn test_remote_background_refusal_with_open_prompt_says_to_answer_it() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    open_approval_prompt(&mut app);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::BackgroundToolResult {
+            id: 1,
+            moved: false,
+            tool_call_id: None,
+            tool_name: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(
+        app.status_notice().as_deref(),
+        Some("Answer the prompt first: the tool is waiting for you")
+    );
+}
+
 #[test]
 fn test_remote_background_shortcut_idle_keeps_word_navigation() {
     let rt = tokio::runtime::Runtime::new().unwrap();

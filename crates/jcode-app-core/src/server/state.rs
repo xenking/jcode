@@ -1570,6 +1570,16 @@ impl SessionControlHandle {
     }
 
     pub fn request_background_current_tool(&self) -> bool {
+        // A call stopped on a human answer (`ask`, an MCP approval) stays in the
+        // foreground. Moving it ends the turn while its prompt is still open,
+        // and a queued message would then answer the prompt as free text.
+        if crate::tool::interactive::has_pending(&self.session_id) {
+            crate::logging::info(&format!(
+                "BACKGROUND_TOOL_SIGNAL_FIRE session={} result=refused_pending_prompt",
+                self.session_id
+            ));
+            return false;
+        }
         // Prefer the directly-held signal; fall back to the process-global
         // registry for lock-free (`cancel_only`) handles built while the agent
         // mutex was busy. This is what makes Alt+B/Ctrl+B work during a busy
