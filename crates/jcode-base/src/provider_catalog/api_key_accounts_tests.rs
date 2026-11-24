@@ -358,3 +358,62 @@ mod key_command {
         assert!(!sentinel.exists());
     }
 }
+
+#[test]
+fn a_provider_with_only_labelled_keys_counts_as_configured_and_serves_them() {
+    let _sandbox = AuthTestSandbox::new().unwrap();
+    assert!(!openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
+    assert_eq!(
+        load_runtime_api_key(OPENCODE_GO_PROFILE.api_key_env, OPENCODE_GO_PROFILE.env_file),
+        None
+    );
+
+    save_labelled_api_key("opencode-go", "only", "sk-only").unwrap();
+
+    assert!(openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
+    // The env-driven runtime path and the profile path both serve the active key.
+    assert_eq!(
+        load_runtime_api_key(OPENCODE_GO_PROFILE.api_key_env, OPENCODE_GO_PROFILE.env_file)
+            .as_deref(),
+        Some("sk-only")
+    );
+    let resolved = resolve_openai_compatible_profile(OPENCODE_GO_PROFILE);
+    assert_eq!(
+        load_openai_compatible_profile_api_key(&resolved).as_deref(),
+        Some("sk-only")
+    );
+    // Other providers are unaffected.
+    assert!(!openai_compatible_profile_is_configured(HUGGING_FACE_PROFILE));
+
+    remove_labelled_api_key("opencode-go", "only").unwrap();
+    assert!(!openai_compatible_profile_is_configured(OPENCODE_GO_PROFILE));
+}
+
+#[test]
+fn spend_ledger_key_follows_the_active_account() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    sandbox
+        .write_openai_compatible_api_key(OPENCODE_GO_PROFILE, "sk-default")
+        .unwrap();
+    let config = Config::default();
+    save_labelled_api_key_with(&config, "opencode-go", "second", "sk-second").unwrap();
+
+    let source = "openai-compatible:opencode-go";
+    assert_eq!(spend_ledger_key_with(&config, source), source);
+    set_active_api_key_account_with(&config, "opencode-go", Some("second")).unwrap();
+    assert_eq!(spend_ledger_key_with(&config, source), "opencode-go:second");
+    // Providers without labelled keys keep their own ledger key.
+    assert_eq!(
+        spend_ledger_key_with(&config, "openai-compatible:deepseek"),
+        "openai-compatible:deepseek"
+    );
+    assert_eq!(spend_ledger_key_with(&config, "claude:api-key"), "claude:api-key");
+    assert_eq!(
+        ledger_key_for_account(&id("opencode-go")),
+        "openai-compatible:opencode-go"
+    );
+    assert_eq!(
+        ledger_key_for_account(&id("opencode-go:second")),
+        "opencode-go:second"
+    );
+}

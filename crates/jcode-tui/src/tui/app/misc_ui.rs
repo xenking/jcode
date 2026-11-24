@@ -632,4 +632,19 @@ mod cache_cost_tests {
         assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
         assert!((pricing.cost_for_usage(10_000, 0, 6_000, 0) - 0.046).abs() < 0.000001);
     }
+
+    #[test]
+    fn configured_cache_write_price_replaces_the_provider_premium() {
+        let pricing = ResolvedTokenPricing {
+            prompt_price: 10.0,
+            completion_price: 40.0,
+            cache_read_price: Some(1.0),
+            cache_write_price: Some(3.0),
+            is_anthropic: false,
+            is_openai: true,
+        };
+        let cost = pricing.cost_for_usage(10_000, 0, 6_000, 2_000);
+        let expected = (2_000.0 * 10.0 + 6_000.0 * 1.0 + 2_000.0 * 3.0) / 1_000_000.0;
+        assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
+    }
 }
