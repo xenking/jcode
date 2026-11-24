@@ -2,7 +2,7 @@
 
 mod ledger;
 
-use jcode_provider_core::cache_keepalive::{Capture, Decision, Replay, Wait, decide};
+use jcode_provider_core::cache_keepalive::{Capture, Decision, Replay, decide};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
@@ -160,39 +160,13 @@ impl Drop for Pause {
 }
 
 impl Pause {
-    pub(crate) fn foreground(
-        session_id: &str,
-        wait: Wait,
-        timeout: Option<Duration>,
-    ) -> Option<Self> {
-        Self::start(
-            lookup(session_id)?,
-            Phase::InTurn,
-            wait,
-            timeout.map(|timeout| SystemTime::now() + timeout),
-        )
-    }
-
+    /// Keeps the parked session's cache warm while it waits on swarm workers
+    /// until `deadline_ms`, as long as rule 6 of the routing economics allows.
     pub(crate) fn detached(session_id: &str, deadline_ms: u64) -> Option<Self> {
-        Self::start(
-            lookup(session_id)?,
-            Phase::Parked,
-            Wait::Automatic,
-            Some(SystemTime::UNIX_EPOCH + Duration::from_millis(deadline_ms)),
-        )
-    }
-
-    fn start(
-        hub: Arc<Hub>,
-        phase: Phase,
-        wait: Wait,
-        deadline: Option<SystemTime>,
-    ) -> Option<Self> {
-        if wait == Wait::Human && !crate::config::config().cache.allow_human_wait {
-            return None;
-        }
+        let hub = lookup(session_id)?;
+        let deadline = SystemTime::UNIX_EPOCH + Duration::from_millis(deadline_ms);
         let live = Arc::new(AtomicBool::new(true));
-        let task = tokio::spawn(run_pause(hub, phase, wait, deadline, Arc::clone(&live)));
+        let task = tokio::spawn(run_pause(hub, deadline, Arc::clone(&live)));
         Some(Self { live, task })
     }
 }
@@ -203,14 +177,10 @@ enum Next {
     Ping(ArmedReplay, u64),
 }
 
-async fn run_pause(
-    hub: Arc<Hub>,
-    phase: Phase,
-    wait: Wait,
-    deadline: Option<SystemTime>,
-    live: Arc<AtomicBool>,
-) {
-    let mut pings = 0;
+async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
+    let phase = Phase::Parked;
+    // Routing's view of the session's account: free room, the pending move.
+    let outlook = || jcode_base::routing_service::global().keepalive_outlook(&hub.session_id);
     let mut changed = hub.changed.subscribe();
     loop {
         if !live.load(Ordering::Acquire)
@@ -226,20 +196,20 @@ async fn run_pause(
             if state.phase != phase {
                 Next::Changed
             } else if let Some(armed) = state.replay.as_ref() {
-                let cache = armed.replay.cache;
-                if deadline.is_some_and(|deadline| deadline <= cache.touched_at + cache.tier.ttl())
-                {
-                    // A definite wake before expiry cannot benefit from a ping.
-                    Next::Changed
-                } else {
-                    match decide(config, wait, cache, now, pings, 0) {
-                        Decision::Stop => Next::Changed,
-                        Decision::Sleep(delay) => Next::Sleep(delay),
-                        Decision::Ping { reserve_micros } => Next::Ping(
-                            state.replay.take().expect("same locked replay"),
-                            reserve_micros,
-                        ),
-                    }
+                match decide(
+                    config,
+                    armed.replay.cache,
+                    now,
+                    deadline,
+                    outlook().as_ref(),
+                    0,
+                ) {
+                    Decision::Stop => Next::Changed,
+                    Decision::Sleep(delay) => Next::Sleep(delay),
+                    Decision::Ping { reserve_micros } => Next::Ping(
+                        state.replay.take().expect("same locked replay"),
+                        reserve_micros,
+                    ),
                 }
             } else {
                 Next::Changed
@@ -283,17 +253,16 @@ async fn run_pause(
                         return;
                     }
                 };
-                pings += 1;
                 let started = SystemTime::now();
                 if !live.load(Ordering::Acquire)
                     || crate::turn_activity::session_is_stopped(&hub.session_id)
                     || !matches!(
                         decide(
                             &crate::config::config().cache,
-                            wait,
                             armed.replay.cache,
                             started,
-                            pings - 1,
+                            deadline,
+                            outlook().as_ref(),
                             0
                         ),
                         Decision::Ping { .. }
@@ -344,9 +313,6 @@ async fn run_pause(
                 armed.replay.cache.touched_at = started;
                 state.replay = Some(armed);
                 hub.changed.send_replace(());
-                if pings >= crate::config::config().cache.max_pings_per_wait {
-                    return;
-                }
             }
         }
     }

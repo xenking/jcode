@@ -11,20 +11,33 @@ events keep transport alive, not the provider's prompt cache.
 [cache]
 keepalive = true                # Set to false to disable all cache pings
 allow_5m = false                # First-party Anthropic 5m tier, opt-in
-allow_human_wait = false        # Pending direct ask, opt-in
 min_cached_tokens = 100000
-max_pings_per_wait = 1
 max_daily_usd_micros = 10000000  # $10 per session, reset at UTC midnight
 ```
 
 Default eligibility is first-party Anthropic Messages on the 1-hour tier with
-known standard prices. The session must be in an active `bg wait`, a validated
-`rollout_wait`, or parked on a pending `swarm await_members` with internal
-auto-wake. Merely running a background job, receiving notifications, or having
-no active turn does not qualify. A known wake deadline before expiry does not
-benefit from a ping. Checks start inside the last 5 minutes of a 1-hour window
-or the last minute of an opted-in 5-minute window, but never within 15 seconds
-of expiry.
+known standard prices. Pings run only while the session is parked on a pending
+`swarm await_members` with internal auto-wake, waiting on its workers. A
+blocking `bg wait`, `rollout_wait` or `ask` never pings: the turn that resumes
+after them is cheap to rebuild or soon enough not to need it. Checks start
+inside the last 5 minutes of a 1-hour window or the last minute of an opted-in
+5-minute window, but never within 15 seconds of expiry.
+
+Each ping follows rule 6 of the routing economics
+([ROUTING_POLICY_PLAN.md](ROUTING_POLICY_PLAN.md), "Economics"):
+
+- A ping costs a read of the cached prefix plus ordinary input rates on any
+  uncached tail. A rebuild costs a cache write plus the tail. Pinging continues
+  while the pings needed until the wait's deadline cost less than one rebuild.
+  A wake before expiry needs no ping.
+- On an account with free room (quota that would expire unused), pings cost
+  nothing and always run.
+- When routing has a pending move for the session that is worth its cache miss
+  (the move costs less than staying warm with the pings it takes), pinging
+  stops. The cache goes cold and the move happens at the next turn for free.
+
+With reads at 0.1x and 1-hour writes at 2x the input price and no tail, up to
+19 pings (about 17 hours of waiting) cost less than one rebuild.
 
 The replay keeps system blocks, tool definitions, messages, cache breakpoints,
 thinking settings, effort, endpoint and credential unchanged. It requests
@@ -33,20 +46,12 @@ extended thinking, assistant prefill, Fast, gateways and unknown prices are
 skipped. Replay data is held only in memory and discarded across daemon exec or
 session transfer. It is never added to history or the session's context usage.
 
-A ping pays for a read of the cached prefix plus ordinary input rates on any
-uncached tail. It must cost less than the assumed chance of returning during the
-extra window (50% for automatic waits, 10% for opted-in human waits) times the
-avoided rewrite premium over a read. For an Opus 5.5 prefix of 900,000 tokens
-with no tail, the list-price read is $0.18 and a 1-hour write is $7.20. The
-50% estimate makes the avoided cost $3.51. These probabilities are policy
-assumptions, not measured predictions.
-
 Anthropic can still charge for a rewrite if the cache unexpectedly misses. The
 daily limit reserves the estimated full rewrite plus tail before dispatch, then
-settles it from reported tokens. An ambiguous response keeps the reservation and
-is not retried. Only a confirmed full hit advances the countdown or the card's
-“Kept warm” count. The card's dollar amount uses public rates, not an invoice
-or an estimate of remaining subscription quota.
+settles it from reported tokens, also on free room. An ambiguous response keeps
+the reservation and is not retried. Only a confirmed full hit advances the
+countdown or the card's "Kept warm" count. The card's dollar amount uses public
+rates, not an invoice or an estimate of remaining subscription quota.
 
 OpenAI is not pinged. Earlier automatic caching has variable retention, while
 newer Responses models document a 30-minute read refresh, not a restart of a

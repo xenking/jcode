@@ -23,6 +23,7 @@ httpdate = "1"
 jcode-logging = { path = "../jcode-logging" }
 jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 jcode-message-types = { path = "../jcode-message-types" }
+jcode-routing-policy = { path = "../jcode-routing-policy" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 ring = "0.17"

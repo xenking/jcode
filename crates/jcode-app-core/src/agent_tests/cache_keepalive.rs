@@ -1,5 +1,5 @@
 use super::*;
-use jcode_provider_core::cache_keepalive::{Cache, Capture, Rates, Replay, Tier, Usage, Wait};
+use jcode_provider_core::cache_keepalive::{Cache, Capture, Rates, Replay, Tier, Usage};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
@@ -145,7 +145,9 @@ impl Provider for FixtureProvider {
     }
 }
 
-struct ParkTool(Wait);
+/// A tool that blocks inside the turn, the way `bg wait`, `rollout_wait` and
+/// `ask` do. Only a parked swarm wait keeps the cache warm, so nothing pings.
+struct ParkTool;
 
 #[async_trait]
 impl crate::tool::Tool for ParkTool {
@@ -165,26 +167,8 @@ impl crate::tool::Tool for ParkTool {
         ctx: crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
         let before = serde_json::to_value(Session::load(&ctx.session_id)?.messages)?;
-        let pause = crate::cache_keepalive::Pause::foreground(&ctx.session_id, self.0, None);
-        if self.0 == Wait::Automatic {
-            assert!(pause.is_some());
-            let usage = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    if let Some(usage) = crate::cache_keepalive::load_usage(&ctx.session_id)
-                        && usage.warmed == 1
-                    {
-                        break usage;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await?;
-            assert_eq!(usage.attempted, 1);
-            assert_eq!(usage.cost_micros, 180_000);
-            assert_eq!(usage.unconfirmed_micros, 0);
-        } else {
-            assert!(pause.is_none());
-        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(crate::cache_keepalive::load_usage(&ctx.session_id).is_none());
         let after = serde_json::to_value(Session::load(&ctx.session_id)?.messages)?;
         assert_eq!(
             before, after,
@@ -199,19 +183,19 @@ impl crate::tool::Tool for ParkTool {
     clippy::await_holding_lock,
     reason = "isolate configuration and synthetic session storage for the test"
 )]
-async fn cache_keepalive_only_runs_during_a_confirmed_wait_and_preserves_history() {
+async fn tool_waits_inside_a_turn_never_ping_and_preserve_history() {
     let _guard = crate::storage::lock_test_env();
-    for wait in [Wait::Automatic, Wait::Human, Wait::Done] {
+    for use_tool in [true, false] {
         let requests = Arc::new(AtomicUsize::new(0));
         let pings = Arc::new(AtomicUsize::new(0));
         let provider = Arc::new(FixtureProvider {
             requests: Arc::clone(&requests),
             pings: Arc::clone(&pings),
-            use_tool: wait != Wait::Done,
+            use_tool,
         });
         let registry = Registry::empty();
         registry
-            .register("park-fixture".into(), Arc::new(ParkTool(wait)))
+            .register("park-fixture".into(), Arc::new(ParkTool))
             .await;
         let mut agent = Agent::new(provider, registry);
         agent.session.is_debug = false; // Test build uses an isolated home regardless.
@@ -227,16 +211,10 @@ async fn cache_keepalive_only_runs_during_a_confirmed_wait_and_preserves_history
         agent.run_turn_streaming_mpsc(tx).await.unwrap();
         assert_eq!(
             requests.load(Ordering::Relaxed),
-            if wait == Wait::Done { 1 } else { 2 }
+            if use_tool { 2 } else { 1 }
         );
-        assert_eq!(
-            pings.load(Ordering::Relaxed),
-            usize::from(wait == Wait::Automatic)
-        );
-        assert_eq!(
-            crate::cache_keepalive::load_usage(agent.session_id()).is_some(),
-            wait == Wait::Automatic
-        );
+        assert_eq!(pings.load(Ordering::Relaxed), 0);
+        assert!(crate::cache_keepalive::load_usage(agent.session_id()).is_none());
         while let Ok(event) = rx.try_recv() {
             assert!(!matches!(
                 event,

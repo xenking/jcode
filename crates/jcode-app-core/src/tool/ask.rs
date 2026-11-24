@@ -75,20 +75,8 @@ impl Tool for AskTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input: Input = serde_json::from_value(input)?;
         validate_ask_questions(&input.questions).map_err(|e| anyhow!(e))?;
-        let root_call = ctx.tool_call_id == ctx.root_invocation_id();
         let route = super::interactive::sender(&ctx.session_id)
             .or_else(|| ctx.stdin_request_tx.filter(|tx| !tx.is_closed()));
-        let cache_pause = (route.is_some() && root_call)
-            .then(|| {
-                crate::cache_keepalive::Pause::foreground(
-                    &ctx.session_id,
-                    jcode_provider_core::cache_keepalive::Wait::Human,
-                    Some(std::time::Duration::from_secs(
-                        crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS,
-                    )),
-                )
-            })
-            .flatten();
         let (response, answer_note) = match route {
             Some(tx) => (
                 crate::turn_activity::global()
@@ -117,7 +105,6 @@ impl Tool for AskTool {
                 }
             }
         };
-        drop(cache_pause);
         let declined = response.answers.is_none() && answer_note.is_none();
         let mut text = format_ask_answers(&input.questions, &response);
         if let Some(note) = answer_note.as_deref() {

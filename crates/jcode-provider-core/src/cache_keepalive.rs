@@ -34,21 +34,12 @@ impl Tier {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wait {
-    Done,
-    Automatic,
-    Human,
-}
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
     pub keepalive: bool,
     pub allow_5m: bool,
-    pub allow_human_wait: bool,
     pub min_cached_tokens: u64,
-    pub max_pings_per_wait: u32,
     pub max_daily_usd_micros: u64,
 }
 
@@ -57,9 +48,7 @@ impl Default for Config {
         Self {
             keepalive: true,
             allow_5m: false,
-            allow_human_wait: false,
             min_cached_tokens: 100_000,
-            max_pings_per_wait: 1,
             max_daily_usd_micros: 10_000_000,
         }
     }
@@ -120,26 +109,37 @@ pub enum Decision {
     Ping { reserve_micros: u64 },
 }
 
+/// Rule 6 of the routing economics: whether to keep a warm cache alive while
+/// the session waits on swarm workers until `deadline`.
+///
+/// Pinging continues while the pings needed until the wait ends cost less
+/// than rebuilding the cache. On free room (`outlook.free_room`) pings cost
+/// nothing and always run. When routing has a pending move worth its miss,
+/// pinging stops so the cache goes cold and the move becomes free. Without a
+/// routing outlook the plain ping-versus-rebuild rule applies.
 pub fn decide(
     config: &Config,
-    wait: Wait,
     cache: Cache,
     now: SystemTime,
-    pings: u32,
+    deadline: SystemTime,
+    outlook: Option<&jcode_routing_policy::Outlook>,
     daily_micros: u64,
 ) -> Decision {
-    // Conservative priors for resuming during the *additional* TTL window.
-    let resume_percent = match wait {
-        Wait::Automatic => 50,
-        Wait::Human if config.allow_human_wait => 10,
-        _ => return Decision::Stop,
-    };
-    if !config.permits_tier(cache.tier)
-        || cache.cached_tokens < config.min_cached_tokens
-        || pings >= config.max_pings_per_wait
-    {
+    if !config.permits_tier(cache.tier) || cache.cached_tokens < config.min_cached_tokens {
         return Decision::Stop;
     }
+    let ttl = cache.tier.ttl();
+    let expiry = cache.touched_at + ttl;
+    // A definite wake before expiry cannot benefit from a ping.
+    let Ok(beyond) = deadline.duration_since(expiry) else {
+        return Decision::Stop;
+    };
+    if beyond.is_zero() {
+        return Decision::Stop;
+    }
+    // Each ping buys one more TTL, minus the margin it is sent ahead of expiry.
+    let refresh = (ttl - cache.tier.margin()).as_secs_f64();
+    let pings = (beyond.as_secs_f64() / refresh).ceil().max(1.0);
     let read = cache.cost(Usage {
         read: cache.cached_tokens,
         ..Usage::default()
@@ -152,17 +152,23 @@ pub fn decide(
         input: cache.uncached_tokens,
         ..Usage::default()
     });
-    let expected = read.saturating_add(tail);
-    let reserve = write.saturating_add(tail);
-    if u128::from(expected) * 100 >= u128::from(write.saturating_sub(read)) * resume_percent
-        || reserve > config.max_daily_usd_micros.saturating_sub(daily_micros)
-    {
+    let ping = read.saturating_add(tail) as f64;
+    let rebuild = write.saturating_add(tail);
+    let free_room = outlook.is_some_and(|outlook| outlook.free_room);
+    if !free_room && pings * ping >= rebuild as f64 {
+        return Decision::Stop;
+    }
+    if outlook.is_some_and(|outlook| outlook.move_worth_miss(pings)) {
+        return Decision::Stop;
+    }
+    // A miss rewrites the whole prefix, so the daily limit reserves a rebuild.
+    if rebuild > config.max_daily_usd_micros.saturating_sub(daily_micros) {
         return Decision::Stop;
     }
     let Ok(age) = now.duration_since(cache.touched_at) else {
         return Decision::Stop;
     };
-    let Some(left) = cache.tier.ttl().checked_sub(age) else {
+    let Some(left) = ttl.checked_sub(age) else {
         return Decision::Stop;
     };
     // Do not start a large upload at the expiry boundary.
@@ -172,7 +178,7 @@ pub fn decide(
         Decision::Sleep(left - cache.tier.margin() + Duration::from_secs(1))
     } else {
         Decision::Ping {
-            reserve_micros: reserve,
+            reserve_micros: rebuild,
         }
     }
 }
@@ -216,208 +222,5 @@ impl Capture {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_hot_economical_confirmed_waits_are_eligible() {
-        let defaults = Config::default();
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
-        let cache = Cache {
-            touched_at: now - Duration::from_secs(3400),
-            tier: Tier::OneHour,
-            cached_tokens: 900_000,
-            uncached_tokens: 0,
-            rates: Rates {
-                input: 5_000_000,
-                read: 500_000,
-                output: 25_000_000,
-            },
-        };
-        let cases = [
-            (
-                "pending",
-                defaults.clone(),
-                Wait::Automatic,
-                cache,
-                0,
-                0,
-                Decision::Ping {
-                    reserve_micros: 9_000_000,
-                },
-            ),
-            (
-                "done",
-                defaults.clone(),
-                Wait::Done,
-                cache,
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "human",
-                defaults.clone(),
-                Wait::Human,
-                cache,
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "human opted in",
-                Config {
-                    allow_human_wait: true,
-                    ..defaults.clone()
-                },
-                Wait::Human,
-                cache,
-                0,
-                0,
-                Decision::Ping {
-                    reserve_micros: 9_000_000,
-                },
-            ),
-            (
-                "off",
-                Config {
-                    keepalive: false,
-                    ..defaults.clone()
-                },
-                Wait::Automatic,
-                cache,
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "count cap",
-                defaults.clone(),
-                Wait::Automatic,
-                cache,
-                1,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "spend cap",
-                defaults.clone(),
-                Wait::Automatic,
-                cache,
-                0,
-                1_000_001,
-                Decision::Stop,
-            ),
-            (
-                "small",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    cached_tokens: 99_999,
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "expensive tail",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    uncached_tokens: 900_000,
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "expired",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    touched_at: now - Duration::from_secs(3600),
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "too late",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    touched_at: now - Duration::from_secs(3590),
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "threshold exact",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    touched_at: now - Duration::from_secs(3300),
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Sleep(Duration::from_secs(1)),
-            ),
-            (
-                "sleep",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    touched_at: now,
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Sleep(Duration::from_secs(3301)),
-            ),
-            (
-                "5m default off",
-                defaults.clone(),
-                Wait::Automatic,
-                Cache {
-                    tier: Tier::FiveMinutes,
-                    touched_at: now - Duration::from_secs(250),
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Stop,
-            ),
-            (
-                "5m opted in",
-                Config {
-                    allow_5m: true,
-                    ..defaults
-                },
-                Wait::Automatic,
-                Cache {
-                    tier: Tier::FiveMinutes,
-                    touched_at: now - Duration::from_secs(250),
-                    ..cache
-                },
-                0,
-                0,
-                Decision::Ping {
-                    reserve_micros: 5_625_000,
-                },
-            ),
-        ];
-        for (case, config, wait, cache, pings, spent, expected) in cases {
-            assert_eq!(
-                decide(&config, wait, cache, now, pings, spent),
-                expected,
-                "{case}"
-            );
-        }
-    }
-}
+#[path = "cache_keepalive_tests.rs"]
+mod tests;
