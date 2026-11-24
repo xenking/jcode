@@ -28,8 +28,93 @@ egress proxies, account priorities, and usage/spend limits, all described in
 - **Intents.** `pin` (session and its children), `switch` (this session), `hold` (all interactive sessions until expiry), `unstick`, `ack` (keep spending here for a while).
 - **Health eviction.** N consecutive failures evict an account for a duration. A `required` egress that is down evicts its accounts.
 - **Unreadable meters never disqualify** and are shown as unknown, never as zero.
-- **Cache seams.** Moves happen at session start and at cache-cold seams. Warm triggers only report a pending move.
+- **Cache seams.** Moves happen at session start and at cache-cold seams. A warm session moves only when the economics below say the move pays for its cache miss.
 - **Grant health.** Idle OAuth accounts get a periodic refresh probe, and an approaching login expiry warns ahead of time.
+
+## Economics: cache, resets and keepalive
+
+Routing is evaluated on every turn because limits move during a session and a
+cache can go cold between turns. Evaluation is local and costs nothing.
+Applying a move is rare, because leaving a warm cache rewrites the whole
+context on the new account.
+
+### Prices
+
+Every account has a shadow price `λ`: what one unit of its quota is worth right
+now. All costs below are tokens times a factor times `λ`.
+
+- **Free room.** Room that would expire unused has `λ = 0`: window room the
+  measured burn will not reach before the reset, plus any reset grant that would
+  expire before the account could hit its wall again. Routing fills free room
+  first, because unused quota at a reset is lost.
+- **Subscription.** Otherwise `λ` is scarcity: projected demand until the reset
+  divided by the room left. It rises as the account runs out.
+- **Credits and metered.** `λ` is the money price times the account's weight,
+  raised while a credits account is ahead of its month line.
+- **Cache factors** per provider and tier: Anthropic writes cost 1.25x (5m) or
+  2x (1h) of input and reads 0.1x. OpenAI-style caches have no write premium
+  and read at the catalog's cached-input ratio. A move pays `context x write`
+  on the target. A warm turn pays `context x read` on the current account.
+
+### Options when a move is wanted
+
+`C` is the cached context, `H` the expected tokens until the next natural cold
+seam (recent tokens per turn times expected turns), `S` the summary size.
+
+| Option | Cost |
+| --- | --- |
+| Stay | `H x λcur`, infinite if the current account cannot serve |
+| Redeem a reset on the current account | free when the grant would otherwise expire unused; the cache survives |
+| Move | `C x write x λnew + H x λnew` |
+| Compact, then move | compaction on the warm current account (`C x read x λcur` plus summary output) `+ S x write x λnew + H x λnew` |
+
+Routing picks the cheapest option. Moving needs a margin (hysteresis) over
+staying, so it does not flap. Compaction before a move runs automatically when
+it is the cheapest option, and the transcript records it.
+
+### Rules
+
+1. A cold seam moves for free: session start, an expired cache TTL, right after
+   a compaction, after a model switch, and after a failed turn.
+2. A warm session moves only when staying costs more than the cheapest move by
+   the margin, or when a person pins or switches.
+3. A short rate limit (a 429 with a retry-after within about a minute) retries
+   on the same account. Exhausted quota or a broken credential moves at once.
+4. At the wall, try in order: redeem a reset that would expire unused,
+   `ack` or paid on the same account, the cheapest move. Interactive sessions
+   see the remaining choices in a gate. Subagents and headless runs get the
+   cheapest automatic option or a block.
+5. Reset grants are never wasted. Ten minutes before a grant expires it is
+   redeemed if that restores any used quota. Until then, routing counts the
+   grant as free room on its account so load drains there first.
+6. Keepalive pings run only while the agent waits on swarm workers. Each ping
+   costs `C x read x λcur`. Pinging continues while the expected pings until
+   the wait ends cost less than rebuilding the cache. On an account with
+   free room, pings cost nothing and always run. When a pending move is worth
+   its miss, pinging stops, the cache goes cold, and the move becomes free.
+7. Children start on their parent's account when it can serve them, so they
+   share the cached system and tool prefix.
+
+```mermaid
+flowchart TD
+    T[Turn or swarm wait tick] --> E["Evaluate: prices λ per account, local"]
+    E --> S{Seam}
+    S -->|"start, TTL expired, compaction, model switch, failed turn"| PICK[Use the cheapest account]
+    S -->|warm| CAN{Current account can serve?}
+    CAN -->|yes| CMP{"Cheapest move beats staying by the margin?"}
+    CMP -->|no| STAY[Stay, report pending if any]
+    CMP -->|yes| HOW
+    CAN -->|no| WALL{"Reset grant that would expire unused?"}
+    WALL -->|yes| REDEEM[Redeem it and stay, cache survives]
+    WALL -->|no| HOW{"Compact first cheaper?"}
+    HOW -->|yes| CM[Compact on the warm account, then move]
+    HOW -->|no| MV[Move with the full context]
+    STAY --> W{Waiting on swarm workers?}
+    W -->|no| IDLE[No pings]
+    W -->|yes| KA{"Pings until the wait ends cost less than a rebuild, and no move is worth its miss?"}
+    KA -->|yes| PING[Keep the cache warm]
+    KA -->|no| COOL[Let it go cold, move at the next turn for free]
+```
 
 ## Data model
 
