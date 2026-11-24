@@ -378,6 +378,10 @@ pub struct CompactionManager {
     /// TTL is cold anyway.
     last_response_at: Option<SystemTime>,
     last_response_cache_read: bool,
+    /// A compaction replaced the cached prefix after the latest response, so
+    /// the provider cache is gone whatever its TTL says. Cleared by the next
+    /// response.
+    prefix_rewritten: bool,
     /// Response timestamp whose cold stretch already got a cache-expiry
     /// snapcompact, so a failed or skipped attempt does not repeat every turn.
     cache_expiry_compacted_for: Option<SystemTime>,
@@ -583,6 +587,7 @@ impl CompactionManager {
             semantic_embed_cache_counter: 0,
             last_response_at: None,
             last_response_cache_read: false,
+            prefix_rewritten: false,
             cache_expiry_compacted_for: None,
             idle_cache_expiry_checked_for: None,
         }
@@ -1430,6 +1435,12 @@ impl CompactionManager {
     pub fn note_provider_response(&mut self, now: SystemTime, cache_read_tokens: Option<u64>) {
         self.last_response_at = Some(now);
         self.last_response_cache_read = cache_read_tokens.unwrap_or(0) > 0;
+        self.prefix_rewritten = false;
+    }
+
+    /// Whether a compaction rewrote the prefix since the latest response.
+    pub fn prefix_rewritten_since_response(&self) -> bool {
+        self.prefix_rewritten
     }
 
     /// A confirmed cache hit extends the current episode without changing usage or history.
@@ -2459,6 +2470,7 @@ impl CompactionManager {
                 } else {
                     self.effective_token_count_with(all_messages) as u64
                 };
+                self.prefix_rewritten = true;
                 self.last_compaction = Some(CompactionEvent {
                     trigger: trigger.clone(),
                     method: Some(method.to_string()),
@@ -2957,6 +2969,7 @@ impl CompactionManager {
         self.observed_input_tokens = None;
         self.observed_estimate_tokens = None;
         let post_tokens = self.effective_token_count_with(all_messages) as u64;
+        self.prefix_rewritten = true;
         self.last_compaction = Some(CompactionEvent {
             trigger: trigger.into(),
             method: Some("drop".to_string()),

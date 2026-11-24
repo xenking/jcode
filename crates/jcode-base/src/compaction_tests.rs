@@ -2832,3 +2832,26 @@ fn idle_precompaction_stops_once_the_fold_drops_the_context() {
 
 #[path = "compaction_tests_additional_tests.rs"]
 mod additional_test_new_manager;
+
+/// A compaction rewrites the prefix the provider cached, so the cache is gone
+/// until the next response proves otherwise. Routing treats that as a cold seam.
+#[test]
+fn compaction_marks_the_prefix_rewritten_until_the_next_response() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} content {}", i, "z".repeat(60)),
+        ));
+        manager.notify_message_added();
+    }
+    manager.note_provider_response(SystemTime::now(), Some(500));
+    assert!(!manager.prefix_rewritten_since_response());
+
+    manager.hard_compact_with(&messages).unwrap();
+    assert!(manager.prefix_rewritten_since_response());
+
+    manager.note_provider_response(SystemTime::now(), Some(0));
+    assert!(!manager.prefix_rewritten_since_response());
+}
