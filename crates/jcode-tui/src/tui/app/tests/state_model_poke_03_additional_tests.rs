@@ -15,6 +15,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

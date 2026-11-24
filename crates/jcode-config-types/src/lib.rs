@@ -845,6 +845,70 @@ pub struct AgentsConfig {
     /// Env override: `JCODE_SWARM_STALL_NUDGE`.
     #[serde(default)]
     pub swarm_stall_nudge: bool,
+    /// Profile applied to new root sessions (not swarm workers). Unset keeps
+    /// the default prompt and tool set. The choice is stored on the session,
+    /// so changing this later does not alter running sessions.
+    #[serde(default)]
+    pub root_profile: Option<String>,
+    /// Agent profiles: a persona, tool allowlist, effort and model for one
+    /// kind of agent. A name matching a built-in profile (`orchestrator`,
+    /// `task`, `sonic`, `scout`, `reviewer`) overrides it field by field.
+    #[serde(default)]
+    pub profiles: std::collections::BTreeMap<String, AgentProfileConfig>,
+}
+
+/// One agent profile as written in config. Every field is optional so a user
+/// entry can override only part of a built-in profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentProfileConfig {
+    /// Short description shown in the swarm tool schema and errors.
+    pub description: Option<String>,
+    /// Prompt section added as `# Agent profile: <name>`.
+    pub instructions: Option<String>,
+    /// File with the prompt section. `~` expands to the home directory.
+    /// Wins over `instructions` when both are set.
+    pub instructions_file: Option<String>,
+    /// Tool allowlist. It only narrows `[tools]`, never widens it. Unset keeps
+    /// every tool.
+    pub tools: Option<Vec<String>>,
+    /// Tools removed on top of the allowlist.
+    pub exclude_tools: Option<Vec<String>>,
+    /// Whether the available-skills list is part of the prompt.
+    pub skills: Option<bool>,
+    /// Reasoning effort when a spawn does not set one.
+    pub effort: Option<String>,
+    /// Worker model when a spawn does not set one. Trusted like `swarm_model`.
+    pub model: Option<String>,
+}
+
+impl AgentProfileConfig {
+    /// Overlay `self` (user config) onto `base` (built-in) field by field.
+    pub fn merged_over(&self, base: &AgentProfileConfig) -> AgentProfileConfig {
+        let pick = |user: &Option<String>, builtin: &Option<String>| {
+            user.clone().or_else(|| builtin.clone())
+        };
+        // A user file replaces built-in inline text, and vice versa.
+        let (instructions, instructions_file) =
+            if self.instructions.is_some() || self.instructions_file.is_some() {
+                (self.instructions.clone(), self.instructions_file.clone())
+            } else {
+                (base.instructions.clone(), base.instructions_file.clone())
+            };
+        AgentProfileConfig {
+            description: pick(&self.description, &base.description),
+            instructions,
+            instructions_file,
+            tools: self.tools.clone().or_else(|| base.tools.clone()),
+            exclude_tools: self
+                .exclude_tools
+                .clone()
+                .or_else(|| base.exclude_tools.clone()),
+            skills: self.skills.or(base.skills),
+            effort: pick(&self.effort, &base.effort),
+            model: pick(&self.model, &base.model),
+        }
+    }
 }
 
 fn default_swarm_stall_after_secs() -> u64 {

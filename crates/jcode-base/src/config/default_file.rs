@@ -753,6 +753,19 @@ swarm_max_concurrent_agents = 32
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
 #
+# Agent profiles: persona, tool allowlist, effort and model per kind of agent.
+# Built-ins: orchestrator, task, sonic, scout, reviewer. Pick one per worker
+# with the swarm tool's `profile` or a todo lane's `lane_profile`. A table
+# named like a built-in overrides only the fields it sets. `tools` narrows
+# [tools], it never widens it.
+# root_profile = "orchestrator"   # applied to new root sessions
+# [agents.profiles.scout]
+# model = "claude-haiku-5-5"
+# effort = "medium"
+# tools = ["read", "agentgrep", "batch", "bash", "todo", "swarm"]
+# skills = false
+# instructions_file = "~/.jcode/profiles/scout.md"
+#
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
 # auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.

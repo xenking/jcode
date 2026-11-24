@@ -34,6 +34,8 @@ impl Default for AgentsConfig {
             swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
             swarm_stall_after_secs: default_swarm_stall_after_secs(),
             swarm_stall_nudge: false,
+            root_profile: None,
+            profiles: std::collections::BTreeMap::new(),
         }
     }
 }

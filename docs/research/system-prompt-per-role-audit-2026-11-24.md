@@ -355,6 +355,60 @@ append = "~/.jcode/prompts/models/gpt.md"
 
 Ранее предложенная секция `[prompt.roles.*]` заменяется на `[agents.roles.*]`, потому что роль управляет не только промптом, а `agents.*` уже содержит выбор модели и effort.
 
+## Реализация P0 и P1
+
+Имя. В jcode слово role уже занято ролью участника swarm (`comm_assign_role`: coordinator, worker), поэтому новая сущность называется **agent profile**: `[agents.profiles.<name>]`, параметр `profile` у `swarm spawn`, поле `lane_profile` у todo lane.
+
+### P0a. Эхо `todo`
+
+Замер по 3328 результатам `todo` с 10 ноября ([`todo_report.txt`](prompt-audit-2026-11-24/todo_report.txt)): поле `description` занимает 80,6% символов вывода, `confidence_history` 5%, секции Plan и Goals вместе 8%. Модель сама написала эти описания и получает их обратно при каждой записи.
+
+- При записи в текст для модели не попадают `description`, `confidence_history` и поля `*_history` в Plan и Goals. Одна задача на строку вместо pretty JSON.
+- Чтение (`todo` без изменений) по-прежнему возвращает всё, включая описания.
+- Формат остаётся тем, что разбирает TUI-карточка (`parse_todo_tool_output`): JSON-массив, затем метки `Plan:`, `Goals:`, `Plan updates:`, `Goal updates:`. Карточка описания и историю не рисует, проверено поиском по `jcode-tui` и `jcode-desktop`. Полные данные остаются в `metadata` и в хранилище.
+
+### P0b. Строки промпта, зависящие от инструмента
+
+Строка с префиксом `<!-- tools: a, b -->` попадает в промпт, если сессии разрешён хотя бы один из перечисленных инструментов. Сама метка вырезается. Заголовок `##`, под которым не осталось строк, тоже удаляется. Разрешение берётся из той же политики сессии, что ограничивает вызовы (`SESSION_TOOL_POLICIES`: `[tools]`, SDK, профиль), поэтому текст и схемы не расходятся. Модуль Codemode попадает в промпт только тогда, когда разрешён `codemode`. Метки работают и в пользовательском `system-prompt.md`. Без меток текст не меняется.
+
+### P1. Профили агентов
+
+```toml
+[agents]
+# Профиль для новых root-сессий (не воркеров). По умолчанию не задан.
+root_profile = "orchestrator"
+
+[agents.profiles.scout]          # переопределяет встроенный по полям
+description = "Read-only exploration"
+instructions = "..."            # или instructions_file = "~/.jcode/profiles/scout.md"
+tools = ["read", "agentgrep", "bash", "todo", "swarm"]   # allowlist
+exclude_tools = []
+skills = false                    # без списка скиллов
+effort = "medium"                 # если spawn не задал effort
+model = "claude-haiku-5-5"        # если spawn не задал model
+```
+
+Встроенные профили (тексты в `crates/jcode-base/src/prompt/profiles/*.md`):
+
+| Профиль | Назначение | Инструменты | Скиллы |
+| --- | --- | --- | --- |
+| `orchestrator` | Root, делегирует и интегрирует, сам не правит и не запускает | read, agentgrep, batch, todo, swarm, ask, user_response, applet, skill_manage, websearch, webfetch, load_tools, selfdev | да |
+| `task` | Реализация по брифу | все, кроме macos_computer_use, desktop, applet, rollout_wait | да |
+| `sonic` | Узкие механические правки и сбор данных | read, agentgrep, batch, bash, bg, edit, write, apply_patch, todo, swarm, ask | нет |
+| `scout` | Исследование только на чтение, карта с путями и строками | read, agentgrep, batch, bash, bg, todo, swarm, websearch, webfetch, ask | нет |
+| `reviewer` | Проверка корректности только на чтение | как у scout | нет |
+
+Инварианты:
+
+1. **Выбор только явный**, как в pi. Источники по приоритету: `swarm spawn profile`, затем `lane_profile` лейна, затем `agents.root_profile` для новой root-сессии. По ID модели профиль никогда не угадывается. Если профиля нет, spawn завершается ошибкой со списком доступных.
+2. **Профиль хранится в сессии** (`Session.agent_profile`) и после перезапуска или reload применяется снова из неё, а не из текущего `root_profile`. Для visible-воркеров он записывается при подготовке сессии, для headless в `prepare_swarm_worker`.
+3. **Инструменты только сужаются.** Эффективный allowlist равен пересечению `[tools]` и `profile.tools`, а `exclude_tools` добавляется к disabled. Профиль не может разрешить то, что запрещено глобально. Ограничение действует и для схем, и для вызовов, включая codemode и MCP.
+4. **Порядок сборки статического промпта:** база (с фильтром по инструментам), модули возможностей, `# Agent profile: <name>`, self-dev, AGENTS.md, overlay, preferred-tools, скиллы (если `skills` не `false`). Всё это известно до первого запроса и замораживается вместе с префиксом. SDK `system_prompt` по-прежнему заменяет всё.
+5. **Effort и модель:** сначала явный параметр spawn, затем поле профиля, затем `swarm_effort` и `swarm_model`. `profile.model` задан пользователем, поэтому считается доверенным наравне с `swarm_model`. Ограничения `swarm_pool` и `swarm_effort_caps` применяются после этого.
+6. Встроенный профиль и пользовательский с тем же именем сливаются по полям: заданное пользователем поле побеждает.
+
+Что остаётся на потом: настройка по семейству модели (P2), consultant (P3), смена профиля посреди сессии через `<system-reminder>`.
+
 ## Как проверять
 
 Только статические подсчёты не доказывают качество. Для каждого шага:

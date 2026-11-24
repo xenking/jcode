@@ -1080,6 +1080,7 @@ fn ownership_gate_output_preserves_the_saved_todo_card() {
         None,
         None,
         [crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
+        TodoEcho::Full,
     )
     .expect("ownership gate should produce a structured todo result");
 
@@ -1099,6 +1100,84 @@ fn ownership_gate_output_preserves_the_saved_todo_card() {
 
 #[path = "todo_execution_tests.rs"]
 mod execution;
+
+/// The compact write echo drops the fields the model just authored while the
+/// result stays in the JSON-then-labelled-sections shape the todo card parses.
+#[test]
+fn compact_write_echo_omits_authored_text_but_stays_card_parseable() {
+    let mut todo = open_todo(Some("ship"));
+    todo.details = Some("a long description the model wrote itself ".repeat(20));
+    todo.confidence_history = vec![
+        crate::todo::ConfidenceState::Plausible,
+        crate::todo::ConfidenceState::Validated,
+    ];
+    let todos = vec![todo];
+    let plan = aligned_plan();
+    let mut stored_goal = goal(Some("ship"), crate::todo::FeedbackLoopState::Closed);
+    stored_goal.closed_feedback_loop_history = vec![crate::todo::FeedbackLoopState::Closed];
+    let goals = vec![stored_goal];
+
+    let full = build_todo_output(
+        todos.clone(),
+        plan.clone(),
+        goals.clone(),
+        None,
+        None,
+        Vec::new(),
+        TodoEcho::Full,
+    )
+    .expect("full echo");
+    let compact = build_todo_output(
+        todos.clone(),
+        plan.clone(),
+        goals.clone(),
+        None,
+        None,
+        Vec::new(),
+        TodoEcho::Compact,
+    )
+    .expect("compact echo");
+
+    assert!(full.output.contains("a long description"));
+    assert!(!compact.output.contains("a long description"));
+    assert!(!compact.output.contains("_history"));
+    assert!(compact.output.contains("call todo with no changes"));
+    assert!(compact.output.len() * 3 < full.output.len());
+    // The UI still receives every field through metadata.
+    assert_eq!(compact.metadata, full.metadata);
+
+    // Same parse sequence as the TUI todo card: array, then labelled sections.
+    let mut stream =
+        serde_json::Deserializer::from_str(&compact.output).into_iter::<Vec<TodoItem>>();
+    let parsed = stream
+        .next()
+        .expect("todo array")
+        .expect("valid todo array");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].status, "in_progress");
+    let rest = compact.output[stream.byte_offset()..].trim_start();
+    let plan_json = rest
+        .strip_prefix("Plan:")
+        .expect("plan section")
+        .trim_start();
+    let mut plan_stream = serde_json::Deserializer::from_str(plan_json).into_iter::<TodoPlan>();
+    let parsed_plan = plan_stream.next().expect("plan").expect("valid plan");
+    assert_eq!(parsed_plan.user_intention, plan.user_intention);
+    let goals_json = plan_json[plan_stream.byte_offset()..]
+        .trim_start()
+        .strip_prefix("Goals:")
+        .expect("goals section")
+        .trim_start();
+    let parsed_goals: Vec<TodoGoal> = serde_json::Deserializer::from_str(goals_json)
+        .into_iter()
+        .next()
+        .expect("goals")
+        .expect("valid goals");
+    assert_eq!(
+        parsed_goals[0].closed_feedback_loop,
+        goals[0].closed_feedback_loop
+    );
+}
 
 fn test_ctx(session_id: &str) -> ToolContext {
     ToolContext {

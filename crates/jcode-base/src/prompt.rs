@@ -85,14 +85,125 @@ impl PromptCapabilities {
 }
 
 fn base_system_prompt_parts(capabilities: PromptCapabilities, base: String) -> Vec<String> {
+    base_system_prompt_parts_composed(capabilities, base, &PromptComposition::default())
+}
+
+fn base_system_prompt_parts_composed(
+    capabilities: PromptCapabilities,
+    base: String,
+    composition: &PromptComposition<'_>,
+) -> Vec<String> {
+    // Without a session policy every gated line stays, but the markers never
+    // reach the model.
+    let base = render_tool_gated(&base, composition.tool_gate.unwrap_or(&|_| true));
     let mut parts = vec![base];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
-    if capabilities.codemode {
+    if capabilities.codemode && composition.tool_allowed("codemode") {
         parts.push(CODEMODE_PROMPT.to_string());
     }
+    if let Some(profile) = composition.profile
+        && let Some(section) = profile.section()
+    {
+        parts.push(section);
+    }
     parts
+}
+
+/// The prompt-visible part of an agent profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePrompt {
+    pub name: String,
+    pub instructions: Option<String>,
+    /// Whether the available-skills list is part of this profile's prompt.
+    pub include_skills: bool,
+}
+
+impl ProfilePrompt {
+    fn section(&self) -> Option<String> {
+        let instructions = self.instructions.as_deref()?.trim();
+        (!instructions.is_empty())
+            .then(|| format!("# Agent profile: {}\n\n{instructions}", self.name))
+    }
+}
+
+/// Session-specific inputs to static prompt composition.
+///
+/// Both are known before the first request and are frozen with the prefix.
+#[derive(Clone, Copy, Default)]
+pub struct PromptComposition<'a> {
+    /// Whether this session may call a tool. `None` keeps every tool-gated line.
+    pub tool_gate: Option<&'a dyn Fn(&str) -> bool>,
+    pub profile: Option<&'a ProfilePrompt>,
+}
+
+impl PromptComposition<'_> {
+    fn tool_allowed(&self, name: &str) -> bool {
+        self.tool_gate.is_none_or(|gate| gate(name))
+    }
+
+    fn include_skills(&self) -> bool {
+        self.profile.is_none_or(|profile| profile.include_skills)
+    }
+}
+
+const TOOL_GATE_PREFIX: &str = "<!-- tools:";
+
+/// Parse a `<!-- tools: a, b -->` line prefix into its tool names and the text
+/// after the marker.
+fn split_tool_gate(line: &str) -> Option<(Vec<&str>, &str)> {
+    let rest = line.trim_start().strip_prefix(TOOL_GATE_PREFIX)?;
+    let (names, text) = rest.split_once("-->")?;
+    let names = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    Some((names, text.trim_start()))
+}
+
+fn heading_level(line: &str) -> Option<usize> {
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    (hashes > 0 && line[hashes..].starts_with(' ')).then_some(hashes)
+}
+
+/// Keep a `<!-- tools: a, b -->` line only when the session may call one of
+/// the listed tools, then drop headings left without content. Text without
+/// markers is returned unchanged, so custom prompts opt in explicitly.
+pub fn render_tool_gated(text: &str, gate: &dyn Fn(&str) -> bool) -> String {
+    if !text.contains(TOOL_GATE_PREFIX) {
+        return text.to_string();
+    }
+    let kept: Vec<&str> = text
+        .lines()
+        .filter_map(|line| match split_tool_gate(line) {
+            Some((names, rest)) => names.iter().any(|name| gate(name)).then_some(rest),
+            None => Some(line),
+        })
+        .collect();
+
+    let mut out: Vec<&str> = Vec::with_capacity(kept.len());
+    for (index, line) in kept.iter().enumerate() {
+        if let Some(level) = heading_level(line) {
+            let has_content = kept[index + 1..]
+                .iter()
+                .find(|next| !next.trim().is_empty())
+                .is_some_and(|next| heading_level(next).is_none_or(|next| next > level));
+            if !has_content {
+                continue;
+            }
+        }
+        // Removed lines must not leave stacked blank lines behind.
+        if line.trim().is_empty() && out.last().is_none_or(|last| last.trim().is_empty()) {
+            continue;
+        }
+        out.push(line);
+    }
+    while out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
 }
 
 /// Fingerprints of the effective overrides, independent of Jcode's embedded
@@ -662,12 +773,44 @@ pub fn build_system_prompt_split_with_sources(
     sources: &StaticPromptSources,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
+    build_system_prompt_split_composed(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        sources,
+        agents_md,
+        &PromptComposition::default(),
+    )
+}
+
+/// Build a split prompt for one session's tool policy and agent profile.
+///
+/// Order: base (tool-gated), capability modules, agent profile, self-dev,
+/// AGENTS.md, overlay, preferred tools, skills. Everything here is static for
+/// the session and freezes with the provider-cache prefix.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors build_system_prompt_split_with_sources plus the session composition"
+)]
+pub fn build_system_prompt_split_composed(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    sources: &StaticPromptSources,
+    agents_md: (Option<String>, ContextInfo),
+    composition: &PromptComposition<'_>,
+) -> (SplitSystemPrompt, ContextInfo) {
     let base = sources
         .files
         .base_override
         .as_deref()
         .unwrap_or(DEFAULT_SYSTEM_PROMPT);
-    let mut static_parts = base_system_prompt_parts(sources.capabilities, base.into());
+    let mut static_parts =
+        base_system_prompt_parts_composed(sources.capabilities, base.into(), composition);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -711,7 +854,9 @@ pub fn build_system_prompt_split_with_sources(
     }
 
     // Add available skills list (fairly static)
-    if let Some(skills_section) = build_available_skills_section(available_skills) {
+    if composition.include_skills()
+        && let Some(skills_section) = build_available_skills_section(available_skills)
+    {
         info.skills_chars = skills_section.len();
         static_parts.push(skills_section);
     }

@@ -238,6 +238,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
 
     let todo = |content: &str, status: &str| crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "t1".to_string(),
@@ -290,6 +291,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
     let session_id = app.session.id.clone();
     let todos = [crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "t1".to_string(),
@@ -355,6 +357,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
 fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: id.to_string(),

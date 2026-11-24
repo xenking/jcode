@@ -369,6 +369,26 @@ pub(super) fn spawn_lane_speed(
     Ok(speed)
 }
 
+/// The agent profile a todo lane asks its worker to run with.
+pub(super) fn spawn_lane_profile(
+    coordinator_session: &str,
+    lane_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut profile: Option<String> = None;
+    for item in crate::todo::load_todos(coordinator_session)? {
+        if crate::todo::stages::lane_id(&item) == lane_id
+            && let Some(next) = item.lane_profile.filter(|name| !name.trim().is_empty())
+        {
+            anyhow::ensure!(
+                profile.as_ref().is_none_or(|current| *current == next),
+                "Todo lane {lane_id} has conflicting profile overrides"
+            );
+            profile = Some(next);
+        }
+    }
+    Ok(profile)
+}
+
 pub(crate) fn open_spawn_lane_owner(
     coordinator_session: &str,
     lane_id: &str,

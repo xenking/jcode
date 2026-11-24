@@ -7,6 +7,7 @@ const NULL_CLEARS: &[&str] = &[
     "lane_dependencies",
     "lane_after",
     "lane_speed",
+    "lane_profile",
     "requires_user_auth",
     "waiting_on",
 ];

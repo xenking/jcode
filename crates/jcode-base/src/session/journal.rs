@@ -49,6 +49,8 @@ pub(super) struct SessionJournalMeta {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) is_swarm_worker: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) agent_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_cap: Option<usize>,
@@ -135,6 +137,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.speed_selection != current.speed_selection
         || prev.worker_speed != current.worker_speed
         || prev.is_swarm_worker != current.is_swarm_worker
+        || prev.agent_profile != current.agent_profile
         || prev.worker_model_approval != current.worker_model_approval
         || prev.context_cap != current.context_cap
         || prev.subagent_model != current.subagent_model

@@ -381,6 +381,7 @@ mod tests {
             lane_after: None,
             lane_owner: None,
             lane_speed: None,
+            lane_profile: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),

@@ -80,6 +80,9 @@ fn create_visible_spawn_session(
         session.set_worker_model_approval(worker.approval.clone());
         session.speed_selection = worker.speed_selection.clone();
         session.worker_speed = Some(worker.speed.clone());
+        // Stored before launch: the headed client restores the session and
+        // re-applies the profile from it.
+        session.agent_profile = worker.profile.clone();
     }
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
@@ -420,6 +423,7 @@ pub(super) async fn spawn_swarm_agent(
     requested_effort: Option<String>,
     requested_speed: Option<jcode_message_types::SpeedMode>,
     label: Option<String>,
+    requested_profile: Option<String>,
     spawn_key: &str,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -454,6 +458,24 @@ pub(super) async fn spawn_swarm_agent(
         return Ok(worker);
     }
     let agents_config = &crate::config::config().agents;
+    // Agent profile: the explicit spawn choice, then the lane's. Resolved
+    // before any model or effort default so an unknown name fails fast.
+    let profile_name = match (requested_profile, lane_id.as_deref()) {
+        (Some(name), _) => Some(name),
+        (None, Some(lane_id)) => {
+            super::swarm_todo_link::spawn_lane_profile(req_session_id, lane_id)?
+        }
+        (None, None) => None,
+    }
+    .map(|name| name.trim().to_string())
+    .filter(|name| !name.is_empty());
+    let profile = profile_name
+        .as_deref()
+        .map(|name| crate::agent_profile::resolve_profile(name, agents_config))
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let profile_model = profile.as_ref().and_then(|profile| profile.model.clone());
+    let profile_effort = profile.as_ref().and_then(|profile| profile.effort.clone());
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
@@ -472,8 +494,12 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let preferred_swarm_model =
-        session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
+    let preferred_swarm_model = session_swarm_model(
+        req_session_id,
+        sessions,
+        profile_model.or_else(|| agents_config.swarm_model.clone()),
+    )
+    .await;
     let configured_swarm_model =
         if requested_model.is_none() && !agents_config.swarm_model_fallbacks.is_empty() {
             let routes = match sessions.read().await.get(req_session_id).cloned() {
@@ -519,7 +545,9 @@ pub(super) async fn spawn_swarm_agent(
     );
     let spawn_effort = resolve_swarm_spawn_effort(
         requested_effort.as_deref(),
-        agents_config.swarm_effort.as_deref(),
+        profile_effort
+            .as_deref()
+            .or(agents_config.swarm_effort.as_deref()),
     );
     let spawn_speed = match (requested_speed, lane_id.as_deref()) {
         (Some(speed), _) => speed,
@@ -545,6 +573,7 @@ pub(super) async fn spawn_swarm_agent(
             "The configured worker route was unavailable; using Standard on its fallback".into(),
         );
     }
+    prepared.profile = profile_name;
 
     // Validate the explicit lane before allocating or launching a worker.
     let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
@@ -853,6 +882,7 @@ pub(super) async fn handle_comm_spawn(
     effort: Option<String>,
     speed: Option<jcode_message_types::SpeedMode>,
     label: Option<String>,
+    profile: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -915,6 +945,10 @@ pub(super) async fn handle_comm_spawn(
     if let Some(speed) = speed {
         key_fields.push(format!("speed:{speed:?}"));
     }
+    // Same rule for the profile: legacy keys stay stable when it is unset.
+    if let Some(profile) = profile.as_deref() {
+        key_fields.push(format!("profile:{profile}"));
+    }
     let mutation_key = request_key(&req_session_id, "spawn", &key_fields);
     let Some(mutation_state) = begin_or_replay(
         swarm_mutation_runtime,
@@ -940,6 +974,7 @@ pub(super) async fn handle_comm_spawn(
         effort,
         speed,
         label,
+        profile,
         &mutation_key,
         sessions,
         global_session_id,

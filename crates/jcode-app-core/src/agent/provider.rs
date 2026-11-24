@@ -279,6 +279,7 @@ impl Agent {
         approval: Option<crate::session::WorkerModelApproval>,
         speed: jcode_message_types::WorkerSpeedStatus,
         speed_selection: Option<crate::session::StoredSpeedSelection>,
+        profile: Option<String>,
     ) -> Result<()> {
         if provider_key.is_some() {
             self.session.provider_key = provider_key;
@@ -291,6 +292,8 @@ impl Agent {
         // The fresh-session constructor clears any inherited provider speed.
         // Reinstall only the selection granted for this new worker.
         self.session.is_swarm_worker = true;
+        // A worker never keeps a root default; it gets only its spawn profile.
+        self.set_agent_profile(profile)?;
         if let Some(choice) = &self.session.speed_selection {
             self.ensure_worker_speed_allowed(choice.mode)?;
             Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)?;

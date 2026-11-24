@@ -54,6 +54,8 @@ pub(super) struct PreparedSwarmWorker {
     pub speed: WorkerSpeedStatus,
     pub speed_selection: Option<StoredSpeedSelection>,
     pub approval: Option<WorkerModelApproval>,
+    /// Agent profile the worker session is created with.
+    pub profile: Option<String>,
 }
 
 impl PreparedSwarmWorker {
@@ -160,6 +162,7 @@ impl PreparedSwarmWorker {
             speed,
             speed_selection,
             approval: None,
+            profile: None,
         })
     }
 

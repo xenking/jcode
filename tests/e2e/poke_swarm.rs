@@ -260,6 +260,7 @@ async fn run_scenario(assign_todo_to_worker: bool, await_worker: bool) -> Result
         client
             .send(serde_json::to_value(Request::CommSpawn {
                 speed: None,
+                profile: None,
                 id: 2,
                 session_id: coordinator.clone(),
                 lane_id: None,

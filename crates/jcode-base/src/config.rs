@@ -4,12 +4,12 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger, AutoReviewConfig,
-    CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
-    CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode,
-    DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig,
-    HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry,
-    LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
+    AgentProfileConfig, AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger,
+    AutoReviewConfig, CompactionConfig, CompactionMode, CrossProviderFailoverMode,
+    CustomWebSearchConfig, CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO,
+    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
+    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
     ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode,

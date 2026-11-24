@@ -1382,6 +1382,7 @@ fn test_remote_done_does_not_duplicate_daemon_pokes() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

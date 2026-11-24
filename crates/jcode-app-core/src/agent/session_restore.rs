@@ -87,11 +87,8 @@ impl Agent {
         }
         let agents_md_ms = lap.elapsed().as_millis();
         let lap = Instant::now();
-        self._tool_policy_registration = crate::tool::register_session_tool_policy(
-            &self.session.id,
-            self.allowed_tools.clone(),
-            self.disabled_tools.clone(),
-        );
+        // The restored session carries its own agent profile.
+        self.refresh_profile_tool_policy();
         let policy_ms = lap.elapsed().as_millis();
         let assign_ms = assign_start.elapsed().as_millis();
         if assign_ms >= 50 {

@@ -743,6 +743,7 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
         session_id,
         &[crate::todo::TodoItem {
             lane_speed: None,
+            lane_profile: None,
             lane_after: None,
             lane_owner: None,
             content: "Wire todo title into picker".to_string(),
@@ -847,6 +848,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
         session_id,
         &[crate::todo::TodoItem {
             lane_speed: None,
+            lane_profile: None,
             lane_after: None,
             lane_owner: None,
             content: "Wire todo title into picker".to_string(),

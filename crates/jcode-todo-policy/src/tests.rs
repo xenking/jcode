@@ -612,6 +612,7 @@ fn todo(content: &str, status: &str, group: Option<&str>) -> TodoItem {
         lane_after: None,
         lane_owner: None,
         lane_speed: None,
+        lane_profile: None,
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),

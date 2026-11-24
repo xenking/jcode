@@ -240,6 +240,7 @@ mod tests {
                 lane_after: None,
                 lane_owner: None,
                 lane_speed: None,
+                lane_profile: None,
                 confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),

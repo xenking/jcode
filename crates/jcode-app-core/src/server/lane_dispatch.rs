@@ -315,6 +315,7 @@ async fn spawn_lane_worker(
         None,
         None,
         None,
+        None,
         &tx,
         &context.sessions,
         &context.global_session_id,

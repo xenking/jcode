@@ -310,6 +310,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         speed: None,
         label: None,
         lane_id: None,
+        profile: params.profile.clone(),
     };
 
     match send_request(spawn_request).await {
@@ -737,6 +738,9 @@ struct CommunicateInput {
     spawn_mode: Option<String>,
     #[serde(default)]
     speed: Option<jcode_message_types::SpeedMode>,
+    /// Spawn: agent profile for the worker (see `agents.profiles`).
+    #[serde(default)]
+    profile: Option<String>,
     /// One-line summary shown collapsed in the recipient's UI for long
     /// message/report bodies. Required when the body exceeds the collapse
     /// threshold.
@@ -931,6 +935,10 @@ impl Tool for CommunicateTool {
                 "speed": {
                     "type": "string", "enum": ["standard", "fast", "ultrafast"],
                     "description": "Worker speed. Set only on user request. Faster modes require owner approval."
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Spawn: worker agent profile (scout read-only map, task implement, sonic narrow edits, reviewer read-only review). Omit to use the lane's lane_profile."
                 },
                 "session_ids": {
                     "type": "array",
@@ -1571,6 +1579,7 @@ impl Tool for CommunicateTool {
                     speed: params.speed,
                     label: Some(label),
                     lane_id: Some(lane_id.clone()),
+                    profile: params.profile.clone(),
                 };
 
                 match send_request(request).await {

@@ -1016,6 +1016,10 @@ pub enum Request {
         /// otherwise derived from the first line of `initial_message`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// Optional agent profile for the worker (see `agents.profiles`).
+        /// Unset uses the lane's `lane_profile`, then no profile.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
 
     /// List models/routes available for spawning swarm agents

@@ -479,6 +479,10 @@ pub struct TodoItem {
     /// Requested execution speed for the worker assigned to this lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_speed: Option<jcode_message_types::SpeedMode>,
+    /// Agent profile for the worker assigned to this lane (see
+    /// `agents.profiles`). Lane-wide, like `lane_speed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_profile: Option<String>,
     /// Forward-looking evidence state that this todo can be completed
     /// correctly. Legacy sessions stored a 0-100 score; numbers map onto the
     /// closest state on load.

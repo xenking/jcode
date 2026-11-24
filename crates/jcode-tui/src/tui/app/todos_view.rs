@@ -990,6 +990,7 @@ mod tests {
     ) -> TodoItem {
         TodoItem {
             lane_speed: None,
+            lane_profile: None,
             id: id.to_string(),
             content: content.to_string(),
             status: status.to_string(),

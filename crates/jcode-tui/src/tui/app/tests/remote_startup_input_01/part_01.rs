@@ -17,6 +17,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

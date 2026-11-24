@@ -312,6 +312,7 @@ async fn idle_waiting_session_precompacts_and_persists_a_divider() -> Result<()>
         client
             .send(serde_json::to_value(Request::CommSpawn {
                 speed: None,
+                profile: None,
                 id: 2,
                 session_id: session_id.clone(),
                 lane_id: None,

@@ -15,6 +15,8 @@ mod messages;
 #[cfg(test)]
 mod model_usage_tests;
 mod parallel_reads;
+mod profile;
+use profile::profile_tool_selection;
 mod prompting;
 pub(crate) mod provider;
 mod reload_resume;
@@ -348,6 +350,10 @@ pub struct Agent {
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    /// Tool selection before the session's agent profile narrows it. The
+    /// effective `allowed_tools`/`disabled_tools` are recomputed from this
+    /// whenever the session (and so its profile) changes.
+    base_tool_selection: (Option<HashSet<String>>, HashSet<String>),
     /// Generation-scoped ownership of this Agent's global tool-policy entry.
     _tool_policy_registration: crate::tool::SessionToolPolicyRegistration,
     /// MCP top-level definition exposure policy captured when the session starts.
@@ -542,6 +548,9 @@ impl Agent {
         let static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
         let agents_md_ms = t.elapsed().as_millis();
         let initial_provider_model = provider.model();
+        let base_tool_selection = (allowed_tools, disabled_tools);
+        let (allowed_tools, disabled_tools) =
+            profile_tool_selection(&base_tool_selection, session.agent_profile.as_deref());
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             &session.id,
             allowed_tools.clone(),
@@ -556,6 +565,7 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             disabled_tools,
+            base_tool_selection,
             _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
             provider_session_id: None,

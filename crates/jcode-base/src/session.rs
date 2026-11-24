@@ -181,6 +181,10 @@ pub struct Session {
     /// Session worker routing. Missing keys follow saved global defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_model_overrides: AgentModelOverrides,
+    /// Agent profile chosen when the session was created (see
+    /// `jcode_base::agent_profile`). Re-applied from here on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<String>,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
@@ -324,6 +328,8 @@ struct SessionStartupStub {
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
+    agent_profile: Option<String>,
+    #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]
     autoreview_enabled: Option<bool>,
@@ -447,6 +453,7 @@ impl Session {
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
+        session.agent_profile = stub.agent_profile;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
@@ -498,6 +505,7 @@ impl Session {
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
+        session.agent_profile = snapshot.agent_profile;
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
@@ -749,6 +757,7 @@ impl Session {
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
+            agent_profile: self.agent_profile.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
@@ -968,6 +977,7 @@ impl Session {
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
+        self.agent_profile = meta.agent_profile;
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
         self.autojudge_enabled = meta.autojudge_enabled;
@@ -1029,6 +1039,7 @@ impl Session {
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
+            agent_profile: None,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1102,6 +1113,7 @@ impl Session {
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
+            agent_profile: None,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -2118,6 +2130,8 @@ struct RemoteStartupSessionSnapshot {
     subagent_model: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
+    #[serde(default)]
+    agent_profile: Option<String>,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]

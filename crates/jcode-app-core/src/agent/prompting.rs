@@ -268,7 +268,14 @@ impl Agent {
             .working_dir
             .as_deref()
             .map(std::path::Path::new);
-        let (split, info) = crate::prompt::build_system_prompt_split_with_sources(
+        let session_id = self.session_id().to_string();
+        let tool_gate = move |name: &str| crate::tool::session_allows_tool(&session_id, name);
+        let profile = self.profile_prompt();
+        let composition = crate::prompt::PromptComposition {
+            tool_gate: Some(&tool_gate),
+            profile: profile.as_ref(),
+        };
+        let (split, info) = crate::prompt::build_system_prompt_split_composed(
             None,
             &self.prompt_skills_snapshot,
             self.session.is_canary,
@@ -276,6 +283,7 @@ impl Agent {
             working_dir,
             sources,
             self.agents_md_snapshot.clone(),
+            &composition,
         );
         (
             self.append_session_system_prompt(split.static_part),

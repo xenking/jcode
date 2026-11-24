@@ -35,13 +35,15 @@ impl Agent {
         registry: Registry,
         working_dir: Option<&str>,
     ) -> Self {
-        Self::new_with_initial_ownership(
+        let mut agent = Self::new_with_initial_ownership(
             provider,
             registry,
             working_dir,
             Session::create(None, None),
             false,
-        )
+        );
+        agent.apply_root_profile_default();
+        agent
     }
 
     pub(crate) fn new_with_parent_and_initial_working_dir(
@@ -50,13 +52,15 @@ impl Agent {
         working_dir: Option<&str>,
         parent_id: Option<String>,
     ) -> Self {
-        Self::new_with_initial_ownership(
+        let mut agent = Self::new_with_initial_ownership(
             provider,
             registry,
             working_dir,
             Session::create(parent_id, None),
             true,
-        )
+        );
+        agent.apply_root_profile_default();
+        agent
     }
 
     fn new_with_initial_ownership(

@@ -7,6 +7,8 @@ impl Agent {
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
         let preserve_working_dir = self.session.working_dir.clone();
+        // A cleared conversation keeps the kind of agent it was.
+        let preserve_profile = self.session.agent_profile.clone();
 
         self.session.mark_closed();
         self.finish_concurrency_tracking();
@@ -21,16 +23,13 @@ impl Agent {
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
         new_session.working_dir = preserve_working_dir;
+        new_session.agent_profile = preserve_profile;
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
         self.provider.set_session_id(&self.session.id);
         self.begin_concurrency_tracking();
-        self._tool_policy_registration = crate::tool::register_session_tool_policy(
-            &self.session.id,
-            self.allowed_tools.clone(),
-            self.disabled_tools.clone(),
-        );
+        self.refresh_profile_tool_policy();
         self.refresh_agents_md_snapshot();
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();

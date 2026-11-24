@@ -12,6 +12,7 @@ fn uncapped_and_preserves_every_todo_field() {
             lane_after: None,
             lane_owner: None,
             lane_speed: None,
+            lane_profile: None,
             details: Some(format!("Full details {i}")),
             confidence: Some(ConfidenceState::Verified),
             completion_confidence: Some(ConfidenceState::Validated),

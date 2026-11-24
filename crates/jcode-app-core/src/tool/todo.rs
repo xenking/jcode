@@ -254,6 +254,7 @@ const UPDATE_FIELDS: &[&str] = &[
     "lane_dependencies",
     "lane_owner",
     "lane_speed",
+    "lane_profile",
     "confidence",
     "completion_confidence",
     "confidence_history",
@@ -417,6 +418,9 @@ fn prepare_todo_patch(
         if let Some(value) = fields.get("lane_speed") {
             patch_lane_field(&mut todos, id, "lane_speed", value.clone())?;
         }
+        if let Some(value) = fields.get("lane_profile") {
+            patch_lane_field(&mut todos, id, "lane_profile", value.clone())?;
+        }
     }
 
     for mut add in adds {
@@ -464,7 +468,7 @@ fn prepare_todo_patch(
         let lane_template = todos.iter().find(|todo| {
             todo.get("stage") == fields.get("stage") && todo.get("group") == fields.get("group")
         });
-        for field in ["lane_after", "lane_speed"] {
+        for field in ["lane_after", "lane_speed", "lane_profile"] {
             if !fields.contains_key(field)
                 && let Some(value) = lane_template.and_then(|todo| todo.get(field))
             {
@@ -473,6 +477,7 @@ fn prepare_todo_patch(
         }
         let lane_after = fields.get("lane_after").cloned();
         let lane_speed = fields.get("lane_speed").cloned();
+        let lane_profile = fields.get("lane_profile").cloned();
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
         if let Some(id) = &id
             && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
@@ -493,6 +498,9 @@ fn prepare_todo_patch(
             }
             if let Some(value) = lane_speed {
                 patch_lane_field(&mut todos, &id, "lane_speed", value)?;
+            }
+            if let Some(value) = lane_profile {
+                patch_lane_field(&mut todos, &id, "lane_profile", value)?;
             }
         }
     }
@@ -674,6 +682,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     "lane_dependencies",
                     "lane_owner",
                     "lane_speed",
+                    "lane_profile",
                 ]
                 .iter()
                 .any(|key| item.contains_key(*key))
@@ -709,6 +718,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 }
                 if let Some(speed) = lane.get("speed") {
                     item.insert("lane_speed".into(), speed.clone());
+                }
+                if let Some(profile) = lane.get("profile").filter(|profile| !profile.is_null()) {
+                    item.insert("lane_profile".into(), profile.clone());
                 }
                 todos.push(Value::Object(item));
             }
@@ -1138,6 +1150,74 @@ fn record_reframe_observations(
     (observations, immediate)
 }
 
+/// How much of the todo state a result echoes back to the model.
+///
+/// A write echoes a compact view: the model authored every description and
+/// every confidence transition it just sent, and field data showed
+/// descriptions alone were 80% of all todo result characters. A read is the
+/// model explicitly asking for the state, so it still gets every field. Both
+/// keep the JSON-then-labelled-sections shape the TUI todo card parses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TodoEcho {
+    Full,
+    Compact,
+}
+
+/// Fields a compact echo drops from each serialized todo, plan and goal.
+const COMPACT_ECHO_DROPPED_TODO_FIELDS: &[&str] = &["description", "confidence_history"];
+
+fn strip_history_fields(value: &mut Value) {
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|key, _| !key.ends_with("_history"));
+    }
+}
+
+/// One JSON object per line: valid JSON for the card parser, without the
+/// indentation that pretty printing spends on every field.
+fn json_lines(items: &[Value]) -> Result<String> {
+    if items.is_empty() {
+        return Ok("[]".to_string());
+    }
+    let lines = items
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(format!("[\n{}\n]", lines.join(",\n")))
+}
+
+fn render_todos(todos: &[TodoItem], echo: TodoEcho) -> Result<(String, bool)> {
+    let public = names::public_todos(todos)?;
+    let mut items = public.as_array().cloned().unwrap_or_default();
+    let mut omitted_descriptions = false;
+    if echo == TodoEcho::Compact {
+        for item in &mut items {
+            if let Some(fields) = item.as_object_mut() {
+                omitted_descriptions |= fields.contains_key("description");
+                for field in COMPACT_ECHO_DROPPED_TODO_FIELDS {
+                    fields.remove(*field);
+                }
+            }
+        }
+    }
+    Ok((json_lines(&items)?, omitted_descriptions))
+}
+
+fn render_section<T: serde::Serialize>(value: &T, echo: TodoEcho) -> Result<String> {
+    let mut value = serde_json::to_value(value)?;
+    match echo {
+        TodoEcho::Full => Ok(serde_json::to_string_pretty(&value)?),
+        TodoEcho::Compact => {
+            if let Some(items) = value.as_array_mut() {
+                items.iter_mut().for_each(strip_history_fields);
+                json_lines(items)
+            } else {
+                strip_history_fields(&mut value);
+                Ok(serde_json::to_string(&value)?)
+            }
+        }
+    }
+}
+
 fn build_todo_output(
     todos: Vec<TodoItem>,
     plan: TodoPlan,
@@ -1145,27 +1225,33 @@ fn build_todo_output(
     plan_change: Option<TodoPlanChange>,
     goal_changes: Option<Vec<TodoGoalChange>>,
     continuations: impl IntoIterator<Item = String>,
+    echo: TodoEcho,
 ) -> Result<ToolOutput> {
     let remaining = todos
         .iter()
         .filter(|todo| todo.status != "completed")
         .count();
-    let mut text = serde_json::to_string_pretty(&names::public_todos(&todos)?)?;
+    let (mut text, omitted_descriptions) = render_todos(&todos, echo)?;
     if plan != TodoPlan::default() {
         text.push_str("\n\nPlan:\n");
-        text.push_str(&serde_json::to_string_pretty(&plan)?);
+        text.push_str(&render_section(&plan, echo)?);
     }
     if !goals.is_empty() {
         text.push_str("\n\nGoals:\n");
-        text.push_str(&serde_json::to_string_pretty(&goals)?);
+        text.push_str(&render_section(&goals, echo)?);
     }
     if let Some(plan_change) = plan_change.as_ref() {
         text.push_str("\n\nPlan updates:\n");
-        text.push_str(&serde_json::to_string_pretty(plan_change)?);
+        text.push_str(&render_section(plan_change, echo)?);
     }
     if let Some(goal_changes) = goal_changes.as_ref().filter(|changes| !changes.is_empty()) {
         text.push_str("\n\nGoal updates:\n");
-        text.push_str(&serde_json::to_string_pretty(goal_changes)?);
+        text.push_str(&render_section(goal_changes, echo)?);
+    }
+    if omitted_descriptions {
+        text.push_str(
+            "\n\n(Descriptions and history omitted; call todo with no changes to read them.)",
+        );
     }
     for continuation in continuations {
         text.push_str("\n\n");
@@ -1386,6 +1472,10 @@ impl Tool for TodoTool {
             "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
             "description": "Lane speed. Null inherits config. Faster modes require owner approval."
         });
+        schema["properties"]["todos"]["items"]["properties"]["lane_profile"] = json!({
+            "type": ["string", "null"],
+            "description": "Worker agent profile for the whole lane, e.g. scout, task, sonic, reviewer."
+        });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
@@ -1433,6 +1523,9 @@ impl Tool for TodoTool {
                         }, "speed": {
                             "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
                             "description": "As lane_speed in add."
+                        }, "profile": {
+                            "type": ["string", "null"],
+                            "description": "As lane_profile in add."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
@@ -1574,12 +1667,21 @@ impl Tool for TodoTool {
                     concise_plan_change,
                     concise_goal_changes,
                     nudges,
+                    TodoEcho::Compact,
                 )
             })()
         } else {
             record_todo_write_mode(&write_mode_input);
             record_todo_telemetry(&previous, &previous, &stored_goals, &stored_plan);
-            build_todo_output(previous, stored_plan, stored_goals, None, None, Vec::new())
+            build_todo_output(
+                previous,
+                stored_plan,
+                stored_goals,
+                None,
+                None,
+                Vec::new(),
+                TodoEcho::Full,
+            )
         };
         result.map_err(|err| {
             crate::logging::warn(&format!(

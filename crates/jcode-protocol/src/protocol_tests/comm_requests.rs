@@ -459,6 +459,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         effort: Some("low".to_string()),
         speed: Some(jcode_message_types::SpeedMode::Fast),
         label: Some("review auth flow".to_string()),
+        profile: Some("scout".to_string()),
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"comm_spawn\""));
@@ -482,6 +483,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         effort,
         speed,
         label,
+        profile,
         ..
     } = decoded
     else {
@@ -497,6 +499,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert_eq!(effort.as_deref(), Some("low"));
     assert_eq!(speed, Some(jcode_message_types::SpeedMode::Fast));
     assert_eq!(label.as_deref(), Some("review auth flow"));
+    assert_eq!(profile.as_deref(), Some("scout"));
     Ok(())
 }
 

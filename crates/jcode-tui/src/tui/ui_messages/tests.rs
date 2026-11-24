@@ -1425,6 +1425,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
             lane_speed: None,
+            lane_profile: None,
             lane_after: None,
             lane_owner: None,
             id: id.to_string(),
@@ -1511,6 +1512,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
 fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         stage: None,
@@ -1577,6 +1579,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "1".to_string(),
@@ -1666,6 +1669,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
 fn render_todos_message_uses_readable_semantic_colors() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "1".to_string(),
@@ -1858,6 +1862,7 @@ fn render_todos_message_color_codes_every_intent_state() {
 fn render_todos_message_collapses_passing_quality_gates() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "1".to_string(),
@@ -1916,6 +1921,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
 fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "1".to_string(),
@@ -1963,6 +1969,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 fn render_todos_message_packs_multiple_goal_gates_per_row() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         id: "1".to_string(),
@@ -2036,6 +2043,7 @@ fn render_todos_message_bad_payload_falls_back_to_system() {
 fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     let todos = vec![crate::todo::TodoItem {
         lane_speed: None,
+        lane_profile: None,
         lane_after: None,
         lane_owner: None,
         stage: None,
