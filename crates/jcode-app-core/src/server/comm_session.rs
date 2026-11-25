@@ -208,9 +208,10 @@ fn spawn_visible_session_window_with_context(
 
 #[path = "spawn_model_selection.rs"]
 pub(super) mod spawn_model_selection;
+#[cfg(test)]
+use spawn_model_selection::CoordinatorSpawnIdentity;
 use spawn_model_selection::{
-    CoordinatorSpawnIdentity, SwarmSpawnSelection, pick_available_swarm_model,
-    provider_key_for_spawn_model, resolve_coordinator_spawn_identity,
+    pick_available_swarm_model, provider_key_for_spawn_model, resolve_coordinator_spawn_identity,
     resolve_swarm_spawn_selection, session_swarm_model,
 };
 

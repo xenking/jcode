@@ -172,7 +172,8 @@ impl DaemonCapabilities {
             .chain(
                 passthrough
                     .into_iter()
-                    .filter_map(|(on, name)| on.then(|| name.to_string())),
+                    .filter(|(on, _)| *on)
+                    .map(|(_, name)| name.to_string()),
             )
             .collect()
     }

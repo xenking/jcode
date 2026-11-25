@@ -47,7 +47,7 @@ pub(super) fn register_background_tool_signal(session_id: &str, signal: Interrup
 }
 
 /// Look up the registered background-tool signal for a session, if any.
-pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<InterruptSignal> {
+fn background_tool_signal_for_session(session_id: &str) -> Option<InterruptSignal> {
     BACKGROUND_TOOL_SIGNALS
         .lock()
         .unwrap_or_else(|poison| {
@@ -706,7 +706,7 @@ impl Drop for TurnEventChannel {
     }
 }
 
-pub(super) fn enqueue_soft_interrupt(
+fn enqueue_soft_interrupt(
     queue: &SoftInterruptQueue,
     content: String,
     images: Vec<(String, String)>,
@@ -716,7 +716,7 @@ pub(super) fn enqueue_soft_interrupt(
     enqueue_soft_interrupt_with_id(queue, content, images, urgent, source, None)
 }
 
-pub(super) fn enqueue_soft_interrupt_with_id(
+fn enqueue_soft_interrupt_with_id(
     queue: &SoftInterruptQueue,
     content: String,
     images: Vec<(String, String)>,

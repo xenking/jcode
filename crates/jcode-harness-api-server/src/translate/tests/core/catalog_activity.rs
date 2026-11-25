@@ -90,7 +90,7 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
     session.pinned_skills = vec!["swarm".into(), "selfdev".into()];
     session.route_api_method = Some("openrouter".into());
     session.last_provider_request_at = Some(session.updated_at);
-    session.messages = serde_json::from_value(json!([
+    session.replace_messages(serde_json::from_value(json!([
         {"id":"reply", "role":"assistant", "content":[{"type":"text", "text":"response"}], "timestamp":"2024-01-01T00:00:01Z"},
         {"id":"prompt", "role":"user", "content":[{"type":"text", "text":"next prompt"}], "timestamp":"2024-01-01T00:00:03Z"}
     ]))

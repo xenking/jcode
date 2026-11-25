@@ -24,12 +24,14 @@ pub mod timing;
 pub mod translate;
 
 #[cfg(test)]
-#[path = "search_api_tests.rs"]
+#[path = "tests/search_api_tests.rs"]
 mod search_api_tests;
 
 #[cfg(all(test, unix))]
+#[path = "tests/session_presence_tests.rs"]
 mod session_presence_tests;
 #[cfg(all(test, unix))]
+#[path = "tests/stdio_tests.rs"]
 mod stdio_tests;
 
 use anyhow::{Context, Result};
@@ -865,6 +867,7 @@ where
 }
 
 #[cfg(all(test, unix))]
+#[path = "tests/runtime_command_compat_tests.rs"]
 mod runtime_command_compat_tests;
 
 #[cfg(all(test, unix))]
@@ -1059,7 +1062,7 @@ mod public_acceptance_tests {
 }
 
 #[cfg(test)]
-#[path = "framing_tests.rs"]
+#[path = "tests/framing_tests.rs"]
 mod framing_tests;
 
 #[cfg(all(test, unix))]

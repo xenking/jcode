@@ -216,7 +216,11 @@ pub(super) async fn daemon_side_questions(socket: &std::path::Path, request: &Va
 pub(super) async fn daemon_routing_view(socket: &std::path::Path) -> ApiEvent {
     let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut stream = Stream::connect(socket).await?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"routing_view", "id":1})).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({"type":"routing_view", "id":1}),
+        )
+        .await?;
         let mut line = String::new();
         read_frame(&mut BufReader::new(stream), &mut line).await?;
         let reply: Value = serde_json::from_str(&line)?;

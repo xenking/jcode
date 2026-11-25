@@ -37,7 +37,7 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
 #[cfg(unix)]
 #[tokio::test]
 async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
-    use crate::server::{Server, reload, reload_recovery::RecoveryOwner, runtime::ServerRuntime};
+    use crate::server::{Server, reload, reload_recovery::RecoveryOwner};
 
     struct QuestionProvider;
     #[async_trait]
@@ -237,7 +237,7 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
 #[tokio::test]
 async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
     use crate::server::ask_escalation::tests::member;
-    use crate::server::{ask_escalation, reload_recovery, runtime::ServerRuntime};
+    use crate::server::{ask_escalation, reload_recovery};
 
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();

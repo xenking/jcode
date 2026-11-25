@@ -1209,7 +1209,7 @@ pub fn note_title(session_id: &str, title: &str) {
 }
 
 #[cfg(test)]
-#[path = "search_index_tests.rs"]
+#[path = "tests/search_index_tests.rs"]
 mod tests;
 
 /// Point the process-wide index at a test corpus.

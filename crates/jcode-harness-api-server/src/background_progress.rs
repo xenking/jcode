@@ -171,5 +171,5 @@ fn parse_percent(summary: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
-#[path = "background_progress_tests.rs"]
+#[path = "tests/background_progress_tests.rs"]
 mod tests;
