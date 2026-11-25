@@ -1,6 +1,6 @@
+use super::ServerHandles;
 use super::client_lifecycle::handle_client;
 use super::debug::handle_debug_client;
-use super::handles::ServerHandles;
 use super::util::get_shared_mcp_pool;
 use crate::gateway::GatewayClient;
 use crate::transport::{Listener, Stream};

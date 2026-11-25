@@ -903,7 +903,7 @@ enum RecoveryAdmission {
 }
 
 impl RecoveryOwner {
-    pub(super) fn new(handles: &super::handles::ServerHandles) -> Self {
+    pub(super) fn new(handles: &super::ServerHandles) -> Self {
         install_recovery_gate();
         Self {
             provider: Arc::clone(&handles.provider),
