@@ -79,11 +79,32 @@ pub(super) struct FileDiffViewCacheEntry {
 
 #[derive(Default)]
 pub(super) struct FileDiffViewCacheState {
-    pub(super) entries: HashMap<FileDiffCacheKey, FileDiffViewCacheEntry>,
-    pub(super) order: VecDeque<FileDiffCacheKey>,
+    entries: HashMap<FileDiffCacheKey, FileDiffViewCacheEntry>,
+    order: VecDeque<FileDiffCacheKey>,
 }
 
 impl FileDiffViewCacheState {
+    /// Whether the cached rows for `key` were built from the current file contents.
+    pub(super) fn is_fresh(
+        &self,
+        key: &FileDiffCacheKey,
+        file_sig: &Option<FileContentSignature>,
+    ) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|cached| cached.file_sig == *file_sig)
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    pub(super) fn get(&self, key: &FileDiffCacheKey) -> Option<&FileDiffViewCacheEntry> {
+        self.entries.get(key)
+    }
+
     pub(super) fn insert(&mut self, key: FileDiffCacheKey, entry: FileDiffViewCacheEntry) {
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
@@ -486,11 +507,7 @@ pub(super) fn draw_file_diff_view(
             Ok(c) => c,
             Err(poisoned) => poisoned.into_inner(),
         };
-        cache
-            .entries
-            .get(&cache_key)
-            .map(|cached| cached.file_sig != file_sig)
-            .unwrap_or(true)
+        !cache.is_fresh(&cache_key, &file_sig)
     };
 
     if needs_rebuild {
@@ -510,7 +527,7 @@ pub(super) fn draw_file_diff_view(
             Ok(c) => c,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let Some(cached) = cache.entries.get(&cache_key) else {
+        let Some(cached) = cache.get(&cache_key) else {
             return;
         };
         (

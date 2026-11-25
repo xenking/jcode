@@ -172,8 +172,7 @@ fn test_file_diff_cache_reuses_entry_when_signature_matches() {
     let state = file_diff_cache();
     {
         let mut cache = state.lock().expect("cache lock");
-        cache.entries.clear();
-        cache.order.clear();
+        cache.clear();
         let key = FileDiffCacheKey {
             file_path: path.clone(),
             msg_index: 1,
@@ -196,7 +195,7 @@ fn test_file_diff_cache_reuses_entry_when_signature_matches() {
             },
         );
 
-        let cached = cache.entries.get(&key).expect("cached entry");
+        let cached = cache.get(&key).expect("cached entry");
         assert_eq!(cached.file_sig, sig);
     }
 }
