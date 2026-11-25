@@ -176,6 +176,11 @@ pub(crate) use session_policy::{
 };
 use session_policy::{ensure_mcp_action_allowed, session_tool_policy};
 
+/// No tool call may hold a turn longer than this many seconds. Model-requested
+/// waits are capped to it, and work still running at the ceiling moves to the
+/// background so the turn continues. Only a human decision (`ask`) is exempt.
+pub(crate) const MAX_BLOCKING_TOOL_WAIT_SECS: u64 = 15 * 60;
+
 fn parse_tool_args<T: serde::de::DeserializeOwned>(input: Value, example: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|err| {
         if err.path().iter().next().is_some() {

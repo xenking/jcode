@@ -33,7 +33,9 @@ fn waits_are_replayed_but_mutating_tools_are_not() {
         json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
     );
 
-    assert!(crate::agent::tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input));
+    assert!(crate::agent::tool_handoff::is_reload_replayable_wait(
+        &tc.name, &tc.input
+    ));
     assert!(!crate::agent::tool_handoff::is_reload_replayable_wait(
         "bg",
         &json!({"action":"cancel"})

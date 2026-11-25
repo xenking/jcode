@@ -32,7 +32,7 @@ fn default_wait_return_on_progress() -> bool {
 
 const DEFAULT_WAIT_SECONDS: u64 = 60;
 /// A wait never holds a turn past the blocking ceiling (15 minutes).
-const MAX_WAIT_SECONDS: u64 = crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS;
+const MAX_WAIT_SECONDS: u64 = super::MAX_BLOCKING_TOOL_WAIT_SECS;
 const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
 const MAX_OUTPUT_BYTES: usize = 50_000;

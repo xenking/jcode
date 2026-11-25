@@ -14,7 +14,7 @@ pub(super) fn automatic_handoff_reason(budget: Duration) -> String {
 /// background so the turn continues. Only a human decision (`ask`) is exempt:
 /// it waits for the person, not for work.
 pub(crate) const MAX_BLOCKING_TOOL_WAIT: Duration =
-    Duration::from_secs(crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS);
+    Duration::from_secs(crate::tool::MAX_BLOCKING_TOOL_WAIT_SECS);
 
 fn is_human_decision(name: &str) -> bool {
     matches!(name, "ask" | "ask_user")
