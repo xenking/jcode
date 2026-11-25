@@ -178,45 +178,7 @@ fn browser_unusable_here() -> bool {
     )
 }
 
-/// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
-/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
-///
-/// Used to keep tests from opening real browser windows (OAuth login pages,
-/// files) on the developer's desktop: many login/onboarding flows are
-/// exercised by TUI tests, and without this guard each test run could pop
-/// multiple browser tabs. Set `JCODE_ALLOW_BROWSER_IN_TESTS=1` to opt out
-/// (e.g. for an intentionally interactive live test).
-pub fn running_in_test_harness() -> bool {
-    static IN_TEST_HARNESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IN_TEST_HARNESS.get_or_init(|| {
-        if env_truthy("JCODE_ALLOW_BROWSER_IN_TESTS") {
-            return false;
-        }
-        // Hosted runners can relocate test binaries outside Cargo's deps directory.
-        if cfg!(test) {
-            return true;
-        }
-        std::env::current_exe()
-            .ok()
-            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
-            .unwrap_or(false)
-    })
-}
-
-#[path = "status/test_harness.rs"]
-mod test_harness;
-use test_harness::is_test_harness_path;
-
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
+use crate::harness_detect::{env_truthy, running_in_test_harness};
 
 fn auth_timing_logging_enabled() -> bool {
     env_truthy("JCODE_AUTH_TIMING")

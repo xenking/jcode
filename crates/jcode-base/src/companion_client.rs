@@ -279,7 +279,7 @@ pub async fn request_async(
 /// so the local fallback is the common path there.
 pub fn open_url(url: &str) -> bool {
     // Never pop real windows (or reach a real companion) from test binaries.
-    if crate::auth::running_in_test_harness() {
+    if crate::harness_detect::running_in_test_harness() {
         return false;
     }
     match request(

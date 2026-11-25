@@ -31,6 +31,12 @@ pub use notifications::{
 
 /// Legacy persisted wakes can retain the provider's user role even though
 /// their display role is a background notification, never a human prompt.
+/// Whether `provider_name` names Anthropic, whose thinking blocks carry
+/// signatures that must be replayed as stored.
+pub(crate) fn is_anthropic_reasoning_provider(provider_name: &str) -> bool {
+    provider_name.eq_ignore_ascii_case("anthropic") || provider_name.eq_ignore_ascii_case("claude")
+}
+
 pub fn is_background_task_notification_content(content: &str) -> bool {
     let trimmed = content.trim_start();
     if trimmed.starts_with("🐝 **Swarm await finished**") {
@@ -333,7 +339,7 @@ pub fn push_reasoning_blocks(
     reasoning_signature: Option<&str>,
     store_replay_context: bool,
 ) {
-    let anthropic = crate::provider::is_anthropic_reasoning_provider(provider_name);
+    let anthropic = is_anthropic_reasoning_provider(provider_name);
     if store_replay_context
         && anthropic
         && let Some(signature) = reasoning_signature.filter(|s| !s.is_empty())
@@ -382,7 +388,7 @@ impl<'a> TurnReasoning<'a> {
             provider_name,
             store_replay_context,
             replay_anthropic: store_replay_context
-                && crate::provider::is_anthropic_reasoning_provider(provider_name),
+                && is_anthropic_reasoning_provider(provider_name),
             trace: String::new(),
             signature: String::new(),
             block_start: 0,

@@ -530,7 +530,7 @@ pub enum BusEvent {
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do
     /// not prevent clients from refreshing cached picker metadata.
-    ModelUsageUpdated(crate::provider::ModelRoute),
+    ModelUsageUpdated(jcode_provider_core::ModelRoute),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,
@@ -761,7 +761,7 @@ impl Bus {
         // A models-updated publish means some provider catalog changed
         // out-of-band. Invalidate memoized route catalogs so the next render
         // rebuilds from the new cache instead of serving a stale memo.
-        crate::provider::catalog_scheduler::bump_catalog_generation();
+        crate::catalog_generation::bump();
 
         let delay = {
             let now = Instant::now();
