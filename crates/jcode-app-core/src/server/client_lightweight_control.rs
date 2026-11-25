@@ -1,6 +1,3 @@
-use super::client_actions::{
-    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
-};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
@@ -9,6 +6,9 @@ use super::client_comm::{
 use super::client_comm_swarms::{
     handle_comm_focus_session, handle_comm_list_sessions, handle_comm_list_swarms,
     handle_comm_set_swarm_label,
+};
+use super::client_lifecycle::actions::{
+    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
 };
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};

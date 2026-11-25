@@ -1,10 +1,4 @@
 use super::available_models_cache::PublishedCatalog;
-use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_session_saved, handle_set_subagent_model, handle_split, handle_stdin_response,
-    handle_transfer, handle_trigger_memory_extraction,
-};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
@@ -117,17 +111,18 @@ macro_rules! dispatch_queued_prompt {
     };
 }
 
-mod actions_requests;
+pub(in crate::server) mod actions;
 mod attach_requests;
 mod connection;
 mod connection_loop;
 mod dispatch;
+mod outcome;
 mod runtime_command;
 mod session_requests;
 mod settings_requests;
 mod turn_requests;
 use connection::{ClientConnection, Handshake};
-use dispatch::{Outcome, RequestContext};
+use outcome::{Outcome, RequestContext};
 mod comm_dispatch;
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
@@ -435,7 +430,7 @@ pub(super) async fn handle_client(
             ..
         }
     );
-    let mut initialization_activity = Some(crate::runtime_activity::global().try_enter()?);
+    let initialization_activity = Some(crate::runtime_activity::global().try_enter()?);
     let initial_working_dir = match resolve_target_subscribe_working_dir(
         &mut initial_request,
         &sessions,
@@ -486,7 +481,7 @@ pub(super) async fn handle_client(
         }
         _ => None,
     };
-    let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
+    let active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     let handshake = Handshake {
         reader,

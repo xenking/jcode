@@ -5,22 +5,6 @@
 
 use super::*;
 
-/// What the request loop does after a handler returns.
-pub(super) enum Outcome {
-    /// Run the epilogue (attachment bookkeeping, lifecycle log), then read on.
-    Next,
-    /// Read the next request without the epilogue.
-    SkipEpilogue,
-    /// End the connection.
-    Close,
-}
-
-/// Per-request values a handler may need beyond the request itself.
-pub(super) struct RequestContext<'a> {
-    pub(super) resume_slot: Option<super::super::session_manager::SessionReservation<'a>>,
-    pub(super) request_decoded_at: Instant,
-}
-
 enum Route {
     /// Answered before acknowledgment, never routed here.
     Early,
@@ -86,22 +70,15 @@ fn route_of(request: &Request) -> Route {
         | Request::NotifyAuthChanged { .. }
         | Request::PersistSession { .. }
         | Request::RefreshModels { .. }
-        | Request::RenameSession { .. }
-        | Request::ResumeAllSessions { .. }
-        | Request::RunSubagent { .. }
-        | Request::SetAgentModel { .. }
         | Request::SetCompactionMode { .. }
         | Request::SetContextCap { .. }
-        | Request::SetFeature { .. }
         | Request::SetModel { .. }
         | Request::SetPremiumMode { .. }
         | Request::SetReasoningEffort { .. }
         | Request::SetRoute { .. }
         | Request::SetServiceTier { .. }
         | Request::SetSessionEnv { .. }
-        | Request::SetSessionSaved { .. }
         | Request::SetSpeedMode { .. }
-        | Request::SetSubagentModel { .. }
         | Request::SetTransport { .. }
         | Request::SwitchAnthropicAccount { .. }
         | Request::SwitchOpenAiAccount { .. } => Route::Settings,
@@ -152,9 +129,16 @@ fn route_of(request: &Request) -> Route {
         | Request::ListSideQuestions { .. }
         | Request::NotifySession { .. }
         | Request::PromoteSideQuestion { .. }
+        | Request::RenameSession { .. }
+        | Request::ResumeAllSessions { .. }
         | Request::RoutingGateAnswer { .. }
         | Request::RoutingIntent { .. }
         | Request::RoutingView { .. }
+        | Request::RunSubagent { .. }
+        | Request::SetAgentModel { .. }
+        | Request::SetFeature { .. }
+        | Request::SetSessionSaved { .. }
+        | Request::SetSubagentModel { .. }
         | Request::Split { .. }
         | Request::SplitSideQuestion { .. }
         | Request::StdinResponse { .. }

@@ -92,21 +92,21 @@ impl ClientConnection {
         let client_is_processing = false;
         let (processing_done_tx, processing_done_rx) =
             mpsc::unbounded_channel::<ProcessingCompletion>();
-        let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
-        let mut processing_message_id: Option<u64> = None;
-        let mut processing_session_id: Option<String> = None;
-        let mut current_client_instance_id: Option<String> = None;
+        let processing_task: Option<tokio::task::JoinHandle<()>> = None;
+        let processing_message_id: Option<u64> = None;
+        let processing_session_id: Option<String> = None;
+        let current_client_instance_id: Option<String> = None;
         // App name from the API Hello, used to enable mobile push per session.
-        let mut connection_client_name: Option<String> = None;
-        let mut continue_on_disconnect = false;
-        let mut model_usage_updates_enabled = false;
-        let mut supports_pdf_panels = false;
+        let connection_client_name: Option<String> = None;
+        let continue_on_disconnect = false;
+        let model_usage_updates_enabled = false;
+        let supports_pdf_panels = false;
         // Keep only the window preference, never a session-specific prefix fingerprint.
-        let mut recent_history_messages = None;
-        let mut desktop = crate::tool::interactive::DesktopCapabilities::default();
-        let mut supports_server_failover = false;
+        let recent_history_messages = None;
+        let desktop = crate::tool::interactive::DesktopCapabilities::default();
+        let supports_server_failover = false;
         // Client selfdev status is determined by Subscribe request, not server's env
-        let mut client_selfdev = false;
+        let client_selfdev = false;
 
         let client_start = std::time::Instant::now();
 
@@ -131,9 +131,9 @@ impl ClientConnection {
         let registry = Registry::new(provider.clone()).await;
         let registry_ms = t0.elapsed().as_millis();
 
-        let mut swarm_enabled = crate::config::config().features.swarm;
-        let mut last_available_models_snapshot = PublishedCatalog::default();
-        let mut model_catalog_retry = ModelCatalogRetry::default();
+        let swarm_enabled = crate::config::config().features.swarm;
+        let last_available_models_snapshot = PublishedCatalog::default();
+        let model_catalog_retry = ModelCatalogRetry::default();
 
         // Create a new session for this client
         let t0 = std::time::Instant::now();
@@ -171,11 +171,11 @@ impl ClientConnection {
             "[TIMING] handle_client setup: provider_fork={provider_fork_ms}ms, registry={registry_ms}ms, agent_new={agent_new_ms}ms, prewarm={prewarm_ms}ms, total={}ms",
             client_start.elapsed().as_millis()
         ));
-        let mut client_session_id = new_agent.session_id().to_string();
+        let client_session_id = new_agent.session_id().to_string();
         let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
         let client_connection_id = id::new_id("conn");
         let connected_at = Instant::now();
-        let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
+        let (disconnect_tx, disconnect_rx) = mpsc::unbounded_channel::<()>();
 
         {
             let mut connections = env.client_connections.write().await;
@@ -208,7 +208,7 @@ impl ClientConnection {
 
         // Get lock-free control-plane handles BEFORE wrapping in Mutex.
         // This allows cancel/soft-interrupt/background-tool requests while the agent is processing.
-        let mut session_control = SessionControlHandle::new(
+        let session_control = SessionControlHandle::new(
             client_session_id.clone(),
             new_agent.soft_interrupt_queue(),
             new_agent.background_tool_signal(),
@@ -232,7 +232,7 @@ impl ClientConnection {
         )
         .await;
 
-        let mut agent = Arc::new(Mutex::new(new_agent));
+        let agent = Arc::new(Mutex::new(new_agent));
         env.sessions
             .register_new(client_session_id.clone(), Arc::clone(&agent))
             .await?;
@@ -291,7 +291,7 @@ impl ClientConnection {
 
         // Set up client debug command channel
         // This client becomes the "active" debug client that receives client: commands
-        let (debug_cmd_tx, mut debug_cmd_rx) = mpsc::unbounded_channel::<(u64, String)>();
+        let (debug_cmd_tx, debug_cmd_rx) = mpsc::unbounded_channel::<(u64, String)>();
         let client_debug_id = id::new_id("client");
         {
             let mut debug_state = env.client_debug_state.write().await;
@@ -309,7 +309,7 @@ impl ClientConnection {
 
         // Subscribe to bus events so we can forward ModelsUpdated to this client
         // (e.g. when Copilot finishes async init after the initial History was sent)
-        let mut bus_rx = Bus::global().subscribe();
+        let bus_rx = Bus::global().subscribe();
 
         // Set up stdin request forwarding: tools send StdinInputRequest, we forward to TUI
         let (stdin_req_tx, mut stdin_req_rx) =
@@ -367,8 +367,8 @@ impl ClientConnection {
         // Do not drain global bus traffic until the client has completed its first
         // subscribe. Under heavy swarm file-activity load, ignored bus frames can
         // otherwise monopolize the select loop before the initial subscribe/read.
-        let mut client_subscribed = false;
-        let mut stdin_attachment: Option<crate::tool::interactive::Attachment> = None;
+        let client_subscribed = false;
+        let stdin_attachment: Option<crate::tool::interactive::Attachment> = None;
         // A waiting session produces no requests, so nothing else would ever trigger
         // an opportunistic compaction. Slow on purpose: the check reads persisted
         // await state and the background registry.
@@ -376,8 +376,8 @@ impl ClientConnection {
         idle_precompact_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         idle_precompact_tick.reset();
         // Session and payload of the last todo snapshot sent on this connection.
-        let mut last_pushed_todos: Option<(String, String)> = None;
-        let mut provisional_session = true;
+        let last_pushed_todos: Option<(String, String)> = None;
+        let provisional_session = true;
         Ok(Self {
             env,
             reader,

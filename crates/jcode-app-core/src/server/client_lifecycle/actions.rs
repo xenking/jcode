@@ -1,12 +1,13 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_reserved_message_streaming_mpsc;
-use super::{
+use super::super::{
     SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
+use super::process_reserved_message_streaming_mpsc;
+use super::*;
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
@@ -19,7 +20,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use super::SessionAgents;
+use super::super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -36,7 +37,7 @@ fn derive_subagent_description(prompt: &str) -> String {
 #[path = "input_shell_output.rs"]
 mod input_shell_output;
 use input_shell_output::{build_input_shell_command, combine_input_shell_output};
-pub(super) struct NotifySessionContext<'a> {
+pub(in crate::server) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
     pub soft_interrupt_queues: &'a SessionInterruptQueues,
     pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -47,17 +48,17 @@ pub(super) struct NotifySessionContext<'a> {
     pub client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
 }
 
-pub(super) async fn handle_notify_session(
+pub(in crate::server) async fn handle_notify_session(
     id: u64,
     session_id: String,
     message: String,
     ctx: NotifySessionContext<'_>,
 ) {
-    let ran_immediately = super::live_turn::run_live_system_turn_if_idle(
+    let ran_immediately = super::super::live_turn::run_live_system_turn_if_idle(
         &session_id,
         &message,
         ctx.sessions,
-        super::live_turn::LiveTurnSwarmContext::new(
+        super::super::live_turn::LiveTurnSwarmContext::new(
             ctx.swarm_members,
             ctx.swarms_by_id,
             ctx.event_history,
@@ -121,7 +122,7 @@ pub(super) async fn handle_notify_session(
 
 /// A user pressed something in an agent applet: store its state, publish, then
 /// resolve a waiting `applet` tool call or wake the agent like a notification.
-pub(super) async fn handle_applet_action(
+pub(in crate::server) async fn handle_applet_action(
     id: u64,
     session_id: String,
     instance: String,
@@ -158,7 +159,7 @@ pub(super) async fn handle_applet_action(
 }
 
 /// The user closed an agent applet. No agent wake.
-pub(super) fn handle_close_applet(
+pub(in crate::server) fn handle_close_applet(
     id: u64,
     session_id: String,
     instance: String,
@@ -179,7 +180,7 @@ pub(super) fn handle_close_applet(
     }
 }
 
-pub(super) fn handle_input_shell(
+fn handle_input_shell(
     id: u64,
     command: String,
     agent: &Arc<Mutex<Agent>>,
@@ -234,7 +235,7 @@ pub(super) fn handle_input_shell(
 }
 
 /// Routing for future workers is metadata, so it can be updated during a turn.
-pub(super) async fn set_session_agent_model(
+pub(in crate::server) async fn set_session_agent_model(
     agent: &Arc<Mutex<Agent>>,
     session_id: &str,
     target: &str,
@@ -254,7 +255,7 @@ pub(super) async fn set_session_agent_model(
 
 /// Save a worker-model default in the server's own configuration, so remote
 /// clients change the default that server-side workers actually use.
-pub(super) async fn set_global_agent_model(
+pub(in crate::server) async fn set_global_agent_model(
     agent: &Arc<Mutex<Agent>>,
     session_id: &str,
     target: &str,
@@ -271,7 +272,7 @@ pub(super) async fn set_global_agent_model(
     }
 }
 
-pub(super) async fn handle_set_subagent_model(
+async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,
     agent: &Arc<Mutex<Agent>>,
@@ -292,7 +293,7 @@ pub(super) async fn handle_set_subagent_model(
     }
 }
 
-pub(super) fn handle_run_subagent(
+fn handle_run_subagent(
     id: u64,
     prompt: String,
     subagent_type: String,
@@ -593,7 +594,7 @@ pub(super) async fn handle_set_feature(
 
 /// Bookmark or unbookmark the session. A save label is the name the user chose,
 /// so it doubles as the session title and is announced like a rename.
-pub(super) async fn handle_set_session_saved(
+async fn handle_set_session_saved(
     id: u64,
     saved: bool,
     label: Option<String>,
@@ -660,7 +661,7 @@ async fn broadcast_session_renamed(
     delivered
 }
 
-pub(super) async fn handle_rename_session(
+async fn handle_rename_session(
     id: u64,
     title: Option<String>,
     agent: &Arc<Mutex<Agent>>,
@@ -737,7 +738,7 @@ pub(super) async fn handle_rename_session(
     );
 }
 
-pub(super) async fn handle_trigger_memory_extraction(
+async fn handle_trigger_memory_extraction(
     id: u64,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -768,10 +769,10 @@ pub(super) async fn handle_trigger_memory_extraction(
 }
 
 #[path = "session_transfer_snapshot.rs"]
-pub(super) mod session_transfer_snapshot;
+mod session_transfer_snapshot;
 use session_transfer_snapshot::*;
 
-pub(super) async fn handle_split(
+async fn handle_split(
     id: u64,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
@@ -836,7 +837,7 @@ pub(super) async fn handle_split(
     });
 }
 
-pub(super) async fn handle_transfer(
+async fn handle_transfer(
     id: u64,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
@@ -950,7 +951,7 @@ pub(super) async fn handle_transfer(
 }
 
 #[cfg(test)]
-#[path = "client_actions_tests.rs"]
+#[path = "actions_tests.rs"]
 mod tests;
 
 /// Decide whether an idle live session still owes the model a continuation.
@@ -966,16 +967,16 @@ fn live_session_owes_continuation(agent: &Agent) -> bool {
         return false;
     }
 
-    if super::reload_recovery::peek_for_session(agent.session_id())
+    if super::super::reload_recovery::peek_for_session(agent.session_id())
         .ok()
         .flatten()
-        .map(|record| record.status == super::reload_recovery::ReloadRecoveryStatus::Pending)
+        .map(|record| record.status == super::super::reload_recovery::ReloadRecoveryStatus::Pending)
         .unwrap_or(false)
     {
         return true;
     }
 
-    if super::client_session::session_was_interrupted_by_reload(agent) {
+    if super::super::client_session::session_was_interrupted_by_reload(agent) {
         return true;
     }
 
@@ -1040,10 +1041,13 @@ pub(super) async fn handle_resume_all_sessions(
             continue;
         }
 
-        let reminder = match super::reload_recovery::pending_directive_for_session(&session_id) {
-            Ok(Some(directive)) => directive.continuation_message,
-            _ => crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message(),
-        };
+        let reminder =
+            match super::super::reload_recovery::pending_directive_for_session(&session_id) {
+                Ok(Some(directive)) => directive.continuation_message,
+                _ => {
+                    crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message()
+                }
+            };
         let display_name = agent_guard
             .session_short_name()
             .map(str::to_string)
@@ -1051,16 +1055,16 @@ pub(super) async fn handle_resume_all_sessions(
 
         // Manual resume submits intent, just like reload capture. It must not
         // create a competing client-owned continuation path.
-        if super::reload_recovery::peek_for_session(&session_id)
+        if super::super::reload_recovery::peek_for_session(&session_id)
             .ok()
             .flatten()
             .is_none()
         {
             let reload_id = format!("manual-resume-{}", uuid::Uuid::new_v4());
-            if let Err(error) = super::reload_recovery::persist_intent(
+            if let Err(error) = super::super::reload_recovery::persist_intent(
                 &reload_id,
                 &session_id,
-                super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
                 crate::tool::selfdev::ReloadRecoveryDirective {
                     continuation_message: reminder,
                     reconnect_notice: None,
@@ -1107,7 +1111,7 @@ pub(super) async fn handle_resume_all_sessions(
     });
 }
 
-pub(super) fn handle_compact(
+fn handle_compact(
     id: u64,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -1153,7 +1157,7 @@ pub(super) fn handle_compact(
     });
 }
 
-pub(super) async fn handle_stdin_response(
+async fn handle_stdin_response(
     id: u64,
     request_id: String,
     input: String,
@@ -1176,7 +1180,7 @@ pub(super) async fn handle_stdin_response(
     let _ = client_event_tx.send(event);
 }
 
-pub(super) struct AgentTaskContext<'a> {
+struct AgentTaskContext<'a> {
     pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
     pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -1185,7 +1189,7 @@ pub(super) struct AgentTaskContext<'a> {
     pub(super) swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
 }
 
-pub(super) async fn handle_agent_task(
+async fn handle_agent_task(
     id: u64,
     task: String,
     client_session_id: &str,
@@ -1204,7 +1208,7 @@ pub(super) async fn handle_agent_task(
             return;
         }
     };
-    let events = super::state::TurnEventChannel::new(
+    let events = super::super::state::TurnEventChannel::new(
         client_session_id.into(),
         Arc::clone(ctx.swarm_members),
         ctx.client_event_tx.clone(),
@@ -1272,4 +1276,560 @@ pub(super) async fn handle_agent_task(
     }
     drop(agent);
     events.finish().await;
+}
+
+impl ClientConnection {
+    pub(super) async fn action_requests(&mut self, request: Request) -> Result<Outcome> {
+        match request {
+            Request::Split { id } => {
+                handle_split(
+                    id,
+                    &self.client_session_id,
+                    &self.agent,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::SplitSideQuestion { id } => {
+                let event = session_transfer_snapshot::handle_split_side_question(
+                    id,
+                    &self.client_session_id,
+                    &self.agent,
+                );
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    event,
+                    "client_lifecycle: SplitSideQuestion",
+                );
+            }
+            Request::RoutingView { id } => {
+                let event = super::super::routing_view_request::reply(id).await;
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    event,
+                    "client_lifecycle: routing view",
+                );
+            }
+            request @ (Request::ListSideQuestions { .. }
+            | Request::GetSideQuestionHistory { .. }
+            | Request::PromoteSideQuestion { .. }) => {
+                let event = super::super::client_lightweight_control::side_question_control::handle_side_question_control(request).await;
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    event,
+                    "client_lifecycle: side question read",
+                );
+            }
+            Request::Transfer { id } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "transfer",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_transfer(
+                    id,
+                    &self.client_session_id,
+                    &self.agent,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::Compact { id } => {
+                handle_compact(id, &self.agent, &self.client_event_tx);
+            }
+            Request::TriggerMemoryExtraction { id } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "trigger_memory_extraction",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_trigger_memory_extraction(id, &self.agent, &self.client_event_tx).await;
+            }
+
+            // Agent-to-agent communication
+            Request::AgentRegister { id, .. } => {
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    ServerEvent::Done { id },
+                    "client_lifecycle: Done",
+                );
+            }
+            Request::StdinResponse {
+                id,
+                request_id,
+                input,
+            } => {
+                if crate::tool::interactive::is_human_approval(&request_id) {
+                    send_client_event_best_effort(
+                        &self.client_event_tx,
+                        ServerEvent::Error {
+                            id,
+                            message: "An approval requires an interactive structured response"
+                                .into(),
+                            retry_after_secs: None,
+                        },
+                        "client_lifecycle: owner approval",
+                    );
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_stdin_response(
+                    id,
+                    request_id,
+                    input,
+                    &self.stdin_responses,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::AskUserResponse {
+                id,
+                request_id,
+                response,
+            } => {
+                if crate::tool::interactive::is_owner_approval(&request_id)
+                    && !(self.local_jcode_peer
+                        && self.connection_client_name.as_deref() == Some("jcode-tui"))
+                {
+                    send_client_event_best_effort(
+                        &self.client_event_tx,
+                        ServerEvent::Error {
+                            id,
+                            message: "This client cannot answer owner approvals".into(),
+                            retry_after_secs: None,
+                        },
+                        "client_lifecycle: owner approval",
+                    );
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                let input = match serde_json::to_string(&response) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        if let Err(delivery_error) = self.client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Cannot encode ask response: {error}"),
+                            retry_after_secs: None,
+                        }) {
+                            crate::logging::debug(&format!(
+                                "Ask response error receiver closed: {delivery_error}"
+                            ));
+                        }
+                        return Ok(Outcome::SkipEpilogue);
+                    }
+                };
+                handle_stdin_response(
+                    id,
+                    request_id,
+                    input,
+                    &self.stdin_responses,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::AgentTask { id, task, .. } => {
+                handle_agent_task(
+                    id,
+                    task,
+                    &self.client_session_id,
+                    &self.agent,
+                    &AgentTaskContext {
+                        client_event_tx: &self.client_event_tx,
+                        swarm_members: &self.env.swarm_members,
+                        swarms_by_id: &self.env.swarms_by_id,
+                        event_history: &self.env.event_history,
+                        event_counter: &self.env.event_counter,
+                        swarm_event_tx: &self.env.swarm_event_tx,
+                    },
+                )
+                .await;
+            }
+            Request::AgentCapabilities { id } => {
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    ServerEvent::Done { id },
+                    "client_lifecycle: Done",
+                );
+            }
+            Request::AgentContext { id } => {
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    ServerEvent::Done { id },
+                    "client_lifecycle: Done",
+                );
+            }
+            Request::NotifySession {
+                id,
+                session_id,
+                message,
+            } => {
+                handle_notify_session(
+                    id,
+                    session_id,
+                    message,
+                    NotifySessionContext {
+                        sessions: &self.env.sessions,
+                        soft_interrupt_queues: &self.env.soft_interrupt_queues,
+                        swarm_members: &self.env.swarm_members,
+                        swarms_by_id: &self.env.swarms_by_id,
+                        event_history: &self.env.event_history,
+                        event_counter: &self.env.event_counter,
+                        swarm_event_tx: &self.env.swarm_event_tx,
+                        client_event_tx: &self.client_event_tx,
+                    },
+                )
+                .await;
+            }
+            Request::AppletAction {
+                id,
+                session_id,
+                instance,
+                action,
+                state,
+                source_key,
+            } => {
+                handle_applet_action(
+                    id,
+                    session_id,
+                    instance,
+                    action,
+                    state,
+                    source_key,
+                    NotifySessionContext {
+                        sessions: &self.env.sessions,
+                        soft_interrupt_queues: &self.env.soft_interrupt_queues,
+                        swarm_members: &self.env.swarm_members,
+                        swarms_by_id: &self.env.swarms_by_id,
+                        event_history: &self.env.event_history,
+                        event_counter: &self.env.event_counter,
+                        swarm_event_tx: &self.env.swarm_event_tx,
+                        client_event_tx: &self.client_event_tx,
+                    },
+                )
+                .await;
+            }
+            Request::CloseApplet {
+                id,
+                session_id,
+                instance,
+            } => {
+                handle_close_applet(id, session_id, instance, &self.client_event_tx);
+            }
+            Request::Transcript {
+                id,
+                text,
+                mode,
+                session_id,
+            } => {
+                match super::super::debug::inject_transcript(
+                    id,
+                    text,
+                    mode,
+                    session_id,
+                    &self.env.client_connections,
+                    &self.env.client_debug_state,
+                    &self.env.swarm_members,
+                )
+                .await
+                {
+                    Ok(event) => {
+                        if let Err(error) = self.client_event_tx.send(event) {
+                            crate::logging::debug(&format!(
+                                "Client disconnected before event delivery: {error}"
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        send_client_event_best_effort(
+                            &self.client_event_tx,
+                            ServerEvent::Error {
+                                id,
+                                message: error.to_string(),
+                                retry_after_secs: None,
+                            },
+                            "client_lifecycle: Error",
+                        );
+                    }
+                }
+            }
+            Request::VoiceActivity {
+                id,
+                session_id,
+                activity,
+            } => {
+                let event = super::super::debug::forward_voice_activity(
+                    id,
+                    &session_id,
+                    activity,
+                    &self.env.swarm_members,
+                )
+                .await;
+                if let Err(error) = self.client_event_tx.send(event) {
+                    crate::logging::debug(&format!(
+                        "client disconnected before voice activity reply: {error}"
+                    ));
+                }
+            }
+            Request::InputShell { id, command } => {
+                handle_input_shell(id, command, &self.agent, &self.client_event_tx);
+            }
+
+            // === Agent communication ===
+            request @ (Request::CommShare { .. }
+            | Request::CommRead { .. }
+            | Request::CommMessage { .. }
+            | Request::CommList { .. }
+            | Request::CommListSessions { .. }
+            | Request::CommFocusSession { .. }
+            | Request::CommListSwarms { .. }
+            | Request::CommSetSwarmLabel { .. }
+            | Request::CommListChannels { .. }
+            | Request::CommChannelMembers { .. }
+            | Request::CommProposePlan { .. }
+            | Request::CommApprovePlan { .. }
+            | Request::CommRejectPlan { .. }
+            | Request::CommSpawn { .. }
+            | Request::CommListModels { .. }
+            | Request::CommStop { .. }
+            | Request::CommWorkerControl { .. }
+            | Request::CommAnswerEscalatedAsk { .. }
+            | Request::CommAssignRole { .. }
+            | Request::CommSummary { .. }
+            | Request::CommStatus { .. }
+            | Request::CommReport { .. }
+            | Request::CommPlanStatus { .. }
+            | Request::CommReadContext { .. }
+            | Request::CommResyncPlan { .. }
+            | Request::CommAssignTask { .. }
+            | Request::CommAssignNext { .. }
+            | Request::CommTaskControl { .. }
+            | Request::CommSubscribeChannel { .. }
+            | Request::CommUnsubscribeChannel { .. }
+            | Request::CommAwaitMembers { .. }) => {
+                if comm_dispatch::dispatch_comm_request(
+                    request,
+                    &self.client_event_tx,
+                    &self.env.sessions,
+                    &self.env.global_session_id,
+                    &self.env.provider_template,
+                    &self.env.swarm_members,
+                    &self.env.swarms_by_id,
+                    &self.env.shared_context,
+                    &self.env.swarm_plans,
+                    &self.env.swarm_coordinators,
+                    &self.env.channel_subscriptions,
+                    &self.env.channel_subscriptions_by_session,
+                    &self.env.event_history,
+                    &self.env.event_counter,
+                    &self.env.swarm_event_tx,
+                    &self.env.mcp_pool,
+                    &self.env.soft_interrupt_queues,
+                    &self.env.swarm_mutation_runtime,
+                    &self.env.client_connections,
+                    &self.env.file_touch,
+                    &self.env.await_members_runtime,
+                )
+                .await
+                {
+                    return Ok(Outcome::Close);
+                }
+            }
+            Request::RoutingGateAnswer {
+                id,
+                gate_id,
+                choice,
+            } => {
+                super::super::routing_requests::handle_gate_answer(
+                    id,
+                    &self.client_session_id,
+                    gate_id,
+                    choice,
+                    &self.client_event_tx,
+                );
+            }
+            Request::RoutingIntent { id, action } => {
+                let current = self
+                    .agent
+                    .try_lock()
+                    .ok()
+                    .and_then(|guard| super::super::routing_turn::current_account(&guard));
+                super::super::routing_requests::handle_intent(
+                    id,
+                    action,
+                    &self.client_session_id,
+                    current,
+                    &self.client_event_tx,
+                );
+            }
+
+            // These are handled via channels, not direct requests from TUI
+            Request::ClientDebugCommand { id, .. } => {
+                handle_client_debug_command(id, &self.client_event_tx).await;
+            }
+            Request::ClientDebugResponse { id, output } => {
+                handle_client_debug_response(id, output, &self.env.client_debug_response_tx);
+            }
+            Request::ResumeAllSessions { id } => {
+                handle_resume_all_sessions(
+                    id,
+                    &self.env.sessions,
+                    &self.env.swarm_members,
+                    &self.env.swarms_by_id,
+                    &self.env.event_history,
+                    &self.env.event_counter,
+                    &self.env.swarm_event_tx,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::SetAgentModel {
+                id,
+                target,
+                model,
+                global,
+            } => {
+                let result = if global {
+                    set_global_agent_model(&self.agent, &self.client_session_id, &target, model)
+                        .await
+                } else {
+                    set_session_agent_model(&self.agent, &self.client_session_id, &target, model)
+                        .await
+                };
+                let event = match result {
+                    Ok(overrides) => ServerEvent::AgentModelsChanged {
+                        id,
+                        session_id: self.client_session_id.clone(),
+                        overrides,
+                    },
+                    Err(error) => ServerEvent::Error {
+                        id,
+                        message: error.to_string(),
+                        retry_after_secs: None,
+                    },
+                };
+                if let Err(error) = self.client_event_tx.send(event) {
+                    crate::logging::debug(&format!(
+                        "Client disconnected before event delivery: {error}"
+                    ));
+                }
+            }
+            Request::SetSubagentModel { id, model } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "set_subagent_model",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_set_subagent_model(id, model, &self.agent, &self.client_event_tx).await;
+            }
+            Request::RunSubagent {
+                id,
+                prompt,
+                subagent_type,
+                model,
+                session_id,
+            } => {
+                handle_run_subagent(
+                    id,
+                    prompt,
+                    subagent_type,
+                    model,
+                    session_id,
+                    &self.agent,
+                    &self.client_event_tx,
+                );
+            }
+            Request::SetSessionSaved { id, saved, label } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "set_session_saved",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_set_session_saved(
+                    id,
+                    saved,
+                    label,
+                    &self.agent,
+                    &self.client_session_id,
+                    &self.env.swarm_members,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::RenameSession { id, title } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "rename_session",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_rename_session(
+                    id,
+                    title,
+                    &self.agent,
+                    &self.client_session_id,
+                    &self.env.swarm_members,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+            Request::SetFeature {
+                id,
+                feature,
+                enabled,
+            } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "set_feature",
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.agent,
+                    &self.client_event_tx,
+                ) {
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                handle_set_feature(
+                    id,
+                    feature,
+                    enabled,
+                    &self.agent,
+                    &self.client_session_id,
+                    &self.friendly_name,
+                    &mut self.swarm_enabled,
+                    &self.env.swarm_members,
+                    &self.env.swarms_by_id,
+                    &self.env.swarm_coordinators,
+                    &self.env.channel_subscriptions,
+                    &self.env.channel_subscriptions_by_session,
+                    &self.env.swarm_plans,
+                    &self.client_event_tx,
+                )
+                .await;
+            }
+
+            other => unreachable!("request {other:?} is not a actions request"),
+        }
+        Ok(Outcome::Next)
+    }
 }

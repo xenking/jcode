@@ -50,7 +50,7 @@ impl ClientConnection {
                     if matches!(parsed, jcode_harness_api::RuntimeCommand::Continue | jcode_harness_api::RuntimeCommand::ResumeAll) {
                         if !args.is_empty() { anyhow::bail!("This command accepts no arguments"); }
                         let (tx, mut rx) = mpsc::unbounded_channel();
-                        super::super::client_actions::handle_resume_all_sessions(id, &self.env.sessions, &self.env.swarm_members, &self.env.swarms_by_id,
+                        super::actions::handle_resume_all_sessions(id, &self.env.sessions, &self.env.swarm_members, &self.env.swarms_by_id,
                             &self.env.event_history, &self.env.event_counter, &self.env.swarm_event_tx, &tx).await;
                         while let Ok(event) = rx.try_recv() {
                             if let ServerEvent::ResumeAllResult { resumed, skipped, message, resumed_sessions, .. } = event {
@@ -73,7 +73,7 @@ impl ClientConnection {
                                 return Ok((serde_json::Value::Null, String::new()));
                             }
                             let (tx, mut rx) = mpsc::unbounded_channel();
-                            handle_set_feature(id, crate::protocol::FeatureToggle::Swarm, enabled, &self.agent, &self.client_session_id, &self.friendly_name,
+                            super::actions::handle_set_feature(id, crate::protocol::FeatureToggle::Swarm, enabled, &self.agent, &self.client_session_id, &self.friendly_name,
                                 &mut self.swarm_enabled, &self.env.swarm_members, &self.env.swarms_by_id, &self.env.swarm_coordinators,
                                 &self.env.channel_subscriptions, &self.env.channel_subscriptions_by_session, &self.env.swarm_plans, &tx).await;
                             while let Ok(event) = rx.try_recv() {

@@ -1060,7 +1060,7 @@ async fn global_agent_model_request_updates_server_config_not_session() {
     let previous = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
     let agent = test_agent_with_working_dir("routing_global", "/tmp/coord").await;
-    let overrides = crate::server::client_actions::set_global_agent_model(
+    let overrides = crate::server::client_lifecycle::actions::set_global_agent_model(
         &agent,
         "routing_global",
         "swarm",
@@ -1076,12 +1076,17 @@ async fn global_agent_model_request_updates_server_config_not_session() {
         crate::config::Config::load().agents.swarm_model.as_deref(),
         Some("openai-api:gpt-5.5")
     );
-    crate::server::client_actions::set_global_agent_model(&agent, "routing_global", "swarm", None)
-        .await
-        .unwrap();
+    crate::server::client_lifecycle::actions::set_global_agent_model(
+        &agent,
+        "routing_global",
+        "swarm",
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(crate::config::Config::load().agents.swarm_model, None);
     assert!(
-        crate::server::client_actions::set_global_agent_model(
+        crate::server::client_lifecycle::actions::set_global_agent_model(
             &agent,
             "routing_global",
             "bogus",
@@ -1219,7 +1224,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let held = agent.lock().await;
     tokio::time::timeout(
         std::time::Duration::from_millis(250),
-        crate::server::client_actions::set_session_agent_model(
+        crate::server::client_lifecycle::actions::set_session_agent_model(
             &agent,
             "routing_busy",
             "swarm",
@@ -1308,7 +1313,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         "session routing overrides must follow the coordinator into its worker"
     );
     drop(child);
-    crate::server::client_actions::set_session_agent_model(
+    crate::server::client_lifecycle::actions::set_session_agent_model(
         &agent,
         "routing_busy",
         "swarm",
@@ -1322,9 +1327,14 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let selection = resolve_swarm_spawn_selection(None, configured, &coordinator);
     assert_eq!(selection.model.as_deref(), Some("claude-opus-4-6"));
     assert_eq!(selection.provider_key.as_deref(), Some("claude-api"));
-    crate::server::client_actions::set_session_agent_model(&agent, "routing_busy", "swarm", None)
-        .await
-        .unwrap();
+    crate::server::client_lifecycle::actions::set_session_agent_model(
+        &agent,
+        "routing_busy",
+        "swarm",
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         super::super::session_swarm_model("routing_busy", &sessions, Some("global-model".into()))
             .await

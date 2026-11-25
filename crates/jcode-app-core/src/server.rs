@@ -7,7 +7,6 @@ pub use await_members_state::set_dependency_delivery as set_await_dependency_del
 mod background_services;
 mod background_task_inspection;
 mod background_tasks;
-mod client_actions;
 mod client_comm;
 mod client_comm_channels;
 mod client_comm_context;

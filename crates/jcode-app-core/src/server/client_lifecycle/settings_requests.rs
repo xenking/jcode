@@ -5,19 +5,6 @@ use super::*;
 impl ClientConnection {
     pub(super) async fn settings_requests(&mut self, request: Request) -> Result<Outcome> {
         match request {
-            Request::ResumeAllSessions { id } => {
-                super::super::client_actions::handle_resume_all_sessions(
-                    id,
-                    &self.env.sessions,
-                    &self.env.swarm_members,
-                    &self.env.swarms_by_id,
-                    &self.env.event_history,
-                    &self.env.event_counter,
-                    &self.env.swarm_event_tx,
-                    &self.client_event_tx,
-                )
-                .await;
-            }
             Request::CycleModel { id, direction } => {
                 handle_cycle_model(id, direction, &self.agent, &self.client_event_tx).await;
             }
@@ -46,77 +33,6 @@ impl ClientConnection {
                     &self.client_event_tx,
                 )
                 .await;
-            }
-            Request::SetAgentModel {
-                id,
-                target,
-                model,
-                global,
-            } => {
-                let result = if global {
-                    super::super::client_actions::set_global_agent_model(
-                        &self.agent,
-                        &self.client_session_id,
-                        &target,
-                        model,
-                    )
-                    .await
-                } else {
-                    super::super::client_actions::set_session_agent_model(
-                        &self.agent,
-                        &self.client_session_id,
-                        &target,
-                        model,
-                    )
-                    .await
-                };
-                let event = match result {
-                    Ok(overrides) => ServerEvent::AgentModelsChanged {
-                        id,
-                        session_id: self.client_session_id.clone(),
-                        overrides,
-                    },
-                    Err(error) => ServerEvent::Error {
-                        id,
-                        message: error.to_string(),
-                        retry_after_secs: None,
-                    },
-                };
-                if let Err(error) = self.client_event_tx.send(event) {
-                    crate::logging::debug(&format!(
-                        "Client disconnected before event delivery: {error}"
-                    ));
-                }
-            }
-            Request::SetSubagentModel { id, model } => {
-                if reject_if_agent_busy_for_request(
-                    id,
-                    "set_subagent_model",
-                    &self.client_session_id,
-                    self.client_is_processing,
-                    &self.agent,
-                    &self.client_event_tx,
-                ) {
-                    return Ok(Outcome::SkipEpilogue);
-                }
-                handle_set_subagent_model(id, model, &self.agent, &self.client_event_tx).await;
-            }
-            Request::RunSubagent {
-                id,
-                prompt,
-                subagent_type,
-                model,
-                session_id,
-            } => {
-                handle_run_subagent(
-                    id,
-                    prompt,
-                    subagent_type,
-                    model,
-                    session_id,
-                    &self.agent,
-                    &self.client_event_tx,
-                );
             }
             Request::SetContextCap {
                 id,
@@ -275,28 +191,6 @@ impl ClientConnection {
                     "client_lifecycle: reply result",
                 );
             }
-            Request::SetSessionSaved { id, saved, label } => {
-                if reject_if_agent_busy_for_request(
-                    id,
-                    "set_session_saved",
-                    &self.client_session_id,
-                    self.client_is_processing,
-                    &self.agent,
-                    &self.client_event_tx,
-                ) {
-                    return Ok(Outcome::SkipEpilogue);
-                }
-                handle_set_session_saved(
-                    id,
-                    saved,
-                    label,
-                    &self.agent,
-                    &self.client_session_id,
-                    &self.env.swarm_members,
-                    &self.client_event_tx,
-                )
-                .await;
-            }
             Request::PersistSession { id } => {
                 // Wait for the lock instead of rejecting: this runs at an idle
                 // turn boundary and must not fail spuriously.
@@ -313,27 +207,6 @@ impl ClientConnection {
                     },
                     "client_lifecycle: reply result",
                 );
-            }
-            Request::RenameSession { id, title } => {
-                if reject_if_agent_busy_for_request(
-                    id,
-                    "rename_session",
-                    &self.client_session_id,
-                    self.client_is_processing,
-                    &self.agent,
-                    &self.client_event_tx,
-                ) {
-                    return Ok(Outcome::SkipEpilogue);
-                }
-                handle_rename_session(
-                    id,
-                    title,
-                    &self.agent,
-                    &self.client_session_id,
-                    &self.env.swarm_members,
-                    &self.client_event_tx,
-                )
-                .await;
             }
             Request::NotifyAuthChanged {
                 id,
@@ -370,39 +243,6 @@ impl ClientConnection {
             }
             Request::InvalidateAnthropicUsage { id, account_label } => {
                 handle_invalidate_anthropic_usage(id, account_label, &self.client_event_tx).await;
-            }
-            Request::SetFeature {
-                id,
-                feature,
-                enabled,
-            } => {
-                if reject_if_agent_busy_for_request(
-                    id,
-                    "set_feature",
-                    &self.client_session_id,
-                    self.client_is_processing,
-                    &self.agent,
-                    &self.client_event_tx,
-                ) {
-                    return Ok(Outcome::SkipEpilogue);
-                }
-                handle_set_feature(
-                    id,
-                    feature,
-                    enabled,
-                    &self.agent,
-                    &self.client_session_id,
-                    &self.friendly_name,
-                    &mut self.swarm_enabled,
-                    &self.env.swarm_members,
-                    &self.env.swarms_by_id,
-                    &self.env.swarm_coordinators,
-                    &self.env.channel_subscriptions,
-                    &self.env.channel_subscriptions_by_session,
-                    &self.env.swarm_plans,
-                    &self.client_event_tx,
-                )
-                .await;
             }
             other => unreachable!("request {other:?} is not a settings request"),
         }
