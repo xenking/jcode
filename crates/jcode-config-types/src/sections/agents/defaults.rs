@@ -42,30 +42,30 @@ impl Default for AgentsConfig {
     }
 }
 
-fn push_unique(list: &mut Vec<String>, route: String) {
-    if !list.contains(&route) {
-        list.push(route);
-    }
-}
-
-/// Whether the pool entry `route` (`provider:model` or a bare model) covers a
-/// worker on `provider_key`/`model`. A provider key matches its prefix or a
-/// `prefix-account` variant of it.
-fn pool_route_matches(route: &str, provider_key: &str, model: &str) -> bool {
-    match route.trim().split_once(':') {
-        Some((prefix, pool_model)) => {
-            pool_model == model
-                && (provider_key.is_empty()
-                    || provider_key == prefix
-                    || provider_key
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with('-')))
-        }
-        None => route.trim() == model,
-    }
-}
-
 impl AgentsConfig {
+    fn push_unique(list: &mut Vec<String>, route: String) {
+        if !list.contains(&route) {
+            list.push(route);
+        }
+    }
+
+    /// Whether the pool entry `route` (`provider:model` or a bare model) covers a
+    /// worker on `provider_key`/`model`. A provider key matches its prefix or a
+    /// `prefix-account` variant of it.
+    fn pool_route_matches(route: &str, provider_key: &str, model: &str) -> bool {
+        match route.trim().split_once(':') {
+            Some((prefix, pool_model)) => {
+                pool_model == model
+                    && (provider_key.is_empty()
+                        || provider_key == prefix
+                        || provider_key
+                            .strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('-')))
+            }
+            None => route.trim() == model,
+        }
+    }
+
     /// Fold `swarm_pool` into the worker allowlists, so every existing check
     /// (spawn validation, tool schema, failover, per-turn guard) enforces it.
     pub fn apply_swarm_pool(&mut self) {
@@ -74,8 +74,8 @@ impl AgentsConfig {
         }
         for route in self.swarm_pool.keys() {
             let route = route.trim().to_string();
-            push_unique(&mut self.spawn_allowed_models, route.clone());
-            push_unique(&mut self.swarm_model_allowlist, route);
+            Self::push_unique(&mut self.spawn_allowed_models, route.clone());
+            Self::push_unique(&mut self.swarm_model_allowlist, route);
         }
         self.swarm_model_selection = true;
     }
@@ -90,7 +90,7 @@ impl AgentsConfig {
         let provider_key = provider_key.trim();
         self.swarm_pool
             .iter()
-            .find(|(route, _)| pool_route_matches(route, provider_key, model))
+            .find(|(route, _)| Self::pool_route_matches(route, provider_key, model))
             .map(|(_, efforts)| efforts.as_slice())
             .filter(|efforts| !efforts.is_empty())
     }
