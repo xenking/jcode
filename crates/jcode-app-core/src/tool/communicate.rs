@@ -9,7 +9,6 @@ use crate::comm_format::{
     format_comm_status_snapshot, format_comm_tool_summary, latest_assistant_comm_report,
     resolve_optional_comm_target_session,
 };
-use crate::plan::PlanItem;
 use crate::protocol::{
     AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, CommToolCallSnapshot,
     ContextEntry, HistoryMessage, MAX_COMM_SUMMARY_TOOL_CALLS, PlanGraphStatus, Request,
@@ -17,8 +16,7 @@ use crate::protocol::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_swarm_core::{derive_swarm_task_label, validate_swarm_tldr};
-use serde::Deserialize;
+use jcode_swarm_core::derive_swarm_task_label;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -26,6 +24,9 @@ const REQUEST_ID: u64 = 1;
 
 mod transport;
 use transport::{send_request, send_request_with_timeout};
+
+mod command;
+use command::{AssignTask, Cleanup, Command, CommunicateInput, WorkerSpawn};
 
 fn check_error(response: &ServerEvent) -> Option<&str> {
     if let ServerEvent::Error { message, .. } = response {
@@ -213,14 +214,13 @@ fn swarm_member_is_drivable_worker(member: &AgentInfo, coordinator_session_id: &
         || member.report_back_to_session_id.as_deref() == Some(coordinator_session_id)
 }
 
-async fn cleanup_swarm_workers(ctx: &ToolContext, params: &CommunicateInput) -> Result<String> {
+async fn cleanup_swarm_workers(ctx: &ToolContext, cleanup: Cleanup) -> Result<String> {
     let members = fetch_swarm_members(&ctx.session_id).await?;
-    let target_status = params
-        .target_status
-        .clone()
-        .unwrap_or_else(default_cleanup_target_statuses);
-    let session_ids = params.session_ids.clone().unwrap_or_default();
-    let force = params.force.unwrap_or(false);
+    let Cleanup {
+        target_status,
+        session_ids,
+        force,
+    } = cleanup;
     let candidates = cleanup_candidate_session_ids(
         &ctx.session_id,
         &members,
@@ -295,22 +295,22 @@ async fn stop_swarm_sessions(
     WorkerCleanupOutcome { stopped, failed }
 }
 
-async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) -> Result<String> {
+async fn spawn_assignment_session(ctx: &ToolContext, worker: &WorkerSpawn) -> Result<String> {
     let spawn_request = Request::CommSpawn {
         id: REQUEST_ID,
         session_id: ctx.session_id.clone(),
-        working_dir: params.working_dir.clone(),
+        working_dir: worker.working_dir.clone(),
         initial_message: None,
         request_nonce: Some(ctx.tool_call_id.clone()),
-        spawn_mode: params.spawn_mode.clone(),
-        model: params.model.clone(),
+        spawn_mode: worker.spawn_mode.clone(),
+        model: worker.model.clone(),
         // Worker effort is not agent-controlled: the server applies
         // `agents.swarm_effort` (default "low").
         effort: None,
         speed: None,
         label: None,
         lane_id: None,
-        profile: params.profile.clone(),
+        profile: worker.profile.clone(),
     };
 
     match send_request(spawn_request).await {
@@ -332,7 +332,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
 
 async fn assign_task_to_session(
     ctx: &ToolContext,
-    params: &CommunicateInput,
+    assignment: &AssignTask,
     target_session: String,
     spawned_suffix: &str,
 ) -> Result<ToolOutput> {
@@ -340,8 +340,8 @@ async fn assign_task_to_session(
         id: REQUEST_ID,
         session_id: ctx.session_id.clone(),
         target_session: Some(target_session.clone()),
-        task_id: params.task_id.clone(),
-        message: params.message.clone(),
+        task_id: assignment.task_id.clone(),
+        message: assignment.message.clone(),
     };
 
     match send_request(retry_request).await {
@@ -672,134 +672,6 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "answer",
 ];
 
-#[derive(Clone, Deserialize)]
-struct CommunicateInput {
-    action: String,
-    #[serde(default)]
-    key: Option<String>,
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    to_session: Option<String>,
-    /// Cross-swarm DM target: swarm label or id (see list_swarms).
-    #[serde(default)]
-    to_swarm: Option<String>,
-    #[serde(default)]
-    channel: Option<String>,
-    #[serde(default)]
-    proposer_session: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    target_session: Option<String>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    working_dir: Option<String>,
-    #[serde(default)]
-    initial_message: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    spawn_if_needed: Option<bool>,
-    #[serde(default)]
-    prefer_spawn: Option<bool>,
-    #[serde(default)]
-    plan_items: Option<Vec<PlanItem>>,
-    #[serde(default)]
-    target_status: Option<Vec<String>>,
-    #[serde(default)]
-    session_ids: Option<Vec<String>>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    timeout_minutes: Option<u64>,
-    #[serde(default)]
-    wake: Option<bool>,
-    #[serde(default)]
-    background: Option<bool>,
-    #[serde(default)]
-    notify: Option<bool>,
-    #[serde(default)]
-    delivery: Option<CommDeliveryMode>,
-    #[serde(default)]
-    force: Option<bool>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    validation: Option<String>,
-    #[serde(default)]
-    follow_up: Option<String>,
-    #[serde(default)]
-    spawn_mode: Option<String>,
-    #[serde(default)]
-    speed: Option<jcode_message_types::SpeedMode>,
-    /// Spawn: agent profile for the worker (see `agents.profiles`).
-    #[serde(default)]
-    profile: Option<String>,
-    /// One-line summary shown collapsed in the recipient's UI for long
-    /// message/report bodies. Required when the body exceeds the collapse
-    /// threshold.
-    #[serde(default)]
-    tldr: Option<String>,
-    /// Optional model override, authorized by the user's opt-in and exact allowlist.
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    effort: Option<String>,
-    /// Short human-readable label for a spawned agent shown in swarm UI.
-    /// Required and nonblank for the explicit `spawn` action.
-    #[serde(default)]
-    label: Option<String>,
-    /// Phase (todo `stage`) a spawned worker's lane joins. Defaults to the
-    /// active phase.
-    #[serde(default, alias = "stage")]
-    phase: Option<u32>,
-    /// Escalated `ask` answer payload, in `AskResponse` shape: one object per
-    /// question. Used by `action = "answer"`.
-    #[serde(default)]
-    answers: Option<Vec<crate::protocol::AskAnswer>>,
-    /// Escalation id from the `ask_escalated` event or the coordinator
-    /// notification. Optional when the worker has one pending escalated ask.
-    #[serde(default)]
-    request_id: Option<String>,
-}
-
-impl CommunicateInput {
-    fn spawn_initial_message(&self) -> Option<String> {
-        self.initial_message
-            .as_ref()
-            .filter(|message| !message.trim().is_empty())
-            .cloned()
-            .or_else(|| {
-                self.prompt
-                    .as_ref()
-                    .filter(|prompt| !prompt.trim().is_empty())
-                    .cloned()
-            })
-    }
-
-    fn required_spawn_label(&self) -> anyhow::Result<String> {
-        let label = self
-            .label
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("'label' is required for spawn action"))?
-            .trim();
-        if label.is_empty() {
-            return Err(anyhow::anyhow!(
-                "'label' must not be blank for spawn action"
-            ));
-        }
-        Ok(label.to_string())
-    }
-}
-
 /// Map common action synonyms/typos to the canonical swarm action name. Models
 /// frequently invent near-miss verbs (e.g. `inbox` for reading messages, `send`
 /// for `message`), which previously produced an "Unknown action" error. Unknown
@@ -1011,79 +883,51 @@ impl Tool for CommunicateTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let mut params: CommunicateInput = serde_json::from_value(input)?;
+        let params: CommunicateInput = serde_json::from_value(input)?;
         crate::config::config()
             .agents
-            .validate_swarm_model_request(params.model.as_deref())
+            .validate_swarm_model_request(params.requested_model())
             .map_err(anyhow::Error::msg)?;
         // Hard worker allowlist: any agent-chosen worker model must be on
         // `agents.spawn_allowed_models`. The error names the allowed set.
         crate::config::config()
             .agents
-            .validate_spawn_allowed_model(params.model.as_deref())
+            .validate_spawn_allowed_model(params.requested_model())
             .map_err(anyhow::Error::msg)?;
 
-        // `to_session` and `target_session` both name a single session id. Historically
-        // different actions required different field names (e.g. `dm` wanted `to_session`
-        // while `assign_role`/`summary`/`status`/`start`/`resume` wanted `target_session`),
-        // which models frequently confuse, producing repeated "'to_session' is required" /
-        // "'target_session' is required" errors. Treat the two fields as interchangeable
-        // aliases so either name works for any action that targets a session.
-        match (params.to_session.is_some(), params.target_session.is_some()) {
-            (true, false) => params.target_session = params.to_session.clone(),
-            (false, true) => params.to_session = params.target_session.clone(),
-            _ => {}
-        }
-
-        // Normalize common action synonyms that models invent (e.g. `inbox`, `send`,
-        // `msg`) so a near-miss verb maps to the real action instead of erroring out.
-        params.action = canonical_swarm_action(&params.action).to_string();
-
-        match params.action.as_str() {
-            "answer" => {
-                let worker = params
-                    .to_session
-                    .clone()
-                    .or_else(|| params.target_session.clone())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "'to_session' is required for answer action: the worker whose escalated ask you are answering"
-                        )
-                    })?;
+        match params.into_command(&ctx.session_id)? {
+            Command::Answer {
+                worker,
+                request_id,
+                answers,
+            } => {
                 let request = Request::CommAnswerEscalatedAsk {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
                     worker_session_id: worker.clone(),
-                    request_id: params.request_id.clone(),
-                    answers: params.answers.clone(),
+                    request_id,
+                    answers,
                 };
                 let response = send_request(request).await?;
                 ensure_success(&response)?;
-                return Ok(ToolOutput::new(format!(
+                Ok(ToolOutput::new(format!(
                     "Escalated ask answered. Worker {worker} resumes with your answer."
                 ))
-                .with_title("Ask answered"));
+                .with_title("Ask answered"))
             }
-            "share" | "share_append" => {
-                let key = params
-                    .key
-                    .ok_or_else(|| anyhow::anyhow!("'key' is required for share action"))?;
-                let value = params
-                    .value
-                    .ok_or_else(|| anyhow::anyhow!("'value' is required for share action"))?;
-
+            Command::Share { key, value, append } => {
                 let request = Request::CommShare {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
                     key: key.clone(),
                     value: value.clone(),
-                    append: params.action == "share_append",
+                    append,
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
-                        let verb = if params.action == "share_append" {
+                        let verb = if append {
                             "Appended shared context"
                         } else {
                             "Shared with other agents"
@@ -1094,11 +938,11 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "read" => {
+            Command::Read { key } => {
                 let request = Request::CommRead {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    key: params.key.clone(),
+                    key,
                 };
 
                 match send_request(request).await {
@@ -1113,26 +957,23 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "message" => {
-                let message = params
-                    .message
-                    .ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
-                let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this message")
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                let to_session = params.to_session.clone();
-                let channel = params.channel.clone();
-                let to_swarm = non_blank(params.to_swarm.clone());
-
+            Command::Message {
+                message,
+                to_session,
+                channel,
+                to_swarm,
+                delivery,
+            } => {
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
                     from_session: ctx.session_id.clone(),
                     message: message.clone(),
                     to_session: to_session.clone(),
                     channel: channel.clone(),
-                    wake: params.wake,
-                    delivery: params.delivery,
-                    tldr,
-                    to_swarm: to_swarm.clone(),
+                    wake: delivery.wake,
+                    delivery: delivery.mode,
+                    tldr: delivery.tldr,
+                    to_swarm,
                     require_target: true,
                 };
 
@@ -1171,28 +1012,16 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "broadcast" => {
-                // `broadcast` targets the sender's spawned subtree (the swarm
-                // coordinator reaches the whole swarm). Any `to_session`/
-                // `channel` is intentionally ignored so the action stays an
-                // unambiguous group send; use `message`/`dm`/`channel` to target.
-                // Prefer DMs; group sends are for rare
-                // coordination moments, not routine status updates.
-                let message = params
-                    .message
-                    .ok_or_else(|| anyhow::anyhow!("'message' is required for broadcast action"))?;
-                let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this broadcast")
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
+            Command::Broadcast { message, delivery } => {
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
                     from_session: ctx.session_id.clone(),
                     message: message.clone(),
                     to_session: None,
                     channel: None,
-                    wake: params.wake,
-                    delivery: params.delivery,
-                    tldr,
+                    wake: delivery.wake,
+                    delivery: delivery.mode,
+                    tldr: delivery.tldr,
                     to_swarm: None,
                     require_target: false,
                 };
@@ -1212,72 +1041,20 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "dm" => {
-                let message = params
-                    .message
-                    .ok_or_else(|| anyhow::anyhow!("'message' is required for dm action"))?;
-                let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this DM")
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                let to_swarm = non_blank(params.to_swarm.clone());
-                if to_swarm.is_none() && params.to_session.is_none() {
-                    return Err(anyhow::anyhow!(
-                        "'to_session' (or 'target_session') is required for dm action, or pass 'to_swarm' to DM another swarm's coordinator"
-                    ));
-                }
-                let to_session = params.to_session.clone();
-
-                let request = Request::CommMessage {
-                    id: REQUEST_ID,
-                    from_session: ctx.session_id.clone(),
-                    message: message.clone(),
-                    to_session: to_session.clone(),
-                    channel: None,
-                    delivery: params.delivery,
-                    wake: params.wake,
-                    tldr,
-                    to_swarm: to_swarm.clone(),
-                    require_target: false,
-                };
-
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        if let Some(output) = external_dm_output(&response, &message) {
-                            return Ok(output);
-                        }
-                        if let Some(output) = queued_cold_output(&response) {
-                            return Ok(output);
-                        }
-                        let to_session = to_session.or(to_swarm).unwrap_or_default();
-                        Ok(ToolOutput::new(format!(
-                            "Direct message sent to {}: {}",
-                            to_session, message
-                        )))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to send DM: {}", e)),
-                }
-            }
-
-            "channel" => {
-                let message = params
-                    .message
-                    .ok_or_else(|| anyhow::anyhow!("'message' is required for channel action"))?;
-                let tldr =
-                    validate_swarm_tldr(params.tldr.as_deref(), &message, "this channel message")
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                let channel = params
-                    .channel
-                    .ok_or_else(|| anyhow::anyhow!("'channel' is required for channel action"))?;
-
+            Command::ChannelMessage {
+                message,
+                channel,
+                delivery,
+            } => {
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
                     from_session: ctx.session_id.clone(),
                     message: message.clone(),
                     to_session: None,
                     channel: Some(channel.clone()),
-                    delivery: params.delivery,
-                    wake: params.wake,
-                    tldr,
+                    delivery: delivery.mode,
+                    wake: delivery.wake,
+                    tldr: delivery.tldr,
                     to_swarm: None,
                     require_target: false,
                 };
@@ -1297,7 +1074,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "list" => {
+            Command::List => {
                 let request = Request::CommList {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1315,7 +1092,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "sessions" => {
+            Command::Sessions => {
                 let request = Request::CommListSessions {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1332,16 +1109,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "focus" => {
-                let target = params
-                    .to_session
-                    .clone()
-                    .or_else(|| params.target_session.clone())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "'to_session' (or 'target_session') is required for focus action"
-                        )
-                    })?;
+            Command::Focus { target } => {
                 let request = Request::CommFocusSession {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1358,7 +1126,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "list_swarms" => {
+            Command::ListSwarms => {
                 let request = Request::CommListSwarms {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1375,16 +1143,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "set_swarm_label" => {
-                let label = params
-                    .label
-                    .clone()
-                    .or_else(|| params.value.clone())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "'label' is required for set_swarm_label (empty string clears it)"
-                        )
-                    })?;
+            Command::SetSwarmLabel { label } => {
                 let request = Request::CommSetSwarmLabel {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1413,7 +1172,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "list_channels" => {
+            Command::ListChannels => {
                 let request = Request::CommListChannels {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1431,10 +1190,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "channel_members" => {
-                let channel = params.channel.ok_or_else(|| {
-                    anyhow::anyhow!("'channel' is required for channel_members action")
-                })?;
+            Command::ChannelMembers { channel } => {
                 let request = Request::CommChannelMembers {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1463,15 +1219,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "propose_plan" => {
-                let items = params.plan_items.ok_or_else(|| {
-                    anyhow::anyhow!("'plan_items' is required for propose_plan action")
-                })?;
-                if items.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "'plan_items' must include at least one item"
-                    ));
-                }
+            Command::ProposePlan { items } => {
                 let item_count = items.len() as u64;
 
                 let request = Request::CommProposePlan {
@@ -1492,11 +1240,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "approve_plan" => {
-                let proposer = params.proposer_session.ok_or_else(|| {
-                    anyhow::anyhow!("'proposer_session' is required for approve_plan action")
-                })?;
-
+            Command::ApprovePlan { proposer } => {
                 let request = Request::CommApprovePlan {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1515,12 +1259,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "reject_plan" => {
-                let proposer = params.proposer_session.ok_or_else(|| {
-                    anyhow::anyhow!("'proposer_session' is required for reject_plan action")
-                })?;
-                let reason = params.reason.clone();
-
+            Command::RejectPlan { proposer, reason } => {
                 let request = Request::CommRejectPlan {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1544,23 +1283,22 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "spawn" => {
-                let label = params.required_spawn_label()?;
+            Command::Spawn(spawn) => {
                 // Every spawned worker owns one lane in the coordinator's todo
                 // list: the lane named `label` in `phase` (default: the active
                 // phase). When it does not exist it is created with one todo
                 // named after the label, with the prompt as its details. The
                 // worker's own todo list is that lane and syncs only it.
-                let prompt = params.spawn_initial_message();
+                let label = spawn.label;
                 let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
                     let title = derive_swarm_task_label(&label).unwrap_or_else(|| label.clone());
                     let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
                         &todos,
                         &label,
-                        params.phase,
+                        spawn.phase,
                         &title,
-                        prompt.as_deref(),
+                        spawn.prompt.as_deref(),
                         &{
                             let mut n = todos.len() + 1;
                             while todos.iter().any(|t| t.id == format!("lane-{n}")) {
@@ -1579,18 +1317,18 @@ impl Tool for CommunicateTool {
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    working_dir: params.working_dir.clone(),
-                    initial_message: params.spawn_initial_message(),
+                    working_dir: spawn.working_dir,
+                    initial_message: spawn.prompt,
                     request_nonce: Some(ctx.tool_call_id.clone()),
-                    spawn_mode: params.spawn_mode.clone(),
-                    model: params.model.clone(),
+                    spawn_mode: spawn.spawn_mode,
+                    model: spawn.model,
                     // Worker effort is not agent-controlled: the server applies
                     // `agents.swarm_effort` (default "low").
                     effort: None,
-                    speed: params.speed,
+                    speed: spawn.speed,
                     label: Some(label),
                     lane_id: Some(lane_id.clone()),
-                    profile: params.profile.clone(),
+                    profile: spawn.profile,
                 };
 
                 match send_request(request).await {
@@ -1620,7 +1358,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "list_models" => {
+            Command::ListModels => {
                 let request = Request::CommListModels {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1644,28 +1382,10 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            action @ ("set_model" | "compact") => {
-                use crate::protocol::SwarmWorkerControl;
-                let target_session = params
-                    .to_session
-                    .filter(|target| !target.trim().is_empty())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("'to_session' is required for {action} action")
-                    })?;
-                let control = if action == "set_model" {
-                    let model = params
-                        .model
-                        .filter(|model| !model.trim().is_empty())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("'model' is required for set_model action")
-                        })?;
-                    SwarmWorkerControl::SetModel {
-                        model,
-                        effort: params.effort,
-                    }
-                } else {
-                    SwarmWorkerControl::Compact
-                };
+            Command::WorkerControl {
+                target_session,
+                control,
+            } => {
                 match send_request(Request::CommWorkerControl {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1684,25 +1404,20 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "stop" => {
-                let Some(target) = params.target_session else {
-                    let targets = params.session_ids.unwrap_or_default();
-                    if targets.is_empty() {
-                        anyhow::bail!("stop requires to_session or a nonempty session_ids list");
-                    }
-                    let outcome =
-                        stop_swarm_sessions(&ctx, targets, params.force.unwrap_or(false)).await;
-                    if outcome.stopped.is_empty() {
-                        return Err(anyhow::Error::msg(outcome.describe()));
-                    }
-                    return Ok(ToolOutput::new(outcome.describe()));
-                };
+            Command::StopMany { targets, force } => {
+                let outcome = stop_swarm_sessions(&ctx, targets, force).await;
+                if outcome.stopped.is_empty() {
+                    return Err(anyhow::Error::msg(outcome.describe()));
+                }
+                Ok(ToolOutput::new(outcome.describe()))
+            }
 
+            Command::StopOne { target, force } => {
                 let request = Request::CommStop {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
                     target_session: target.clone(),
-                    force: params.force,
+                    force,
                 };
 
                 match send_request(request).await {
@@ -1714,25 +1429,11 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "cleanup" => cleanup_swarm_workers(&ctx, &params)
+            Command::Cleanup(cleanup) => cleanup_swarm_workers(&ctx, cleanup)
                 .await
                 .map(ToolOutput::new),
 
-            "assign_role" => {
-                let target_raw = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for assign_role action")
-                })?;
-                let role = params
-                    .role
-                    .ok_or_else(|| anyhow::anyhow!("'role' is required for assign_role action"))?;
-
-                // Resolve "current" to the caller's own session ID
-                let target = if target_raw == "current" {
-                    ctx.session_id.clone()
-                } else {
-                    target_raw
-                };
-
+            Command::AssignRole { target, role } => {
                 let request = Request::CommAssignRole {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1752,12 +1453,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "status" => {
-                let targets = status_target_sessions(
-                    params.target_session,
-                    params.session_ids.as_deref(),
-                    &ctx.session_id,
-                );
+            Command::Status { targets } => {
                 let mut sections = Vec::new();
                 for target in targets {
                     let request = Request::CommStatus {
@@ -1781,22 +1477,15 @@ impl Tool for CommunicateTool {
                 Ok(ToolOutput::new(sections.join("\n\n---\n\n")))
             }
 
-            // Compatibility for old transcripts and scripts only. Worker output is
-            // collected automatically, so this action is not advertised to models.
-            "report" => {
-                let message = params
-                    .message
-                    .ok_or_else(|| anyhow::anyhow!("'message' is required for report action"))?;
-                let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this report")
-                    .map_err(|e| anyhow::anyhow!(e))?;
+            Command::Report(report) => {
                 let request = Request::CommReport {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    status: params.status,
-                    message,
-                    validation: params.validation,
-                    follow_up: params.follow_up,
-                    tldr,
+                    status: report.status,
+                    message: report.message,
+                    validation: report.validation,
+                    follow_up: report.follow_up,
+                    tldr: report.tldr,
                 };
                 match send_request(request).await {
                     Ok(ServerEvent::CommReportResponse {
@@ -1812,28 +1501,17 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "plan_status" => {
+            Command::PlanStatus => {
                 let summary = fetch_plan_status(&ctx.session_id).await?;
                 Ok(format_plan_status(&summary))
             }
 
-            "summary" => {
-                if params.mode.is_some()
-                    || params.session_ids.is_some()
-                    || params.to_swarm.is_some()
-                {
-                    anyhow::bail!(
-                        "`summary` does not aggregate. Use `list` for swarm members or `plan_status` for plan progress. For one agent, pass `to_session` with its exact ID from `list`, without `mode`, `session_ids`, or `to_swarm`."
-                    );
-                }
-                let target = params.to_session.as_deref().map(str::trim).filter(|id| !id.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!(r#"`summary` requires one `to_session` ID from `list`, e.g. {{"action":"summary","to_session":"session_123"}}. Use `list` or `plan_status` for the whole swarm."#))?;
-
+            Command::Summary { target, limit } => {
                 let request = Request::CommSummary {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    target_session: target.to_owned(),
-                    limit: params.limit,
+                    target_session: target.clone(),
+                    limit,
                 };
 
                 match send_request(request).await {
@@ -1841,7 +1519,7 @@ impl Tool for CommunicateTool {
                         tool_calls,
                         snapshot,
                         ..
-                    }) => Ok(format_tool_summary(target, &tool_calls, snapshot)),
+                    }) => Ok(format_tool_summary(&target, &tool_calls, snapshot)),
                     Ok(response) => {
                         ensure_success(&response)?;
                         Ok(ToolOutput::new("No tool call data returned."))
@@ -1850,11 +1528,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "read_context" => {
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for read_context action")
-                })?;
-
+            Command::ReadContext { target } => {
                 let request = Request::CommReadContext {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1873,7 +1547,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "resync_plan" => {
+            Command::ResyncPlan => {
                 let request = Request::CommResyncPlan {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -1888,19 +1562,17 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "assign_task" => {
-                let target = params
+            Command::AssignTask(assignment) => {
+                let target = assignment
                     .target_session
                     .clone()
                     .unwrap_or_else(|| "next available agent".to_string());
-                let spawn_if_needed = params.spawn_if_needed.unwrap_or(false);
-                let prefer_spawn = params.prefer_spawn.unwrap_or(false);
 
-                if prefer_spawn && params.target_session.is_none() {
-                    let spawned_session = spawn_assignment_session(&ctx, &params).await?;
+                if assignment.prefer_spawn && assignment.target_session.is_none() {
+                    let spawned_session = spawn_assignment_session(&ctx, &assignment.spawn).await?;
                     return assign_task_to_session(
                         &ctx,
-                        &params,
+                        &assignment,
                         spawned_session,
                         " (spawned by planner preference)",
                     )
@@ -1910,9 +1582,9 @@ impl Tool for CommunicateTool {
                 let request = Request::CommAssignTask {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    target_session: params.target_session.clone(),
-                    task_id: params.task_id.clone(),
-                    message: params.message.clone(),
+                    target_session: assignment.target_session.clone(),
+                    task_id: assignment.task_id.clone(),
+                    message: assignment.message.clone(),
                 };
 
                 match send_request(request).await {
@@ -1929,14 +1601,15 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new(output))
                     }
                     Ok(response)
-                        if spawn_if_needed
-                            && params.target_session.is_none()
+                        if assignment.spawn_if_needed
+                            && assignment.target_session.is_none()
                             && auto_assignment_needs_spawn(&response) =>
                     {
-                        let spawned_session = spawn_assignment_session(&ctx, &params).await?;
+                        let spawned_session =
+                            spawn_assignment_session(&ctx, &assignment.spawn).await?;
                         assign_task_to_session(
                             &ctx,
-                            &params,
+                            &assignment,
                             spawned_session,
                             " (spawned automatically)",
                         )
@@ -1944,7 +1617,7 @@ impl Tool for CommunicateTool {
                     }
                     Ok(response) => {
                         ensure_success(&response)?;
-                        let msg = params.task_id.as_deref().map_or_else(
+                        let msg = assignment.task_id.as_deref().map_or_else(
                             || format!("Assigned next runnable task to {}", target),
                             |task_id| format!("Task '{}' assigned to {}", task_id, target),
                         );
@@ -1954,8 +1627,8 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "assign_next" => {
-                let target = params
+            Command::AssignNext(next) => {
+                let target = next
                     .target_session
                     .clone()
                     .unwrap_or_else(|| "next available agent".to_string());
@@ -1963,12 +1636,12 @@ impl Tool for CommunicateTool {
                 let request = Request::CommAssignNext {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    target_session: params.target_session.clone(),
-                    working_dir: params.working_dir.clone(),
-                    prefer_spawn: params.prefer_spawn,
-                    spawn_if_needed: params.spawn_if_needed,
-                    message: params.message.clone(),
-                    model: params.model.clone(),
+                    target_session: next.target_session,
+                    working_dir: next.working_dir,
+                    prefer_spawn: next.prefer_spawn,
+                    spawn_if_needed: next.spawn_if_needed,
+                    message: next.message,
+                    model: next.model,
                     // Worker effort is not agent-controlled: the server applies
                     // `agents.swarm_effort` (default "low").
                     effort: None,
@@ -1994,47 +1667,14 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "launch" | "run_plan" | "fill_slots" => Err(anyhow::anyhow!(
-                "'{}' was removed. Mark a todo lane `owner: \"worker\"` (todo phases[].lanes[].owner, \
-                 or update lane_owner) and the server spawns a worker for it as soon as its \
-                 dependencies are met. Use `plan_status` to watch lanes.",
-                params.action
-            )),
-
-            "start" | "start_task" | "wake" | "resume" | "retry" | "reassign" | "replace"
-            | "salvage" => {
-                let task_id = match params.task_id.clone() {
-                    Some(task_id) => task_id,
-                    None if params.target_session.is_some() => String::new(),
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "'task_id' is required for {} action unless 'target_session' uniquely identifies the assigned task. Use `swarm list`/`swarm plan_status` to inspect assignments, or pass task_id explicitly.",
-                            params.action
-                        ));
-                    }
-                };
-                if matches!(params.action.as_str(), "reassign" | "replace" | "salvage")
-                    && params.target_session.is_none()
-                {
-                    return Err(anyhow::anyhow!(
-                        "'target_session' is required for {} action",
-                        params.action
-                    ));
-                }
-
-                let control_action = if params.action == "start_task" {
-                    "start".to_string()
-                } else {
-                    params.action.clone()
-                };
-
+            Command::TaskControl(control) => {
                 let request = Request::CommTaskControl {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    action: control_action.clone(),
-                    task_id: task_id.clone(),
-                    target_session: params.target_session.clone(),
-                    message: params.message.clone(),
+                    action: control.control_action.clone(),
+                    task_id: control.task_id.clone(),
+                    target_session: control.target_session.clone(),
+                    message: control.message.clone(),
                 };
 
                 match send_request(request).await {
@@ -2067,25 +1707,25 @@ impl Tool for CommunicateTool {
                     }
                     Ok(response) => {
                         ensure_success(&response)?;
-                        let target_suffix = params
+                        let target_suffix = control
                             .target_session
                             .as_deref()
                             .map(|target| format!(" -> {}", target))
                             .unwrap_or_default();
                         Ok(ToolOutput::new(format!(
                             "Task '{}' {}{}",
-                            task_id, params.action, target_suffix
+                            control.task_id, control.action, target_suffix
                         )))
                     }
-                    Err(e) => Err(anyhow::anyhow!("Failed to {} task: {}", control_action, e)),
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to {} task: {}",
+                        control.control_action,
+                        e
+                    )),
                 }
             }
 
-            "subscribe_channel" => {
-                let channel = params.channel.ok_or_else(|| {
-                    anyhow::anyhow!("'channel' is required for subscribe_channel action")
-                })?;
-
+            Command::SubscribeChannel { channel } => {
                 let request = Request::CommSubscribeChannel {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2101,11 +1741,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "unsubscribe_channel" => {
-                let channel = params.channel.ok_or_else(|| {
-                    anyhow::anyhow!("'channel' is required for unsubscribe_channel action")
-                })?;
-
+            Command::UnsubscribeChannel { channel } => {
                 let request = Request::CommUnsubscribeChannel {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2121,45 +1757,22 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "await_members" => {
-                let target_status = params
-                    .target_status
-                    .unwrap_or_else(default_await_target_statuses);
-                let mut session_ids = params.session_ids.unwrap_or_default();
-                if let Some(target_session) = params.target_session.clone()
-                    && !session_ids.iter().any(|id| id == &target_session)
-                {
-                    session_ids.push(target_session);
-                }
-                let timeout_minutes = params.timeout_minutes.unwrap_or(60);
-                let timeout_secs = timeout_minutes * 60;
-                // Public member waits are always asynchronous. The blocking
-                // CommAwaitMembers protocol remains available internally, but agents must not park an entire
-                // turn waiting on a worker or a long-lived socket.
-                let blocking_was_requested = params.background == Some(false);
-                let background = true;
-                let notify = params.notify.unwrap_or(true);
-                let wake = params.wake.unwrap_or(true);
-
+            Command::AwaitMembers(wait) => {
                 let request = Request::CommAwaitMembers {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    target_status,
-                    session_ids,
-                    mode: params.mode.clone(),
-                    timeout_secs: Some(timeout_secs),
-                    background,
-                    notify,
-                    wake,
+                    target_status: wait.target_status,
+                    session_ids: wait.session_ids,
+                    mode: wait.mode,
+                    timeout_secs: Some(wait.timeout_secs),
+                    background: true,
+                    notify: wait.notify,
+                    wake: wait.wake,
                 };
 
-                // Background waits return promptly with a snapshot; only blocking
-                // waits need the long socket timeout that covers the full wait.
-                let socket_timeout = if background {
-                    std::time::Duration::from_secs(30)
-                } else {
-                    std::time::Duration::from_secs(timeout_secs + 30)
-                };
+                // Member waits return promptly with a snapshot, so the short
+                // socket timeout suffices.
+                let socket_timeout = std::time::Duration::from_secs(30);
 
                 match send_request_with_timeout(request, Some(socket_timeout)).await {
                     Ok(ServerEvent::CommAwaitMembersResponse {
@@ -2170,7 +1783,7 @@ impl Tool for CommunicateTool {
                         ..
                     }) => {
                         if background_started {
-                            let compatibility_note = if blocking_was_requested {
+                            let compatibility_note = if wait.blocking_was_requested {
                                 "\n\n(Blocking member waits are no longer supported; this wait was started asynchronously.)"
                             } else {
                                 "\n\n(You can keep working; this wait runs in the background.)"
@@ -2194,14 +1807,6 @@ impl Tool for CommunicateTool {
                     Err(e) => Err(anyhow::anyhow!("Failed to await members: {}", e)),
                 }
             }
-
-            _ => Err(anyhow::anyhow!(
-                "Unknown action '{}'. Valid actions: share, share_append, read, message, broadcast, dm, channel, list, list_channels, channel_members, \
-                 propose_plan, approve_plan, reject_plan, spawn, stop, assign_role, status, plan_status, summary, read_context, \
-                 resync_plan, assign_task, assign_next, cleanup, start, start_task, wake, resume, retry, reassign, replace, salvage, subscribe_channel, unsubscribe_channel, await_members, set_model, compact. \
-                 To read messages addressed to you, use action='read'.",
-                params.action
-            )),
         }
     }
 }
