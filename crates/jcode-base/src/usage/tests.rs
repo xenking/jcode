@@ -416,6 +416,25 @@ fn test_parse_openai_wham_windows_preserve_low_percent_values() {
     assert_eq!(parsed.limits[1].usage_percent, 0.25);
 }
 
+/// A Business seat paid by credits reports no rate-limit windows at all. It is
+/// not exhausted: nothing may park the login, fail it over, or hide its models
+/// because a window is missing.
+#[test]
+fn credits_only_workspace_seat_is_not_exhausted() {
+    let json: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/chatgpt_business_spend_control.json"
+    ))
+    .unwrap();
+    let parsed = openai_helpers::parse_openai_usage_payload(&json);
+    assert!(parsed.limits.is_empty(), "no windows are reported");
+    let mut usage = openai_helpers::classify_openai_limits(&parsed.limits);
+    usage.hard_limit_reached = parsed.hard_limit_reached;
+    usage.credit_overage = parsed.credit_overage;
+    assert!(usage.five_hour.is_none() && usage.seven_day.is_none());
+    assert!(!usage.hard_limit_reached);
+    assert!(!usage.exhausted());
+}
+
 #[test]
 fn test_classify_openai_limits_treats_usage_limit_values_as_percent() {
     let limits = vec![UsageLimit {
