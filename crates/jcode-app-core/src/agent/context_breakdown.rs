@@ -82,6 +82,7 @@ impl Agent {
         let (prompt, skills_chars) = self.system_prompt_with_accounting(None, true);
         let mut counts = Counts {
             include_snapcompact,
+            action_forecast,
             ..Counts::default()
         };
         counts.prompt(&prompt, skills_chars);
@@ -89,7 +90,6 @@ impl Agent {
         counts.tools(&tools, &projection.messages, |name| {
             crate::tool::sdk::custom(self.session_id(), name)
         });
-        counts.forecast(action_forecast);
         ContextBreakdownSnapshot {
             breakdown: counts.finish(Some(self.session.id.clone()), Some(model), meter),
             compact,
@@ -516,10 +516,6 @@ struct Counts {
 }
 
 impl Counts {
-    fn forecast(&mut self, action_forecast: Option<ContextActionForecast>) {
-        self.action_forecast = action_forecast;
-    }
-
     fn forget_dynamic_tools(&mut self) {
         self.dynamic_tokens = None;
     }
