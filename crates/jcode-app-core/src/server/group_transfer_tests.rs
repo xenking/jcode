@@ -662,6 +662,7 @@ async fn scoped_bus_callback_reserves_until_dispatch_and_rechecks_ownership_afte
         notification: "continue".into(),
         notify: true,
         wake: true,
+        checkin: false,
     });
     let gate = crate::runtime_activity::global();
     let selected = BTreeSet::from(["selected".to_string()]);
@@ -710,6 +711,7 @@ async fn scoped_bus_callback_reserves_until_dispatch_and_rechecks_ownership_afte
                 notification: "continue".into(),
                 notify: true,
                 wake: true,
+                checkin: false,
             })
         )
         .await

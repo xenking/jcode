@@ -248,6 +248,51 @@ fn background_completion_notification(
     format!("🐝 **Swarm await finished**\n\n{}", body)
 }
 
+/// Interval between progress check-ins for a pending background await, or
+/// `None` when disabled (`server.await_checkin_minutes = 0`).
+fn checkin_interval() -> Option<tokio::time::Interval> {
+    let minutes = crate::config::config().server.await_checkin_minutes;
+    if minutes == 0 {
+        return None;
+    }
+    let period = Duration::from_secs(minutes.saturating_mul(60));
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    Some(interval)
+}
+
+async fn next_checkin(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+fn checkin_event(
+    state: &PersistedAwaitMembersState,
+    members: &[AwaitedMemberStatus],
+) -> SwarmAwaitCompleted {
+    let done = members.iter().filter(|member| member.done).count();
+    let waited_minutes =
+        super::durable_state::now_unix_ms().saturating_sub(state.created_at_unix_ms) / 60_000;
+    let summary = format!(
+        "Still waiting after {waited_minutes} min: {done} of {} member(s) finished. The await keeps running.",
+        members.len()
+    );
+    let body = format_comm_awaited_members_with_reports(false, &summary, members, &HashMap::new());
+    SwarmAwaitCompleted {
+        session_id: state.session_id.clone(),
+        completed: false,
+        summary,
+        notification: format!("🐝 **Swarm await still pending**\n\n{body}"),
+        notify: state.notify,
+        wake: state.wake,
+        checkin: true,
+    }
+}
+
 /// Reload the latest persisted pending state for `state.key`, if any. Delivery
 /// prefs (background/notify/wake) can be updated by duplicate requests after a
 /// watcher captured its own copy at spawn, so re-reading before exit/finalize
@@ -305,6 +350,7 @@ pub(super) async fn finish_await(
             notification,
             notify: state.notify,
             wake: state.wake,
+            checkin: false,
         })
     } else {
         None
@@ -374,6 +420,7 @@ pub(super) async fn spawn_or_resume_await_members(
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         recheck.tick().await;
         let mut cache_pause = None;
+        let mut checkin = checkin_interval();
 
         loop {
             let mut snapshot = awaited_member_snapshot(
@@ -441,6 +488,18 @@ pub(super) async fn spawn_or_resume_await_members(
                 // Re-resolve even without an event: a restored member can appear
                 // without broadcasting a change, or belong to another swarm.
                 _ = recheck.tick() => {}
+                // A long wait must not silence its coordinator: wake it with
+                // progress while the await keeps running.
+                _ = next_checkin(&mut checkin) => {
+                    if latest.background
+                        && (latest.notify || latest.wake)
+                        && !crate::turn_activity::session_is_stopped(&latest.session_id)
+                    {
+                        Bus::global().publish(BusEvent::SwarmAwaitCompleted(
+                            checkin_event(&latest, &member_statuses),
+                        ));
+                    }
+                }
                 event = event_rx.recv() => {
                     match event {
                         Ok(event) => {
@@ -919,6 +978,7 @@ pub(super) async fn resume_background_awaits(
             notification,
             notify,
             wake,
+            checkin: false,
         }));
     }
 

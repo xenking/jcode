@@ -108,6 +108,7 @@ async fn silent_stall_and_await_wakes_publish_idle_and_queued_context_entries() 
                     notification: "Await resolved: workers done".into(),
                     notify: false,
                     wake: true,
+                    checkin: false,
                 };
                 super::super::background_tasks::dispatch_swarm_await_completion(
                     &event, &sessions, &queues, &members, &swarms, &history, &counter, &swarm_tx,

@@ -668,6 +668,9 @@ wake_mode = "internal"
 # Keep finished background tasks and their output for 7 days. Set to 0 to
 # disable automatic cleanup. Running tasks are never expired by this policy.
 # background_task_retention_days = 7
+# While a background swarm await is pending, wake its coordinator with a
+# progress check-in this often (minutes). Set to 0 to disable.
+# await_checkin_minutes = 15
 
 [agents]
 # Swarm root settings and defaults for helper agents (workers, subagents, sidecars).

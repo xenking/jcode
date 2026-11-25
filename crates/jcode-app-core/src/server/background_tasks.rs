@@ -331,9 +331,19 @@ pub(super) async fn dispatch_swarm_await_completion(
         return;
     }
 
+    let wake_kind = if event.checkin {
+        "swarm_await_checkin"
+    } else {
+        "swarm_await_completed"
+    };
+    let instruction = if event.checkin {
+        "A swarm await you started is still pending. Check on the members, reassign or stop stuck work, and keep waiting only if it is still useful."
+    } else {
+        "A swarm await you started just resolved. Review the result and continue if useful."
+    };
     if emit_external_wake(
         &event.session_id,
-        "swarm_await_completed",
+        wake_kind,
         &event.notification,
         swarm_members,
     )
@@ -345,10 +355,7 @@ pub(super) async fn dispatch_swarm_await_completion(
     if !run_live_turn_if_idle(
         &event.session_id,
         &event.notification,
-        Some(
-            "A swarm await you started just resolved. Review the result and continue if useful."
-                .to_string(),
-        ),
+        Some(instruction.to_string()),
         sessions,
         LiveTurnSwarmContext::new(
             swarm_members,

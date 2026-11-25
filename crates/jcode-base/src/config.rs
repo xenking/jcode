@@ -770,6 +770,9 @@ pub struct ServerConfig {
     pub mobile_push: Option<bool>,
     /// Days to keep finished background tasks and their output. Zero disables cleanup.
     pub background_task_retention_days: u64,
+    /// Minutes between check-in wakes for a still-pending background swarm
+    /// await, so a long wait cannot silence its coordinator. Zero disables.
+    pub await_checkin_minutes: u64,
 }
 
 impl Default for ServerConfig {
@@ -778,6 +781,7 @@ impl Default for ServerConfig {
             wake_mode: WakeMode::default(),
             mobile_push: None,
             background_task_retention_days: 7,
+            await_checkin_minutes: 15,
         }
     }
 }

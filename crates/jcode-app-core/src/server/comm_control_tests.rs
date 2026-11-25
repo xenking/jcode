@@ -165,6 +165,7 @@ include!("comm_control_tests/await_lagged.rs");
 include!("comm_control_tests/await_resume_expired.rs");
 include!("comm_control_tests/await_persist_failure.rs");
 include!("comm_control_tests/await_failed_worker_wake.rs");
+include!("comm_control_tests/await_checkin.rs");
 include!("comm_control_tests/await_recovery_spam.rs");
 include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");

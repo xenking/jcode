@@ -305,6 +305,9 @@ pub struct SwarmAwaitCompleted {
     pub notify: bool,
     /// Wake an idle requesting agent (or soft-interrupt it when busy).
     pub wake: bool,
+    /// Periodic progress check-in for an await that is still pending, not a
+    /// result. Keeps a long wait from silencing its coordinator.
+    pub checkin: bool,
 }
 
 /// A worker report that must reach its owner's model, not just its UI.
@@ -847,6 +850,7 @@ mod tests {
             notification: "accepted continuation".into(),
             notify: true,
             wake: true,
+            checkin: false,
         })
     }
 
