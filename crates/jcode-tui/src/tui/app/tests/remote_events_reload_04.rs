@@ -1298,6 +1298,11 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
 
 #[test]
 fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
+    if runs_in_isolated_process(
+        "tui::app::tests::test_info_widget_local_direct_api_runtime_shows_cost_based_usage",
+    ) {
+        return;
+    }
     let _guard = crate::storage::lock_test_env();
     // Restore on unwind, not only on the success path: a mid-test assertion
     // panic used to leave these vars cleared, poisoning concurrently running

@@ -1510,6 +1510,11 @@ fn test_model_picker_waits_for_async_post_login_catalog_activation() {
 
 #[test]
 fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
+    if runs_in_isolated_process(
+        "tui::app::tests::test_login_completed_surfaces_new_provider_models_in_local_model_picker",
+    ) {
+        return;
+    }
     let mut app = create_auth_refresh_test_app();
 
     app.handle_login_completed(crate::bus::LoginCompleted {

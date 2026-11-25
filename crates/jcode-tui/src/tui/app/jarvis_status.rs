@@ -294,8 +294,21 @@ impl Drop for CaptureStatus {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A capture lease is an `flock` on a descriptor opened with `O_CLOEXEC`,
+    /// but a child process that is mid-`exec` (on macOS this window lasts
+    /// milliseconds for a system `python3`) still references the open file
+    /// description, so the lock outlives `drop`. Tests that hold a lease or
+    /// spawn a helper take this fence so a sibling's spawn cannot overlap the
+    /// lease lifetime they assert on.
+    fn lease_spawn_fence() -> std::sync::MutexGuard<'static, ()> {
+        static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        FENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn native_history_is_bounded_throttled_and_cleared_on_pause() {
+        let _fence = lease_spawn_fence();
         let temp = tempfile::tempdir().unwrap();
         let mut status = CaptureStatus::in_directory(&temp.path().join("jarvis")).unwrap();
         let start = Instant::now();
@@ -363,6 +376,7 @@ mod tests {
 
     #[test]
     fn error_snapshot_is_actionable_and_retry_is_single_use_and_lease_scoped() {
+        let _fence = lease_spawn_fence();
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("jcode-jarvis");
         let mut status = CaptureStatus::in_directory(&directory).unwrap();
@@ -410,6 +424,7 @@ mod tests {
 
     #[test]
     fn status_is_private_exclusive_and_cleared_on_drop() {
+        let _fence = lease_spawn_fence();
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("jarvis");
         let mut status = CaptureStatus::in_directory(&directory).unwrap();

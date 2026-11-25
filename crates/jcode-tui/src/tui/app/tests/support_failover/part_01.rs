@@ -178,6 +178,42 @@ impl Provider for OpenRouterSpecCaptureProvider {
     }
 }
 
+/// Re-run the calling test alone in a fresh process and report whether the
+/// caller should return (`true`: the child ran it and passed).
+///
+/// For tests whose subject is process-global provider/auth state: login and
+/// route activation rewrite provider env vars from detached tasks, and the
+/// auth-status cache is shared by every test in the process, so no lock the
+/// test can take stops a sibling from observing or rewriting that state. The
+/// child starts from an empty environment with a private home, so neither the
+/// developer's credentials nor a sibling's half-applied env can leak in.
+pub(crate) fn runs_in_isolated_process(test_name: &str) -> bool {
+    const CHILD: &str = "JCODE_ISOLATED_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("isolated test home");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(test_name)
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .arg("--nocapture")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("JCODE_HOME", home.path())
+        .env(CHILD, test_name)
+        .output()
+        .expect("run isolated test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "isolated run of {test_name} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 pub(crate) fn create_test_app() -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
