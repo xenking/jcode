@@ -49,7 +49,7 @@ impl GoogleService {
 
     /// Google Cloud service name of this product's API, for `gcloud services
     /// enable` and console enable links.
-    pub fn api_service_name(&self) -> &'static str {
+    fn api_service_name(&self) -> &'static str {
         match self {
             GoogleService::Gmail => "gmail.googleapis.com",
             GoogleService::Calendar => "calendar-json.googleapis.com",
@@ -97,7 +97,7 @@ impl GoogleService {
 }
 
 /// Sort and dedupe a service list so stored tokens and scope strings are stable.
-pub fn normalize_services(mut services: Vec<GoogleService>) -> Vec<GoogleService> {
+fn normalize_services(mut services: Vec<GoogleService>) -> Vec<GoogleService> {
     services.sort();
     services.dedup();
     services
@@ -109,7 +109,7 @@ fn default_services() -> Vec<GoogleService> {
 }
 
 /// OAuth scopes for a set of services. Gmail uses the tier's scopes.
-pub fn scopes_for(services: &[GoogleService], tier: GmailAccessTier) -> Vec<&'static str> {
+fn scopes_for(services: &[GoogleService], tier: GmailAccessTier) -> Vec<&'static str> {
     let mut scopes = Vec::new();
     for service in normalize_services(services.to_vec()) {
         match service {
@@ -492,7 +492,7 @@ async fn exchange_code(
 
 /// Refresh Google OAuth tokens, serialized via the refresh coordinator so
 /// concurrent callers do not race the token endpoint and the stored file.
-pub async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {
+async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {
     crate::auth::refresh_coordinator::single_flight(
         "google".to_string(),
         || load_tokens().ok(),
@@ -564,7 +564,7 @@ pub async fn get_valid_token() -> Result<String> {
 }
 
 /// Services from `requested` whose scopes all appear in the granted scope string.
-pub fn granted_services(
+fn granted_services(
     requested: &[GoogleService],
     tier: GmailAccessTier,
     granted: &str,

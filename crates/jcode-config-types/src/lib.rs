@@ -61,8 +61,8 @@ pub use gateway::GatewayConfig;
 pub use keybinding_settings::KeybindingsConfig;
 pub use keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
-    KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding, default_binding_or,
-    keybinding_default, keybinding_defaults_report, validate_keybinding_defaults,
+    KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding,
+    keybinding_defaults_report, validate_keybinding_defaults,
 };
 pub use launch_hotkeys::{LaunchHotkeyEntry, LaunchHotkeysConfig};
 pub use menubar::MenubarConfig;

@@ -45,11 +45,20 @@ impl DisplayPreference {
 
 impl DisplayConfig {
     /// Apply `JCODE_*` display environment overrides.
+    pub fn apply_env_overrides(&mut self) {
+        self.apply_behavior_env();
+        self.apply_reasoning_env();
+        self.apply_animation_env();
+        self.apply_sessions_env();
+        self.apply_rendering_env();
+    }
+
+    /// Env overrides for diff mode, pins, queueing, mouse and emoji.
     #[expect(
         clippy::collapsible_if,
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
-    pub fn apply_env_overrides(&mut self) {
+    fn apply_behavior_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
             match v.to_lowercase().as_str() {
                 "off" | "none" | "0" | "false" => self.diff_mode = DiffDisplayMode::Off,
@@ -110,6 +119,14 @@ impl DisplayConfig {
         {
             self.emoji = !parsed;
         }
+    }
+
+    /// Env overrides for reasoning, markdown and spacing.
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_reasoning_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_SHOW_THINKING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.show_thinking = parsed;
@@ -138,6 +155,14 @@ impl DisplayConfig {
                 _ => {}
             }
         }
+    }
+
+    /// Env overrides for idle and prompt animations.
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_animation_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_IDLE_ANIMATION") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.idle_animation = parsed;
@@ -151,6 +176,14 @@ impl DisplayConfig {
         if let Ok(v) = std::env::var("JCODE_DISABLED_ANIMATIONS") {
             self.disabled_animations = parse_env_list(&v);
         }
+    }
+
+    /// Env overrides for session manager and resume.
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_sessions_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_ACTIVE_SESSIONS_MANAGER") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.active_sessions_manager = parsed;
@@ -176,6 +209,14 @@ impl DisplayConfig {
                 self.resume_open_elsewhere = parsed;
             }
         }
+    }
+
+    /// Env overrides for performance, redraw, tool output and scrollbars.
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_rendering_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {

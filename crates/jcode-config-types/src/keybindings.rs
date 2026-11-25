@@ -138,7 +138,7 @@ impl PlatformDefault {
     }
 
     /// Whether this default actually binds anything.
-    pub fn is_bound(&self) -> bool {
+    fn is_bound(&self) -> bool {
         is_bound_value(self.binding)
     }
 }
@@ -173,7 +173,7 @@ impl KeybindingDefault {
 
 /// Returns `true` when `value` actually binds a key (non-empty and not an
 /// explicit disable token).
-pub fn is_bound_value(value: &str) -> bool {
+fn is_bound_value(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return false;
@@ -362,7 +362,7 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
 ];
 
 /// Look up a keybinding action by id.
-pub fn keybinding_default(id: &str) -> Option<&'static KeybindingDefault> {
+fn keybinding_default(id: &str) -> Option<&'static KeybindingDefault> {
     KEYBINDING_DEFAULTS.iter().find(|entry| entry.id == id)
 }
 
@@ -370,14 +370,6 @@ pub fn keybinding_default(id: &str) -> Option<&'static KeybindingDefault> {
 /// a known action.
 pub fn default_binding(id: &str, platform: KeybindingPlatform) -> Option<&'static str> {
     keybinding_default(id).map(|entry| entry.binding_for(platform))
-}
-
-/// The default binding string for `id` on the current platform, falling back to
-/// `fallback` for unknown ids (which should never happen for real fields).
-pub fn default_binding_or(id: &str, fallback: &'static str) -> String {
-    default_binding(id, KeybindingPlatform::current())
-        .unwrap_or(fallback)
-        .to_string()
 }
 
 /// The kind of problem the check layer detected.
