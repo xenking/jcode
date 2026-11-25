@@ -120,7 +120,7 @@ impl Agent {
                             &ctx.session_id,
                             &ctx.tool_call_id,
                             async {
-                                if crate::server::ask_escalation::wait_for_recovery_coordinator(&ctx.session_id).await {
+                                if wait_for_recovery_coordinator(&ctx.session_id).await {
                                     None
                                 } else {
                                     Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await)
@@ -167,9 +167,9 @@ impl Agent {
             self.session.replace_messages(messages);
             self.persist_session_now()?;
             if is_error {
-                crate::server::reload_recovery::cancel(&self.session.id)?;
+                crate::recovery_gate::cancel(&self.session.id)?;
             } else if let Some(identity) = self.server_turn_observer().snapshot().1
-                && !crate::server::reload_recovery::admit_ask_answer(
+                && !crate::recovery_gate::admit_ask_answer(
                     &self.session,
                     &identity,
                     &ask.id,
@@ -705,4 +705,21 @@ mod tests {
         assert!(result.unwrap());
         assert!(interrupted_ask(&Session::load(session_id).unwrap().messages).is_none());
     }
+}
+
+/// Whether this session escalates asks to a coordinator. Waits (bounded) for
+/// that coordinator to have a client attached, so a replayed ask is not
+/// answered by assumption while the coordinator is still reconnecting.
+async fn wait_for_recovery_coordinator(session_id: &str) -> bool {
+    let Some(root) = crate::ask_route::coordinator_root(session_id).await else {
+        return false;
+    };
+    if let Some(root) = root {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::tool::interactive::wait_for_sender(&root),
+        )
+        .await;
+    }
+    true
 }

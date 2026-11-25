@@ -54,7 +54,7 @@ impl Tool for RolloutWait {
         let request: Request =
             serde_json::from_value(input).context("invalid rollout wait request")?;
         let read = || -> Result<_> {
-            let journal = crate::server::rollout::inspect(&request.rollout_id)?
+            let journal = crate::rollout_journal::inspect(&request.rollout_id)?
                 .with_context(|| format!("unknown rollout {}", request.rollout_id))?;
             ensure!(
                 journal.intent.cli_sha.as_deref() == Some(request.cli_sha.as_str())

@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// A parked escalated ask resolves itself after this long by taking the
@@ -54,15 +54,6 @@ pub(crate) fn set_timeout_for_test(millis: u64) {
 
 type SwarmMembers = Arc<RwLock<HashMap<String, SwarmMember>>>;
 
-struct Bridge {
-    tx: mpsc::UnboundedSender<EscalationRequest>,
-    cancelled: CancellationToken,
-    members: SwarmMembers,
-}
-
-static BRIDGES: LazyLock<Mutex<HashMap<String, Bridge>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 struct PendingAsk {
     request_id: String,
     worker_session_id: String,
@@ -74,86 +65,62 @@ struct PendingAsk {
 static PENDING: LazyLock<Mutex<HashMap<String, PendingAsk>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-struct EscalationRequest {
-    request_id: String,
-    tool_call_id: String,
-    questions: Vec<AskQuestion>,
-    reply: oneshot::Sender<Result<EscalatedAsk>>,
-}
-
-/// Outcome of an escalated ask, in the same shape a client answer produces.
-#[derive(Debug)]
-pub(crate) struct EscalatedAsk {
-    pub(crate) response: AskResponse,
-    /// Set when the answer was assumed rather than decided (no interactive
-    /// client anywhere, or the escalation timed out).
-    pub(crate) note: Option<String>,
-}
-
-fn lock_bridges() -> std::sync::MutexGuard<'static, HashMap<String, Bridge>> {
-    BRIDGES.lock().unwrap_or_else(|e| e.into_inner())
-}
+pub(crate) use crate::ask_route::EscalatedAsk;
 
 fn lock_pending() -> std::sync::MutexGuard<'static, HashMap<String, PendingAsk>> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Install an escalation route for a session that runs turns without an
-/// interactive client (a headless swarm worker). Idempotent: a live bridge is
+/// interactive client (a headless swarm worker). Idempotent: a live route is
 /// reused, so reload revival and repeated spawn paths cannot stack routes.
 pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
-    {
-        let bridges = lock_bridges();
-        if bridges
-            .get(session_id)
-            .is_some_and(|bridge| !bridge.tx.is_closed())
-        {
-            return;
-        }
-    }
-    let (tx, mut rx) = mpsc::unbounded_channel::<EscalationRequest>();
-    let cancelled = CancellationToken::new();
-    {
-        let mut bridges = lock_bridges();
-        if let Some(previous) = bridges.insert(
-            session_id.to_string(),
-            Bridge {
-                tx,
-                cancelled: cancelled.clone(),
-                members: Arc::clone(&members),
-            },
-        ) {
-            previous.cancelled.cancel();
-        }
-    }
+    let root_of: crate::ask_route::RootLookup = {
+        let members = Arc::clone(&members);
+        Arc::new(move |session: &str| {
+            let members = Arc::clone(&members);
+            let session = session.to_string();
+            Box::pin(async move {
+                super::swarm::swarm_ancestors(&*members.read().await, &session).pop()
+            })
+        })
+    };
+    let Some(crate::ask_route::InstalledRoute {
+        mut requests,
+        cancelled,
+    }) = crate::ask_route::install(session_id, root_of)
+    else {
+        return;
+    };
     let worker_session_id = session_id.to_string();
     super::reload_recovery::ask_owner_available(session_id);
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = cancelled.cancelled() => break,
-                request = rx.recv() => match request {
+                request = requests.recv() => match request {
                     None => break,
-                    Some(mut request) => {
+                    Some(request) => {
+                        let (request_id, tool_call_id, questions, mut reply) = request.into_parts();
                         let worker = worker_session_id.clone();
                         let members = Arc::clone(&members);
                         let cancelled = cancelled.clone();
                         tokio::spawn(async move {
                             let outcome = handle_escalation(
                                 worker,
-                                request.request_id,
-                                request.questions,
-                                request.tool_call_id,
+                                request_id,
+                                questions,
+                                tool_call_id,
                                 members,
                                 async {
                                     tokio::select! {
                                         _ = cancelled.cancelled() => {},
-                                        _ = request.reply.closed() => {},
+                                        _ = reply.closed() => {},
                                     }
                                 },
                             )
                             .await;
-                            let _ = request.reply.send(outcome);
+                            let _ = reply.send(outcome);
                         });
                     }
                 },
@@ -164,63 +131,11 @@ pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
 
 /// Whether this session can escalate an ask to a coordinator.
 pub(crate) fn has_bridge(session_id: &str) -> bool {
-    lock_bridges()
-        .get(session_id)
-        .is_some_and(|bridge| !bridge.tx.is_closed())
-}
-
-pub(crate) async fn wait_for_recovery_coordinator(session_id: &str) -> bool {
-    let members = lock_bridges()
-        .get(session_id)
-        .map(|bridge| Arc::clone(&bridge.members));
-    let Some(members) = members else {
-        return false;
-    };
-    let root = super::swarm::swarm_ancestors(&*members.read().await, session_id).pop();
-    if let Some(root) = root {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(30),
-            crate::tool::interactive::wait_for_sender(&root),
-        )
-        .await;
-    }
-    true
+    crate::ask_route::has_route(session_id)
 }
 
 pub(super) fn is_pending(request_id: &str) -> bool {
     lock_pending().contains_key(request_id)
-}
-
-/// Ask the coordinator, from inside the `ask` tool.
-///
-/// Returns `None` when this process has no escalation route for the session
-/// (plain headless run, tests, non-swarm agent), so the caller can fall back to
-/// its own default. Returns `Some(Err(..))` only when a route existed and the
-/// parked ask was withdrawn.
-pub(crate) async fn escalate(
-    session_id: &str,
-    tool_call_id: &str,
-    questions: &[AskQuestion],
-) -> Option<Result<EscalatedAsk>> {
-    let tx = lock_bridges()
-        .get(session_id)
-        .filter(|bridge| !bridge.tx.is_closed())
-        .map(|bridge| bridge.tx.clone())?;
-    let request_id = format!("ask-esc-{session_id}-{}", uuid::Uuid::new_v4());
-    let (reply, answer) = oneshot::channel();
-    tx.send(EscalationRequest {
-        request_id,
-        tool_call_id: tool_call_id.to_string(),
-        questions: questions.to_vec(),
-        reply,
-    })
-    .ok()?;
-    Some(match answer.await {
-        Ok(result) => result,
-        Err(_) => Err(anyhow!(
-            "ask was cancelled: the session's coordinator route closed before answering"
-        )),
-    })
 }
 
 /// Handle `Request::CommAnswerEscalatedAsk` from a client.
@@ -516,7 +431,7 @@ pub(crate) fn answer(
 /// Called when the worker is stopped or removed from the swarm so the root is
 /// never left with a question nobody will answer.
 pub(crate) fn withdraw_worker(session_id: &str) {
-    let bridge = lock_bridges().remove(session_id);
+    let route_cancelled = crate::ask_route::remove(session_id);
     let pending: Vec<PendingAsk> = {
         let mut pending = lock_pending();
         let ids: Vec<String> = pending
@@ -531,8 +446,8 @@ pub(crate) fn withdraw_worker(session_id: &str) {
     for entry in &pending {
         entry.closed.cancel();
     }
-    if let Some(bridge) = bridge {
-        bridge.cancelled.cancel();
+    if let Some(cancelled) = route_cancelled {
+        cancelled.cancel();
     }
     if !pending.is_empty() {
         crate::logging::info(&format!(
@@ -622,27 +537,7 @@ const ESCALATION_NO_CLIENT_NOTE: &str = "No interactive client is attached anywh
 
 const ESCALATION_TIMEOUT_NOTE: &str = "The coordinator did not answer within the escalation timeout. The recommended options were assumed; state the assumption if it affects the result.";
 
-/// A response that takes the option labelled "(Recommended)" (else the first
-/// option) for every question.
-pub(crate) fn recommended_response(questions: &[AskQuestion]) -> AskResponse {
-    AskResponse {
-        answers: Some(
-            questions
-                .iter()
-                .map(|question| AskAnswer {
-                    selected: question
-                        .options
-                        .iter()
-                        .find(|option| option.label.to_ascii_lowercase().contains("(recommended)"))
-                        .or_else(|| question.options.first())
-                        .map(|option| vec![option.label.clone()])
-                        .unwrap_or_default(),
-                    ..AskAnswer::default()
-                })
-                .collect(),
-        ),
-    }
-}
+pub(crate) use crate::ask_route::recommended_response;
 
 fn assumed(questions: &[AskQuestion], note: &str) -> EscalatedAsk {
     EscalatedAsk {
@@ -654,9 +549,7 @@ fn assumed(questions: &[AskQuestion], note: &str) -> EscalatedAsk {
 /// Drop all in-process state. Used by tests to simulate a daemon restart.
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
-    for (_, bridge) in lock_bridges().drain() {
-        bridge.cancelled.cancel();
-    }
+    crate::ask_route::clear_for_test();
     for (_, pending) in lock_pending().drain() {
         pending.closed.cancel();
     }

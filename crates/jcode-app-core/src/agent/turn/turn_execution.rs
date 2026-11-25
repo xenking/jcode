@@ -213,7 +213,7 @@ impl Agent {
                 .iter()
                 .any(|item| item.active_skill.is_some() || !item.attachments.is_empty());
             let session_id = self.session.id.clone();
-            if !crate::server::reload_recovery::admit_input(
+            if !crate::recovery_gate::admit_input(
                 &session_id,
                 lease.identity(),
                 queued_client_id.as_deref(),

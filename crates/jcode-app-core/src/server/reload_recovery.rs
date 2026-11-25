@@ -25,6 +25,7 @@ struct StoreGuard {
 }
 
 fn lock_store() -> Result<StoreGuard> {
+    install_recovery_gate();
     let local = STORE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -804,6 +805,41 @@ pub(crate) fn admit_ask_answer(
     )?;
     let _ = crate::tool::selfdev::ReloadContext::load_for_session(&session.id);
     Ok(true)
+}
+
+/// The journal-backed answer to the agent's admission questions.
+struct JournalGate;
+
+impl crate::recovery_gate::RecoveryGate for JournalGate {
+    fn cancel(&self, session_id: &str) -> Result<()> {
+        cancel(session_id)
+    }
+
+    fn admit_input(
+        &self,
+        session_id: &str,
+        identity: &crate::protocol::TurnIdentity,
+        input_ids: Option<&[String]>,
+        persist_input: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        admit_input(session_id, identity, input_ids, persist_input)
+    }
+
+    fn admit_ask_answer(
+        &self,
+        session: &crate::session::Session,
+        identity: &crate::protocol::TurnIdentity,
+        tool_id: &str,
+    ) -> Result<bool> {
+        admit_ask_answer(session, identity, tool_id)
+    }
+}
+
+static JOURNAL_GATE: JournalGate = JournalGate;
+
+/// Let the agent consult this journal. Idempotent.
+pub(super) fn install_recovery_gate() {
+    crate::recovery_gate::install(&JOURNAL_GATE);
 }
 
 #[cfg(test)]

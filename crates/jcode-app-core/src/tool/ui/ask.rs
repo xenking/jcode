@@ -89,7 +89,7 @@ impl Tool for AskTool {
                 None,
             ),
             None => {
-                match crate::server::ask_escalation::escalate(
+                match crate::ask_route::escalate(
                     &ctx.session_id,
                     &ctx.tool_call_id,
                     &input.questions,
@@ -99,7 +99,7 @@ impl Tool for AskTool {
                     Some(Ok(escalated)) => (escalated.response, escalated.note),
                     Some(Err(error)) => return Err(error),
                     None => (
-                        crate::server::ask_escalation::recommended_response(&input.questions),
+                        crate::ask_route::recommended_response(&input.questions),
                         Some(NO_INTERACTIVE_USER_NOTE.to_string()),
                     ),
                 }
