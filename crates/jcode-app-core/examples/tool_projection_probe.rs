@@ -6,9 +6,9 @@ use jcode_session_types::StoredMessage;
     dead_code,
     reason = "This probe shares only the message constructor from the search fixtures"
 )]
-#[path = "../src/tool/session_search/searchable_text_fixtures.rs"]
+#[path = "../src/tool/search/session_search/searchable_text_fixtures.rs"]
 mod fixtures;
-#[path = "../src/tool/session_search/searchable_text.rs"]
+#[path = "../src/tool/search/session_search/searchable_text.rs"]
 mod projection;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;

@@ -78,7 +78,9 @@ fn spawn_cancellable_search(
     })
 }
 
+#[path = "agentgrep/args.rs"]
 mod args;
+#[path = "agentgrep/context.rs"]
 mod context;
 
 #[cfg(test)]

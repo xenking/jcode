@@ -22,9 +22,11 @@ use std::collections::HashMap;
 
 const REQUEST_ID: u64 = 1;
 
+#[path = "communicate/transport.rs"]
 mod transport;
 use transport::{send_request, send_request_with_timeout};
 
+#[path = "communicate/command.rs"]
 mod command;
 use command::{AssignTask, Cleanup, Command, CommunicateInput, WorkerSpawn};
 
@@ -461,6 +463,7 @@ fn status_target_sessions(
     targets
 }
 
+#[path = "communicate/awaited_reports.rs"]
 mod awaited_reports;
 use awaited_reports::fetch_awaited_member_reports;
 

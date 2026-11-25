@@ -1750,6 +1750,7 @@ fn truncate_context_text(text: &str) -> String {
     }
 }
 
+#[path = "session_search/searchable_text.rs"]
 mod searchable_text;
 use searchable_text::searchable_message_text;
 

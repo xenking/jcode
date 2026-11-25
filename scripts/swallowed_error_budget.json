@@ -11,97 +11,97 @@
       "let_underscore": 3,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/cache_request.rs": {
+    "crates/jcode-app-core/src/agent/context/cache_request.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/compaction.rs": {
+    "crates/jcode-app-core/src/agent/context/compaction.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/context_breakdown.rs": {
+    "crates/jcode-app-core/src/agent/context/context_breakdown.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/environment.rs": {
+    "crates/jcode-app-core/src/agent/context/environment.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/idle_hibernation.rs": {
+    "crates/jcode-app-core/src/agent/recovery/idle_hibernation.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/inline_tail.rs": {
+    "crates/jcode-app-core/src/agent/context/inline_tail.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/interrupts.rs": {
+    "crates/jcode-app-core/src/agent/recovery/interrupts.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/provider.rs": {
+    "crates/jcode-app-core/src/agent/session/provider.rs": {
       "dot_ok": 0,
       "let_underscore": 5,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/reload_resume.rs": {
+    "crates/jcode-app-core/src/agent/recovery/reload_resume.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/response_recovery.rs": {
+    "crates/jcode-app-core/src/agent/recovery/response_recovery.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/stream_request_preparation.rs": {
+    "crates/jcode-app-core/src/agent/turn/stream_request_preparation.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/streaming.rs": {
+    "crates/jcode-app-core/src/agent/turn/streaming.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/tool_handoff.rs": {
+    "crates/jcode-app-core/src/agent/tools/tool_handoff.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/tool_replay.rs": {
+    "crates/jcode-app-core/src/agent/tools/tool_replay.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/agent/tools.rs": {
+    "crates/jcode-app-core/src/agent/tools/tools.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/agent/turn_execution.rs": {
+    "crates/jcode-app-core/src/agent/turn/turn_execution.rs": {
       "dot_ok": 0,
       "let_underscore": 3,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/agent/turn_loops.rs": {
+    "crates/jcode-app-core/src/agent/turn/turn_loops.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": {
+    "crates/jcode-app-core/src/agent/turn/turn_streaming_mpsc.rs": {
       "dot_ok": 0,
       "let_underscore": 70,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/agent/utils.rs": {
+    "crates/jcode-app-core/src/agent/session/utils.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
@@ -546,132 +546,132 @@
       "let_underscore": 7,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/agentgrep.rs": {
+    "crates/jcode-app-core/src/tool/search/agentgrep.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/agentgrep/args.rs": {
+    "crates/jcode-app-core/src/tool/search/agentgrep/args.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/agentgrep/context.rs": {
+    "crates/jcode-app-core/src/tool/search/agentgrep/context.rs": {
       "dot_ok": 17,
       "let_underscore": 1,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/tool/ambient.rs": {
+    "crates/jcode-app-core/src/tool/assist/ambient.rs": {
       "dot_ok": 4,
       "let_underscore": 2,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/applet.rs": {
+    "crates/jcode-app-core/src/tool/ui/applet.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/tool/apply_patch.rs": {
+    "crates/jcode-app-core/src/tool/fs/apply_patch.rs": {
       "dot_ok": 3,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/ask.rs": {
+    "crates/jcode-app-core/src/tool/ui/ask.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/background_worker.rs": {
+    "crates/jcode-app-core/src/tool/jobs/background_worker.rs": {
       "dot_ok": 1,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/bash.rs": {
+    "crates/jcode-app-core/src/tool/bash/bash.rs": {
       "dot_ok": 17,
       "let_underscore": 14,
       "unwrap_or_default": 6
     },
-    "crates/jcode-app-core/src/tool/bg.rs": {
+    "crates/jcode-app-core/src/tool/jobs/bg.rs": {
       "dot_ok": 3,
       "let_underscore": 1,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/tool/bridge_reload.rs": {
+    "crates/jcode-app-core/src/tool/jobs/bridge_reload.rs": {
       "dot_ok": 8,
       "let_underscore": 4,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/browser.rs": {
+    "crates/jcode-app-core/src/tool/browser/browser.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/tool/browser_fast.rs": {
+    "crates/jcode-app-core/src/tool/browser/browser_fast.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/codemode.rs": {
+    "crates/jcode-app-core/src/tool/compose/codemode.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/codemode_ledger.rs": {
+    "crates/jcode-app-core/src/tool/compose/codemode_ledger.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/communicate.rs": {
+    "crates/jcode-app-core/src/tool/swarm/communicate.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 9
     },
-    "crates/jcode-app-core/src/tool/communicate/transport.rs": {
+    "crates/jcode-app-core/src/tool/swarm/communicate/transport.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/computer/mod.rs": {
+    "crates/jcode-app-core/src/tool/ui/computer/mod.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/config_edit_notice.rs": {
+    "crates/jcode-app-core/src/tool/devtools/config_edit_notice.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/conversation_search.rs": {
+    "crates/jcode-app-core/src/tool/search/conversation_search.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/gmail.rs": {
+    "crates/jcode-app-core/src/tool/web/gmail.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 10
     },
-    "crates/jcode-app-core/src/tool/goal.rs": {
+    "crates/jcode-app-core/src/tool/todo/goal.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/tool/inflight.rs": {
+    "crates/jcode-app-core/src/tool/jobs/inflight.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/interactive.rs": {
+    "crates/jcode-app-core/src/tool/ui/interactive.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/line_anchor.rs": {
+    "crates/jcode-app-core/src/tool/fs/line_anchor.rs": {
       "dot_ok": 2,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/mcp.rs": {
+    "crates/jcode-app-core/src/tool/mcp/mcp.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 5
@@ -681,82 +681,82 @@
       "let_underscore": 3,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/tool/read.rs": {
+    "crates/jcode-app-core/src/tool/fs/read.rs": {
       "dot_ok": 2,
       "let_underscore": 2,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/tool/remote_exec.rs": {
+    "crates/jcode-app-core/src/tool/jobs/remote_exec.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/selfdev/build_queue.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/build_queue.rs": {
       "dot_ok": 1,
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/selfdev/mod.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/mod.rs": {
       "dot_ok": 8,
       "let_underscore": 3,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/selfdev/reload.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/reload.rs": {
       "dot_ok": 0,
       "let_underscore": 9,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/tool/selfdev/setup.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/setup.rs": {
       "dot_ok": 7,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/selfdev/status.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/status.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/selfdev/ui_diff.rs": {
+    "crates/jcode-app-core/src/tool/devtools/selfdev/ui_diff.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/session_search.rs": {
+    "crates/jcode-app-core/src/tool/search/session_search.rs": {
       "dot_ok": 2,
       "let_underscore": 4,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/session_search_index.rs": {
+    "crates/jcode-app-core/src/tool/search/session_search_index.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/tool/todo.rs": {
+    "crates/jcode-app-core/src/tool/todo/todo.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 6
     },
-    "crates/jcode-app-core/src/tool/todo_telemetry.rs": {
+    "crates/jcode-app-core/src/tool/todo/todo_telemetry.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/webfetch.rs": {
+    "crates/jcode-app-core/src/tool/web/webfetch.rs": {
       "dot_ok": 3,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/tool/websearch.rs": {
+    "crates/jcode-app-core/src/tool/web/websearch.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/tool/websearch_kagi.rs": {
+    "crates/jcode-app-core/src/tool/web/websearch_kagi.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/write.rs": {
+    "crates/jcode-app-core/src/tool/fs/write.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0

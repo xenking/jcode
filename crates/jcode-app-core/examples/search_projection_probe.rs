@@ -11,11 +11,11 @@
 //! empty-separator case regressed 108 -> 144 ns despite fewer allocations.
 use jcode_message_types::ContentBlock;
 use jcode_session_types::StoredMessage;
-#[path = "../src/tool/session_search/searchable_text_fixtures.rs"]
+#[path = "../src/tool/search/session_search/searchable_text_fixtures.rs"]
 mod fixtures;
-#[path = "../src/tool/session_search/searchable_text_legacy.rs"]
+#[path = "../src/tool/search/session_search/searchable_text_legacy.rs"]
 mod oracle;
-#[path = "../src/tool/session_search/searchable_text.rs"]
+#[path = "../src/tool/search/session_search/searchable_text.rs"]
 mod projection;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;

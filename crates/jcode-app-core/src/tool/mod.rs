@@ -1,12 +1,19 @@
 pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
 
+#[path = "devtools/advisor.rs"]
 mod advisor;
+#[path = "search/agentgrep.rs"]
 mod agentgrep;
+#[path = "assist/ambient.rs"]
 pub mod ambient;
+#[path = "fs/apply_patch.rs"]
 mod apply_patch;
+#[path = "ui/ask.rs"]
 mod ask;
+#[path = "fs/line_anchor.rs"]
 mod line_anchor;
 pub(crate) use ask::{ask_client, ask_for_real_answer};
+#[path = "bash/bash.rs"]
 mod bash;
 pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
 #[cfg(unix)]
@@ -15,71 +22,124 @@ pub(crate) use bash::{BASH_SUPERVISED, follow_detached_task, restore_detached_ta
 // so its behaviour is exercised from the agent-side cancel tests too.
 #[cfg(test)]
 pub(crate) use bash::BashTool as TestBashTool;
+#[path = "compose/batch.rs"]
 mod batch;
+#[path = "jobs/bg.rs"]
 mod bg;
+#[path = "jobs/rollout_wait.rs"]
 pub(crate) mod rollout_wait;
 pub(crate) use bg::replay_wait_input as replay_bg_wait_input;
 #[cfg(unix)]
+#[path = "jobs/bridge_reload.rs"]
 pub(crate) mod bridge_reload;
+#[path = "browser/browser.rs"]
 mod browser;
+#[path = "web/calendar.rs"]
 mod calendar;
+#[path = "compose/codemode.rs"]
 mod codemode;
+#[path = "compose/codemode_ledger.rs"]
 pub(crate) mod codemode_ledger;
+#[path = "swarm/communicate.rs"]
 mod communicate;
 pub(crate) use communicate::swarm_instruction_tokens;
 #[cfg(target_os = "macos")]
+#[path = "ui/computer/mod.rs"]
 mod computer;
+#[path = "devtools/config_edit_notice.rs"]
 mod config_edit_notice;
+#[path = "search/conversation_search.rs"]
 mod conversation_search;
+#[path = "devtools/debug_socket.rs"]
 mod debug_socket;
+#[path = "ui/desktop.rs"]
 mod desktop;
+#[path = "devtools/desktop_selfdev.rs"]
 mod desktop_selfdev;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use desktop_selfdev::peer_process;
+#[path = "fs/edit.rs"]
 mod edit;
+#[path = "fs/edit_stats.rs"]
 mod edit_stats;
+#[path = "devtools/feedback.rs"]
 mod feedback;
+#[path = "fs/file_diff.rs"]
 mod file_diff;
+#[path = "fs/file_lock.rs"]
 pub(crate) mod file_lock;
+#[path = "web/gmail.rs"]
 mod gmail;
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+#[path = "ui/applet.rs"]
 pub mod applet;
+#[path = "ui/approval_request.rs"]
 mod approval_request;
 #[allow(dead_code)]
+#[path = "todo/goal.rs"]
 mod goal;
+#[path = "jobs/inflight.rs"]
 pub mod inflight;
+#[path = "ui/interactive.rs"]
 pub(crate) mod interactive;
+#[path = "devtools/jcode_docs.rs"]
 mod jcode_docs;
+#[path = "registry/load_tools.rs"]
 pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 #[cfg(unix)]
+#[path = "jobs/background_worker.rs"]
 pub mod background_worker;
 #[cfg(unix)]
+#[path = "jobs/detached_jobs.rs"]
 pub mod detached_jobs;
+#[path = "mcp/mcp.rs"]
 pub mod mcp;
+#[path = "ui/mcp_approval.rs"]
 mod mcp_approval;
+#[path = "assist/memory.rs"]
 mod memory;
+#[path = "assist/name_suggestions.rs"]
 mod name_suggestions;
+#[path = "fs/open.rs"]
 mod open;
+#[path = "ui/panel.rs"]
 mod panel;
+#[path = "fs/patch.rs"]
 mod patch;
+#[path = "fs/read.rs"]
 mod read;
 #[cfg(test)]
 pub(crate) use read::set_test_read_gate;
+#[path = "jobs/remote_exec.rs"]
 pub mod remote_exec;
+#[path = "mcp/sdk.rs"]
 pub(crate) mod sdk;
+#[path = "devtools/selfdev/mod.rs"]
 pub mod selfdev;
+#[path = "registry/serde_coerce.rs"]
 pub(crate) mod serde_coerce;
+#[path = "web/session_http.rs"]
 pub(crate) mod session_http;
+#[path = "search/session_search.rs"]
 mod session_search;
+#[path = "search/session_search_index.rs"]
 pub(crate) mod session_search_index;
+#[path = "ui/side_panel.rs"]
 mod side_panel;
+#[path = "assist/skill.rs"]
 mod skill;
+#[path = "todo/todo.rs"]
 mod todo;
+#[path = "ui/user_response.rs"]
 mod user_response;
+#[path = "web/webfetch.rs"]
 mod webfetch;
+#[path = "web/websearch.rs"]
 mod websearch;
+#[path = "registry/withheld_identity.rs"]
 mod withheld_identity;
+#[path = "fs/write.rs"]
 mod write;
 
 use withheld_identity::withheld_call_key;
@@ -94,13 +154,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[path = "name_policy.rs"]
+#[path = "registry/name_policy.rs"]
 mod name_policy;
 use name_policy::is_fixed_mcp_tool;
 pub(crate) use name_policy::{tool_name_is_allowed, tool_name_is_disabled};
 
+#[path = "registry/builtin.rs"]
 mod builtin;
+#[path = "bash/read_hint.rs"]
 mod read_hint;
+#[path = "registry/session_policy.rs"]
 mod session_policy;
 pub(crate) use session_policy::{
     SessionToolPolicyRegistration, register_session_tool_policy, session_allows_tool,
@@ -289,10 +352,10 @@ impl Clone for Registry {
     }
 }
 
-#[path = "registry_touched_paths.rs"]
+#[path = "registry/registry_touched_paths.rs"]
 mod registry_touched_paths;
 
-#[path = "registry_lifecycle.rs"]
+#[path = "registry/registry_lifecycle.rs"]
 mod registry_lifecycle;
 
 impl Registry {
@@ -1336,8 +1399,9 @@ impl Registry {
 }
 
 #[cfg(test)]
-#[path = "registry_mcp_allow_list_tests.rs"]
+#[path = "registry/registry_mcp_allow_list_tests.rs"]
 mod mcp_allow_list_tests;
 
 #[cfg(test)]
+#[path = "registry/tests.rs"]
 mod tests;

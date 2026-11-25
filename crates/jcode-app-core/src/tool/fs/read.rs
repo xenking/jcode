@@ -482,6 +482,7 @@ Image #{ordinal}"
 }
 
 #[cfg(test)]
+#[path = "read/tests.rs"]
 mod tests;
 
 fn is_binary_file(path: &Path) -> bool {
