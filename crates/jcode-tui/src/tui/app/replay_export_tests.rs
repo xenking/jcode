@@ -86,7 +86,7 @@ async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
         }],
     );
     let mut app = App::new_for_replay_silent(session);
-    assert!(app.session.messages().is_empty());
+    assert!(app.session.has_no_messages());
     assert!(app.display_messages.is_empty());
     assert!(!app.auto_poke_incomplete_todos);
     let widget = app.info_widget_data();

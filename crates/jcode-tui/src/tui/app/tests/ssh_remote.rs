@@ -58,7 +58,7 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
                 .content
                 .contains("conversation before cloud handoff")
         }));
-        assert!(app.session.messages().is_empty());
+        assert!(app.session.has_no_messages());
         assert!(app.session.working_dir().is_none());
         assert!(app.remote_startup_phase.is_some());
         assert_eq!(

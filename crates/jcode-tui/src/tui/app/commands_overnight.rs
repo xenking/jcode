@@ -520,7 +520,7 @@ fn overnight_fingerprint_for_app(
         task_active: task_summary.counts.active,
         task_blocked: task_summary.counts.blocked,
         task_validated: task_summary.validated,
-        session_message_count: app.session.messages().len(),
+        session_message_count: app.session.message_count(),
         review_notes_mtime: file_mtime_secs(&manifest.review_notes_path),
         validation_files: count_files(&manifest.validation_dir),
     }

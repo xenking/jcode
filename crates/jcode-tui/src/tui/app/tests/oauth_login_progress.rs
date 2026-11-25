@@ -62,11 +62,11 @@ fn oauth_login_progress_exchange_input_never_becomes_ai_prompt() {
     app.handle_debug_command("login-progress-fixture");
     app.handle_debug_command("login-progress-exchange-fixture");
     let before = app.display_messages.len();
-    let session_before = app.session.messages().len();
+    let session_before = app.session.message_count();
     app.set_input_for_test("http://localhost:1455/auth/callback?code=secret&state=secret");
     app.submit_input();
     assert_eq!(app.display_messages.len(), before);
-    assert_eq!(app.session.messages().len(), session_before);
+    assert_eq!(app.session.message_count(), session_before);
     assert!(matches!(
         app.pending_login,
         Some(PendingLogin::Exchanging { .. })
@@ -119,7 +119,7 @@ fn oauth_login_progress_enter_shortcuts_cannot_queue_or_launch_credentials() {
             app.queue_mode = queue;
             app.route_next_prompt_to_new_session = true;
             let before = app.display_messages.len();
-            let session_before = app.session.messages().len();
+            let session_before = app.session.message_count();
             app.set_input_for_test("http://localhost:1455/auth/callback?code=secret&state=secret");
             if alternate {
                 super::input::handle_alternate_enter(&mut app);
@@ -133,7 +133,7 @@ fn oauth_login_progress_enter_shortcuts_cannot_queue_or_launch_credentials() {
             assert!(app.queued_messages.is_empty());
             assert!(app.interleave_message.is_none());
             assert_eq!(app.display_messages.len(), before);
-            assert_eq!(app.session.messages().len(), session_before);
+            assert_eq!(app.session.message_count(), session_before);
             assert!(
                 app.route_next_prompt_to_new_session,
                 "login must not consume or use prompt routing"

@@ -801,7 +801,7 @@ impl crate::tui::TuiState for App {
         let message_count = if self.is_remote {
             self.display_messages.len()
         } else {
-            self.session.messages().len()
+            self.session.message_count()
         };
         let (compaction_count, compaction_summary_chars, is_compacting, compaction_fresh) =
             if self.is_remote {
@@ -897,7 +897,7 @@ impl crate::tui::TuiState for App {
                 0
             };
 
-            for msg in self.session.messages().iter().skip(skip) {
+            for msg in self.session.iter_messages().skip(skip) {
                 match msg.role {
                     Role::User => user_count += 1,
                     Role::Assistant => asst_count += 1,

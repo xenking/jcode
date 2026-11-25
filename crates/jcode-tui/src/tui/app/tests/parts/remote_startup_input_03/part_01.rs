@@ -181,8 +181,7 @@ fn test_terminal_file_drop_submits_as_user_input_instead_of_a_skill() {
     );
     let submitted = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("submitted file path message");
     assert!(matches!(
         submitted.content.as_slice(),
@@ -223,8 +222,7 @@ fn test_terminal_file_drop_with_followup_text_stays_normal_input() {
     );
     let submitted = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("submitted file prompt message");
     assert!(matches!(
         submitted.content.as_slice(),
@@ -574,7 +572,7 @@ fn test_system_reminder_goes_to_transcript_not_system_prompt() {
     let after = app.build_system_prompt_split(None);
     assert_eq!(before.static_part, after.static_part);
     assert_eq!(before.dynamic_part, after.dynamic_part);
-    let last = app.session.messages().last().expect("reminder message");
+    let last = app.session.last_message().expect("reminder message");
     assert_eq!(
         last.display_role,
         Some(crate::session::StoredDisplayRole::System)
@@ -586,10 +584,10 @@ fn test_system_reminder_goes_to_transcript_not_system_prompt() {
     assert!(text.starts_with("<system-reminder>"));
     assert!(text.contains("Continue where you left off."));
 
-    let count = app.session.messages().len();
+    let count = app.session.message_count();
     app.append_turn_system_reminder(Some("   ".to_string()));
     app.append_turn_system_reminder(None);
-    assert_eq!(app.session.messages().len(), count);
+    assert_eq!(app.session.message_count(), count);
 }
 
 #[test]

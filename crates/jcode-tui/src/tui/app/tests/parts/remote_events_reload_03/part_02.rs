@@ -316,7 +316,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             );
         }
     }
-    let compacted_count = app.session.messages().len();
+    let compacted_count = app.session.message_count();
     app.session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {

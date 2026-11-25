@@ -16,7 +16,7 @@ impl App {
     }
 
     pub(super) fn ensure_provider_messages_hydrated(&mut self) {
-        if !self.is_remote || !self.messages.is_empty() || self.session.messages().is_empty() {
+        if !self.is_remote || !self.messages.is_empty() || self.session.has_no_messages() {
             return;
         }
 
@@ -36,7 +36,7 @@ impl App {
         if self.is_remote {
             self.messages.len()
         } else {
-            self.session.messages().len()
+            self.session.message_count()
         }
     }
 
@@ -735,7 +735,7 @@ impl App {
                 }
             }
         } else {
-            for (index, msg) in self.session.messages().iter().enumerate().skip(scan_start) {
+            for (index, msg) in self.session.iter_messages().enumerate().skip(scan_start) {
                 match msg.role {
                     Role::User => {
                         for block in &msg.content {
@@ -871,7 +871,7 @@ impl App {
     /// Rebuild current session into a new one without tool calls
     pub(super) fn recover_session_without_tools(&mut self) {
         let old_session = self.session.clone();
-        let old_messages = old_session.messages().to_vec();
+        let old_messages = old_session.cloned_messages();
 
         let new_session_id = format!("session_recovery_{}", id::new_id("rec"));
         let mut new_session =

@@ -40,8 +40,7 @@ fn test_refactor_command_starts_refactor_loop() {
 
     let msg = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("missing refactor prompt");
     assert!(matches!(
         &msg.content[0],
@@ -67,7 +66,7 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
     assert_eq!(app.improve_mode, None);
     assert!(app.is_processing());
 
-    let msg = app.session.messages().last().expect("missing plan prompt");
+    let msg = app.session.last_message().expect("missing plan prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -98,7 +97,7 @@ fn test_plan_command_without_goal_plans_current_focus() {
     assert_eq!(app.improve_mode, None);
     assert!(app.is_processing());
 
-    let msg = app.session.messages().last().expect("missing plan prompt");
+    let msg = app.session.last_message().expect("missing plan prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -122,8 +121,7 @@ fn test_refactor_plan_command_is_plan_only_and_accepts_focus() {
 
     let msg = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("missing refactor plan prompt");
     assert!(matches!(
         &msg.content[0],
@@ -252,8 +250,7 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
 
         let msg = app
             .session
-            .messages()
-            .last()
+            .last_message()
             .expect("missing refactor resume prompt");
         assert!(matches!(
             &msg.content[0],

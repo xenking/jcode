@@ -435,7 +435,7 @@ mod tests {
         app.typing_scroll_lock = true;
         let session_id = app.session.id().to_owned();
         let display_count = app.display_messages.len();
-        let stored_count = app.session.messages().len();
+        let stored_count = app.session.message_count();
         freeze(&mut app);
         assert_eq!(app.input, "drft");
         assert_eq!(app.cursor_pos, 2);
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(app.session.id(), session_id);
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.display_messages.len(), display_count);
-        assert_eq!(app.session.messages().len(), stored_count);
+        assert_eq!(app.session.message_count(), stored_count);
         assert_eq!(app.pending_images.len(), 1);
         assert_eq!(app.pasted_contents, ["expanded paste"]);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));

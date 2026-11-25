@@ -425,7 +425,7 @@ mod tests {
                 projected.as_secs_f64() * 1000.0,
                 frame_elapsed.as_secs_f64() * 1000.0,
                 started.elapsed().as_secs_f64() * 1000.0,
-                session.messages().len(),
+                session.message_count(),
                 preview_count,
             );
             assert!(preview_count > 0);

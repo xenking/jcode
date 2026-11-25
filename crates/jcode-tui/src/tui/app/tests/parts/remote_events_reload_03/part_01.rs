@@ -1017,13 +1017,12 @@ fn test_remote_swarm_status_does_not_clobber_newer_session_history_on_disk() {
 
     let persisted = crate::session::Session::load(session_id).expect("reload persisted session");
     assert_eq!(
-        persisted.messages().len(),
+        persisted.message_count(),
         2,
         "remote UI persistence should not roll back newer server-written messages"
     );
     let last_text = persisted
-        .messages()
-        .last()
+        .last_message()
         .and_then(|msg| {
             msg.content.iter().find_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),

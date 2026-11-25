@@ -538,11 +538,9 @@ impl App {
     /// 2. Last assistant message ends with "[generation interrupted - server reloading]"
     pub(super) fn was_interrupted_by_reload(&self) -> bool {
         use crate::message::{ContentBlock, Role};
-        let messages = self.session.messages();
-        if messages.is_empty() {
+        let Some(last) = self.session.last_message() else {
             return false;
-        }
-        let last = &messages[messages.len() - 1];
+        };
         match last.role {
             Role::User => last.content.iter().any(|block| match block {
                 ContentBlock::ToolResult {

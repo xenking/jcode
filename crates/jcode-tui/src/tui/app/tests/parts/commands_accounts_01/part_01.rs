@@ -1074,7 +1074,7 @@ fn test_btw_command_asks_in_a_side_card_instead_of_forking() {
 }
 
 fn app_message_count(app: &App) -> usize {
-    app.session.messages().len() + app.display_messages().len()
+    app.session.message_count() + app.display_messages().len()
 }
 
 #[test]

@@ -693,8 +693,7 @@ impl App {
             return self.remote_context_tokens;
         }
         self.session
-            .messages()
-            .iter()
+            .iter_messages()
             .rev()
             .find_map(|message| message.token_usage.as_ref()?.prompt_tokens)
     }

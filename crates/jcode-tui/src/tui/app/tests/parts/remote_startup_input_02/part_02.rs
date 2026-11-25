@@ -9,7 +9,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
         ] {
             let succeeded = status == BackgroundTaskStatus::Completed;
             let mut app = create_test_app();
-            let initial_message_count = app.session.messages().len();
+            let initial_message_count = app.session.message_count();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let started = "**Background task started** `silent-task` · `silent work`";
             let notification = |message: String| crate::protocol::ServerEvent::Notification {
@@ -77,7 +77,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
             );
             assert_eq!(row.completed_at.is_some(), succeeded);
             assert!(app.display_messages().is_empty());
-            assert_eq!(app.session.messages().len(), initial_message_count);
+            assert_eq!(app.session.message_count(), initial_message_count);
             assert!(!app.pending_turn);
             assert!(!app.is_processing());
         }

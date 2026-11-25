@@ -784,7 +784,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     // then calls `strip_transcript_for_remote_client()` to release the backing
     // transcript (the server is the source of truth for the live transcript).
     // So the stripped `session.messages` is expected to be empty here.
-    assert_eq!(app.session.messages().len(), 0);
+    assert_eq!(app.session.message_count(), 0);
     assert_eq!(app.remote_session_id.as_deref(), Some(session_id));
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
 
@@ -1763,7 +1763,7 @@ fn test_debug_command_message_respects_queue_mode() {
     let mut app = create_test_app();
 
     // Test 1: When not processing, should submit directly
-    let initial_session_messages = app.session.messages().len();
+    let initial_session_messages = app.session.message_count();
     app.is_processing = false;
     let result = app.handle_debug_command("message:hello");
     assert!(
@@ -1776,11 +1776,10 @@ fn test_debug_command_message_respects_queue_mode() {
     assert!(app.pending_turn);
     assert_eq!(app.messages.len(), 0);
     assert_eq!(app.display_messages.len(), 1);
-    assert_eq!(app.session.messages().len(), initial_session_messages + 1);
+    assert_eq!(app.session.message_count(), initial_session_messages + 1);
     let submitted_message = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("submitted debug message should be stored");
     assert_eq!(submitted_message.role, crate::message::Role::User);
     assert_eq!(submitted_message.display_role, None);

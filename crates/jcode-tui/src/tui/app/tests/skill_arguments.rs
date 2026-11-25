@@ -15,7 +15,7 @@ fn skill_invocation_renders_arguments_in_the_model_transcript() {
     });
     app.input = "/parameterized 42 'project repo'".into();
     app.submit_input();
-    assert!(app.session.messages().iter().flat_map(|msg| &msg.content).any(|block| {
+    assert!(app.session.iter_messages().flat_map(|msg| &msg.content).any(|block| {
         matches!(block, ContentBlock::Text { text, .. } if text.contains("issue=42 repo=project repo first=42 second=project repo all=42 'project repo'"))
     }));
 }
@@ -82,8 +82,7 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
     assert!(app.is_processing, "the trailing prompt should start a turn");
     let submitted = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("submitted session message");
     assert!(matches!(
         submitted.content.as_slice(),

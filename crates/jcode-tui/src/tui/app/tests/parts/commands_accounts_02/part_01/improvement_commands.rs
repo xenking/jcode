@@ -15,8 +15,7 @@ fn test_improve_command_starts_improvement_loop() {
 
     let msg = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("missing improve prompt");
     assert!(matches!(
         &msg.content[0],
@@ -47,8 +46,7 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
 
     let msg = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("missing improve plan prompt");
     assert!(matches!(
         &msg.content[0],
@@ -164,8 +162,7 @@ fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
 
     let msg = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("missing improve stop prompt");
     assert!(matches!(
         &msg.content[0],
@@ -234,8 +231,7 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
 
         let msg = app
             .session
-            .messages()
-            .last()
+            .last_message()
             .expect("missing improve resume prompt");
         assert!(matches!(
             &msg.content[0],

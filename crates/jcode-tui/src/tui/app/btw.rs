@@ -515,7 +515,7 @@ impl App {
             let mut messages = session.messages_for_provider_uncached();
             if let Some(state) = session.compaction().as_deref() {
                 let mut compaction = crate::compaction::CompactionManager::new();
-                compaction.restore_persisted_stored_state_with(state, session.messages());
+                compaction.restore_persisted_stored_state_with(state, &session);
                 messages = compaction.messages_for_api_with_vision(
                     &messages,
                     crate::compaction::snapcompact_pages_usable(

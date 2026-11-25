@@ -55,7 +55,7 @@ fn test_handle_server_event_transcript_send_prefixes_user_message() {
     assert_eq!(last.content, "[transcription] dictated hello");
     assert!(app.messages.is_empty());
     assert!(matches!(
-        app.session.messages().last().and_then(|message| message.content.last()),
+        app.session.last_message().and_then(|message| message.content.last()),
         Some(crate::message::ContentBlock::Text { text, .. }) if text == "[transcription] dictated hello"
     ));
     assert!(

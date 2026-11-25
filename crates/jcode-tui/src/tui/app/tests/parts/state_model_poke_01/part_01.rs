@@ -49,15 +49,15 @@ fn test_strip_oversized_images_drops_oldest_first() {
             .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
         assert_eq!(stripped, 2);
         assert!(matches!(
-            app.session.messages()[0].content[0],
+            app.session.message_at(0).expect("transcript message").content[0],
             ContentBlock::Text { .. }
         ));
         assert!(matches!(
-            app.session.messages()[1].content[0],
+            app.session.message_at(1).expect("transcript message").content[0],
             ContentBlock::Text { .. }
         ));
         assert!(matches!(
-            app.session.messages()[2].content[0],
+            app.session.message_at(2).expect("transcript message").content[0],
             ContentBlock::Image { .. }
         ));
     });
@@ -89,7 +89,7 @@ fn test_rewind_truncates_provider_messages() {
     app.submit_input();
 
     assert_eq!(app.messages.len(), 2);
-    assert_eq!(app.session.messages().len(), 2);
+    assert_eq!(app.session.message_count(), 2);
     assert!(matches!(
         &app.messages[1].content[0],
         ContentBlock::Text { text, .. } if text == "msg-2"
@@ -239,7 +239,7 @@ fn test_rewind_autocomplete_uses_visible_message_count() {
         }],
     );
 
-    assert_eq!(app.session.messages().len(), 2);
+    assert_eq!(app.session.message_count(), 2);
     assert_eq!(app.session.visible_conversation_message_count(), 1);
 
     app.input = "/rewind ".to_string();
@@ -705,7 +705,7 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     app.scroll_offset = 25;
     app.auto_scroll_paused = true;
     crate::tui::ui::set_last_chat_viewport_height(30);
-    let session_messages_before = app.session.messages().len();
+    let session_messages_before = app.session.message_count();
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
@@ -721,7 +721,7 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     let spacer = &app.display_messages()[1];
     assert_eq!(spacer.role, "spacer");
     assert_eq!(spacer.content, "30", "spacer spans the viewport height");
-    assert_eq!(app.session.messages().len(), session_messages_before);
+    assert_eq!(app.session.message_count(), session_messages_before);
     assert_eq!(app.input(), "draft message", "input draft must survive");
     assert_eq!(app.queued_messages.len(), 1, "queue must survive");
     assert!(!app.diagram_focus);
@@ -806,7 +806,7 @@ fn test_cls_command_clears_view_but_keeps_context() {
     app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
     app.bump_display_messages_version();
     let session_id_before = app.session.id().to_owned();
-    let session_messages_before = app.session.messages().len();
+    let session_messages_before = app.session.message_count();
 
     app.input = "/cls".to_string();
     app.cursor_pos = app.input.len();
@@ -814,7 +814,7 @@ fn test_cls_command_clears_view_but_keeps_context() {
 
     assert!(app.display_messages().is_empty(), "view should be cleared");
     assert_eq!(
-        app.session.messages().len(),
+        app.session.message_count(),
         session_messages_before,
         "provider context must survive"
     );

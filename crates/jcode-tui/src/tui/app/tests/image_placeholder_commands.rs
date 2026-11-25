@@ -154,7 +154,7 @@ fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
         app.pending_images.is_empty(),
         "submitting must consume pending images"
     );
-    let submitted = app.session.messages().last().expect("submitted message");
+    let submitted = app.session.last_message().expect("submitted message");
     assert!(
         matches!(submitted.content.first(), Some(ContentBlock::Image { .. })),
         "image block must be attached"

@@ -219,7 +219,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 Some(parent_id.clone()),
                 Some(title.to_string()),
             );
-            child.replace_messages(parent.messages().to_vec());
+            child.replace_messages(parent.cloned_messages());
             child.adopt_compaction(Some(crate::session::StoredCompactionState {
                 summary_text: "stale compaction".to_string(),
                 plan_context: None,
@@ -242,8 +242,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
 
             let prepared = crate::session::Session::load(&child_id).expect("reload child session");
             let transcript = prepared
-                .messages()
-                .iter()
+                .iter_messages()
                 .flat_map(|msg| msg.content.iter())
                 .filter_map(|block| match block {
                     ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -588,7 +587,7 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             app.display_messages()[0].content,
             "persisted transcript should render once"
         );
-        assert!(app.session.messages().is_empty());
+        assert!(app.session.has_no_messages());
         assert!(app.session.compaction().is_none());
     });
 }
@@ -621,7 +620,7 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
         crate::env::remove_var("JCODE_RELOAD_FAST_START");
         let loaded = crate::session::Session::load_for_remote_startup(session_id)
             .expect("load persisted DM");
-        assert_eq!(loaded.messages().len(), 1);
+        assert_eq!(loaded.message_count(), 1);
         assert_eq!(crate::session::render_messages(&loaded).len(), 1);
         let app = App::new_for_remote_with_options(Some(session_id.to_string()), false);
         let message = app.display_messages().first().expect("restored DM");

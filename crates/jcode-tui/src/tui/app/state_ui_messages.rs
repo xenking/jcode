@@ -578,13 +578,12 @@ impl App {
         let Ok(latest_session) = crate::session::Session::load(self.session.id()) else {
             return false;
         };
-        if latest_session.messages().len() <= self.session.messages().len() {
+        if latest_session.message_count() <= self.session.message_count() {
             return false;
         }
 
-        let appended: Vec<DisplayMessage> = latest_session.messages()
-            [self.session.messages().len()..]
-            .iter()
+        let appended: Vec<DisplayMessage> = latest_session
+            .iter_messages_from(self.session.message_count())
             .filter_map(display_message_from_stored_message)
             .collect();
         self.session = latest_session;

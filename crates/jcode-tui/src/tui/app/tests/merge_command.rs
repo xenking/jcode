@@ -10,7 +10,7 @@ fn merge_command_starts_synthetic_turn() {
         app.display_messages().last().unwrap().content,
         super::commands::merge_launch_notice(false)
     );
-    let message = app.session.messages().last().unwrap();
+    let message = app.session.last_message().unwrap();
     assert!(message.content.iter().any(|block| matches!(
         block,
         crate::message::ContentBlock::Text { text, .. }
@@ -153,7 +153,7 @@ fn merge_remote_release_command_starts_synthetic_turn() {
         app.display_messages().last().unwrap().content,
         super::commands::merge_remote_release_launch_notice(false)
     );
-    let message = app.session.messages().last().unwrap();
+    let message = app.session.last_message().unwrap();
     assert!(message.content.iter().any(|block| matches!(
         block,
         crate::message::ContentBlock::Text { text, .. }

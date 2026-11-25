@@ -1138,11 +1138,11 @@ fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
                 .contains("pinned-probe")
         );
     }
-    let announcements = app.session.messages().len();
+    let announcements = app.session.message_count();
     app.input = "/mode pinned-probe".into();
     app.submit_input();
     assert_eq!(
-        app.session.messages().len(),
+        app.session.message_count(),
         announcements,
         "re-pinning is idempotent"
     );
@@ -1194,8 +1194,7 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
     );
     let submitted = app
         .session
-        .messages()
-        .last()
+        .last_message()
         .expect("submitted session message");
     assert_eq!(submitted.role, Role::User);
     let images = app.session.session_images();
@@ -1228,13 +1227,13 @@ fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
     });
     app.input = "/definitely-not-a-real-skill".to_string();
     app.cursor_pos = app.input.len();
-    let session_messages_before = app.session.messages().len();
+    let session_messages_before = app.session.message_count();
 
     app.submit_input();
 
     assert!(!app.is_processing, "unknown skill must not start a turn");
     assert_eq!(
-        app.session.messages().len(),
+        app.session.message_count(),
         session_messages_before,
         "no message should be sent to the model"
     );
@@ -1263,13 +1262,13 @@ fn endorsed_but_not_installed_skill_invocation_surfaces_install_hint() {
 
     app.input = format!("/{}", endorsed.name);
     app.cursor_pos = app.input.len();
-    let session_messages_before = app.session.messages().len();
+    let session_messages_before = app.session.message_count();
 
     app.submit_input();
 
     assert!(!app.is_processing, "missing skill must not start a turn");
     assert_eq!(
-        app.session.messages().len(),
+        app.session.message_count(),
         session_messages_before,
         "no message should be sent to the model"
     );

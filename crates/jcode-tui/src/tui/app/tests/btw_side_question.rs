@@ -19,11 +19,10 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
                 cache_control: None,
             }],
         );
-        let parent_message_count = app.session.messages().len();
+        let parent_message_count = app.session.message_count();
         let parent_ids: Vec<String> = app
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .map(|message| message.id.clone())
             .collect();
 
@@ -69,14 +68,13 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
 
         // The parent session is untouched: same rows, same ids, no save.
         assert_eq!(
-            app.session.messages().len(),
+            app.session.message_count(),
             parent_message_count,
             "a side question appends nothing to the session"
         );
         assert_eq!(
             app.session
-                .messages()
-                .iter()
+                .iter_messages()
                 .map(|message| message.id.clone())
                 .collect::<Vec<_>>(),
             parent_ids
@@ -87,7 +85,7 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
 #[test]
 fn btw_stream_paints_the_answer_in_the_card_not_the_transcript() {
     let mut app = create_test_app();
-    let transcript_before = app.session.messages().len() + app.display_messages().len();
+    let transcript_before = app.session.message_count() + app.display_messages().len();
 
     assert!(app.start_btw("why is the socket hot?".to_string()));
     assert!(
@@ -114,7 +112,7 @@ fn btw_stream_paints_the_answer_in_the_card_not_the_transcript() {
         view.lines
     );
     assert_eq!(
-        app.session.messages().len() + app.display_messages().len(),
+        app.session.message_count() + app.display_messages().len(),
         transcript_before,
         "streaming an answer posts no transcript row"
     );
@@ -269,7 +267,7 @@ fn btw_hidden_child_session_carries_the_context_but_stays_off_the_list() {
             "the parent's provider session must not be reused"
         );
         assert!(
-            child.messages().iter().any(|message| message
+            child.iter_messages().any(|message| message
                 .content
                 .iter()
                 .any(|block| matches!(block, ContentBlock::Text { text, .. }
@@ -377,7 +375,7 @@ fn btw_history_reopens_without_a_turn_and_queues_follow_up_in_the_same_child() {
 #[test]
 fn btw_server_deltas_stream_into_the_card_and_end_the_turn() {
     let mut app = create_test_app();
-    let parent_messages_before = app.session.messages().len();
+    let parent_messages_before = app.session.message_count();
     app.btw = Some(crate::tui::app::btw::BtwCard {
         question: "why?".to_string(),
         child: Some("child-session".to_string()),
@@ -412,7 +410,7 @@ fn btw_server_deltas_stream_into_the_card_and_end_the_turn() {
     assert!(app.apply_btw_server_event(crate::protocol::ServerEvent::Done { id: 7 }));
     assert!(!app.btw_card().expect("card").streaming);
     assert_eq!(
-        app.session.messages().len(),
+        app.session.message_count(),
         parent_messages_before,
         "the parent stays untouched"
     );
@@ -513,8 +511,7 @@ fn btw_remote_child_copies_the_conversation_the_user_is_looking_at() {
             .expect("hidden child session");
         let child = Session::load(&child_id).expect("child session file");
         let transcript = child
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.clone()),

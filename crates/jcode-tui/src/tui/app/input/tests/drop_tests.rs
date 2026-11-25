@@ -116,7 +116,7 @@ fn issue_1206_local_submit_and_bracketed_paste_both_resolve_paths() {
     assert!(std::path::Path::new(&app.input).is_file());
     app.set_input_for_test(escaped);
     app.submit_input();
-    let message = app.session.messages().last().unwrap();
+    let message = app.session.last_message().unwrap();
     assert!(
         matches!(message.content.as_slice(), [ContentBlock::Text { text, .. }] if std::path::Path::new(text).is_file())
     );

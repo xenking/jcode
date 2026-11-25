@@ -180,7 +180,7 @@ fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<Stor
     // user's `reasoning_display` mode, so strip reasoning up front rather than
     // letting a `Full` display preference leak hidden reasoning to the judge.
     let mut visible_parent = parent_session.clone();
-    let mut messages = visible_parent.messages().to_vec();
+    let mut messages = visible_parent.cloned_messages();
     for message in &mut messages {
         message.content.retain(|block| {
             !matches!(
@@ -688,7 +688,7 @@ fn clone_session_for_review(
 ) -> anyhow::Result<(String, String)> {
     let parent_session_id = current_feedback_target_session_id(app);
     let mut child = Session::create(Some(parent_session_id), Some(session_title.to_string()));
-    child.replace_messages(app.session.messages().to_vec());
+    child.replace_messages(app.session.cloned_messages());
     child.inherit_from(
         &app.session,
         Inherit::COMPACTION | Inherit::WORKING_DIR | Inherit::SUBAGENT_MODEL,

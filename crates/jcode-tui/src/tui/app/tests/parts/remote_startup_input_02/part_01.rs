@@ -1447,7 +1447,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         let child_todos = crate::todo::load_todos(&child_id).expect("load child todos");
 
         assert_eq!(child.parent_id(), Some(app.session.id()));
-        assert!(child.messages().is_empty());
+        assert!(child.has_no_messages());
         assert_eq!(child.compaction().as_deref(), Some(&transfer_compaction));
         assert_eq!(child.model(), Some("test-model"));
         assert_eq!(child.provider_key(), Some("test-provider"));

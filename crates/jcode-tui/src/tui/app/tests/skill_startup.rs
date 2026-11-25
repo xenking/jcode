@@ -73,7 +73,7 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
             ..app.session.workspace()
         });
         assert!(app.remote_skills.is_empty());
-        assert!(app.session.messages().is_empty());
+        assert!(app.session.has_no_messages());
         assert_eq!(
             startup_skill_commands(&mut app, "/"),
             vec!["/startup-global"]

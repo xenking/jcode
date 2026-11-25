@@ -21,11 +21,11 @@ fn ssh_loop_turn_end_never_reads_or_acknowledges_laptop_todo_state() {
     )
     .unwrap();
     let local_id = app.session.id().to_owned();
-    let messages = app.session.messages().to_vec();
+    let messages = app.session.cloned_messages();
     assert!(!app.schedule_turn_end_followups_after_response(true));
     assert!(!app.schedule_auto_poke_followup_if_needed());
     assert_eq!(app.session.id(), local_id);
-    assert_eq!(app.session.messages().len(), messages.len());
+    assert_eq!(app.session.message_count(), messages.len());
     assert!(!app.has_queued_followups());
     assert_eq!(
         crate::todo::load_gate_observations("session_server_owned_loop").unwrap(),

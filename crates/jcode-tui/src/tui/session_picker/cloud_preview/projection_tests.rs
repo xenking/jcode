@@ -236,8 +236,8 @@ fn oversized_remote_snapshot_is_bounded_valid_and_keeps_late_journal_updates() {
     assert!(first_preview.stdout.len() < 2 * 1024 * 1024);
     let (first, _) = parse_preview(&first_preview.stdout)
         .expect("oversized individual message projection must remain valid");
-    assert_eq!(first.messages().len(), 1);
-    assert_eq!(first.messages()[0].id, "huge");
+    assert_eq!(first.message_count(), 1);
+    assert_eq!(first.message_at(0).expect("transcript message").id, "huge");
     let mut journal = std::fs::File::create(sessions.join(format!("{id}.journal.jsonl"))).unwrap();
     for i in 0..100 {
         writeln!(journal, "{}", serde_json::json!({
@@ -251,8 +251,8 @@ fn oversized_remote_snapshot_is_bounded_valid_and_keeps_late_journal_updates() {
     let (loaded, _) =
         parse_preview(&preview.stdout).expect("projection must remain valid Session JSON");
     assert_eq!(loaded.title(), Some("Late journal title 99"));
-    assert_eq!(loaded.messages().len(), 80);
-    assert_eq!(loaded.messages().last().unwrap().id, "late-99");
+    assert_eq!(loaded.message_count(), 80);
+    assert_eq!(loaded.last_message().unwrap().id, "late-99");
     assert_eq!(loaded.migration_epoch(), 19);
     assert!(build_messages_preview(&loaded).iter().any(|m| {
         m.content
