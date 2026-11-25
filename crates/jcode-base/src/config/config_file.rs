@@ -492,7 +492,7 @@ fn migrate_line_once<F: Fn(&str) -> Option<String>>(migration: LineMigration<F>)
     }
     match std::fs::write(&path, new_content) {
         Ok(()) => {
-            Config::invalidate_cache();
+            super::invalidate_config_cache();
             write_marker();
             crate::logging::info(migration.migrated);
             true

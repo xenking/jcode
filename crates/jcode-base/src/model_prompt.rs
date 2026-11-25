@@ -29,7 +29,7 @@ impl ModelPrompt {
 fn rule_text(rule: &ModelPromptConfig) -> Option<String> {
     let text = match rule.instructions_file.as_deref() {
         Some(path) => {
-            let path = crate::agent_profile::expand_home(path);
+            let path = crate::home_path::expand_home(path);
             match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) => {

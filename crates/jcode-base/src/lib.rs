@@ -56,6 +56,7 @@ pub mod gmail;
 pub mod goal;
 pub mod google_calendar;
 pub mod harness_detect;
+pub mod home_path;
 pub mod hooks;
 pub mod id;
 pub mod image_normalize;

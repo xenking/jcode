@@ -136,16 +136,6 @@ fn normalize(name: &str) -> String {
     jcode_tool_types::resolve_tool_name(name.trim()).to_string()
 }
 
-/// Expand a leading `~/` to the home directory.
-pub fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(path)
-}
-
 /// Every profile name a spawn may request, sorted.
 pub fn available_profile_names(agents: &AgentsConfig) -> Vec<String> {
     let mut all: Vec<String> = BUILTIN_PROFILE_NAMES
@@ -177,7 +167,7 @@ pub fn resolve_profile(name: &str, agents: &AgentsConfig) -> Result<ResolvedAgen
     };
     let instructions = match merged.instructions_file.as_deref() {
         Some(path) => {
-            let path = expand_home(path);
+            let path = crate::home_path::expand_home(path);
             Some(std::fs::read_to_string(&path).map_err(|error| {
                 format!(
                     "Agent profile {name:?} instructions_file {} is unreadable: {error}",
