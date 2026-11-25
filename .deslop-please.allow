@@ -426,7 +426,6 @@ wide-directory crates/jcode-tui-markdown/src/
 wide-directory crates/jcode-tui-mermaid/src/
 wide-directory crates/jcode-tui/src/tui/
 wide-directory crates/jcode-tui/src/tui/app/
-wide-directory crates/jcode-tui/src/tui/app/tests/
 wide-directory crates/jcode-voice/src/
 wide-directory src/cli/
 wide-directory tests/e2e/
