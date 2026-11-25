@@ -36,6 +36,8 @@ struct Snapshot {
     #[serde(default)]
     model_scoped: Vec<(String, f32, Option<String>)>,
     extra_usage_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credits: Option<jcode_usage_types::CreditsReport>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -48,9 +50,9 @@ struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     imported_reset: Option<ImportedReset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    omp_probe: Option<OmpProbe>,
+    import_probe: Option<ImportProbe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    omp_suppress_until_ms: Option<i64>,
+    import_suppress_until_ms: Option<i64>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -71,30 +73,30 @@ struct ImportedReset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct OmpProbe {
+struct ImportProbe {
     token_hash: String,
     attempted_ms: i64,
 }
 
 /// Rate-limit identity probes across CLI and desktop processes.
-pub(super) fn begin_omp_probe(key: &str, token: &str) -> bool {
+pub(super) fn begin_import_probe(key: &str, token: &str) -> bool {
     let token_hash = token_hash(token);
     let mut allowed = false;
     update(key, |entry| {
         if entry
-            .omp_suppress_until_ms
+            .import_suppress_until_ms
             .is_some_and(|until| until > now_ms())
         {
             return;
         }
-        if entry.omp_probe.as_ref().is_some_and(|p| {
+        if entry.import_probe.as_ref().is_some_and(|p| {
             p.token_hash == token_hash
                 && p.attempted_ms <= now_ms()
                 && age(p.attempted_ms) < Duration::from_secs(5 * 60)
         }) {
             return;
         }
-        entry.omp_probe = Some(OmpProbe {
+        entry.import_probe = Some(ImportProbe {
             token_hash,
             attempted_ms: now_ms(),
         });
@@ -115,7 +117,7 @@ pub(super) fn store_imported_reset_status(
 ) {
     update(key, |entry| {
         if entry
-            .omp_suppress_until_ms
+            .import_suppress_until_ms
             .is_some_and(|until| until > now_ms())
         {
             return;
@@ -239,7 +241,9 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
     // Drop logins whose only data is long expired.
     map.retain(|_, entry| {
         entry.adaptive_interval_secs > 0
-            || entry.omp_suppress_until_ms.is_some_and(|at| at > now_ms())
+            || entry
+                .import_suppress_until_ms
+                .is_some_and(|at| at > now_ms())
             || entry.retry_not_before_ms.is_some_and(|at| at > now_ms())
             || entry
                 .last_good
@@ -280,6 +284,7 @@ fn to_usage(snapshot: &Snapshot, last_error: Option<String>) -> UsageData {
             )
             .collect(),
         extra_usage_enabled: snapshot.extra_usage_enabled,
+        credits: snapshot.credits.clone(),
         fetched_at: Some(instant_for(snapshot.fetched_unix_ms)),
         last_success_at: Some(instant_for(snapshot.fetched_unix_ms)),
         refresh_after: None,
@@ -469,6 +474,9 @@ pub(super) fn store_response_limits(
             seven_day_resets_at: seven.map(|value| value.1),
             seven_observed_ms: seven_time,
             extra_usage_enabled,
+            // Response headers carry no credit figures. Keep what the last
+            // full response said.
+            credits: previous.and_then(|good| good.credits.clone()),
             ..Default::default()
         };
         // Genuine changes remain immediately visible to other processes; an
@@ -551,6 +559,7 @@ pub(super) fn store_success_with_reset_status(
             .map(|w| (w.model_name.clone(), w.utilization, w.resets_at.clone()))
             .collect(),
         extra_usage_enabled: data.extra_usage_enabled,
+        credits: data.credits.clone(),
     };
     let entry = update(key, |entry| {
         // Migrate an old rate-limit record before clearing its error.
@@ -690,9 +699,9 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
             entry.reset_status = None;
             entry.reset_observed_ms = None;
             entry.imported_reset = None;
-            // OMP may preserve a pre-redemption grant list while refreshing its
+            // The importing tool may preserve a pre-redemption grant list while refreshing its
             // usage timestamp. Do not resurrect it after a local redemption.
-            entry.omp_suppress_until_ms =
+            entry.import_suppress_until_ms =
                 Some(now_ms().saturating_add(LAST_GOOD_MAX_AGE.as_millis() as i64));
             if entry.adaptive_interval_secs == 0
                 && entry.error.as_deref().is_some_and(is_rate_limit)
@@ -713,15 +722,15 @@ mod tests {
         with_home(|| {
             let key = "label:import-fixture";
             store_success(key, &sample());
-            assert!(begin_omp_probe(key, "token-a"));
-            assert!(!begin_omp_probe(key, "token-a"));
+            assert!(begin_import_probe(key, "token-a"));
+            assert!(!begin_import_probe(key, "token-a"));
             let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
             store_imported_reset_status(key, "token-a", status.clone(), now_ms());
             assert_eq!(imported_reset_status(key, "token-a"), Some(status.clone()));
             assert_eq!(imported_reset_status(key, "token-b"), None);
             invalidate(|candidate| candidate == key);
             assert_eq!(imported_reset_status(key, "token-a"), None);
-            assert!(!begin_omp_probe(key, "token-a"));
+            assert!(!begin_import_probe(key, "token-a"));
             // A profile request already in flight must not restore old grants.
             store_imported_reset_status(key, "token-a", status, now_ms());
             assert_eq!(imported_reset_status(key, "token-a"), None);

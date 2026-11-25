@@ -6,7 +6,7 @@ use super::{
 use serde::Deserialize;
 use std::time::Instant;
 
-pub(super) fn mask_email(email: &str) -> String {
+pub fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
     let Some((local, domain)) = trimmed.split_once('@') else {
         return trimmed.to_string();
@@ -66,8 +66,14 @@ pub(super) fn openai_provider_display_name(
     if account_count <= 1 {
         format!("OpenAI (ChatGPT){}", email_suffix)
     } else {
+        // The user's name, or the email, plus the plan. The internal label is
+        // the last resort, never the only thing shown.
+        let who = crate::auth::account_identity::oauth_identity("openai", label).map_or_else(
+            || format!("{label}{email_suffix}"),
+            |identity| identity.display_name,
+        );
         let active_marker = if is_active { " ✦" } else { "" };
-        format!("OpenAI - {}{}{}", label, email_suffix, active_marker)
+        format!("OpenAI - {who}{active_marker}")
     }
 }
 
@@ -88,6 +94,8 @@ pub struct UsageData {
     pub model_scoped: Vec<ModelScopedUsageWindow>,
     /// Whether extra usage (long context, etc.) is enabled
     pub extra_usage_enabled: bool,
+    /// Credit balance and spend, for accounts paid in credits or dollars.
+    pub credits: Option<jcode_usage_types::CreditsReport>,
     /// Last fetch time
     pub fetched_at: Option<Instant>,
     /// Last successful provider fetch, retained when a later fetch fails.
@@ -219,6 +227,16 @@ pub(super) struct UsageWindow {
 #[derive(Deserialize, Debug)]
 pub(super) struct ExtraUsageResponse {
     pub(super) is_enabled: Option<bool>,
+    /// Monthly allowance in minor currency units.
+    #[serde(default)]
+    pub(super) monthly_limit: Option<f64>,
+    #[serde(default)]
+    pub(super) used_credits: Option<f64>,
+    #[serde(default)]
+    pub(super) currency: Option<String>,
+    /// Digits after the decimal point of the minor unit. Cents when absent.
+    #[serde(default)]
+    pub(super) decimal_places: Option<u32>,
 }
 
 // ─── Combined usage for /usage command ───────────────────────────────────────
@@ -289,7 +307,7 @@ impl OpenAIUsageData {
 
     pub fn exhausted(&self) -> bool {
         // A spent plan window funded by paid credits still serves requests
-        // (Codex CLI and omp keep using it). Live usage_limit_reached errors
+        // (the Codex CLI keeps using it). Live usage_limit_reached errors
         // stay authoritative for blocking.
         if self.credit_overage {
             return false;

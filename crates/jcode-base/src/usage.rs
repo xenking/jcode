@@ -9,7 +9,7 @@ pub use account_fetch::fetch_oauth_account_usage;
 mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
-mod omp_banked;
+mod imported_banked;
 pub(crate) use anthropic_fable_reset::{auto_reset_fable_usage, auto_reset_fable_usage_with};
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
@@ -18,6 +18,7 @@ mod api_keys;
 mod banked;
 pub use banked::{AccountBankedResets, cached_account_banked_resets};
 mod cache;
+mod credits;
 mod disk_cache;
 mod display;
 mod flight;
@@ -62,10 +63,14 @@ pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
     cached_account_usage_windows, cached_anthropic_usage_for_label,
 };
+pub use credits::credits_line;
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
 };
-pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{
+    AccountIdentity, CredentialKind, CreditUnit, CreditsReport, CreditsState, OpenAiResetCredits,
+    ProviderUsage, ProviderUsageProgress, SpendCap, UsageLimit,
+};
 pub use model::*;
 pub use openai_reset::{
     OpenAiUsageResetOutcome, PendingOpenAiUsageReset, consume_openai_usage_reset,
@@ -260,14 +265,15 @@ fn usage_data_from_response(data: &UsageResponse) -> UsageData {
             .as_ref()
             .and_then(|w| w.utilization)
             .map(usage_percent_to_ratio)
-            .unwrap_or(0.0),
+            .unwrap_or(-1.0),
         five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
         seven_day: data
             .seven_day
             .as_ref()
             .and_then(|w| w.utilization)
             .map(usage_percent_to_ratio)
-            .unwrap_or(0.0),
+            // A window the response does not report is unknown, never 0% used.
+            .unwrap_or(-1.0),
         seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
         seven_day_opus: data
             .seven_day_opus
@@ -292,6 +298,10 @@ fn usage_data_from_response(data: &UsageResponse) -> UsageData {
             .as_ref()
             .and_then(|e| e.is_enabled)
             .unwrap_or(false),
+        credits: data
+            .extra_usage
+            .as_ref()
+            .and_then(credits::claude_extra_usage_credits),
         fetched_at: Some(Instant::now()),
         last_success_at: Some(Instant::now()),
         refresh_after: None,
@@ -479,6 +489,24 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
         });
     if let Some((label, mut details)) = oauth_details {
         details.push(("Account label".to_string(), label.to_string()));
+        let provider = if source_key.starts_with("openai:") {
+            "openai"
+        } else {
+            "claude"
+        };
+        report.account = auth::account_identity::oauth_identity(provider, label);
+        // An account paid in credits that reports neither limits nor a balance
+        // is unreadable. Say so instead of leaving it to read as an empty meter.
+        if report.error.is_none()
+            && report.limits.is_empty()
+            && report.credits.is_none()
+            && report
+                .account
+                .as_ref()
+                .is_some_and(|account| account.kind == jcode_usage_types::CredentialKind::Credits)
+        {
+            report.credits = Some(jcode_usage_types::CreditsReport::default());
+        }
         // Replace rather than duplicate local values if a caller reattaches.
         report
             .extra_info
@@ -685,23 +713,23 @@ fn enqueue_anthropic_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provide
 
     let active_label = auth::claude::active_account_label();
     let account_count = accounts.len();
+    let identities = auth::account_identity::oauth_identities();
     for account in accounts {
+        let identity = identities
+            .iter()
+            .find(|identity| identity.provider == "claude" && identity.label == account.label);
         let label = if account_count > 1 {
             let active_marker = if active_label.as_deref() == Some(&account.label) {
                 " ✦"
             } else {
                 ""
             };
-            let email_suffix = account
-                .email
-                .as_deref()
-                .map(mask_email)
-                .map(|m| format!(" ({})", m))
-                .unwrap_or_default();
-            format!(
-                "Anthropic - {}{}{}",
-                account.label, email_suffix, active_marker
-            )
+            // The user's name, or organization or email, plus the plan. The
+            // internal id is the last resort, never the only thing shown.
+            let who = identity.map_or(account.label.as_str(), |identity| {
+                identity.display_name.as_str()
+            });
+            format!("Anthropic - {who}{active_marker}")
         } else {
             let email_suffix = account
                 .email

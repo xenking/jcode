@@ -276,6 +276,79 @@ impl Measured for CachedMeasure {
     }
 }
 
+/// A saved login or API key and how it is billed by default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedAccount {
+    /// `provider:label`, the id `[[routing.accounts]]` uses.
+    pub id: String,
+    /// What the user would recognise: their name for it, else email or
+    /// organization, plus the plan.
+    pub display_name: String,
+    /// Subscription for OAuth plans, metered for API keys, credits for
+    /// credit-funded plans, until `[[routing.accounts]]` says otherwise.
+    pub kind: AccountKind,
+    /// Whether `[[routing.accounts]]` already lists it.
+    pub routed: bool,
+}
+
+fn credential_kind(kind: jcode_usage_types::CredentialKind) -> AccountKind {
+    match kind {
+        jcode_usage_types::CredentialKind::Subscription => AccountKind::Subscription,
+        jcode_usage_types::CredentialKind::Credits => AccountKind::Credits,
+        jcode_usage_types::CredentialKind::Metered => AccountKind::Metered,
+    }
+}
+
+/// Every saved OAuth login and labelled API key, with the kind it gets when
+/// `[[routing.accounts]]` does not say. A listed account keeps its configured
+/// kind, so this is only the default for the ones that are not listed.
+pub fn saved_accounts(routing: &RoutingConfig, keys: &[ProviderKeys]) -> Vec<SavedAccount> {
+    let configured: BTreeMap<AccountId, AccountKind> = routing
+        .accounts
+        .iter()
+        .filter_map(|account| Some((AccountId::parse(&account.id)?, account.kind)))
+        .collect();
+    let mut saved = Vec::new();
+    for identity in crate::auth::account_identity::oauth_identities() {
+        let Some(id) = AccountId::parse(&format!("{}:{}", identity.provider, identity.label))
+        else {
+            continue;
+        };
+        saved.push(SavedAccount {
+            display_name: identity.display_name,
+            kind: configured
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| credential_kind(identity.kind)),
+            routed: configured.contains_key(&id),
+            id: id.to_string(),
+        });
+    }
+    for provider in keys {
+        for account in &provider.accounts {
+            let kind = crate::auth::account_identity::default_kind(&provider.provider, None, true);
+            saved.push(SavedAccount {
+                display_name: account.label.clone().map_or_else(
+                    || provider.provider.clone(),
+                    |label| format!("{} · {label} · API key", provider.provider),
+                ),
+                kind: configured
+                    .get(&account.id)
+                    .copied()
+                    .unwrap_or_else(|| credential_kind(kind)),
+                routed: configured.contains_key(&account.id),
+                id: account.id.to_string(),
+            });
+        }
+    }
+    saved
+}
+
+/// [`saved_accounts`] for the loaded config.
+pub fn current_saved_accounts() -> Vec<SavedAccount> {
+    saved_accounts(&crate::config::config().routing, &provider_keys())
+}
+
 /// The view of the loaded config and the cached meters at `now` (unix seconds).
 pub fn current(now: i64) -> RoutingView {
     let config = crate::config::config();

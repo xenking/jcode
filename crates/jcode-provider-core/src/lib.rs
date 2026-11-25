@@ -1297,6 +1297,80 @@ pub fn oauth_account_label(method: &str) -> Option<&str> {
     Some(label)
 }
 
+/// Marks a route's detail line as the catalog's own account identity, never a
+/// later diagnostic: `account <label> [<display name>] · <email> · <note>`.
+const ACCOUNT_IDENTITY_PREFIX: &str = "account ";
+
+/// What a saved-account route says about its login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteAccountIdentity<'a> {
+    /// Internal label (`claude-fox`), the part after `@` in the api method.
+    pub label: &'a str,
+    /// What to show instead of the label: the user's name for the login, else
+    /// its organization or email, plus the plan (`team · Max 20x`).
+    pub display_name: Option<&'a str>,
+    /// Text after the identity: email first, then notes.
+    pub rest: &'a str,
+}
+
+impl<'a> RouteAccountIdentity<'a> {
+    /// The name a person recognises this login by.
+    pub fn title(&self) -> &'a str {
+        self.display_name.unwrap_or(self.label)
+    }
+
+    /// The email, when the first segment after the identity is one.
+    pub fn email(&self) -> Option<&'a str> {
+        self.rest
+            .split(" · ")
+            .next()
+            .filter(|email| email.contains('@') && !email.chars().any(char::is_whitespace))
+    }
+}
+
+/// The identity text a catalog puts in front of an account route's detail.
+/// `display_name` is left out when it only repeats the label.
+pub fn route_account_identity(label: &str, display_name: Option<&str>) -> String {
+    match display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != label)
+    {
+        Some(name) => format!(
+            "{ACCOUNT_IDENTITY_PREFIX}{label} [{}]",
+            name.replace('[', "(").replace(']', ")")
+        ),
+        None => format!("{ACCOUNT_IDENTITY_PREFIX}{label}"),
+    }
+}
+
+/// Read the identity back from a route's detail. Scope tags such as
+/// `[global] ` are ignored. Older catalogs without a display name still parse.
+pub fn parse_route_account_identity(detail: &str) -> Option<RouteAccountIdentity<'_>> {
+    let detail = detail
+        .trim_start_matches("[global] ")
+        .trim_start_matches("[session] ");
+    let rest = detail.strip_prefix(ACCOUNT_IDENTITY_PREFIX)?;
+    let (label, after) = match rest.find([' ', '[']) {
+        Some(end) => rest.split_at(end),
+        None => (rest, ""),
+    };
+    if label.is_empty() {
+        return None;
+    }
+    let (display_name, after) = match after
+        .strip_prefix(" [")
+        .and_then(|tail| tail.split_once(']'))
+    {
+        Some((name, tail)) => (Some(name).filter(|name| !name.is_empty()), tail),
+        None => (None, after),
+    };
+    Some(RouteAccountIdentity {
+        label,
+        display_name,
+        rest: after.strip_prefix(" · ").unwrap_or(after),
+    })
+}
+
 impl ModelRouteApiMethod {
     /// The route-vocabulary api_method for a canonical dual-auth route.
     pub fn from_auth_route(route: crate::auth_mode::AuthRoute) -> Self {

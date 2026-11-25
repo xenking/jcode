@@ -44,3 +44,42 @@ fn invalid_or_non_oauth_account_methods_are_not_accepted() {
         assert_eq!(oauth_account_label(method), None, "{method:?}");
     }
 }
+
+#[test]
+fn account_identity_carries_the_name_a_person_recognises() {
+    let detail = format!(
+        "{} · t***m@example.com · requires extra usage",
+        route_account_identity("claude-otter", Some("team · Max 20x"))
+    );
+    assert_eq!(
+        detail,
+        "account claude-otter [team · Max 20x] · t***m@example.com · requires extra usage"
+    );
+    let parsed = parse_route_account_identity(&detail).expect("identity");
+    assert_eq!(parsed.label, "claude-otter");
+    assert_eq!(parsed.display_name, Some("team · Max 20x"));
+    assert_eq!(parsed.title(), "team · Max 20x");
+    assert_eq!(parsed.email(), Some("t***m@example.com"));
+}
+
+#[test]
+fn account_identity_parses_older_catalogs_and_scope_tags() {
+    let parsed = parse_route_account_identity("[session] account claude-fox · a@b.io").unwrap();
+    assert_eq!(parsed.display_name, None);
+    assert_eq!(parsed.title(), "claude-fox");
+    assert_eq!(parsed.email(), Some("a@b.io"));
+    let bare = parse_route_account_identity("account claude-fox").unwrap();
+    assert_eq!((bare.label, bare.rest), ("claude-fox", ""));
+    assert_eq!(parse_route_account_identity("requires extra usage"), None);
+    // A name that only repeats the label adds nothing.
+    assert_eq!(
+        route_account_identity("claude-fox", Some("claude-fox")),
+        "account claude-fox"
+    );
+    // A bracket in a name cannot end the identity early.
+    let tricky = route_account_identity("openai-otter", Some("a]b"));
+    assert_eq!(
+        parse_route_account_identity(&tricky).unwrap().display_name,
+        Some("a)b")
+    );
+}

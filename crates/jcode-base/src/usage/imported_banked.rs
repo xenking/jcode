@@ -1,4 +1,6 @@
-//! Read-only import of OMP's Claude usage cache, after identity verification.
+//! Read-only import of banked-reset observations that another tool cached in
+//! a SQLite file, after identity verification. Disabled unless a path is set
+//! (`[provider] banked_reset_import_path` or `JCODE_BANKED_RESET_IMPORT_DB`).
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +23,7 @@ fn status_from_report(
     }
     let resets = value.get("resetCredits")?;
     let credits = resets.get("credits")?.as_array()?;
-    // OMP can also return the unrelated Juniper session offer. Never infer
+    // The cache can also hold the unrelated Juniper session offer. Never infer
     // a Cedar zero or mix programs when the cache does not identify Cedar.
     if credits.is_empty()
         || credits
@@ -42,7 +44,7 @@ fn status_from_report(
         })
         .collect::<Option<Vec<_>>>()?;
     Some(
-        serde_json::json!({"_jcode_cached_source": "OMP", "cedar_ember": {
+        serde_json::json!({"_jcode_cached_source": "imported", "cedar_ember": {
             "eligible": resets.get("eligible")?.as_bool()?,
             "next_grant_id": resets.get("nextCreditId").and_then(|v| v.as_str()),
             "grants": grants
@@ -50,8 +52,20 @@ fn status_from_report(
     )
 }
 
-fn omp_database() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("HOME")?).join(".omp/agent/agent.db"))
+/// The cache file to read, from the environment or the config. `None` means
+/// the import is not configured.
+fn import_database() -> Option<PathBuf> {
+    std::env::var_os("JCODE_BANKED_RESET_IMPORT_DB")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::config::config()
+                .provider
+                .banked_reset_import_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
 }
 
 fn read_report(
@@ -64,35 +78,39 @@ fn read_report(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .inspect_err(|error| crate::logging::debug(&format!("OMP usage cache unavailable: {error}")))
+    .inspect_err(|error| {
+        crate::logging::debug(&format!("Banked reset import cache unavailable: {error}"))
+    })
     .ok()?;
     db.busy_timeout(std::time::Duration::from_millis(100))
         .inspect_err(|error| {
-            crate::logging::debug(&format!("OMP cache timeout unavailable: {error}"))
+            crate::logging::debug(&format!("Banked reset import timeout unavailable: {error}"))
         })
         .ok()?;
     let mut stmt = db.prepare("SELECT value, expires_at FROM cache WHERE key LIKE 'usage_cache:report:%:anthropic:%' AND expires_at > ?1 ORDER BY expires_at DESC LIMIT 100")
-        .inspect_err(|error| crate::logging::debug(&format!("OMP usage query unavailable: {error}")))
+        .inspect_err(|error| crate::logging::debug(&format!("Banked reset import query unavailable: {error}")))
         .ok()?;
     let rows = stmt
         .query_map([now / 1000], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .inspect_err(|error| crate::logging::debug(&format!("OMP usage read failed: {error}")))
+        .inspect_err(|error| {
+            crate::logging::debug(&format!("Banked reset import read failed: {error}"))
+        })
         .ok()?;
     let mut best: Option<(serde_json::Value, i64)> = None;
     for row in rows {
         let (raw, _) = match row {
             Ok(row) => row,
             Err(error) => {
-                crate::logging::debug(&format!("OMP usage row unavailable: {error}"));
+                crate::logging::debug(&format!("Banked reset import row unavailable: {error}"));
                 continue;
             }
         };
         let report = match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(report) => report,
             Err(error) => {
-                crate::logging::debug(&format!("OMP usage report invalid: {error}"));
+                crate::logging::debug(&format!("Banked reset import report invalid: {error}"));
                 continue;
             }
         };
@@ -123,25 +141,27 @@ fn read_report(
 }
 
 /// Profile verification binds both the OAuth account and organization before
-/// importing other applications' observations. No credential is read from OMP.
+/// importing other applications' observations. No credential is read from the cache.
 pub(super) async fn import_for_account(token: &str, key: &str, account_label: Option<&str>) {
     // Unit tests use isolated JCODE_HOME but inherit the developer's HOME.
-    // Never inspect a real OMP database or contact Anthropic from such tests.
+    // Never inspect a real cache file or contact Anthropic from such tests.
     #[cfg(test)]
-    if std::env::var_os("JCODE_USAGE_ALLOW_OMP_TEST").is_none() {
+    if std::env::var_os("JCODE_USAGE_ALLOW_IMPORT_TEST").is_none() {
         return;
     }
-    let Some(path) = omp_database().filter(|p| p.is_file()) else {
+    let Some(path) = import_database().filter(|p| p.is_file()) else {
         return;
     };
     let client = match crate::egress::client("claude", account_label).await {
         Ok(client) => client,
         Err(error) => {
-            crate::logging::debug(&format!("OMP profile verification unavailable: {error}"));
+            crate::logging::debug(&format!(
+                "Banked reset profile verification unavailable: {error}"
+            ));
             return;
         }
     };
-    if !super::disk_cache::begin_omp_probe(key, token) {
+    if !super::disk_cache::begin_import_probe(key, token) {
         return;
     }
     let response = client
@@ -155,7 +175,9 @@ pub(super) async fn import_for_account(token: &str, key: &str, account_label: Op
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            crate::logging::debug(&format!("OMP profile verification unavailable: {error}"));
+            crate::logging::debug(&format!(
+                "Banked reset profile verification unavailable: {error}"
+            ));
             return;
         }
     };
@@ -165,7 +187,9 @@ pub(super) async fn import_for_account(token: &str, key: &str, account_label: Op
     let profile = match response.json::<serde_json::Value>().await {
         Ok(profile) => profile,
         Err(error) => {
-            crate::logging::debug(&format!("OMP profile verification invalid: {error}"));
+            crate::logging::debug(&format!(
+                "Banked reset profile verification invalid: {error}"
+            ));
             return;
         }
     };
@@ -191,7 +215,7 @@ pub(super) async fn import_for_account(token: &str, key: &str, account_label: Op
             super::disk_cache::store_imported_reset_status(key, token, status, fetched);
         }
         Ok(None) => {} // No verified advisory balance, never a zero balance.
-        Err(error) => crate::logging::warn(&format!("OMP usage import task failed: {error}")),
+        Err(error) => crate::logging::warn(&format!("Banked reset import task failed: {error}")),
     }
 }
 
@@ -280,7 +304,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!((banked.usable_count, banked.available_count), (1, 2));
-        assert_eq!(banked.cached_source.as_deref(), Some("OMP"));
+        assert_eq!(banked.cached_source.as_deref(), Some("imported"));
         assert!(status_from_report(&report, "wrong", "org", now).is_none());
         assert!(status_from_report(&report, "acct", "wrong", now).is_none());
         assert!(status_from_report(&report, "acct", "org", now + 86_400_001).is_none());

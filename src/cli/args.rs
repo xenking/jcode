@@ -272,7 +272,9 @@ pub(crate) enum Command {
         #[arg(value_enum, id = "login_provider", value_name = "PROVIDER")]
         provider: Option<ProviderChoice>,
 
-        /// Account label for multi-account support (stored labels are auto-numbered)
+        /// Name for the account in multi-account setups. A new name labels the new
+        /// login (shown in usage, pickers and routing). An existing name or id logs
+        /// in to that account again. Internal ids stay auto-numbered.
         #[arg(long, short = 'a')]
         account: Option<String>,
 

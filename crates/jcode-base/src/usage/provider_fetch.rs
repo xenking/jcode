@@ -92,7 +92,7 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     super::anthropic_banked::cached_banked_resets(&access_token, label);
                 if banked.is_none() {
                     let key = anthropic_usage_cache_key(&access_token, label);
-                    super::omp_banked::import_for_account(&access_token, &key, label).await;
+                    super::imported_banked::import_for_account(&access_token, &key, label).await;
                     banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
                 }
                 report.anthropic_limit_reset = offer;
@@ -399,6 +399,8 @@ pub(super) async fn fetch_openai_usage_for_account(
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: parsed.credits,
     };
     store_openai_usage_for_generation(
         generation,
@@ -529,6 +531,8 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -629,6 +633,8 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -673,6 +679,8 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -713,7 +721,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
             // without usage still shows the plan label.
             let has_membership =
                 json.get("membershipType").is_some() || json.get("spendLimitUsage").is_some();
-            if report.limits.is_empty() && !has_membership {
+            if report.limits.is_empty() && report.credits.is_none() && !has_membership {
                 return Some(cursor_key_status_report().await);
             }
             Some(report)
@@ -771,6 +779,8 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: super::credits::cursor_credits(json),
     }
 }
 
@@ -846,6 +856,8 @@ async fn cursor_key_status_report() -> ProviderUsage {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     }
 }
 
@@ -971,6 +983,8 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 

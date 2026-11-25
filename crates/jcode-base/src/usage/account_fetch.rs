@@ -104,7 +104,7 @@ pub async fn fetch_oauth_account_usage(
                         )
                         .is_none()
                     {
-                        omp_banked::import_for_account(
+                        imported_banked::import_for_account(
                             &reset_token,
                             &cache_key,
                             Some(&account.label),

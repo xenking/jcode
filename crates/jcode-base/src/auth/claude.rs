@@ -455,6 +455,7 @@ pub fn remove_account(label: &str) -> Result<()> {
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_anthropic_account.clone());
     }
+    crate::auth::account_identity::forget("claude", label);
 
     Ok(())
 }

@@ -50,17 +50,12 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
         return api_method_display(&route.api_method);
     };
     // Only the catalog identity prefix is authoritative, not later diagnostics.
-    let identity = format!("account {label} · ");
-    let detail = route
-        .detail
-        .trim_start_matches("[global] ")
-        .trim_start_matches("[session] ");
-    let email = detail
-        .strip_prefix(&identity)
-        .and_then(|rest| rest.split(" · ").next())
-        .filter(|email| email.contains('@') && !email.chars().any(char::is_whitespace));
-    match email {
-        Some(email) => format!("oauth · {email}"),
+    let identity = jcode_provider_core::parse_route_account_identity(&route.detail)
+        .filter(|identity| identity.label == label);
+    // The user's name for the login (`team · Max 20x`), else its email. The
+    // internal label is the last resort.
+    match identity.and_then(|identity| identity.display_name.or(identity.email())) {
+        Some(name) => format!("oauth · {name}"),
         None => api_method_display(&route.api_method),
     }
 }

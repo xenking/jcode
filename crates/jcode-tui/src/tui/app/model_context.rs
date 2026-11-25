@@ -1833,6 +1833,25 @@ impl App {
         }
 
         let mut details = Vec::new();
+        if let Some(account) = &provider.account {
+            details.push(format!(
+                ": Account\t{} ({})",
+                one_line(&account.display_name),
+                account.kind.as_str()
+            ));
+        }
+        if let Some(credits) = &provider.credits {
+            // An unreadable balance reads `unknown`, never `0`.
+            let marker = if credits.state == crate::usage::CreditsState::Known {
+                '+'
+            } else {
+                ':'
+            };
+            details.push(format!(
+                "{marker} Credits\t{}",
+                one_line(&crate::usage::credits_line(credits))
+            ));
+        }
         if let Some(credits) = &provider.openai_reset_credits {
             let marker = if credits.available_count > 0 {
                 '+'
@@ -1854,7 +1873,7 @@ impl App {
             let source = banked
                 .cached_source
                 .as_deref()
-                .map(|s| format!(" · cached {s}"))
+                .map(|_| " · imported")
                 .unwrap_or_default();
             details.push(format!(
                 "{marker} Banked resets\t{} usable / {}{expiry}{source}",

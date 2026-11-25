@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 /// Read-only banked reset metadata from the ChatGPT usage response, pinned to
 /// the login whose usage was fetched. `None` label denotes the default scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,113 @@ pub struct AnthropicBankedResets {
     pub cached_source: Option<String>,
 }
 
+/// How an account is billed, as shown beside its name and used as the default
+/// routing kind. Mirrors the routing policy's account kinds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialKind {
+    /// Rate windows (5h, 7d, ...) that reset on their own.
+    #[default]
+    Subscription,
+    /// A prepaid or monthly grant spent in money or credits.
+    Credits,
+    /// Pay per token.
+    Metered,
+}
+
+impl CredentialKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::Credits => "credits",
+            Self::Metered => "metered",
+        }
+    }
+}
+
+/// Who a saved login is, for display. Never carries token material.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountIdentity {
+    /// Credential family: `claude`, `openai`, or an API-key provider id.
+    pub provider: String,
+    /// Internal, stable label (`claude-fox`). Never the only thing shown.
+    pub label: String,
+    /// What the user called the login, if they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Masked email of the login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Human plan, for example `Max 20x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// What to print for this login: the user's name, else the organization or
+    /// email, plus the plan (`team · Max 20x`).
+    pub display_name: String,
+    pub kind: CredentialKind,
+    #[serde(default)]
+    pub active: bool,
+}
+
+/// What an account's balance is denominated in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CreditUnit {
+    #[default]
+    Credits,
+    Usd,
+}
+
+/// Credit balance and spend for an account that is paid in credits or dollars
+/// (ChatGPT credits, Cursor on-demand spend, Claude extra-usage credits).
+///
+/// `None` fields are unknown. A provider that does not state a figure must not
+/// be shown as zero: `state` is `Unknown` when the endpoint gave no usable
+/// numbers at all.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreditsReport {
+    pub state: CreditsState,
+    pub unit: CreditUnit,
+    /// Remaining balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<f64>,
+    /// Spent in the current period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    /// Period or spend limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    #[serde(default)]
+    pub unlimited: bool,
+    /// RFC3339 end of the billing period, when the provider reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    /// Spend granted beyond the plan (Cursor bonus usage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bonus: Option<f64>,
+    /// Pay-as-you-go spend past the plan, against its own cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_demand: Option<SpendCap>,
+}
+
+/// Spend against a cap. `None` is unknown, never zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpendCap {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CreditsState {
+    /// The provider did not report usable numbers.
+    #[default]
+    Unknown,
+    Known,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderUsage {
     pub provider_name: String,
@@ -54,6 +163,10 @@ pub struct ProviderUsage {
     /// When jcode last successfully used this login/credential (unix seconds).
     /// Drives most-recently-used-first ordering in `/usage`. `None` sorts last.
     pub last_used_unix_secs: Option<u64>,
+    /// Which saved login this report describes.
+    pub account: Option<AccountIdentity>,
+    /// Credit balance and spend, for accounts paid in credits or dollars.
+    pub credits: Option<CreditsReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +185,6 @@ pub struct ProviderUsageProgress {
     pub from_cache: bool,
 }
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

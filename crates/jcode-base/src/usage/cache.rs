@@ -784,6 +784,14 @@ pub(super) fn provider_report_from_usage_data(
             format!("{minutes}m ago (cached; usage API rate limited)"),
         ));
     }
+    if limits.is_empty() && data.credits.is_none() {
+        // No window and no balance came back: the usage is not readable, which
+        // is different from nothing being used.
+        extra_info.push((
+            "Usage".to_string(),
+            "Unknown (this account reports no limits)".to_string(),
+        ));
+    }
     extra_info.push((
         "Extra usage (long context)".to_string(),
         if data.extra_usage_enabled {
@@ -804,6 +812,8 @@ pub(super) fn provider_report_from_usage_data(
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: data.credits.clone(),
     }
 }
 
@@ -867,6 +877,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         seven_day_opus: seven_day_opus.map(|limit| usage_percent_to_ratio(limit.usage_percent)),
         model_scoped,
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
+        credits: report.credits.clone(),
         fetched_at: Some(Instant::now()),
         // Reports do not carry the original probe timestamp or retry deadline.
         // Only a successful report with actual limits proves last-good quota.
@@ -937,6 +948,8 @@ pub(super) fn provider_report_from_openai_usage_data(
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     }
 }
 

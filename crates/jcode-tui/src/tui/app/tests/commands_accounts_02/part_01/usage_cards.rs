@@ -9,7 +9,7 @@ fn claude_banked_card_shows_usable_total_and_expiry() {
             account_label: Some("fixture".into()),
             available_count: 2,
             usable_count: 1,
-            cached_source: Some("OMP".into()),
+            cached_source: Some("imported".into()),
             expires_at: Some("2099-01-01T00:00:00Z".into()),
         }),
         ..Default::default()
@@ -17,7 +17,7 @@ fn claude_banked_card_shows_usable_total_and_expiry() {
     let content = &app.display_messages().last().unwrap().content;
     assert!(content.contains("1 usable / 2"), "{content}");
     assert!(content.contains("expires"), "{content}");
-    assert!(content.contains("cached OMP"), "{content}");
+    assert!(content.contains("imported"), "{content}");
 }
 
 #[test]
@@ -262,6 +262,8 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     }]);
 
     assert!(!app.usage_report_refreshing);
@@ -302,6 +304,8 @@ fn test_usage_progress_updates_card_incrementally() {
             anthropic_banked_resets: None,
             error: None,
             last_used_unix_secs: None,
+            account: None,
+            credits: None,
         }],
         completed: 1,
         total: 2,

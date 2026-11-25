@@ -200,7 +200,7 @@ mod tests {
                 available_count: 2,
                 usable_count: 1,
                 expires_at: None,
-                cached_source: Some("OMP".into()),
+                cached_source: Some("imported".into()),
             }),
             ..Default::default()
         };

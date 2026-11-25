@@ -660,10 +660,12 @@ use key_flows::*;
 mod api_keys;
 pub(crate) use api_keys::run_keys_command;
 async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
-    let label = auth::claude::login_target_label(requested_label)?;
+    let (existing, new_name) = auth::account_identity::resolve_request("claude", requested_label);
+    let label = auth::claude::login_target_label(existing.as_deref())?;
     eprintln!("Logging in to Claude (account: {})...", label);
     let tokens = auth::oauth::login_claude(no_browser).await?;
     auth::oauth::save_claude_tokens_for_account(&tokens, &label)?;
+    remember_account_name("claude", &label, new_name.as_deref());
     let profile_email =
         match auth::oauth::update_claude_account_profile(&label, &tokens.access_token).await {
             Ok(email) => email,
@@ -688,11 +690,25 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
     Ok(())
 }
 
+/// A name typed at login labels the new account. Internal ids stay
+/// auto-numbered, so the name is stored beside them, never instead of them.
+fn remember_account_name(provider: &str, label: &str, name: Option<&str>) {
+    let Some(name) = name else {
+        return;
+    };
+    match auth::account_identity::set_name(provider, label, Some(name)) {
+        Ok(()) => eprintln!("Account '{label}' is named '{name}'"),
+        Err(error) => eprintln!("Warning: could not save the account name: {error}"),
+    }
+}
+
 async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
-    let label = auth::codex::login_target_label(requested_label)?;
+    let (existing, new_name) = auth::account_identity::resolve_request("openai", requested_label);
+    let label = auth::codex::login_target_label(existing.as_deref())?;
     eprintln!("Logging in to OpenAI/Codex (account: {})...", label);
     let tokens = auth::oauth::login_openai(no_browser).await?;
     auth::oauth::save_openai_tokens_for_account(&tokens, &label)?;
+    remember_account_name("openai", &label, new_name.as_deref());
     eprintln!(
         "Successfully logged in to OpenAI! Account '{}' saved to {}",
         label,

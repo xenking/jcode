@@ -399,6 +399,19 @@ fn oauth_row_displays_email_instead_of_account_label() {
 }
 
 #[test]
+fn oauth_row_shows_the_account_name_and_plan_before_the_email() {
+    let mut picker = sample_picker();
+    let route = &mut picker.entries[0].options[0];
+    route.api_method = "claude-oauth@claude-otter".into();
+    route.detail =
+        "account claude-otter [team · Max 20x] · t***m@example.com · requires extra usage".into();
+    assert_eq!(route_method_display(route), "oauth · team · Max 20x");
+    // A detail naming another login never labels this one.
+    route.api_method = "claude-oauth@claude-fox".into();
+    assert_eq!(route_method_display(route), "oauth · claude-fox");
+}
+
+#[test]
 fn oauth_email_is_visible_in_unselected_suggestion_rows_and_width_scan() {
     let mut picker = sample_picker();
     picker.entries.push(picker.entries[0].clone());

@@ -1,0 +1,15 @@
+{
+  "five_hour": null,
+  "seven_day": null,
+  "seven_day_opus": null,
+  "extra_usage": {
+    "is_enabled": true,
+    "monthly_limit": 30000,
+    "used_credits": 10587,
+    "utilization": 35.29,
+    "currency": "USD",
+    "decimal_places": 2
+  },
+  "juniper_tide": null,
+  "cedar_ember": null
+}

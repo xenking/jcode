@@ -203,6 +203,13 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
             Vec::new()
         }
     };
+    let identities = crate::auth::account_identity::oauth_identities();
+    let display_name_of = |provider: &str, label: &str| {
+        identities
+            .iter()
+            .find(|identity| identity.provider == provider && identity.label == label)
+            .map(|identity| identity.display_name.clone())
+    };
     if !claude.is_empty() {
         routes.retain(|route| route.api_method != "claude-oauth");
         // Auth and disk-catalog reads are account facts, not model facts.
@@ -248,7 +255,12 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                     has_refresh,
                     expired,
                 );
-                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                qualify_saved_account_route(
+                    &mut route,
+                    &account.label,
+                    display_name_of("claude", &account.label).as_deref(),
+                    account.email.as_deref(),
+                );
                 routes.push(route);
             }
         }
@@ -279,7 +291,12 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                         .expires_at
                         .is_some_and(|expires| expires <= chrono::Utc::now().timestamp_millis()),
                 );
-                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                qualify_saved_account_route(
+                    &mut route,
+                    &account.label,
+                    display_name_of("openai", &account.label).as_deref(),
+                    account.email.as_deref(),
+                );
                 routes.push(route);
             }
         }
@@ -381,11 +398,19 @@ fn apply_saved_account_status(
     }
 }
 
-fn qualify_saved_account_route(route: &mut ModelRoute, label: &str, email: Option<&str>) {
+fn qualify_saved_account_route(
+    route: &mut ModelRoute,
+    label: &str,
+    display_name: Option<&str>,
+    email: Option<&str>,
+) {
     route.api_method = format!("{}@{label}", route.api_method);
+    // Carry the name a person knows the login by, so a picker can tell three
+    // Anthropic accounts apart without showing internal ids.
+    let identity = jcode_provider_core::route_account_identity(label, display_name);
     let identity = match email {
-        Some(email) => format!("account {label} · {email}"),
-        None => format!("account {label}"),
+        Some(email) => format!("{identity} · {email}"),
+        None => identity,
     };
     route.detail = if route.detail.is_empty() {
         identity

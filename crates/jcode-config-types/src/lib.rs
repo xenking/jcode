@@ -1609,6 +1609,10 @@ pub struct ProviderConfig {
     /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
     /// OAuth usage. Never purchases credits. Disabled by default.
     pub anthropic_auto_fable_reset: bool,
+    /// Optional SQLite file where another tool caches Claude banked-reset
+    /// observations. Read-only, and used only when the cached report names the
+    /// same account and organization as the login. Unset means no import.
+    pub banked_reset_import_path: Option<String>,
     /// Preserve earned resets while the account pool router has another ready route.
     /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
     pub auto_reset_only_when_no_routes: bool,
@@ -1676,6 +1680,7 @@ impl Default for ProviderConfig {
             same_provider_account_failover: true,
             openai_auto_banked_reset: true,
             anthropic_auto_fable_reset: false,
+            banked_reset_import_path: None,
             auto_reset_only_when_no_routes: true,
             auto_reset_trigger: AutoResetTrigger::default(),
             auto_reset_min_wait_minutes: 10,

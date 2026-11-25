@@ -533,6 +533,7 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
         anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        ..Default::default()
     };
 
     let usage = usage_data_from_provider_report(&report);
@@ -1407,7 +1408,7 @@ mod model_scoped;
 mod additional_test_usage_data_default;
 
 /// A Pro account whose weekly plan window is spent keeps serving requests from
-/// its paid credit balance (Codex CLI and omp both keep using it). The live
+/// its paid credit balance (the Codex CLI keeps using it). The live
 /// 2026-11-19 payload: `limit_reached` with `credits.has_credits`. Treating it as
 /// exhausted parked a working account and failed every worker on it.
 fn credit_funded_payload(credits: serde_json::Value, spend_reached: bool) -> serde_json::Value {

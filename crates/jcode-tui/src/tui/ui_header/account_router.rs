@@ -292,7 +292,7 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
         let source = banked
             .cached_source
             .as_deref()
-            .map(|s| format!(" · cached {s}"))
+            .map(|_| " · imported")
             .unwrap_or_default();
         return Some(Span::styled(
             format!("↻ {} {noun}{usable}{expiry}{source}", banked.available),

@@ -1,0 +1,6 @@
+{
+  "plan_type": "enterprise",
+  "rate_limit": null,
+  "credits": {"has_credits": true, "unlimited": true, "overage_limit_reached": false, "balance": null},
+  "spend_control": {"reached": false, "individual_limit": null}
+}

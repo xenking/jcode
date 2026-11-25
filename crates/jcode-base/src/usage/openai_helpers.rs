@@ -14,6 +14,8 @@ pub(super) struct ParsedOpenAIUsageReport {
     pub(super) ordinary_usage_allowed: Option<bool>,
     /// Paid credits fund requests past the spent plan window.
     pub(super) credit_overage: bool,
+    /// Credit balance and spend, when the account is paid in credits.
+    pub(super) credits: Option<jcode_usage_types::CreditsReport>,
 }
 
 fn normalize_ratio_value(raw: f32) -> f32 {
@@ -263,7 +265,7 @@ pub(super) fn parse_openai_hard_limit_reached(json: &serde_json::Value) -> bool 
 /// Whether paid credits keep a spent plan window usable. `/wham/usage` only
 /// describes the plan allowance; Codex CLI keeps serving from the credit
 /// balance once it is spent, so a funded account must not be parked until the
-/// weekly reset (omp `hasPlanCreditOverage` makes the same call). Only plan
+/// weekly reset (the Codex CLI makes the same call). Only plan
 /// exhaustion qualifies: a refusal for any other reason is not something a
 /// balance can pay for.
 fn parse_openai_credit_overage(json: &serde_json::Value, plan_limit_reached: bool) -> bool {
@@ -379,6 +381,7 @@ pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpen
     let mut parsed = ParsedOpenAIUsageReport {
         hard_limit_reached,
         credit_overage: parse_openai_credit_overage(json, hard_limit_reached),
+        credits: super::credits::openai_credits(json),
         available_reset_count: json
             .get("rate_limit_reset_credits")
             .and_then(|credits| credits.get("available_count"))

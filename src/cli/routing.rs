@@ -130,18 +130,31 @@ fn status(json: bool, now: i64) -> Result<()> {
     for ack in &state.acks {
         println!("ack: {} for {}", ack.account, until_text(ack.until, now));
     }
+    let saved = crate::routing_view::current_saved_accounts();
+    let title_of = |id: &str| {
+        saved
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| account.display_name.clone())
+    };
     if policy.accounts.is_empty() {
         println!("no [[routing.accounts]] configured");
     }
     for account in &policy.accounts {
+        let title = title_of(account.id.as_str())
+            .map(|title| format!(" ({title})"))
+            .unwrap_or_default();
         let mut line = format!(
-            "  {}  {:?}  priority {}  on limit {:?}",
+            "  {}{}  {:?}  priority {}  on limit {:?}",
             account.id,
+            title,
             account.kind,
             priority_text(&account.priority),
             account.on_limit
-        )
-        .to_lowercase();
+        );
+        // Lowercase the words, never the account name the user typed.
+        let line_head = format!("  {}{}", account.id, title);
+        line = format!("{line_head}{}", line[line_head.len()..].to_lowercase());
         if !account.models.is_empty() {
             line.push_str(&format!("  models {}", account.models.len()));
         }
@@ -149,6 +162,18 @@ fn status(json: bool, now: i64) -> Result<()> {
             line.push_str(&format!("  via {egress}"));
         }
         println!("{line}");
+    }
+    let unlisted: Vec<_> = saved.iter().filter(|account| !account.routed).collect();
+    if !unlisted.is_empty() {
+        println!("saved accounts not in [[routing.accounts]] (default kind, not routed):");
+        for account in unlisted {
+            println!(
+                "  {} ({})  {}",
+                account.id,
+                account.display_name,
+                kind_text(account.kind)
+            );
+        }
     }
     for budget in &policy.budgets {
         let limit = match budget.unit {
@@ -167,6 +192,15 @@ fn status(json: bool, now: i64) -> Result<()> {
     Ok(())
 }
 
+fn kind_text(kind: jcode_routing_policy::config::AccountKind) -> &'static str {
+    use jcode_routing_policy::config::AccountKind;
+    match kind {
+        AccountKind::Subscription => "subscription",
+        AccountKind::Credits => "credits",
+        AccountKind::Metered => "metered",
+    }
+}
+
 fn status_json(
     mode: &RoutingMode,
     policy: &Result<Policy, Vec<jcode_routing_policy::PolicyError>>,
@@ -177,6 +211,7 @@ fn status_json(
         Ok(_) => Vec::new(),
         Err(errors) => errors.iter().map(ToString::to_string).collect(),
     };
+    let saved = crate::routing_view::current_saved_accounts();
     let accounts: Vec<serde_json::Value> = policy
         .as_ref()
         .map(|policy| {
@@ -186,6 +221,10 @@ fn status_json(
                 .map(|account| {
                     serde_json::json!({
                         "id": account.id.as_str(),
+                        "display_name": saved
+                            .iter()
+                            .find(|saved| saved.id == account.id.as_str())
+                            .map(|saved| saved.display_name.as_str()),
                         "kind": format!("{:?}", account.kind).to_lowercase(),
                         "priority": priority_text(&account.priority),
                         "egress": account.egress,
@@ -199,6 +238,15 @@ fn status_json(
         "mode": mode,
         "problems": problems,
         "accounts": accounts,
+        "saved_accounts": saved
+            .iter()
+            .map(|account| serde_json::json!({
+                "id": account.id,
+                "display_name": account.display_name,
+                "kind": kind_text(account.kind),
+                "routed": account.routed,
+            }))
+            .collect::<Vec<_>>(),
         "intents": state,
         "now": now,
     })

@@ -527,6 +527,16 @@ struct ClaudeProfileResponse {
 }
 
 impl ClaudeProfileResponse {
+    /// Organization display name, when the profile has one.
+    fn organization_name(&self) -> Option<String> {
+        self.organization
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    }
+
     fn subscription_type(&self) -> Option<String> {
         let explicit = self
             .organization
@@ -603,8 +613,14 @@ pub async fn update_claude_account_profile(
 ) -> Result<Option<String>> {
     let profile = fetch_claude_profile_at_url(access_token, claude::PROFILE_URL).await?;
     let subscription_type = profile.subscription_type();
+    let org = profile.organization_name();
     let email = profile.account.email;
     claude_auth::update_account_profile_metadata(label, email.clone(), subscription_type)?;
+    // The organization only names the login in the UI. Failing to save it must
+    // not fail the login.
+    if let Err(error) = crate::auth::account_identity::set_org("claude", label, org.as_deref()) {
+        crate::logging::debug(&format!("Could not save organization name: {error}"));
+    }
     Ok(email)
 }
 

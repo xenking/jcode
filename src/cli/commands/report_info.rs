@@ -158,7 +158,21 @@ struct UsageProviderReport {
     /// Dry-run auto-reset decision under current config. Never spends.
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_reset: Option<UsageAutoResetReport>,
+    /// Which saved login this section describes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<crate::usage::AccountIdentity>,
+    /// Credit balance and spend for accounts paid in credits or dollars.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credits: Option<UsageCreditsReport>,
     error: Option<String>,
+}
+
+/// A credits report with the one-line wording every client shows as is.
+#[derive(Debug, Serialize)]
+struct UsageCreditsReport {
+    #[serde(flatten)]
+    credits: crate::usage::CreditsReport,
+    summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -529,6 +543,7 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         if provider.limits.is_empty()
             && provider.extra_info.is_empty()
             && provider.banked_reset.is_none()
+            && provider.credits.is_none()
         {
             println!("No usage data available.");
             continue;
@@ -559,6 +574,16 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
             for (key, value) in &provider.extra_info {
                 println!("{}: {}", key, value);
             }
+        }
+        if let Some(account) = &provider.account {
+            println!(
+                "Account: {} ({})",
+                account.display_name,
+                account.kind.as_str()
+            );
+        }
+        if let Some(credits) = &provider.credits {
+            println!("Credits: {}", credits.summary);
         }
         if let Some(reset) = &provider.banked_reset {
             let name = if reset.provider == "claude" && reset.usable_count.is_none() {
@@ -594,8 +619,8 @@ fn banked_reset_text(reset: &UsageBankedResetReport) -> String {
             crate::usage::format_reset_time(at)
         ));
     }
-    if let Some(source) = &reset.cached_source {
-        text.push_str(&format!(" · cached {source}"));
+    if reset.cached_source.is_some() {
+        text.push_str(" · imported");
     }
     text
 }
@@ -645,6 +670,11 @@ fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProvide
         extra_info: provider.extra_info.clone(),
         banked_reset: banked_reset_report(provider),
         auto_reset: auto_reset_report(provider),
+        account: provider.account.clone(),
+        credits: provider.credits.clone().map(|credits| UsageCreditsReport {
+            summary: crate::usage::credits_line(&credits),
+            credits,
+        }),
         error: provider.error.clone(),
     }
 }
@@ -878,15 +908,15 @@ mod tests {
             available_count: 2,
             usable_count: 1,
             expires_at: None,
-            cached_source: Some("OMP".into()),
+            cached_source: Some("imported".into()),
         });
         let saved = banked_reset_report(&saved).unwrap();
         assert_eq!((saved.available_count, saved.limit_reached), (2, false));
         let saved_json = serde_json::to_value(&saved).unwrap();
         assert_eq!(saved_json["usable_count"], 1);
         assert!(banked_reset_text(&saved).contains("1 usable / 2"));
-        assert_eq!(saved_json["cached_source"], "OMP");
-        assert!(banked_reset_text(&saved).contains("cached OMP"));
+        assert_eq!(saved_json["cached_source"], "imported");
+        assert!(banked_reset_text(&saved).contains("imported"));
         assert!(saved.next_available_at.is_none());
         let json = serde_json::to_value(usage_provider_report(&claude(true))).unwrap();
         assert_eq!(json["banked_reset"]["provider"], "claude");

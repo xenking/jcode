@@ -921,6 +921,8 @@ mod tests {
                 anthropic_banked_resets: None,
                 error: None,
                 last_used_unix_secs: None,
+                account: None,
+                credits: None,
             }],
             false,
             1,
