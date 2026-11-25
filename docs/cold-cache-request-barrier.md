@@ -37,18 +37,18 @@ Only a subscribed client can initiate this work, so a closed session cannot star
 
 The active turn and the idle check share the session's agent lock. If a prompt comes in before an idle fold finishes, the existing cold-request barrier waits for that fold rather than starting a second reduction. A finished result is persisted with the cache touch that triggered it and sent through the usual compaction event. A reload restores the cache clock and completed result from the snapshot and journal; it can retry an interrupted fold when the session is attached again.
 
-## omp comparison
+## Idle compaction scheduler comparison
 
-Read-only `~/.omp/agent/config.yml`: `idleEnabled: true`, `thresholdTokens: 550000`, `idleThresholdTokens: 550000`, method order `remote, snapcompact, handoff, shake, soft`. Thus a 433K context is below this installation's ordinary idle compaction threshold.
+A reference idle scheduler uses `idleEnabled: true`, `thresholdTokens: 550000`, `idleThresholdTokens: 550000`, method order `remote, snapcompact, handoff, shake, soft`. Thus a 433K context is below its ordinary idle compaction threshold.
 
-Installed implementation is in `~/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src/session/idle-maintenance.ts`:
+Its behaviour:
 
-- `#armCompaction` requires idle enabled, positive threshold, nonpersistent cache, and current context at/above threshold.
-- `#compactionDelayMs` schedules a long (1h) entry shortly before expiry so summarization can still read the warm prefix. Short/unknown/expired entries use the configured idle delay.
-- `#onCompactionDue` rechecks settled/blocked state and tokens before calling `runIdleCompaction`.
-- `agent-session.ts::runIdleCompaction` defers while an asynchronous wake is pending and delegates to session maintenance.
+- It arms compaction only when idle is enabled, the threshold is positive, the cache is nonpersistent, and current context is at/above the threshold.
+- It schedules a long (1h) entry shortly before expiry so summarization can still read the warm prefix. Short/unknown/expired entries use the configured idle delay.
+- When the timer fires it rechecks settled/blocked state and tokens before running idle compaction.
+- Idle compaction defers while an asynchronous wake is pending and delegates to session maintenance.
 
-omp documents profile-specific thresholds and a separate cache-expiry shake integration. Jcode's pre-request expiry hook is not the same as omp's idle scheduler: a background task alone cannot guarantee a small next request.
+The reference design documents profile-specific thresholds and a separate cache-expiry shake integration. Jcode's pre-request expiry hook is not the same as an idle scheduler: a background task alone cannot guarantee a small next request.
 
 ## Acceptance
 

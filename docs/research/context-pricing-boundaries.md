@@ -1,6 +1,6 @@
 # Long-context pricing by route
 
-Verified on 2026-11-22 (local date) against Jcode `309810412`, installed OMP `18.22.2-d619fa988e8b`, and public provider documentation. No inference calls were made.
+Verified on 2026-11-22 (local date) against Jcode `309810412`, installed third-party agent harness (version string not published), and public provider documentation. No inference calls were made.
 
 | Route | Model IDs | Published boundary and source |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ Verified on 2026-11-22 (local date) against Jcode `309810412`, installed OMP `18
 ## What the local catalogs prove
 
 - Jcode's `openai_model_catalog_cache.json` exposed `context_limits` but no pricing fields: 272,000 for both Astra IDs and 500,000 for `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6.2-sol`. These are catalog context values, not billing evidence. The Claude cache likewise reports context limits (including 1M for Haiku 5.5), not the 100K tariff boundary.
-- OMP's bundled `openai/*` rows include `cost.longContext.inputThreshold = 272000` for both Astra IDs. Its `openai-codex/gpt-6-astra` row has `contextWindow = 272000` and no `cost.longContext`. The installed Codex compatibility rules have a 6.2 Astra cost patch with API-derived base rates and a separate context maximum, not confirmation of subscription billing. OMP bundled `openai/gpt-6.1-sol` lacks the long-context rate that OpenAI now documents; `openai-codex/gpt-5.6-sol` carries a 272K tier not corroborated by its applicable OAuth sources. OMP's Go rows listed above have a 1M window and no tier. Catalog absence is not proof of flat pricing.
+- The harness's bundled `openai/*` rows include `cost.longContext.inputThreshold = 272000` for both Astra IDs. Its `openai-codex/gpt-6-astra` row has `contextWindow = 272000` and no `cost.longContext`. The installed Codex compatibility rules have a 6.2 Astra cost patch with API-derived base rates and a separate context maximum, not confirmation of subscription billing. The harness's bundled `openai/gpt-6.1-sol` lacks the long-context rate that OpenAI now documents; `openai-codex/gpt-5.6-sol` carries a 272K tier not corroborated by its applicable OAuth sources. The harness's Go rows listed above have a 1M window and no tier. Catalog absence is not proof of flat pricing.
 - Jcode's OAuth activity report estimates **API-equivalent** cost from provider counters. Its use of 272K is not what the subscription actually paid.
 
 ## Renderer contract

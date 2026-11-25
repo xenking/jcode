@@ -16,4 +16,4 @@ Check `side_questions_v1` in `hello_ok`. It requires support from both the bridg
 
 ## Session lineage is not a message tree
 
-Jcode stores each topic as one child session and uses its session ID as the stable topic ID. This is separate from the swarm owner reported on `SessionInfo`. Installed OMP 18.22.2 stores BTW topics and their follow-ups in a session sidecar, keyed by topic ID and starting message leaf. OMP's separate `/tree` command changes the active message leaf inside one session. Listing Jcode child sessions does not move a message leaf or provide that operation.
+Jcode stores each topic as one child session and uses its session ID as the stable topic ID. This is separate from the swarm owner reported on `SessionInfo`. Another agent harness stores BTW topics and their follow-ups in a session sidecar, keyed by topic ID and starting message leaf. Its separate `/tree` command changes the active message leaf inside one session. Listing Jcode child sessions does not move a message leaf or provide that operation.
