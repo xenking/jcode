@@ -32,8 +32,7 @@ fn generic_credential_paths_for_provider(
             {
                 vec![config_dir.join(env_file)]
             } else {
-                let resolved =
-                    crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 vec![config_dir.join(resolved.env_file)]
             }
         }
@@ -94,8 +93,8 @@ fn probe_generic_provider_auth(
     );
 }
 
-async fn probe_claude_auth(report: &mut AuthTestProviderReport) {
-    if let Some(creds) = push_result_step(
+fn probe_claude_auth(report: &mut AuthTestProviderReport) {
+    if push_result_step(
         report,
         "credential_probe",
         crate::auth::claude::load_credentials(),
@@ -105,17 +104,13 @@ async fn probe_claude_auth(report: &mut AuthTestProviderReport) {
                 creds.expires_at
             )
         },
-    ) {
-        push_result_step(
-            report,
+    )
+    .is_some()
+    {
+        report.push_step(
             "refresh_probe",
-            crate::auth::oauth::refresh_claude_tokens(&creds.refresh_token).await,
-            |tokens| {
-                format!(
-                    "Claude token refresh succeeded (new_expires_at={}).",
-                    tokens.expires_at
-                )
-            },
+            true,
+            "Skipped: the Claude login is refreshed by its daemon.".to_string(),
         );
     }
 }

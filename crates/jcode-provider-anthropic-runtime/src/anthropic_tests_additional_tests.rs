@@ -225,11 +225,16 @@ fn cache_budget_for_short_and_long_histories_in_both_auth_and_completion_modes()
     let oauth = AnthropicProvider::new()
         .with_oauth_test_endpoint(&endpoint)
         .unwrap();
-    *oauth.credentials.try_write().unwrap() = Some(CachedCredentials {
-        access_token: "fake-oauth".into(),
-        refresh_token: String::new(),
-        expires_at: i64::MAX,
-    });
+    auth::claude::upsert_account(auth::claude::AnthropicAccount {
+        label: auth::claude::primary_account_label(),
+        access: "fake-oauth".into(),
+        refresh: String::new(),
+        expires: i64::MAX,
+        email: None,
+        subscription_type: None,
+        scopes: vec!["user:inference".into()],
+    })
+    .unwrap();
 
     let mut history = vec![Message::user("first question")];
     for i in 0..25 {

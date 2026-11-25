@@ -221,6 +221,41 @@ fn save_claude_tokens_updates_fox_without_touching_otter() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn claude_cached_rejection_does_not_reject_the_callers_unsubmitted_token() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let label = claude_auth::primary_account_label();
+    let stored = OAuthTokens {
+        access_token: "expired-access".into(),
+        refresh_token: "rejected-on-disk".into(),
+        expires_at: 1,
+        id_token: None,
+        scopes: vec![],
+    };
+    save_claude_tokens_for_account(&stored, &label)?;
+    let state = &crate::auth::refresh_state::status_path()?;
+    crate::auth::refresh_state::record_permanent_rejection(
+        "claude",
+        &stored.refresh_token,
+        "invalid_grant",
+    )?;
+    let before = std::fs::read(state)?;
+
+    // The store and the caller disagree. A local denial for the stored
+    // token must not create a provider rejection of the caller's token.
+    let error = refresh_claude_tokens_for_account("not-submitted", &label)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("previously rejected"));
+    assert!(
+        !crate::auth::refresh_state::refresh_token_is_known_rejected("claude", "not-submitted")
+    );
+    assert_eq!(std::fs::read(state)?, before);
+    Ok(())
+}
+
 #[test]
 fn claude_oauth_constants() {
     assert!(!claude::CLIENT_ID.is_empty());

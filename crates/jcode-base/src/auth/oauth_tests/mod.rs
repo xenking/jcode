@@ -24,7 +24,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-async fn mock_token_server(
+pub(super) async fn mock_token_server(
     status: u16,
     response_body: &str,
 ) -> (

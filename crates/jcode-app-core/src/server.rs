@@ -2225,6 +2225,7 @@ impl Server {
         let main_listener = Listener::bind(&self.socket_path)?;
         let debug_listener = Listener::bind(&self.debug_socket_path)?;
         drop(replacement_gate);
+        let _claude_refresh = crate::auth::oauth::claim_claude_daemon_refresh();
 
         #[cfg(unix)]
         {

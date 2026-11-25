@@ -118,10 +118,15 @@ pub fn ensure_refresh_allowed(
 /// Record the outcome of a refresh attempt, routing permanent rejections into
 /// the terminal state and everything else into the retryable one.
 ///
-/// Every provider must funnel failures through here rather than calling
-/// [`record_failure`] directly, otherwise it silently opts out of the
-/// terminal-rejection guarantee.
-pub fn record_refresh_outcome<T>(provider_id: &str, refresh_token: &str, result: &Result<T>) {
+/// Claude uses a separate typed endpoint result in its refresh transaction.
+pub(super) fn record_refresh_outcome<T>(
+    provider_id: &str,
+    refresh_token: &str,
+    result: &Result<T>,
+) {
+    // Claude records only authenticated token-endpoint outcomes, inside its
+    // own cross-process transaction. Don't infer a rejection from prose.
+    assert_ne!(provider_id, "claude");
     match result {
         Ok(_) => {
             let _ = record_success(provider_id);
@@ -129,7 +134,7 @@ pub fn record_refresh_outcome<T>(provider_id: &str, refresh_token: &str, result:
         Err(err) => {
             let message = err.to_string();
             if error_is_permanent_rejection(&message) {
-                let _ = record_permanent_rejection(provider_id, refresh_token, &message);
+                let _ = record_failure_with_rejection(provider_id, &message, Some(refresh_token));
             } else {
                 let _ = record_failure(provider_id, &message);
             }
@@ -152,7 +157,7 @@ pub fn get(provider_id: &str) -> Option<ProviderRefreshRecord> {
     load_all().get(provider_id).cloned()
 }
 
-pub fn record_success(provider_id: &str) -> Result<()> {
+pub(super) fn record_success(provider_id: &str) -> Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     upsert(
         provider_id,
@@ -166,9 +171,32 @@ pub fn record_success(provider_id: &str) -> Result<()> {
     )
 }
 
-pub fn record_failure(provider_id: &str, error: impl AsRef<str>) -> Result<()> {
+fn record_failure(provider_id: &str, error: &str) -> Result<()> {
+    record_failure_with_rejection(provider_id, error, None)
+}
+
+pub(super) fn record_claude_refresh_failure(
+    refresh_token: &str,
+    error: &anyhow::Error,
+    rejected: bool,
+) -> Result<()> {
+    let message = if rejected {
+        "Claude OAuth endpoint rejected the refresh grant (invalid_grant)".to_owned()
+    } else {
+        error.to_string()
+    };
+    record_failure_with_rejection("claude", &message, rejected.then_some(refresh_token))
+}
+
+fn record_failure_with_rejection(
+    provider_id: &str,
+    error: &str,
+    rejected_token: Option<&str>,
+) -> Result<()> {
+    let _lock =
+        super::account_store::lock_store(&crate::storage::jcode_dir()?, REFRESH_STATUS_FILE)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let mut message = error.as_ref().trim().to_string();
+    let mut message = error.trim().to_string();
     if message.chars().count() > MAX_ERROR_CHARS {
         message = message.chars().take(MAX_ERROR_CHARS).collect::<String>();
         message.push('…');
@@ -182,6 +210,9 @@ pub fn record_failure(provider_id: &str, error: impl AsRef<str>) -> Result<()> {
     });
     record.last_attempt_ms = now_ms;
     record.last_error = Some(message);
+    if let Some(token) = rejected_token {
+        record.rejected_refresh_fingerprint = Some(refresh_token_fingerprint(token));
+    }
     upsert(provider_id, record)
 }
 
@@ -197,23 +228,22 @@ pub fn refresh_token_fingerprint(refresh_token: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Record that the provider permanently rejected this refresh token, so
-/// callers can skip re-attempting a refresh that cannot succeed.
+/// Seed a test fixture without contacting a provider.
+#[cfg(any(test, feature = "test-support"))]
 pub fn record_permanent_rejection(
     provider_id: &str,
     refresh_token: &str,
     error: impl AsRef<str>,
 ) -> Result<()> {
-    record_failure(provider_id, error)?;
-    let mut record = get(provider_id).unwrap_or(ProviderRefreshRecord {
-        last_attempt_ms: chrono::Utc::now().timestamp_millis(),
-        last_success_ms: None,
-        last_error: None,
-        rejected_refresh_fingerprint: None,
-        rejected_refresh_fingerprints: Vec::new(),
-    });
-    record.rejected_refresh_fingerprint = Some(refresh_token_fingerprint(refresh_token));
-    upsert(provider_id, record)
+    let path = status_path()?;
+    let home = path
+        .parent()
+        .expect("status path has a parent")
+        .canonicalize()?;
+    if let Some(real) = dirs::home_dir().and_then(|home| home.join(".jcode").canonicalize().ok()) {
+        anyhow::ensure!(home != real, "Tests cannot seed the user's refresh state");
+    }
+    record_failure_with_rejection(provider_id, error.as_ref(), Some(refresh_token))
 }
 
 /// True when this exact refresh token was already rejected as unrecoverable.

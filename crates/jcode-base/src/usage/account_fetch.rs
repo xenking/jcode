@@ -10,6 +10,12 @@ pub(super) fn cache_anthropic_account_failure(
     cache_key: String,
     error: anyhow::Error,
 ) -> UsageData {
+    if error.is::<auth::oauth::ClaudeRefreshDeferred>() {
+        return UsageData {
+            last_error: Some(error.to_string()),
+            ..UsageData::default()
+        };
+    }
     // A first-ever HTTP failure can already carry a provider Retry-After.
     // Credential failures happen before that cache, so persist those too.
     let data = cached_or_shared_anthropic_usage(&cache_key).unwrap_or_else(|| {
@@ -62,12 +68,16 @@ pub async fn fetch_oauth_account_usage(
                         let now = chrono::Utc::now().timestamp_millis();
                         let token =
                             if account.expires < now + 300_000 && !account.refresh.is_empty() {
-                                auth::oauth::refresh_claude_tokens_for_account(
+                                match auth::oauth::refresh_claude_tokens_for_account(
                                     &account.refresh,
                                     &account.label,
                                 )
                                 .await
-                                .map(|tokens| tokens.access_token)
+                                {
+                                    Ok(tokens) => Ok(tokens.access_token),
+                                    Err(_) if account.expires > now => Ok(account.access),
+                                    Err(error) => Err(error),
+                                }
                             } else if account.expires < now {
                                 Err(anyhow::anyhow!("OAuth token expired"))
                             } else {

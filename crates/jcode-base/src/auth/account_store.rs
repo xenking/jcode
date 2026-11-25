@@ -42,9 +42,38 @@ impl Drop for StoreLockGuard {
 
 /// Lock one store in the jcode home directory for a complete read/modify/write
 /// transaction. Nested acquisitions on the same thread are supported, including
-/// load-time migration calling save. Unix also serializes independent processes.
-/// Other platforms retain process-local serialization (no cross-process flock).
+/// load-time migration calling save.
 pub(crate) fn lock_store(home: &Path, store_name: &str) -> Result<StoreLockGuard> {
+    let (home, path) = store_lock_path(home, store_name)?;
+    let lock = STORE_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(path.clone())
+        .or_default()
+        .clone();
+    let thread = std::thread::current().id();
+    let mut owner = lock.owner.lock().unwrap_or_else(|e| e.into_inner());
+    while owner.thread.is_some() && owner.thread != Some(thread) {
+        owner = lock
+            .available
+            .wait(owner)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    if owner.thread.is_none() {
+        let file = open_store_lock_file(&home, &path)?;
+        file.lock()?;
+        owner.file = Some(file);
+        owner.thread = Some(thread);
+    }
+    owner.depth += 1;
+    drop(owner);
+    Ok(StoreLockGuard {
+        lock,
+        _not_send: std::marker::PhantomData,
+    })
+}
+
+fn store_lock_path(home: &Path, store_name: &str) -> Result<(PathBuf, PathBuf)> {
     anyhow::ensure!(
         !store_name.is_empty()
             && store_name != "."
@@ -62,34 +91,36 @@ pub(crate) fn lock_store(home: &Path, store_name: &str) -> Result<StoreLockGuard
     );
     let home = std::fs::canonicalize(home)?;
     let path = home.join(format!(".{store_name}.lock"));
-    let lock = STORE_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(path.clone())
-        .or_default()
-        .clone();
-    let thread = std::thread::current().id();
-    let mut owner = lock.owner.lock().unwrap_or_else(|e| e.into_inner());
-    while owner.thread.is_some() && owner.thread != Some(thread) {
-        owner = lock
-            .available
-            .wait(owner)
-            .unwrap_or_else(|e| e.into_inner());
-    }
-    if owner.thread.is_none() {
-        owner.file = Some(open_store_lock(&home, &path)?);
-        owner.thread = Some(thread);
-    }
-    owner.depth += 1;
-    drop(owner);
-    Ok(StoreLockGuard {
-        lock,
-        _not_send: std::marker::PhantomData,
+    Ok((home, path))
+}
+
+/// A separate cross-process lock that can be held across the token exchange.
+pub(crate) async fn lock_refresh(
+    home: &Path,
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<std::fs::File> {
+    use std::fs::TryLockError;
+    let (home, path) = store_lock_path(home, name)?;
+    let file = open_store_lock_file(&home, &path)?;
+    tokio::time::timeout(timeout, async {
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(TryLockError::WouldBlock) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(TryLockError::Error(error)) => return Err(error),
+            }
+        }
     })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for the OAuth refresh lock"))??;
+    Ok(file)
 }
 
 #[cfg(unix)]
-fn open_store_lock(home: &Path, path: &Path) -> Result<std::fs::File> {
+fn open_store_lock_file(home: &Path, path: &Path) -> Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -124,20 +155,11 @@ fn open_store_lock(home: &Path, path: &Path) -> Result<std::fs::File> {
             && metadata.mode() & 0o777 == 0o600,
         "Unsafe account store lock ownership, type, links or permissions"
     );
-    loop {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            break;
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error.into());
-        }
-    }
     Ok(file)
 }
 
 #[cfg(not(unix))]
-fn open_store_lock(_home: &Path, path: &Path) -> Result<std::fs::File> {
+fn open_store_lock_file(_home: &Path, path: &Path) -> Result<std::fs::File> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         anyhow::ensure!(
             metadata.is_file() && !metadata.file_type().is_symlink(),
