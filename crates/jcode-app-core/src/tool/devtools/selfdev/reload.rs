@@ -392,7 +392,7 @@ impl SelfDevTool {
 
         // Signal the server via in-process channel (replaces filesystem-based rebuild-signal)
         let request_id =
-            server::send_reload_signal(hash.clone(), Some(session_id.to_string()), true);
+            crate::reload_state::send_reload_signal(hash.clone(), Some(session_id.to_string()), true);
         crate::logging::info(&format!(
             "selfdev reload: request={} session_id={} hash={} execution_mode={:?}",
             request_id, session_id, hash, execution_mode
@@ -400,7 +400,7 @@ impl SelfDevTool {
 
         let timeout = std::time::Duration::from_secs(SelfDevTool::reload_timeout_secs());
         let ack_wait_started = std::time::Instant::now();
-        let ack = server::wait_for_reload_ack(&request_id, timeout)
+        let ack = crate::reload_state::wait_for_reload_ack(&request_id, timeout)
             .await
             .map_err(|error| {
                 if !test_mode {
@@ -418,7 +418,7 @@ impl SelfDevTool {
             ack.request_id,
             ack.hash,
             ack_wait_started.elapsed().as_millis(),
-            server::reload_state_summary(std::time::Duration::from_secs(60))
+            crate::reload_state::reload_state_summary(std::time::Duration::from_secs(60))
         ));
 
         match execution_mode {
@@ -429,37 +429,37 @@ impl SelfDevTool {
                         ack.hash
                     )));
                 }
-                match server::await_reload_handoff_for(
-                    &server::socket_path(),
+                match crate::reload_state::await_reload_handoff_for(
+                    &crate::server_endpoint::socket_path(),
                     timeout,
                     &request_id,
                     None,
                 )
                 .await
                 {
-                    server::ReloadWaitStatus::Ready => {
+                    crate::reload_state::ReloadWaitStatus::Ready => {
                         let _ = build::complete_pending_activation_for_session(session_id);
                         Ok(ToolOutput::new(format!(
                             "Reload completed successfully for build {}. Server reported ready.",
                             ack.hash
                         )))
                     }
-                    server::ReloadWaitStatus::Failed(detail) => {
+                    crate::reload_state::ReloadWaitStatus::Failed(detail) => {
                         let _ = build::rollback_pending_activation_for_session(session_id);
                         Err(anyhow::anyhow!(
                             "Reload was acknowledged for build {}, but the replacement server failed before becoming ready on {}: {}; recent_state={}",
                             ack.hash,
-                            server::socket_path().display(),
+                            crate::server_endpoint::socket_path().display(),
                             detail.unwrap_or_else(|| "unknown reload failure".to_string()),
-                            server::reload_state_summary(std::time::Duration::from_secs(60))
+                            crate::reload_state::reload_state_summary(std::time::Duration::from_secs(60))
                         ))
                     }
-                    server::ReloadWaitStatus::Unknown { reason } => Err(anyhow::anyhow!(
+                    crate::reload_state::ReloadWaitStatus::Unknown { reason } => Err(anyhow::anyhow!(
                         "Reload {} has unknown serving generation: {}",
                         request_id,
                         reason
                     )),
-                    server::ReloadWaitStatus::Idle | server::ReloadWaitStatus::Waiting { .. } => {
+                    crate::reload_state::ReloadWaitStatus::Idle | crate::reload_state::ReloadWaitStatus::Waiting { .. } => {
                         let _ = build::rollback_pending_activation_for_session(session_id);
                         Err(anyhow::anyhow!(
                             "Reload was acknowledged for build {}, but readiness could not be confirmed within {}s.",

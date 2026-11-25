@@ -132,7 +132,7 @@ impl Registry {
                 "calendar",
                 calendar::CalendarTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "schedule", crate::ambient_tools::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "desktop", desktop::DesktopTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
             Self::insert_tool_timed(
@@ -570,25 +570,25 @@ impl Registry {
     pub async fn register_ambient_tools(&self) {
         self.register(
             "end_ambient_cycle".to_string(),
-            Arc::new(ambient::EndAmbientCycleTool::new()) as Arc<dyn Tool>,
+            Arc::new(crate::ambient_tools::EndAmbientCycleTool::new()) as Arc<dyn Tool>,
         )
         .await;
 
         self.register(
             "schedule_ambient".to_string(),
-            Arc::new(ambient::ScheduleAmbientTool::new()) as Arc<dyn Tool>,
+            Arc::new(crate::ambient_tools::ScheduleAmbientTool::new()) as Arc<dyn Tool>,
         )
         .await;
 
         self.register(
             "request_permission".to_string(),
-            Arc::new(ambient::RequestPermissionTool::new()) as Arc<dyn Tool>,
+            Arc::new(crate::ambient_tools::RequestPermissionTool::new()) as Arc<dyn Tool>,
         )
         .await;
 
         self.register(
             "send_message".to_string(),
-            Arc::new(ambient::SendChannelMessageTool::new()) as Arc<dyn Tool>,
+            Arc::new(crate::ambient_tools::SendChannelMessageTool::new()) as Arc<dyn Tool>,
         )
         .await;
     }

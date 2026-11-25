@@ -1530,7 +1530,7 @@ impl Agent {
                 match result {
                     Ok(output) => {
                         if tc.name == "end_ambient_cycle"
-                            && crate::tool::ambient::is_ambient_session_registered(&self.session.id)
+                            && crate::ambient_session::is_ambient_session_registered(&self.session.id)
                         {
                             ambient_cycle_ended = true;
                         }

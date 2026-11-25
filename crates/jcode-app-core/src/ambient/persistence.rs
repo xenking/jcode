@@ -23,7 +23,7 @@ impl AmbientState {
         Self::load_from(&state_path()?)
     }
 
-    pub(super) fn load_from(path: &Path) -> Result<Self> {
+    pub(crate) fn load_from(path: &Path) -> Result<Self> {
         if path.exists() {
             storage::read_json(path)
         } else {
@@ -62,7 +62,7 @@ impl AmbientState {
 }
 
 #[derive(PartialEq, Eq)]
-pub(super) struct FileRevision {
+pub(crate) struct FileRevision {
     modified: Option<SystemTime>,
     len: u64,
     #[cfg(unix)]
@@ -70,7 +70,7 @@ pub(super) struct FileRevision {
 }
 
 impl FileRevision {
-    pub(super) fn read(path: &Path) -> std::io::Result<Option<Self>> {
+    pub(crate) fn read(path: &Path) -> std::io::Result<Option<Self>> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -136,7 +136,7 @@ impl ScheduledQueue {
         }
     }
 
-    pub(super) fn refresh(&mut self) -> Result<()> {
+    pub(crate) fn refresh(&mut self) -> Result<()> {
         let revision = FileRevision::read(&self.path)?;
         if revision != self.revision {
             self.revision = revision;
@@ -153,7 +153,7 @@ impl ScheduledQueue {
     /// Lock a separate stable inode: atomic JSON replacement must not replace
     /// the inode carrying the lock. Reload under lock, and publish only after
     /// the entire mutation was durably saved. Never write a cached snapshot.
-    pub(super) fn transact<T>(
+    pub(crate) fn transact<T>(
         &mut self,
         update: impl FnOnce(&mut Vec<ScheduledItem>) -> Result<T>,
     ) -> Result<T> {
@@ -234,7 +234,7 @@ impl ScheduledQueue {
             })
     }
 
-    pub(super) fn maintain_and_take_direct(
+    pub(crate) fn maintain_and_take_direct(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<Vec<ScheduledItem>> {
@@ -281,7 +281,7 @@ impl ScheduledQueue {
         Ok(ready_items)
     }
 
-    pub(super) fn next_maintenance(&self) -> Option<DateTime<Utc>> {
+    pub(crate) fn next_maintenance(&self) -> Option<DateTime<Utc>> {
         self.next_check
     }
 

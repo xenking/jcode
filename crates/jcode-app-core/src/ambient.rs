@@ -6,7 +6,6 @@ use std::path::PathBuf;
 mod manager;
 mod persistence;
 mod prompt;
-pub mod runner;
 pub mod scheduler;
 
 pub use crate::ambient_directives::{

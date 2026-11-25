@@ -108,7 +108,12 @@ struct Entry {
     profile: Profile,
     client: reqwest::Client,
 }
-static CACHE: LazyLock<Mutex<VecDeque<Entry>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+static CACHE: LazyLock<Mutex<VecDeque<Entry>>> = LazyLock::new(|| {
+    // Entries are keyed by the proxy config a session environment selects, so
+    // they must be pruned whenever those environments change.
+    crate::session_env::observe_changes(prune);
+    Mutex::new(VecDeque::new())
+});
 
 fn builder(profile: Profile) -> reqwest::ClientBuilder {
     match profile {

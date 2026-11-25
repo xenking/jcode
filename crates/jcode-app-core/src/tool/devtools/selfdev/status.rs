@@ -92,10 +92,10 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
     status.push_str("\n## Debug Socket\n\n");
     status.push_str(&format!(
         "**Path:** {}\n",
-        server::debug_socket_path().display()
+        crate::server_endpoint::debug_socket_path().display()
     ));
 
-    if let Some(reload_state) = server::ReloadState::load() {
+    if let Some(reload_state) = crate::reload_state::ReloadState::load() {
         status.push_str("\n## Reload State\n\n");
         status.push_str(&format!(
             "**Phase:** {:?}\n**Request:** {}\n**Hash:** {}\n**PID:** {}\n**Timestamp:** {}\n",
@@ -218,8 +218,8 @@ impl SelfDevTool {
     }
 
     pub(super) async fn do_socket_info(&self) -> Result<ToolOutput> {
-        let debug_socket = server::debug_socket_path();
-        let main_socket = server::socket_path();
+        let debug_socket = crate::server_endpoint::debug_socket_path();
+        let main_socket = crate::server_endpoint::socket_path();
 
         let info = json!({
             "debug_socket": debug_socket.to_string_lossy(),

@@ -4,8 +4,10 @@ pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to 
 mod advisor;
 #[path = "search/agentgrep.rs"]
 mod agentgrep;
-#[path = "assist/ambient.rs"]
-pub mod ambient;
+/// Ambient-session bookkeeping, kept under its historical path for clients.
+pub mod ambient {
+    pub use crate::ambient_session::{register_ambient_session, unregister_ambient_session};
+}
 #[path = "fs/apply_patch.rs"]
 mod apply_patch;
 #[path = "ui/ask.rs"]
@@ -117,8 +119,7 @@ pub mod remote_exec;
 pub(crate) mod sdk;
 #[path = "devtools/selfdev/mod.rs"]
 pub mod selfdev;
-#[path = "registry/serde_coerce.rs"]
-pub(crate) mod serde_coerce;
+pub(crate) use crate::serde_coerce;
 pub(crate) use crate::session_http;
 #[path = "search/session_search.rs"]
 mod session_search;

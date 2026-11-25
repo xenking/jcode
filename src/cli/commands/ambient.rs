@@ -39,7 +39,7 @@ async fn run_ambient_visible() -> Result<()> {
     registry.register_ambient_tools().await;
 
     let safety = std::sync::Arc::new(crate::safety::SafetySystem::new());
-    crate::tool::ambient::init_safety_system(safety);
+    crate::ambient_tools::init_safety_system(safety);
 
     let (terminal, tui_runtime) = init_tui_runtime()?;
 
@@ -57,7 +57,7 @@ async fn run_ambient_visible() -> Result<()> {
 
     tui_runtime.finish(true);
 
-    if let Some(cycle_result) = crate::tool::ambient::take_cycle_result() {
+    if let Some(cycle_result) = crate::ambient_tools::take_cycle_result() {
         let result_path = VisibleCycleContext::result_path()?;
         crate::storage::write_json(&result_path, &cycle_result)?;
         eprintln!("Ambient cycle result saved.");

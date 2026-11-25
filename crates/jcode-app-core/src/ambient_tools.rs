@@ -1,16 +1,16 @@
-use super::{Tool, ToolContext, ToolOutput};
+use crate::ambient_session::is_ambient_session_registered;
+use jcode_tool_core::{Tool, ToolContext, intent_schema_property};
+use jcode_tool_types::ToolOutput;
 use crate::ambient::{
     AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
     ScheduleTarget, ScheduledItem,
 };
-use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -44,17 +44,18 @@ pub fn take_cycle_result() -> Option<AmbientCycleResult> {
 static SAFETY_SYSTEM: OnceLock<Arc<SafetySystem>> = OnceLock::new();
 /// Shared schedule/ambient runner handle used to wake the background loop after
 /// queue changes.
-static SCHEDULE_RUNNER: OnceLock<Mutex<Option<AmbientRunnerHandle>>> = OnceLock::new();
-/// Session IDs currently allowed to use ambient-only permission workflows.
-static AMBIENT_SESSION_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static SCHEDULE_RUNNER: OnceLock<Mutex<Option<ScheduleNudge>>> = OnceLock::new();
+
+/// Wakes the ambient loop after the schedule changes.
+type ScheduleNudge = Arc<dyn Fn() + Send + Sync>;
 
 pub fn init_safety_system(system: Arc<SafetySystem>) {
     let _ = SAFETY_SYSTEM.set(system);
 }
 
-pub fn init_schedule_runner(handle: AmbientRunnerHandle) {
+pub fn init_schedule_runner(nudge: impl Fn() + Send + Sync + 'static) {
     if let Ok(mut slot) = SCHEDULE_RUNNER.get_or_init(|| Mutex::new(None)).lock() {
-        *slot = Some(handle);
+        *slot = Some(Arc::new(nudge));
     }
 }
 
@@ -63,31 +64,6 @@ fn get_safety_system() -> Arc<SafetySystem> {
         .get()
         .cloned()
         .unwrap_or_else(|| Arc::new(SafetySystem::new()))
-}
-
-fn ambient_session_ids() -> &'static Mutex<HashSet<String>> {
-    AMBIENT_SESSION_IDS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Mark a session ID as ambient-enabled for ambient-only tooling.
-pub fn register_ambient_session(session_id: impl Into<String>) {
-    if let Ok(mut ids) = ambient_session_ids().lock() {
-        ids.insert(session_id.into());
-    }
-}
-
-/// Remove a session ID from the ambient-enabled set.
-pub fn unregister_ambient_session(session_id: &str) {
-    if let Ok(mut ids) = ambient_session_ids().lock() {
-        ids.remove(session_id);
-    }
-}
-
-pub(crate) fn is_ambient_session_registered(session_id: &str) -> bool {
-    ambient_session_ids()
-        .lock()
-        .map(|ids| ids.contains(session_id))
-        .unwrap_or(false)
 }
 
 fn ensure_ambient_session(ctx: &ToolContext) -> Result<()> {
@@ -122,9 +98,9 @@ impl EndAmbientCycleTool {
 #[derive(Deserialize)]
 struct EndCycleInput {
     summary: String,
-    #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
+    #[serde(deserialize_with = "crate::serde_coerce::u32_from_string_or_number")]
     memories_modified: u32,
-    #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
+    #[serde(deserialize_with = "crate::serde_coerce::u32_from_string_or_number")]
     compactions: u32,
     #[serde(default)]
     proactive_work: Option<String>,
@@ -136,7 +112,7 @@ struct EndCycleInput {
 struct NextScheduleInput {
     #[serde(
         default,
-        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+        deserialize_with = "crate::serde_coerce::opt_u32_from_string_or_number"
     )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
@@ -160,7 +136,7 @@ impl Tool for EndAmbientCycleTool {
             "type": "object",
             "required": ["summary", "memories_modified", "compactions"],
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema_property(),
                 "summary": {
                     "type": "string",
                     "description": "Human-readable summary of what was done this cycle"
@@ -287,7 +263,7 @@ impl ScheduleAmbientTool {
 struct ScheduleInput {
     #[serde(
         default,
-        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+        deserialize_with = "crate::serde_coerce::opt_u32_from_string_or_number"
     )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
@@ -312,7 +288,7 @@ impl Tool for ScheduleAmbientTool {
             "type": "object",
             "required": ["context"],
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema_property(),
                 "wake_in_minutes": {
                     "type": "integer",
                     "description": "Minutes from now to wake"
@@ -406,7 +382,7 @@ struct RequestPermissionInput {
     urgency: Option<String>,
     #[serde(
         default = "default_false",
-        deserialize_with = "super::serde_coerce::bool_from_string_or_bool"
+        deserialize_with = "crate::serde_coerce::bool_from_string_or_bool"
     )]
     wait: bool,
     #[serde(default)]
@@ -562,7 +538,7 @@ impl Tool for RequestPermissionTool {
             "type": "object",
             "required": ["action", "description", "rationale"],
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema_property(),
                 "action": {
                     "type": "string",
                     "description": "The action requiring permission (e.g., 'create_pull_request', 'push', 'edit')"
@@ -735,7 +711,7 @@ struct ScheduleToolInput {
     task: Option<String>,
     #[serde(
         default,
-        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+        deserialize_with = "crate::serde_coerce::opt_u32_from_string_or_number"
     )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
@@ -766,7 +742,7 @@ impl Tool for ScheduleTool {
         json!({
             "type": "object",
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema_property(),
                 "action": {
                     "type": "string",
                     "enum": ["create", "list", "cancel"],
@@ -1011,14 +987,14 @@ fn format_scheduled_item(item: &ScheduledItem) -> String {
     )
 }
 
-pub(super) fn nudge_schedule_runner() {
+pub(crate) fn nudge_schedule_runner() {
     let runner = SCHEDULE_RUNNER
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
         .and_then(|slot| slot.clone());
-    if let Some(runner) = runner {
-        runner.nudge();
+    if let Some(nudge) = runner {
+        nudge();
     }
 }
 
@@ -1054,7 +1030,7 @@ impl Tool for SendChannelMessageTool {
         json!({
             "type": "object",
             "properties": {
-                "intent": super::intent_schema_property(),
+                "intent": intent_schema_property(),
                 "message": {
                     "type": "string",
                     "description": "The message text to send"
@@ -1128,5 +1104,5 @@ impl Tool for SendChannelMessageTool {
 // ===========================================================================
 
 #[cfg(test)]
-#[path = "ambient/tests.rs"]
+#[path = "ambient_tools/tests.rs"]
 mod tests;

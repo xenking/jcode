@@ -42,7 +42,7 @@ impl AmbientManager {
         })
     }
 
-    pub(super) fn refresh_state(&mut self) -> Result<()> {
+    pub(crate) fn refresh_state(&mut self) -> Result<()> {
         let revision = FileRevision::read(&self.state_path)?;
         if revision != self.state_revision {
             self.state_revision = revision;
@@ -51,7 +51,7 @@ impl AmbientManager {
         Ok(())
     }
 
-    pub(super) fn has_pending_directives(&mut self) -> Result<bool> {
+    pub(crate) fn has_pending_directives(&mut self) -> Result<bool> {
         let revision = FileRevision::read(&self.directives_path)?;
         if revision != self.directives_revision {
             self.directives_revision = revision;
@@ -65,7 +65,7 @@ impl AmbientManager {
         Ok(self.pending_directives)
     }
 
-    pub(super) fn set_status(&mut self, status: AmbientStatus) -> Result<()> {
+    pub(crate) fn set_status(&mut self, status: AmbientStatus) -> Result<()> {
         if self.state.status == status {
             return Ok(());
         }
@@ -123,7 +123,7 @@ impl AmbientManager {
         self.queue.take_ready_direct_items()
     }
 
-    pub(super) fn maintain_schedule(&mut self, now: DateTime<Utc>) -> Result<Vec<ScheduledItem>> {
+    pub(crate) fn maintain_schedule(&mut self, now: DateTime<Utc>) -> Result<Vec<ScheduledItem>> {
         self.queue.maintain_and_take_direct(now)
     }
 
@@ -135,7 +135,7 @@ impl AmbientManager {
         Ok(id)
     }
 
-    pub(super) fn scheduled_item(request: ScheduleRequest) -> ScheduledItem {
+    pub(crate) fn scheduled_item(request: ScheduleRequest) -> ScheduledItem {
         let id = format!("sched_{:032x}", rand::random::<u128>());
         let scheduled_for = request.wake_at.unwrap_or_else(|| {
             Utc::now() + chrono::Duration::minutes(request.wake_in_minutes.unwrap_or(30) as i64)

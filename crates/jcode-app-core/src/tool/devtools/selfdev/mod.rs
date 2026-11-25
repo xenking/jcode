@@ -6,6 +6,7 @@ use crate::background::{self, TaskResult};
 use crate::build;
 use crate::bus::BackgroundTaskStatus;
 use crate::protocol::{ServerEvent, TranscriptMode};
+#[cfg(test)]
 use crate::server;
 use crate::session;
 use crate::session_launch;

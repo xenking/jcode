@@ -124,7 +124,7 @@ pub(super) fn publish_reload_socket_ready(policy: ForeignMarkerPolicy) {
 
     let current_pid = std::process::id();
     if state.phase == ReloadPhase::Starting && state.pid == current_pid {
-        super::reload_trace::record_value(
+        crate::reload_trace::record_value(
             &state.request_id,
             "socket_ready",
             serde_json::json!({
@@ -632,7 +632,7 @@ pub fn send_reload_signal(
         prefer_selfdev_binary,
         std::process::id()
     ));
-    let target = super::reload_exec_target(prefer_selfdev_binary)
+    let target = crate::reload_target::reload_exec_target(prefer_selfdev_binary)
         .ok_or_else(|| anyhow::anyhow!("no selected reload target"))
         // Admission pins file/payload identity without running a subprocess on
         // the daemon's control loop. Explicit version selections are resolved

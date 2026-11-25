@@ -67,8 +67,8 @@ pub(crate) mod reload_recovery;
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
 pub(crate) mod ask_escalation;
-mod reload_state;
-mod reload_trace;
+use crate::reload_state;
+use crate::reload_trace;
 pub mod rollout;
 mod rollout_desktop;
 pub mod rollout_fs;
@@ -599,7 +599,7 @@ pub use self::socket::{spawn_owned_server_notify, spawn_server_notify};
 pub(crate) use self::util::server_has_newer_binary;
 pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 use self::util::{
-    debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
+    debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for,
     startup_headless_recovery_test_delay, swarm_id_for_dir, swarm_id_for_session,
 };
 
@@ -751,7 +751,10 @@ impl Server {
         let ambient_runner = {
             let safety = Arc::new(crate::safety::SafetySystem::new());
             let handle = AmbientRunnerHandle::new(safety);
-            crate::tool::ambient::init_schedule_runner(handle.clone());
+            {
+                let runner = handle.clone();
+                crate::ambient_tools::init_schedule_runner(move || runner.nudge());
+            }
             Some(handle)
         };
 

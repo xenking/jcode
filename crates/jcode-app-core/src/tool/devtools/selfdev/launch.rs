@@ -119,7 +119,7 @@ impl SelfDevTool {
     }
 
     async fn try_send_prompt_once(session_id: &str, prompt: &str) -> Result<()> {
-        let mut client = server::Client::connect_debug().await?;
+        let mut client = crate::server_client::Client::connect_debug().await?;
         let request_id = client
             .send_transcript(prompt, TranscriptMode::Send, Some(session_id.to_string()))
             .await?;

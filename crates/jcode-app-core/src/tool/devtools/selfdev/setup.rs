@@ -257,11 +257,11 @@ impl SelfDevTool {
         output.push_str("\n### Sockets\n\n");
         output.push_str(&format!(
             "**main socket:** {}\n",
-            server::socket_path().display()
+            crate::server_endpoint::socket_path().display()
         ));
         output.push_str(&format!(
             "**debug socket:** {}\n",
-            server::debug_socket_path().display()
+            crate::server_endpoint::debug_socket_path().display()
         ));
 
         let metadata = json!({
@@ -284,17 +284,17 @@ impl SelfDevTool {
             return Ok(ToolOutput::new("Test mode: skipped reload-to-newer-build."));
         }
 
-        if !server::server_has_newer_binary() {
+        if !crate::reload_target::server_has_newer_binary() {
             return Ok(ToolOutput::new(
                 "Already running the newest installed jcode build; no reload needed.",
             ));
         }
 
         let hash = jcode_build_meta::git_hash().to_string();
-        let request_id = server::send_reload_signal(hash.clone(), None, false);
+        let request_id = crate::reload_state::send_reload_signal(hash.clone(), None, false);
         let timeout = std::time::Duration::from_secs(SelfDevTool::reload_timeout_secs());
 
-        match server::wait_for_reload_ack(&request_id, timeout).await {
+        match crate::reload_state::wait_for_reload_ack(&request_id, timeout).await {
             Ok(ack) => Ok(ToolOutput::new(format!(
                 "Reload initiated into build {}. The server is restarting into the newer binary.",
                 ack.hash
