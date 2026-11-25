@@ -6,7 +6,10 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 impl App {
     pub(crate) fn model_picker_preview_filter(input: &str) -> Option<String> {
-        slash_command_preview_filter(input, &["/model", "/models"])
+        let filter = slash_command_preview_filter(input, &["/model", "/models"])?;
+        // `/model cancel` withdraws a queued switch. A picker preview would
+        // swallow its Enter and pick a model instead.
+        (filter.trim() != "cancel").then_some(filter)
     }
 
     pub(crate) fn subagent_model_picker_preview_filter(input: &str) -> Option<String> {

@@ -1427,6 +1427,12 @@ fn test_model_picker_preview_filter_parsing() {
     );
     assert_eq!(App::model_picker_preview_filter("/modelx"), None);
     assert_eq!(App::model_picker_preview_filter("hello /model"), None);
+    // `/model cancel` is a command. A picker preview would take its Enter.
+    assert_eq!(App::model_picker_preview_filter("/model cancel"), None);
+    assert_eq!(
+        App::model_picker_preview_filter("/model cance"),
+        Some("cance".to_string())
+    );
 }
 
 #[test]
