@@ -274,6 +274,18 @@ If the **manual legacy handoff itself** fails, stop and inspect its error and
 provide the new daemon's crash-loop guarantee before the new daemon starts.
 Do not report success or remove either application in that state.
 
+## Machines without Xcode
+
+Precompiled Desktop shaders need Xcode's Metal toolchain. Rollout and the paired
+smoke ask `xcrun --sdk macosx --find metal` under the developer directory they
+will use: `DEVELOPER_DIR` when set, else Xcode when installed, else
+`/Library/Developer/CommandLineTools`. When `metal` is missing, they build
+Desktop with `--features gpui_platform/runtime_shaders`, so shaders compile when
+the app starts, and the plan prints that choice on the `package-desktop` line.
+Packaging passes the feature through `DESKTOP_CARGO_FEATURES`. A Desktop commit
+whose `scripts/package-macos.sh` predates that variable is refused with a clear
+message instead of failing later inside the shader build.
+
 ## Paired acceptance smoke
 
 Before preparing a CLI and Desktop rollout, `jcode rollout` requires a local
@@ -291,7 +303,8 @@ After acquiring the build lock, the runner checks for a valid `PASS` receipt for
 the same SHA pair and, if found, prints its path without rebuilding. Use
 `--force` to remove that receipt and run the smoke again.
 
-The runner requires a macOS graphical login, Xcode, and `justrust`. Install
+The runner requires a macOS graphical login, Xcode or the Command Line Tools,
+and `justrust`. Install
 `tesseract` to verify painted text when Desktop does not expose visible rows.
 The runner builds
 the exact commits in disposable sibling worktrees and launches only private
