@@ -12,11 +12,11 @@
 //! falls back to a fresh load. Entries are taken once and expire, so memory is
 //! bounded and a stale copy is never served later.
 
+use super::prewarm_store as store;
+use super::storage_paths::session_path;
 use super::Session;
-use super::storage_paths::{session_journal_path_from_snapshot, session_path};
-use std::collections::HashMap;
-use std::sync::{Condvar, LazyLock, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// Below this, a direct parse is a few ms. Above it, the parse is the bulk
 /// of resume (live: 6.4MB sessions took 98-116ms of a ~165ms resume). A
@@ -25,76 +25,6 @@ use std::time::{Duration, Instant, SystemTime};
 const MIN_PREWARM_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PREWARM_SESSIONS: usize = 64;
 const PREWARM_WORKERS: usize = 2;
-/// Reconnects arrive within a few seconds of startup.
-const ENTRY_TTL: Duration = Duration::from_secs(30);
-/// Never block a resume for long on an in-flight prewarm.
-const MAX_WAIT_FOR_IN_FLIGHT: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct FileStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-fn stamp(path: &std::path::Path) -> Option<FileStamp> {
-    match std::fs::metadata(path) {
-        Ok(meta) => Some(FileStamp {
-            len: meta.len(),
-            modified: meta.modified().ok(),
-        }),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some(FileStamp {
-            len: u64::MAX,
-            modified: None,
-        }),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Fingerprint {
-    snapshot: Option<FileStamp>,
-    journal: Option<FileStamp>,
-}
-
-fn fingerprint(session_id: &str) -> Option<Fingerprint> {
-    let path = session_path(session_id).ok()?;
-    let journal = session_journal_path_from_snapshot(&path);
-    Some(Fingerprint {
-        snapshot: stamp(&path),
-        journal: stamp(&journal),
-    })
-}
-
-enum Entry {
-    /// Waiting for the prewarm thread. A resume that finds this claims the
-    /// session and loads it itself instead of waiting behind larger ones.
-    Queued,
-    /// Being parsed right now. A resume waits briefly for it.
-    Parsing,
-    Ready {
-        session: Box<Session>,
-        fingerprint: Fingerprint,
-        ready_at: Instant,
-    },
-}
-
-struct Prewarm {
-    entries: Mutex<HashMap<String, Entry>>,
-    changed: Condvar,
-}
-
-static PREWARM: LazyLock<Prewarm> = LazyLock::new(|| Prewarm {
-    entries: Mutex::new(HashMap::new()),
-    changed: Condvar::new(),
-});
-
-fn lock_entries() -> std::sync::MutexGuard<'static, HashMap<String, Entry>> {
-    PREWARM
-        .entries
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Sessions whose `active_pids` marker names `pid`. Call before the startup
 /// prune removes those markers.
 pub fn sessions_owned_by(pid: u32) -> Vec<String> {
@@ -137,12 +67,7 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
     }
     sized.sort_by(|a, b| b.0.cmp(&a.0));
     sized.truncate(MAX_PREWARM_SESSIONS);
-    {
-        let mut entries = lock_entries();
-        for (_, id) in &sized {
-            entries.insert(id.clone(), Entry::Queued);
-        }
-    }
+    store::enqueue(sized.iter().map(|(_, id)| id));
     // Two workers pull from one largest-first queue. Each parse is itself
     // multi-threaded (see `parallel_messages`), so more workers would only
     // compete with the reconnect handlers for CPU.
@@ -170,7 +95,7 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
         })
         .collect();
     if workers.is_empty() {
-        lock_entries().clear();
+        store::clear();
         return;
     }
     let _ = std::thread::Builder::new()
@@ -181,95 +106,18 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
                 "[TIMING] session_prewarm: sessions={loaded}, total={}ms",
                 start.elapsed().as_millis()
             ));
-            std::thread::sleep(ENTRY_TTL);
-            expire_stale();
+            std::thread::sleep(store::ENTRY_TTL);
+            store::expire_stale();
         });
 }
 
 fn prewarm_one(session_id: &str) {
-    {
-        let mut entries = lock_entries();
-        match entries.get(session_id) {
-            Some(Entry::Queued) => {
-                entries.insert(session_id.to_string(), Entry::Parsing);
-            }
-            // Claimed by a resume that loaded it directly.
-            _ => return,
-        }
-    }
-    let before = fingerprint(session_id);
-    let result = session_path(session_id).and_then(|path| Session::load_from_path(&path));
-    let after = fingerprint(session_id);
-    let mut entries = lock_entries();
-    // A write during the parse would make this copy ambiguous. Drop it.
-    match (result, before, after) {
-        (Ok(session), Some(before), Some(after)) if before == after => {
-            entries.insert(
-                session_id.to_string(),
-                Entry::Ready {
-                    session: Box::new(session),
-                    fingerprint: after,
-                    ready_at: Instant::now(),
-                },
-            );
-        }
-        _ => {
-            entries.remove(session_id);
-        }
-    }
-    drop(entries);
-    PREWARM.changed.notify_all();
-}
-
-fn expire_stale() {
-    let mut entries = lock_entries();
-    entries.retain(|_, entry| match entry {
-        Entry::Queued | Entry::Parsing => true,
-        Entry::Ready { ready_at, .. } => ready_at.elapsed() < ENTRY_TTL,
-    });
-}
-
-/// Take the prewarmed copy of `session_id` if it is still identical to disk.
-/// Waits briefly when that session is being parsed right now, since a fresh
-/// parse would only race it for the same CPU. A still-queued session is
-/// claimed and left to the caller's own load.
-pub(super) fn take(session_id: &str) -> Option<Session> {
-    let deadline = Instant::now() + MAX_WAIT_FOR_IN_FLIGHT;
-    let mut entries = lock_entries();
-    loop {
-        match entries.get(session_id) {
-            None => return None,
-            Some(Entry::Queued) => {
-                entries.remove(session_id);
-                return None;
-            }
-            Some(Entry::Parsing) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return None;
-                }
-                entries = PREWARM
-                    .changed
-                    .wait_timeout(entries, deadline - now)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .0;
-            }
-            Some(Entry::Ready { .. }) => break,
-        }
-    }
-    let Some(Entry::Ready {
-        session,
-        fingerprint: parsed,
-        ready_at,
-    }) = entries.remove(session_id)
-    else {
-        return None;
+    // `None`: claimed by a resume that loaded it directly.
+    let Some(claim) = store::begin_parse(session_id) else {
+        return;
     };
-    drop(entries);
-    if ready_at.elapsed() >= ENTRY_TTL || fingerprint(session_id) != Some(parsed) {
-        return None;
-    }
-    Some(*session)
+    let result = session_path(session_id).and_then(|path| Session::load_from_path(&path));
+    store::finish_parse(session_id, claim, result);
 }
 
 #[cfg(test)]
@@ -277,6 +125,7 @@ mod tests {
     use super::*;
     use crate::session::{Session, StoredMessage};
     use jcode_message_types::{ContentBlock, Role};
+    use std::time::Duration;
 
     struct Home {
         _dir: tempfile::TempDir,
@@ -290,7 +139,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let prev = std::env::var_os("JCODE_HOME");
             crate::env::set_var("JCODE_HOME", dir.path());
-            lock_entries().clear();
+            store::probe::reset();
             Self {
                 _dir: dir,
                 prev,
@@ -301,7 +150,7 @@ mod tests {
 
     impl Drop for Home {
         fn drop(&mut self) {
-            lock_entries().clear();
+            store::probe::reset();
             match &self.prev {
                 Some(prev) => crate::env::set_var("JCODE_HOME", prev),
                 None => crate::env::remove_var("JCODE_HOME"),
@@ -333,7 +182,7 @@ mod tests {
     fn wait_ready(id: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if matches!(lock_entries().get(id), Some(Entry::Ready { .. }) | None) {
+            if !store::probe::is_pending(id) {
                 return;
             }
             assert!(Instant::now() < deadline, "prewarm did not finish");
@@ -354,13 +203,10 @@ mod tests {
         saved_session("session_prewarm_hit", "hello");
         spawn_prewarm_with_min_bytes(vec!["session_prewarm_hit".into()], 0);
         wait_ready("session_prewarm_hit");
-        assert!(matches!(
-            lock_entries().get("session_prewarm_hit"),
-            Some(Entry::Ready { .. })
-        ));
+        assert!(store::probe::is_ready("session_prewarm_hit"));
         let loaded = Session::load_for_resume("session_prewarm_hit").unwrap();
         assert_eq!(first_text(&loaded), "hello");
-        assert!(take("session_prewarm_hit").is_none(), "taken exactly once");
+        assert!(store::take("session_prewarm_hit").is_none(), "taken exactly once");
     }
 
     #[test]
@@ -387,7 +233,7 @@ mod tests {
             token_usage: None,
         });
         session.save().unwrap();
-        assert!(take("session_prewarm_stale").is_none());
+        assert!(store::take("session_prewarm_stale").is_none());
         let loaded = Session::load_for_resume("session_prewarm_stale").unwrap();
         assert_eq!(loaded.messages.len(), 2, "fresh load sees the new message");
     }
@@ -409,24 +255,24 @@ mod tests {
             let loaded = Session::load_for_resume(id).unwrap();
             assert_eq!(&first_text(&loaded), id);
         }
-        assert!(lock_entries().is_empty(), "every entry taken exactly once");
+        assert!(store::probe::is_empty(), "every entry taken exactly once");
     }
 
     #[test]
     fn a_queued_session_is_claimed_not_waited_on() {
         let _home = Home::new();
         saved_session("session_prewarm_queued", "queued");
-        lock_entries().insert("session_prewarm_queued".into(), Entry::Queued);
+        store::enqueue([&"session_prewarm_queued".to_string()]);
         let start = Instant::now();
-        assert!(take("session_prewarm_queued").is_none());
+        assert!(store::take("session_prewarm_queued").is_none());
         assert!(
             start.elapsed() < Duration::from_millis(100),
             "must not wait"
         );
-        assert!(lock_entries().get("session_prewarm_queued").is_none());
+        assert!(!store::probe::contains("session_prewarm_queued"));
         // The prewarm thread then skips it instead of parsing a claimed session.
         prewarm_one("session_prewarm_queued");
-        assert!(lock_entries().get("session_prewarm_queued").is_none());
+        assert!(!store::probe::contains("session_prewarm_queued"));
     }
 
     #[test]
@@ -437,7 +283,7 @@ mod tests {
             "session_prewarm_small".into(),
             "session_does_not_exist".into(),
         ]);
-        assert!(lock_entries().is_empty());
+        assert!(store::probe::is_empty());
         let loaded = Session::load_for_resume("session_prewarm_small").unwrap();
         assert_eq!(first_text(&loaded), "tiny");
     }

@@ -106,6 +106,16 @@ pub(super) enum PersistVectorMode {
     Full,
 }
 
+impl PersistVectorMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Append => "append",
+            Self::Full => "full",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct SessionPersistState {
     pub(super) snapshot_exists: bool,

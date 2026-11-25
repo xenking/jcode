@@ -530,7 +530,7 @@ impl Session {
     /// server startup when it still matches disk (see `session::prewarm`).
     /// Only for resume, which consumes the copy exactly once.
     pub fn load_for_resume(session_id: &str) -> Result<Self> {
-        if let Some(mut session) = super::prewarm::take(session_id) {
+        if let Some(mut session) = super::prewarm_store::take(session_id) {
             session.refresh_agent_model_overrides()?;
             crate::logging::info(&format!(
                 "[TIMING] session_load: session={session_id}, source=prewarm, messages={}",

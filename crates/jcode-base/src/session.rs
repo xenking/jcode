@@ -60,6 +60,7 @@ mod persistence;
 mod pinned_skill;
 mod presence;
 pub mod prewarm;
+mod prewarm_store;
 mod prompt_inputs;
 mod render;
 mod storage_paths;
@@ -93,7 +94,7 @@ pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
-use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
+use storage_paths::estimate_json_bytes;
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
@@ -701,7 +702,7 @@ impl Session {
             "provider_messages_cache": {
                 "count": self.provider_messages_cache.len(),
                 "source_len": self.provider_messages_cache_len,
-                "mode": persist_vector_mode_label(self.provider_messages_cache_mode),
+                "mode": self.provider_messages_cache_mode.label(),
                 "json_bytes": provider_messages_cache_json_bytes,
                 "content_shared_with_source_count": provider_cache_shared_content_count,
                 "memory": provider_cache_stats.to_json(),
