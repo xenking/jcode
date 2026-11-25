@@ -111,10 +111,26 @@ pub(crate) fn push_ordered_stage_lines(
         }
         // Expand a waiting lane so its dependency progress belongs to the
         // corresponding todo rather than an ambiguous lane-wide status dot.
+        // The user's requests always get a row each: their titles are the
+        // names the agent updates them by.
         if items.iter().any(|todo| {
-            crate::todo::todo_requires_user_auth(todo)
+            todo.is_request()
+                || crate::todo::todo_requires_user_auth(todo)
                 || !todo_running_dependencies(todo, background_tasks).is_empty()
         }) {
+            if items.iter().all(|todo| todo.is_request()) {
+                let done = items.iter().filter(|todo| is_done(todo)).count();
+                lines.push(todo_card_line(
+                    vec![Span::styled(
+                        format!("requests {done}/{}", items.len()),
+                        Style::default()
+                            .fg(todo_meta_color())
+                            .add_modifier(Modifier::BOLD),
+                    )],
+                    base_indent,
+                    inner_width,
+                ));
+            }
             for todo in &items {
                 lines.push(render_todo_item_line_with_background(
                     todo,

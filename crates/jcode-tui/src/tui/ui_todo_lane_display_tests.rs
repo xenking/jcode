@@ -61,3 +61,50 @@ fn lane_name_shared_by_every_lane_is_not_drawn() {
     let rows = render(&distinct, &[], 120).join("\n");
     assert!(rows.contains("parser") && rows.contains("ship"), "{rows}");
 }
+
+fn request(number: u64, status: &str, text: &str) -> TodoItem {
+    let mut item = todo(
+        &format!("request_{number}"),
+        &format!("Ask #{number}: {text}"),
+        status,
+        None,
+    );
+    item.group = Some(crate::todo::REQUESTS_GROUP.to_string());
+    item
+}
+
+#[test]
+fn requests_lead_the_card_and_never_become_a_phase() {
+    for staged in [true, false] {
+        let mut todos = vec![
+            laned("Parse the config", "in_progress", 1, "Crates"),
+            laned("Ship it", "pending", 2, "Crates"),
+        ];
+        if !staged {
+            todos.iter_mut().for_each(|todo| todo.stage = None);
+        }
+        // Requests sit first in the stored list, the way the daemon writes them.
+        todos.splice(
+            0..0,
+            [
+                request(1, "completed", "Check the quota"),
+                request(2, "in_progress", "Run the tests and then report"),
+                request(3, "pending", "Fix the build"),
+            ],
+        );
+        let rows = render(&todos, &[], 100);
+        let joined = rows.join("\n");
+        let at = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing: {joined}"))
+        };
+        assert!(at("requests") < at("Ask #1"), "{joined}");
+        assert!(at("Ask #2") < at("Ask #3"), "{joined}");
+        assert!(at("Ask #3") < at("Parse the config"), "{joined}");
+        assert!(!joined.contains("Phase 3") && !joined.contains("phase 3"), "{joined}");
+        for width in 0..120 {
+            assert_fits(&render(&todos, &[], width), width);
+        }
+    }
+}
