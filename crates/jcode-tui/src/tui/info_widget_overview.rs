@@ -101,22 +101,24 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
-/// Only a genuine pending first snapshot reserves space. An absent snapshot
-/// after initialization is not evidence that this account supports quota data.
-pub(super) fn startup_usage_pending(data: &InfoWidgetData) -> bool {
-    data.startup_usage_pending
-        && matches!(data.auth_method, AuthMethod::OpenAIOAuth)
-        && !data
-            .usage_info
-            .as_ref()
-            .is_some_and(|info| info.available || info.limit_reached)
+impl InfoWidgetData {
+    /// Only a genuine pending first snapshot reserves space. An absent snapshot
+    /// after initialization is not evidence that this account supports quota data.
+    pub(super) fn usage_pending_at_startup(&self) -> bool {
+        self.startup_usage_pending
+            && matches!(self.auth_method, AuthMethod::OpenAIOAuth)
+            && !self
+                .usage_info
+                .as_ref()
+                .is_some_and(|info| info.available || info.limit_reached)
+    }
 }
 
 pub(super) fn render_overview_usage(
     data: &InfoWidgetData,
     width: u16,
 ) -> Vec<ratatui::text::Line<'static>> {
-    if startup_usage_pending(data) {
+    if data.usage_pending_at_startup() {
         return super::info_widget::startup_usage_lines(width);
     }
     data.usage_info
@@ -127,7 +129,7 @@ pub(super) fn render_overview_usage(
 }
 
 fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if startup_usage_pending(data) {
+    if data.usage_pending_at_startup() {
         return 2;
     }
     let Some(info) = data.usage_info.as_ref() else {

@@ -65,7 +65,7 @@ pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{memory_active_summary, memory_last_trace_summary, memory_state_detail};
-use model::{overview_runtime_height, render_model_info, render_model_widget, runtime_has_data};
+use model::{overview_runtime_height, render_model_info, render_model_widget};
 use swarm_background::{render_background_compact, render_background_widget, render_swarm_widget};
 use text::clip;
 pub(crate) use tips::occasional_status_tip;
@@ -799,7 +799,7 @@ impl InfoWidgetData {
                 let mut sections = 0usize;
                 // Status-line facts (model, context %, branch) never count:
                 // the overview only joins detail sections.
-                if runtime_has_data(self) {
+                if self.has_runtime_data() {
                     sections += 1;
                 }
                 if self
@@ -813,7 +813,7 @@ impl InfoWidgetData {
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
-                if super::info_widget_overview::startup_usage_pending(self)
+                if self.usage_pending_at_startup()
                     || self
                         .usage_info
                         .as_ref()
@@ -859,7 +859,7 @@ impl InfoWidgetData {
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
             WidgetKind::UsageLimits => {
-                super::info_widget_overview::startup_usage_pending(self)
+                self.usage_pending_at_startup()
                     || self
                         .usage_info
                         .as_ref()
@@ -867,7 +867,7 @@ impl InfoWidgetData {
                         .unwrap_or(false)
             }
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
-            WidgetKind::ModelInfo => runtime_has_data(self),
+            WidgetKind::ModelInfo => self.has_runtime_data(),
             WidgetKind::Tips => false,
             WidgetKind::GitStatus => {
                 self.dual_git_info.is_some()
@@ -1807,7 +1807,7 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::BackgroundTasks => render_background_widget(data, inner),
         WidgetKind::Compaction => render_compaction_widget(data, inner),
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
-        WidgetKind::UsageLimits if super::info_widget_overview::startup_usage_pending(data) => {
+        WidgetKind::UsageLimits if data.usage_pending_at_startup() => {
             Framed::body(
                 startup_usage_lines(inner.width)
                     .into_iter()

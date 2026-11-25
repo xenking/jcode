@@ -272,6 +272,14 @@ mod tests {
     }
 }
 
+fn caption_text(text: &str) -> String {
+    let plain = crate::message::strip_ansi_escape_sequences(text);
+    let text: String = plain.chars().filter_map(|c| {
+        if c.is_whitespace() { Some(' ') } else if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { None } else { Some(c) }
+    }).take(160).collect();
+    text.trim().to_owned()
+}
+
 #[derive(Default)]
 pub(super) struct AlwaysListening {
     playback: DeferredPlayback,
@@ -390,16 +398,8 @@ impl AlwaysListening {
         &self.captions
     }
 
-    fn caption_text(text: &str) -> String {
-        let plain = crate::message::strip_ansi_escape_sequences(text);
-        let text: String = plain.chars().filter_map(|c| {
-            if c.is_whitespace() { Some(' ') } else if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { None } else { Some(c) }
-        }).take(160).collect();
-        text.trim().to_owned()
-    }
-
     fn update_caption(&mut self, id: u64, text: &str) {
-        let text = Self::caption_text(text);
+        let text = caption_text(text);
         if text.is_empty() {
             return;
         }

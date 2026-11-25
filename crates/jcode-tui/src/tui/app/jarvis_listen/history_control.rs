@@ -200,7 +200,7 @@ impl HistoryControl {
                                     }
                                 }
                             });
-                            self.caption = Some(AlwaysListening::caption_text(&text));
+                            self.caption = Some(super::caption_text(&text));
                             self.player = Some((child, Instant::now()));
                             "playing"
                         }
