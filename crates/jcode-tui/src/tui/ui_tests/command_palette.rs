@@ -20,7 +20,12 @@ fn palette(selected: usize) -> (TestState, Vec<(String, String)>) {
         ("poteto-mode", long, true, true),
         ("selfdev", "Develop the fork", true, false),
         ("swarm", "Coordinate\nworkers", true, false),
-        ("clickhouse-architecture-advisor", "Design ClickHouse schemas", false, false),
+        (
+            "clickhouse-architecture-advisor",
+            "Design ClickHouse schemas",
+            false,
+            false,
+        ),
         ("go-review", long, false, false),
     ];
     let mut state = TestState {
@@ -31,7 +36,9 @@ fn palette(selected: usize) -> (TestState, Vec<(String, String)>) {
     let mut described = Vec::new();
     for (name, description, mode, active) in rows {
         let command = format!("/mode toggle {name}");
-        state.palette_rows.push((command.clone(), "Toggle session mode"));
+        state
+            .palette_rows
+            .push((command.clone(), "Toggle session mode"));
         state
             .palette_info
             .insert(command, info(description, mode, active));
@@ -114,9 +121,17 @@ fn modes_are_marked_and_the_active_one_is_distinct() {
     let lines = render_palette(&state, 100);
     assert!(lines[0].starts_with("● poteto-mode"), "{:?}", lines[0]);
     assert!(lines[1].starts_with("○ selfdev"), "{:?}", lines[1]);
-    assert!(lines[1].contains("mode · Develop the fork"), "{:?}", lines[1]);
+    assert!(
+        lines[1].contains("mode · Develop the fork"),
+        "{:?}",
+        lines[1]
+    );
     // A plain skill has no state marker or mode tag.
-    assert!(lines[3].starts_with("  clickhouse-architecture-advisor"), "{:?}", lines[3]);
+    assert!(
+        lines[3].starts_with("  clickhouse-architecture-advisor"),
+        "{:?}",
+        lines[3]
+    );
     assert!(!lines[3].contains("mode ·"), "{:?}", lines[3]);
     // Multi-line descriptions collapse onto the row.
     assert!(lines[2].contains("Coordinate workers"), "{:?}", lines[2]);
@@ -128,5 +143,8 @@ fn a_wide_name_never_pushes_the_description_off_a_narrow_row() {
     let lines = render_palette(&state, 40);
     let wide = &lines[3];
     assert!(wide.width() <= 40, "{wide:?}");
-    assert!(wide.contains("Design"), "description kept visible: {wide:?}");
+    assert!(
+        wide.contains("Design"),
+        "description kept visible: {wide:?}"
+    );
 }

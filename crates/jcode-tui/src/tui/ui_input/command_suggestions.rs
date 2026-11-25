@@ -140,12 +140,14 @@ pub(super) fn command_suggestion_lines(
                 .filter(|needle| !needle.is_empty()),
             command_style,
         ));
-        let tag = info.as_ref().and_then(|info| match (info.mode, info.active) {
-            (true, true) => Some("active mode"),
-            (true, false) => Some("mode"),
-            (false, true) => Some("active"),
-            (false, false) => None,
-        });
+        let tag = info
+            .as_ref()
+            .and_then(|info| match (info.mode, info.active) {
+                (true, true) => Some("active mode"),
+                (true, false) => Some("mode"),
+                (false, true) => Some("active"),
+                (false, false) => None,
+            });
         let description = match (tag, description.is_empty()) {
             (Some(tag), true) => tag.to_string(),
             (Some(tag), false) => format!("{tag} · {description}"),

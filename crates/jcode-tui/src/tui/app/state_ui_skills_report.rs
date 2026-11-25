@@ -5,7 +5,11 @@ use super::App;
 pub(super) fn build_skills_report(app: &App) -> String {
     let mut out = String::new();
 
-    let active = app.active_skill().map(|s| s.to_string());
+    let pinned = app.session.pinned_skill_names().to_vec();
+    let active = app.active_skill();
+    let is_active =
+        |name: &str| active.as_deref() == Some(name) || pinned.iter().any(|pinned| pinned == name);
+    let mode_tag = |is_mode: bool| if is_mode { " [mode]" } else { "" };
 
     // Loaded skills. In remote mode we only have names; locally we have full
     // skill metadata (description + path).
@@ -14,12 +18,13 @@ pub(super) fn build_skills_report(app: &App) -> String {
         let mut names = app.remote_skills.clone();
         names.sort();
         for name in &names {
-            let marker = if active.as_deref() == Some(name.as_str()) {
-                " (active)"
-            } else {
-                ""
-            };
-            out.push_str(&format!("- /{}{}\n", name, marker));
+            let marker = if is_active(name) { " (active)" } else { "" };
+            out.push_str(&format!(
+                "- /{}{}{}\n",
+                name,
+                mode_tag(crate::skill::name_implies_mode(name)),
+                marker
+            ));
         }
     } else {
         let snapshot = app.current_skills_snapshot();
@@ -31,12 +36,17 @@ pub(super) fn build_skills_report(app: &App) -> String {
             );
         } else {
             for skill in skills {
-                let marker = if active.as_deref() == Some(skill.name.as_str()) {
+                let marker = if is_active(&skill.name) {
                     " (active)"
                 } else {
                     ""
                 };
-                out.push_str(&format!("- /{}{}\n", skill.name, marker));
+                out.push_str(&format!(
+                    "- /{}{}{}\n",
+                    skill.name,
+                    mode_tag(skill.is_mode()),
+                    marker
+                ));
                 out.push_str(&format!("    {}\n", skill.description));
                 out.push_str(&format!("    path: {}\n", skill.path.display()));
             }
@@ -96,6 +106,9 @@ pub(super) fn build_skills_report(app: &App) -> String {
     }
 
     out.push_str("\nActivate a skill by typing its slash command (e.g. /optimization).\n");
+    out.push_str(
+        "Modes are skills pinned to the session: type `/mode ` to toggle several at once.\n",
+    );
     out.push_str("Manage skills with the skill_manage tool (list/load/read/reload).\n");
     out.push_str(
         "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",

@@ -77,7 +77,10 @@ fn mode_picker_rows_carry_live_description_mode_flag_and_pin_state() {
     assert!(worker.mode && !worker.active);
     let plain = app.skill_suggestion_info("/zz-plain").unwrap();
     assert!(!plain.mode && !plain.active);
-    assert!(app.skill_suggestion_info("/zz-optout-mode").is_some_and(|info| !info.mode));
+    assert!(
+        app.skill_suggestion_info("/zz-optout-mode")
+            .is_some_and(|info| !info.mode)
+    );
     // Registered commands keep their registered help.
     assert!(app.skill_suggestion_info("/model").is_none());
     assert!(app.skill_suggestion_info("/mode off").is_none());
@@ -98,4 +101,20 @@ fn selecting_a_mode_picker_row_toggles_it_without_replacing_other_modes() {
         app.submit_input();
         assert_eq!(app.session.pinned_skill_names(), expected, "{input}");
     }
+}
+
+#[test]
+fn skills_report_marks_modes_and_every_pinned_skill() {
+    let mut app = create_test_app();
+    let project = mode_picker_project();
+    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_pinned_skill_names(vec!["zz-quiet".into(), "zz-plain".into()]);
+
+    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    let report = app.display_messages().last().unwrap().content.clone();
+    assert!(report.contains("- /zz-quiet [mode] (active)\n"), "{report}");
+    assert!(report.contains("- /zz-plain (active)\n"), "{report}");
+    assert!(report.contains("- /zz-worker-mode [mode]\n"), "{report}");
+    assert!(report.contains("- /zz-optout-mode\n"), "{report}");
 }

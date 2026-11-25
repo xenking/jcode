@@ -20,12 +20,22 @@ impl App {
         let mut skills: Vec<(String, String, bool)> = snapshot
             .list()
             .into_iter()
-            .map(|skill| (skill.name.clone(), skill.description.clone(), skill.is_mode()))
+            .map(|skill| {
+                (
+                    skill.name.clone(),
+                    skill.description.clone(),
+                    skill.is_mode(),
+                )
+            })
             .collect();
         if self.is_remote {
             for name in &self.remote_skills {
                 if !skills.iter().any(|(known, _, _)| known == name) {
-                    skills.push((name.clone(), String::new(), crate::skill::name_implies_mode(name)));
+                    skills.push((
+                        name.clone(),
+                        String::new(),
+                        crate::skill::name_implies_mode(name),
+                    ));
                 }
             }
         }
@@ -99,7 +109,11 @@ impl App {
         Some(CommandSuggestionInfo {
             description,
             mode,
-            active: self.session.pinned_skill_names().iter().any(|pinned| pinned == name),
+            active: self
+                .session
+                .pinned_skill_names()
+                .iter()
+                .any(|pinned| pinned == name),
         })
     }
 }
