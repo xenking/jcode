@@ -5,7 +5,7 @@ pub(in crate::tui::app) use event_dispatch::handle_server_event;
 use event_dispatch::should_defer_history_for_runtime_identity_with_allow;
 
 #[cfg(test)]
-#[path = "turn_identity_tests.rs"]
+#[path = "tests/turn_identity_tests.rs"]
 mod turn_identity_tests;
 
 use super::auto_reload_guard::{auto_reload_loop_guard_tripped, clear_auto_reload_loop_guard};
@@ -99,14 +99,14 @@ fn should_defer_history_for_runtime_identity(
 }
 
 #[cfg(test)]
-#[path = "kv_cache_miss_tests.rs"]
+#[path = "tests/kv_cache_miss_tests.rs"]
 mod kv_cache_miss_tests;
 
 #[path = "server_events/cache_miss.rs"]
 mod cache_miss;
 use cache_miss::handle_kv_cache_miss;
 #[cfg(test)]
-#[path = "runtime_identity_tests.rs"]
+#[path = "tests/runtime_identity_tests.rs"]
 mod runtime_identity_tests;
 
 #[path = "server_events/history_fingerprint.rs"]

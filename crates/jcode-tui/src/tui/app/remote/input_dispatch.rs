@@ -539,7 +539,7 @@ mod ssh_slash_tests {
         }
     }
 
-    include!("ssh_git_diff_test.rs");
+    include!("ssh/ssh_git_diff_test.rs");
 
     #[test]
     fn ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt() {

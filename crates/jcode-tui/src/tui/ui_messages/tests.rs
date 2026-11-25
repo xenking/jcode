@@ -1054,9 +1054,9 @@ mod message_card_tests;
 #[allow(unused_imports)]
 pub(crate) use message_card_tests::*;
 
-#[path = "tests_additional_tests.rs"]
+#[path = "tests/tests_additional_tests.rs"]
 mod additional_pinned_dependency_label_uses_available_width_and_palette;
-#[path = "provider_card_tests.rs"]
+#[path = "tests/provider_card_tests.rs"]
 mod provider_card_tests;
-#[path = "tool_render_tests.rs"]
+#[path = "tests/tool_render_tests.rs"]
 mod tool_render;

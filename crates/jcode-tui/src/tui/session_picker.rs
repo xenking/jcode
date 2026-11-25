@@ -36,34 +36,54 @@ pub use jcode_tui_session_picker::{
 };
 
 #[cfg(test)]
+#[path = "session_picker/bench/benchmark_io.rs"]
 mod benchmark_io;
 #[cfg(test)]
+#[path = "session_picker/bench/benchmark_matrix.rs"]
 mod benchmark_matrix;
+#[path = "session_picker/view/canvas.rs"]
 mod canvas;
+#[path = "session_picker/preview/cloud_presence.rs"]
 mod cloud_presence;
 mod cloud_preview;
+#[path = "session_picker/search/filter.rs"]
 mod filter;
+#[path = "session_picker/search/identity_search.rs"]
 mod identity_search;
+#[path = "session_picker/bench/latency.rs"]
 mod latency;
 mod loading;
 mod memory;
+#[path = "session_picker/view/navigation.rs"]
 mod navigation;
+#[path = "session_picker/bench/performance.rs"]
 mod performance;
 #[cfg(test)]
+#[path = "session_picker/bench/performance_tests.rs"]
 mod performance_tests;
+#[path = "session_picker/preview/preview_chrome.rs"]
 mod preview_chrome;
+#[path = "session_picker/preview/preview_io.rs"]
 mod preview_io;
 use preview_io::preview_result;
+#[path = "session_picker/preview/preview_metadata.rs"]
 mod preview_metadata;
+#[path = "session_picker/preview/preview_refresh.rs"]
 mod preview_refresh;
+#[path = "session_picker/preview/progressive_preview.rs"]
 mod progressive_preview;
+#[path = "session_picker/view/render.rs"]
 mod render;
+#[path = "session_picker/view/saved_placement.rs"]
 mod saved_placement;
+#[path = "session_picker/search/search_terms.rs"]
 mod search_terms;
+#[path = "session_picker/view/session_view.rs"]
 mod session_view;
 use session_view::highlight_buffer_matches;
 mod transcript_search;
 #[cfg(test)]
+#[path = "session_picker/bench/typing_bench.rs"]
 mod typing_bench;
 
 #[cfg(test)]
@@ -461,7 +481,7 @@ impl SessionPicker {
     }
 }
 
-#[path = "session_picker/onboarding_render.rs"]
+#[path = "session_picker/view/onboarding_render.rs"]
 mod onboarding_render;
 
 impl SessionPicker {
@@ -508,7 +528,7 @@ impl SessionPicker {
     }
 }
 
-#[path = "session_picker/preview_render.rs"]
+#[path = "session_picker/preview/preview_render.rs"]
 mod preview_render;
 
 impl SessionPicker {

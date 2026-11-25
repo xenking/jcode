@@ -1,5 +1,5 @@
 use crate::id::{extract_session_name, session_icon};
-#[path = "loading_opencode.rs"]
+#[path = "loading/opencode.rs"]
 mod opencode;
 use opencode::load_opencode_session_info;
 
@@ -427,7 +427,7 @@ fn send_session_list_updates_with_discovery(
     let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
 
-#[path = "loading_search_text.rs"]
+#[path = "loading/search_text.rs"]
 mod search_text;
 #[cfg(test)]
 use super::search_terms::{push_sampled_search_text, search_query_tokens};
@@ -1583,5 +1583,5 @@ pub(crate) fn load_external_cli_sessions_grouped(
 }
 
 #[cfg(test)]
-#[path = "loading_tests.rs"]
+#[path = "loading/tests.rs"]
 mod tests;

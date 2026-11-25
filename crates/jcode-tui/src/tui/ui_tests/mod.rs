@@ -1,10 +1,16 @@
 use super::*;
 
+#[path = "cards/cloud_directories.rs"]
 mod cloud_directories;
+#[path = "cards/codemode_preview.rs"]
 mod codemode_preview;
+#[path = "cards/compact_agent_dms.rs"]
 mod compact_agent_dms;
+#[path = "cards/preview_redraw_schedule.rs"]
 mod preview_redraw_schedule;
+#[path = "cards/queued_reminders.rs"]
 mod queued_reminders;
+#[path = "cards/resume_parity.rs"]
 mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
@@ -548,31 +554,32 @@ fn reset_prompt_viewport_state_for_test() {
     });
 }
 
-#[path = "pinned_todo_regressions.rs"]
+#[path = "cards/pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
+#[path = "cards/todo_blocker_notes.rs"]
 mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;
-#[path = "command_palette.rs"]
+#[path = "chrome/command_palette.rs"]
 mod command_palette;
 #[path = "diagrams.rs"]
 mod diagrams;
-#[path = "expanded_diff.rs"]
+#[path = "cards/expanded_diff.rs"]
 mod expanded_diff;
-#[path = "inline_picker.rs"]
+#[path = "chrome/inline_picker.rs"]
 mod inline_picker;
-#[path = "onboarding.rs"]
+#[path = "chrome/onboarding.rs"]
 mod onboarding;
-#[path = "palette_topology.rs"]
+#[path = "chrome/palette_topology.rs"]
 mod palette_topology;
 #[path = "prepare.rs"]
 mod prepared_messages_tests;
-#[path = "rendering.rs"]
+#[path = "chrome/rendering.rs"]
 mod rendering;
-#[path = "scrollbar_overlay.rs"]
+#[path = "chrome/scrollbar_overlay.rs"]
 mod scrollbar_overlay;
-#[path = "swarm_buffer.rs"]
+#[path = "chrome/swarm_buffer.rs"]
 mod swarm_buffer;
-#[path = "tools.rs"]
+#[path = "cards/tools.rs"]
 mod tools;

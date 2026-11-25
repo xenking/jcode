@@ -2,7 +2,7 @@
 //! All matching, including literal metadata and identity fields, runs on
 //! cancellable workers. The UI only consumes bounded batches of rank evidence.
 use super::search_terms::{lowercase_field, search_query_tokens};
-#[path = "transcript_search_shard_search.rs"]
+#[path = "search/transcript_search_shard_search.rs"]
 mod shard_search;
 
 use super::{ResumeTarget, SessionInfo};
@@ -1119,17 +1119,17 @@ fn log_scan_error(path: &Path, record: Option<usize>, scan: &Scan<'_>, error: &s
 }
 
 #[cfg(test)]
-#[path = "transcript_search_tests.rs"]
+#[path = "search/transcript_search_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "relevance_tests.rs"]
+#[path = "search/relevance_tests.rs"]
 mod relevance_tests;
 
 #[cfg(test)]
-#[path = "queued_submission_tests.rs"]
+#[path = "search/queued_submission_tests.rs"]
 mod queued_submission_tests;
 
 #[cfg(test)]
-#[path = "search_speed_tests.rs"]
+#[path = "search/search_speed_tests.rs"]
 mod search_speed_tests;

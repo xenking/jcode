@@ -1,5 +1,5 @@
 use super::*;
-#[path = "../ui_todo_stages.rs"]
+#[path = "../../ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;

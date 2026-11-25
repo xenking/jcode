@@ -1207,7 +1207,7 @@ pub(super) fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(false);
 }
 
-include!("../gmail_drafts_tests.rs");
+include!("gmail_drafts_tests.rs");
 
 #[test]
 pub(super) fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {

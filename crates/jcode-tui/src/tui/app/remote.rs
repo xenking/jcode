@@ -21,21 +21,31 @@ use crossterm::event::{
 use ratatui::{DefaultTerminal, Terminal, backend::Backend};
 use std::time::{Duration, Instant};
 
+#[path = "remote/lifecycle/auto_reload_guard.rs"]
 mod auto_reload_guard;
 mod input_dispatch;
 mod key_handling;
+#[path = "remote/lifecycle/latency.rs"]
 mod latency;
+#[path = "remote/lifecycle/queue_recovery.rs"]
 mod queue_recovery;
+#[path = "remote/lifecycle/reconnect.rs"]
 mod reconnect;
 mod server_event_handlers;
 mod server_events;
+#[path = "remote/lifecycle/session_persistence.rs"]
 mod session_persistence;
+#[path = "remote/ssh/ssh_host.rs"]
 mod ssh_host;
+#[path = "remote/ssh/ssh_sessions.rs"]
 pub(super) mod ssh_sessions;
+#[path = "remote/swarm/swarm_plan_core.rs"]
 mod swarm_plan_core;
+#[path = "remote/swarm/swarm_status_core.rs"]
 mod swarm_status_core;
 mod transcript_input;
 pub(super) mod turn_identity;
+#[path = "remote/swarm/workspace.rs"]
 mod workspace;
 
 #[cfg(test)]
@@ -104,7 +114,7 @@ pub(super) enum RemoteEventOutcome {
     Quit,
 }
 
-#[path = "remote/tick.rs"]
+#[path = "remote/lifecycle/tick.rs"]
 mod tick;
 #[allow(unused_imports)]
 pub(crate) use tick::*;

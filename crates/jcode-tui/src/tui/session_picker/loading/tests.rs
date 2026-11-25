@@ -1442,7 +1442,7 @@ fn benchmark_resume_loading_reports_timings() {
     );
 }
 
-#[path = "loading_scope_tests.rs"]
+#[path = "scope_tests.rs"]
 mod loading_scope;
 
 #[test]
@@ -1533,5 +1533,5 @@ fn external_previews_index_tool_blocks_at_their_own_weight() {
     );
 }
 
-#[path = "loading_tests_additional_tests.rs"]
+#[path = "additional_tests.rs"]
 mod additional_fork_intent_snapshot_uses_first_genuine_request_and_keeps_inherited_search;

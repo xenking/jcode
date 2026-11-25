@@ -5,10 +5,10 @@ use gmail_drafts::*;
 mod tool_rendering;
 pub(crate) use tool_rendering::render_tool_message;
 
-#[path = "ui_messages/todo_completion.rs"]
+#[path = "ui_messages/cards/todo_completion.rs"]
 mod todo_completion;
 #[cfg(test)]
-#[path = "ui_messages/todo_payload_cache_tests.rs"]
+#[path = "ui_messages/tests/todo_payload_cache_tests.rs"]
 mod todo_payload_cache_tests;
 pub(crate) use todo_cards::{TodoCardAgent, animate_lane_spinners};
 
@@ -25,7 +25,7 @@ mod dm_summary;
 pub(crate) use dm_summary::render_agent_dm_run;
 #[path = "ui_messages/git_diff.rs"]
 mod git_diff;
-#[path = "ui_messages/todo_header.rs"]
+#[path = "ui_messages/cards/todo_header.rs"]
 mod todo_header;
 use crate::message::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
@@ -237,7 +237,7 @@ enum AssistantSegment {
 /// Split assistant content into markdown/plan segments when it contains at
 /// least one ```plan fenced block. Returns `None` when there is no plan block
 /// so the common path stays on the plain markdown renderer.
-#[path = "ui_messages/plan_card.rs"]
+#[path = "ui_messages/cards/plan_card.rs"]
 mod plan_card;
 use plan_card::{render_assistant_segments, split_plan_segments};
 
@@ -891,7 +891,7 @@ pub(crate) struct TodoCardBackgroundTask {
     pub percent: Option<f32>,
 }
 
-#[path = "ui_messages/todo_cards.rs"]
+#[path = "ui_messages/cards/todo_cards.rs"]
 mod todo_cards;
 #[allow(unused_imports)]
 pub(crate) use todo_cards::*;
@@ -905,7 +905,7 @@ fn compact_run_id(run_id: &str) -> String {
     }
 }
 
-#[path = "ui_messages/scheduled_cards.rs"]
+#[path = "ui_messages/cards/scheduled_cards.rs"]
 mod scheduled_cards;
 #[allow(unused_imports)]
 pub(crate) use scheduled_cards::*;
@@ -925,7 +925,7 @@ fn swarm_notification_token_count(content: &str) -> usize {
     crate::util::estimate_tokens(body.trim())
 }
 
-#[path = "ui_messages/swarm_cards.rs"]
+#[path = "ui_messages/cards/swarm_cards.rs"]
 mod swarm_cards;
 #[allow(unused_imports)]
 pub(crate) use swarm_cards::*;
@@ -972,7 +972,7 @@ fn token_badge_for_count(tokens: usize) -> ToolOutputTokenBadge {
 }
 
 #[cfg(test)]
-#[path = "ui_messages/agent_color_tests.rs"]
+#[path = "ui_messages/tests/agent_color_tests.rs"]
 mod agent_color_tests;
 
 #[cfg(test)]
@@ -980,7 +980,7 @@ mod agent_color_tests;
 mod tests;
 
 #[cfg(test)]
-#[path = "ui_messages/kv_cache_footer_tests.rs"]
+#[path = "ui_messages/tests/kv_cache_footer_tests.rs"]
 mod kv_cache_footer_tests;
 
 #[path = "ui_messages/connection.rs"]
