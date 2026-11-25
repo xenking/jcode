@@ -8,16 +8,6 @@ pub(crate) use todo_margins::{compute_visible_margins, pinned_todo_band_lines};
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
-#[cfg(target_os = "macos")]
-pub(crate) const COPY_BADGE_ALT_LABEL: &str = "⌥";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const COPY_BADGE_ALT_LABEL: &str = "Alt";
-
-pub(crate) fn copy_badge_alt_label() -> String {
-    let config = crate::config::config();
-    copy_badge_alt_label_from_config(&config.display.copy_badge_alt_label)
-}
-
 /// Build one Ratatui cell symbol that starts at the bottom-right of a reserved
 /// math region, moves to its top-left, invokes Handterm's native LaTeX APC, and
 /// restores the cursor where Ratatui expects it after printing one cell.
@@ -36,22 +26,6 @@ fn handterm_native_latex_cell_symbol(source: &str, rows: u16, cols: u16) -> Opti
     // terminal cursor and advance once so its state matches that accounting.
     symbol.push_str("\x1b[u\x1b[1C");
     Some(symbol)
-}
-
-pub(crate) fn shortcut_badge_spans(
-    key: char,
-    alt_style: Style,
-    shift_style: Style,
-    key_style: Style,
-) -> [Span<'static>; 5] {
-    let dim = Style::default().fg(dim_color());
-    [
-        Span::styled("[", dim),
-        Span::styled(copy_badge_alt_label(), alt_style),
-        Span::styled("⇧", shift_style),
-        Span::styled(key.to_ascii_uppercase().to_string(), key_style),
-        Span::styled("]", dim),
-    ]
 }
 
 fn copy_badge_shortcut_width(key_label: &str) -> usize {
@@ -170,7 +144,11 @@ use super::selection_highlight::highlight_line_selection;
 
 #[path = "ui_viewport_text.rs"]
 mod viewport_text;
-use viewport_text::copy_badge_alt_label_from_config;
+#[cfg(test)]
+pub(crate) use super::shortcut_badge::COPY_BADGE_ALT_LABEL;
+#[cfg(test)]
+use super::shortcut_badge::copy_badge_alt_label_from_config;
+pub(crate) use super::shortcut_badge::{copy_badge_alt_label, shortcut_badge_spans};
 pub(crate) use viewport_text::{truncate_line_for_copy_badge, truncate_line_in_place_to_width};
 
 /// Choose the wrapped line that hosts an inline copy badge for a copy target

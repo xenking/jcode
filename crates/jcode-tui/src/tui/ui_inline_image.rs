@@ -941,7 +941,7 @@ pub(crate) fn image_label_line(
         );
     }
     let mut suffix = vec![Span::raw("  ")];
-    suffix.extend(super::viewport::shortcut_badge_spans('I', dim, dim, dim));
+    suffix.extend(super::shortcut_badge::shortcut_badge_spans('I', dim, dim, dim));
     suffix.push(Span::raw(" "));
     if images_visible {
         suffix.push(Span::styled("hide", dim));

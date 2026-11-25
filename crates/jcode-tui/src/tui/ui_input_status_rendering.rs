@@ -684,7 +684,7 @@ pub(in super::super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span
             };
             spans.push(Span::styled(feedback_text, feedback_style));
         }
-        spans.extend(super::super::viewport::shortcut_badge_spans(
+        spans.extend(super::super::shortcut_badge::shortcut_badge_spans(
             key,
             alt_style,
             shift_style,

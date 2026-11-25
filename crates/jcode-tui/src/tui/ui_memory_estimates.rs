@@ -221,24 +221,6 @@ struct DiagnosticAllocations {
     seen: std::collections::HashSet<usize>,
 }
 
-pub(super) fn diagnostic_aux_profile<'a>(
-    values: impl Iterator<Item = (usize, usize, &'a Vec<String>)>,
-    order_entries_count: usize,
-) -> serde_json::Value {
-    let mut seen = std::collections::HashSet::new();
-    let mut entries_count = 0;
-    let mut bytes = 0;
-    for (pointer, inline_bytes, lines) in values {
-        entries_count += 1;
-        if seen.insert(pointer) {
-            bytes +=
-                2 * std::mem::size_of::<usize>() + inline_bytes + estimate_string_vec_bytes(lines);
-        }
-    }
-    serde_json::json!({"entries_count": entries_count, "unique_values_count": seen.len(),
-        "order_entries_count": order_entries_count, "unique_prepared_bytes": bytes})
-}
-
 impl DiagnosticAllocations {
     fn arc<T>(&mut self, value: &Arc<T>, payload: impl FnOnce(&mut Self, &T) -> usize) -> usize {
         if !self.seen.insert(Arc::as_ptr(value) as usize) {
@@ -402,6 +384,7 @@ pub(crate) fn debug_side_panel_memory_profile() -> serde_json::Value {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+    use super::super::prepare::diagnostic_aux_profile;
     use std::mem::size_of;
 
     #[test]

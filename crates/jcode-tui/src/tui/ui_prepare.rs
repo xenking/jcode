@@ -48,12 +48,31 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
 }
 
+pub(super) fn diagnostic_aux_profile<'a>(
+    values: impl Iterator<Item = (usize, usize, &'a Vec<String>)>,
+    order_entries_count: usize,
+) -> serde_json::Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries_count = 0;
+    let mut bytes = 0;
+    for (pointer, inline_bytes, lines) in values {
+        entries_count += 1;
+        if seen.insert(pointer) {
+            bytes +=
+                2 * std::mem::size_of::<usize>() + inline_bytes + (lines.iter().map(|value| value.capacity()).sum::<usize>()
+                    + lines.capacity() * std::mem::size_of::<String>());
+        }
+    }
+    serde_json::json!({"entries_count": entries_count, "unique_values_count": seen.len(),
+        "order_entries_count": order_entries_count, "unique_prepared_bytes": bytes})
+}
+
 /// Diagnostic-only snapshot of unique auxiliary payload allocations.
 pub(super) fn debug_assistant_aux_memory_profile() -> serde_json::Value {
     let cache = assistant_aux_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    super::memory_estimates::diagnostic_aux_profile(
+    diagnostic_aux_profile(
         cache.entries.values().map(|value| {
             (
                 Arc::as_ptr(value) as usize,

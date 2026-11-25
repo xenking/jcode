@@ -58,24 +58,3 @@ pub(crate) fn side_panel_dismiss_area(area: Rect) -> Option<Rect> {
         .then(|| Rect::new(area.right().saturating_sub(8), area.y, 8, 1))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_side_panel_markdown(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    app: &dyn crate::tui::TuiState,
-    snapshot: &crate::side_panel::SidePanelSnapshot,
-    scroll: usize,
-    focused: bool,
-    centered: bool,
-) {
-    super::pinned_ui::draw_side_panel_markdown(
-        frame, area, app, snapshot, scroll, focused, centered,
-    );
-    if let Some(close_area) = side_panel_dismiss_area(area) {
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(" [close]")
-                .style(Style::default().fg(super::theme_support::accent_color())),
-            close_area,
-        );
-    }
-}

@@ -558,7 +558,27 @@ pub(crate) fn prewarm_focused_side_panel(
     true
 }
 
-pub(super) fn draw_side_panel_markdown(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_side_panel_markdown(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &dyn crate::tui::TuiState,
+    snapshot: &crate::side_panel::SidePanelSnapshot,
+    scroll: usize,
+    focused: bool,
+    centered: bool,
+) {
+    draw_side_panel_page(frame, area, app, snapshot, scroll, focused, centered);
+    if let Some(close_area) = super::side_panel_dismiss_area(area) {
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(" [close]")
+                .style(Style::default().fg(super::theme_support::accent_color())),
+            close_area,
+        );
+    }
+}
+
+fn draw_side_panel_page(
     frame: &mut Frame,
     area: Rect,
     app: &dyn TuiState,

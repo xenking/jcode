@@ -94,6 +94,8 @@ pub(crate) mod panel_image_preview;
 mod pinned_ui;
 #[path = "ui_prepare.rs"]
 pub(crate) mod prepare;
+#[path = "ui_shortcut_badge.rs"]
+mod shortcut_badge;
 #[path = "ui_smoothness.rs"]
 mod smoothness;
 #[path = "ui_todo_changes.rs"]
@@ -143,7 +145,8 @@ pub(crate) use header::capitalize;
 pub(crate) use inline_ui::inline_ui_height as inline_ui_height_for_tests;
 use inline_ui::{draw_inline_ui, inline_ui_height};
 pub(crate) use layout_support::{SIDE_PANEL_DISMISSED_HINT, side_panel_restore_area};
-pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
+pub(crate) use layout_support::side_panel_dismiss_area;
+pub(crate) use pinned_ui::draw_side_panel_markdown;
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
 #[cfg(test)]
