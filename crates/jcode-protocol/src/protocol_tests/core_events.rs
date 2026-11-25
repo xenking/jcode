@@ -1081,3 +1081,42 @@ fn history_delta_fields_are_backward_compatible() {
     };
     assert_eq!(messages_base_count, None);
 }
+
+/// The bridge to the harness API reads these exact keys, so a rename here
+/// would turn a queued switch back into a silent timeout.
+#[test]
+fn queued_model_switch_events_keep_their_wire_shape() -> Result<()> {
+    let pending = encode_event(&ServerEvent::ModelChangePending {
+        id: 7,
+        model: "gpt-6.2-sol".to_string(),
+    });
+    let value: serde_json::Value = serde_json::from_str(pending.trim())?;
+    assert_eq!(
+        value,
+        serde_json::json!({"type":"model_change_pending","id":7,"model":"gpt-6.2-sol"})
+    );
+    let cancelled = encode_event(&ServerEvent::ModelChangeCancelled {
+        id: 8,
+        pending_id: Some(7),
+        model: Some("gpt-6.2-sol".to_string()),
+    });
+    let value: serde_json::Value = serde_json::from_str(cancelled.trim())?;
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "type":"model_change_cancelled","id":8,"pending_id":7,"model":"gpt-6.2-sol"
+        })
+    );
+    let nothing = parse_event_json(r#"{"type":"model_change_cancelled","id":9}"#)?;
+    assert!(matches!(
+        nothing,
+        ServerEvent::ModelChangeCancelled {
+            id: 9,
+            pending_id: None,
+            model: None
+        }
+    ));
+    let request: Request = serde_json::from_str(r#"{"type":"cancel_pending_model_change","id":4}"#)?;
+    assert!(matches!(request, Request::CancelPendingModelChange { id: 4 }));
+    Ok(())
+}

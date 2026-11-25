@@ -1202,6 +1202,16 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_model", session_id: sessionId, model });
   }
 
+  /**
+   * Like `setModel`, and reports whether the switch took effect (`applied`) or
+   * is queued behind the running turn (`queued`). Anything meant for the new
+   * model, such as an effort level, must wait until it has applied.
+   */
+  async setModelSwitch(sessionId: string, model: string): Promise<"queued" | "applied"> {
+    const frame = await this.requestOk({ req: "set_model", session_id: sessionId, model });
+    return frame.ev === "model_switch" && frame.state === "queued" ? "queued" : "applied";
+  }
+
   /** Withdraw a model switch that `setModel` queued behind a running turn. */
   async cancelPendingModel(sessionId: string): Promise<void> {
     await this.requestOk({ req: "cancel_pending_model", session_id: sessionId });

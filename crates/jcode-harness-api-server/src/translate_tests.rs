@@ -2382,7 +2382,10 @@ fn a_queued_model_change_answers_immediately_and_settles_later() {
             if model == "gpt-6.2-sol"
     ));
     assert_eq!(queued[1].reply_to, Some(4));
-    assert!(matches!(queued[1].event, ApiEvent::Ok));
+    assert!(matches!(
+        queued[1].event,
+        ApiEvent::ModelSwitch { state: ModelSwitchState::Queued, .. }
+    ));
     assert_eq!(
         state.current_model.as_deref(),
         Some("claude-opus-5-5"),

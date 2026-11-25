@@ -3150,9 +3150,12 @@ impl BridgeState {
                     model: event["model"].as_str().map(str::to_string),
                     error: None,
                 };
-                let mut frames = vec![ServerFrame::event(queued)];
+                let mut frames = vec![ServerFrame::event(queued.clone())];
+                // The caller learns the switch is queued from its own reply,
+                // so it does not apply an effort or speed meant for the new
+                // model to the one that is still running.
                 if let Some(api_id) = reply_to {
-                    frames.push(ServerFrame::reply(api_id, ApiEvent::Ok));
+                    frames.push(ServerFrame::reply(api_id, queued));
                 }
                 frames
             }

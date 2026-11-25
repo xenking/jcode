@@ -15,6 +15,7 @@ use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_inst
 use crate::ssh::{SshConnectOptions, SshProcess, SshTransport};
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
+    ModelSwitchState,
     PermissionDecision, ServerFrame, SessionInfo, SessionToolDefinition, TextMatch,
     ToolConfiguration, api_socket_path, read_frame, write_frame,
 };
@@ -1814,11 +1815,22 @@ impl JcodeClient {
     /// the call returns at once, [`ApiEvent::ModelSwitch`] reports it as
     /// queued, and the session keeps its model until the turn ends.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
-        self.request_ok(ApiRequest::SetModel {
+        self.set_model_switch(session_id, model).map(drop)
+    }
+
+    /// Like [`Self::set_model`], and says whether the switch took effect
+    /// ([`ModelSwitchState::Applied`]) or is queued behind the running turn
+    /// ([`ModelSwitchState::Queued`]). Anything meant for the new model, such
+    /// as an effort level, must wait until the switch has applied.
+    pub fn set_model_switch(&self, session_id: &str, model: &str) -> Result<ModelSwitchState> {
+        let frame = self.request_ok(ApiRequest::SetModel {
             session_id: session_id.to_string(),
             model: model.to_string(),
+        })?;
+        Ok(match frame.event {
+            ApiEvent::ModelSwitch { state, .. } => state,
+            _ => ModelSwitchState::Applied,
         })
-        .map(drop)
     }
 
     /// Withdraw a model switch that [`Self::set_model`] queued behind a

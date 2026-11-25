@@ -1529,3 +1529,89 @@ fn remote_failover_countdown_resumes_after_a_manual_model_change_or_reconnect() 
         assert!(app.pending_provider_failover.is_some());
     });
 }
+
+/// A switch the daemon holds until the turn ends is shown as queued. The
+/// session keeps its model, and the line that says it switched comes only when
+/// the daemon confirms it.
+#[test]
+fn remote_queued_model_switch_waits_for_the_turn_then_announces_the_switch() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_model = Some("claude-opus-5-5".into());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangePending {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_model_switch,
+            Some((7, "gpt-6.2-sol".to_string()))
+        );
+        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+        let queued = app.display_messages().last().unwrap().content.clone();
+        assert!(queued.contains("queued") && queued.contains("claude-opus-5-5"), "{queued}");
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+                provider_name: Some("openai".into()),
+                error: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(app.queued_model_switch, None);
+        assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-6.2-sol"));
+        assert!(app
+            .display_messages()
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model: gpt-6.2-sol")));
+    });
+}
+
+#[test]
+fn remote_queued_model_switch_can_be_cancelled() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_model = Some("claude-opus-5-5".into());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangePending {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangeCancelled {
+                id: 8,
+                pending_id: Some(7),
+                model: Some("gpt-6.2-sol".into()),
+            },
+            &mut remote,
+        );
+        assert_eq!(app.queued_model_switch, None);
+        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+        assert!(app
+            .display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("cancelled"));
+    });
+}
