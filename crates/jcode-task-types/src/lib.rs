@@ -651,7 +651,7 @@ pub struct TodoPlanChange {
 /// metric, while "design an onboarding screen" cannot because success is a
 /// taste judgment. Items like "read the auth code" have no meaningful score of
 /// their own, so the score lives here instead of on `TodoItem`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TodoGoal {
     /// Group label this goal describes. `None` covers the ungrouped list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
