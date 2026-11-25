@@ -133,13 +133,10 @@ fn update_channel_parse_accepts_known_aliases_and_rejects_unknown() {
 
 impl Config {
     fn external_auth_source_allowed_for_path_config(&self, source_id: &str, path: &Path) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
+        let Ok(entry) = crate::auth::external_trust::path_entry(source_id, path) else {
             return false;
         };
-        self.auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+        self.auth.trusts_path_entry(&entry)
     }
 }
 

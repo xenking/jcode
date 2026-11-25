@@ -120,7 +120,7 @@ pub fn legacy_auth_file_path() -> Result<PathBuf> {
 }
 
 pub fn trust_legacy_auth_for_future_use() -> Result<()> {
-    crate::config::Config::allow_external_auth_source_for_path(
+    crate::auth::external_trust::allow_source_for_path(
         LEGACY_CODEX_AUTH_SOURCE_ID,
         &legacy_auth_path()?,
     )?;
@@ -141,7 +141,7 @@ pub fn legacy_auth_allowed() -> bool {
         || legacy_auth_path()
             .ok()
             .map(|path| {
-                crate::config::Config::external_auth_source_allowed_for_path(
+                crate::auth::external_trust::source_allowed_for_path(
                     LEGACY_CODEX_AUTH_SOURCE_ID,
                     &path,
                 )

@@ -116,10 +116,7 @@ const SOURCES: [ExternalAuthSource; 4] = [
 ];
 
 pub fn trust_external_auth_source(source: ExternalAuthSource) -> Result<()> {
-    crate::config::Config::allow_external_auth_source_for_path(
-        source.source_id(),
-        &source.path()?,
-    )?;
+    crate::auth::external_trust::allow_source_for_path(source.source_id(), &source.path()?)?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
@@ -281,17 +278,15 @@ pub fn source_allowed(source: ExternalAuthSource) -> bool {
         return false;
     };
 
-    if crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path) {
+    if crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path) {
         return true;
     }
 
     match source {
-        ExternalAuthSource::OpenCode => {
-            crate::config::Config::external_auth_source_allowed_for_path(
-                OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
-                &path,
-            )
-        }
+        ExternalAuthSource::OpenCode => crate::auth::external_trust::source_allowed_for_path(
+            OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
+            &path,
+        ),
         ExternalAuthSource::Pi | ExternalAuthSource::OpenClaw | ExternalAuthSource::Hermes => false,
     }
 }

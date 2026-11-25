@@ -9,6 +9,40 @@ use crate::display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode, TodoHea
 use crate::env::{parse_bool as parse_env_bool, parse_list as parse_env_list};
 use crate::{DiffDisplayMode, LatexRenderingMode, MarkdownSpacingMode, ReasoningDisplayMode};
 
+/// One `[display]` preference a user can change from the UI and have saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayPreference {
+    Centered(bool),
+    CompactNotifications(bool),
+    ShowAgentgrepOutput(bool),
+    LatexRendering(LatexRenderingMode),
+    ToolCallDetails(bool),
+}
+
+impl DisplayPreference {
+    /// The key under `[display]` this preference is stored as.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Centered(_) => "centered",
+            Self::CompactNotifications(_) => "compact_notifications",
+            Self::ShowAgentgrepOutput(_) => "show_agentgrep_output",
+            Self::LatexRendering(_) => "latex_rendering",
+            Self::ToolCallDetails(_) => "tool_call_details",
+        }
+    }
+
+    /// The stored value as it reads in the config file.
+    pub fn value_label(self) -> String {
+        match self {
+            Self::Centered(value)
+            | Self::CompactNotifications(value)
+            | Self::ShowAgentgrepOutput(value)
+            | Self::ToolCallDetails(value) => value.to_string(),
+            Self::LatexRendering(mode) => mode.as_str().to_string(),
+        }
+    }
+}
+
 impl DisplayConfig {
     /// Apply `JCODE_*` display environment overrides.
     #[expect(
@@ -200,50 +234,23 @@ impl DisplayConfig {
 }
 
 impl DisplayConfig {
-    /// Persisted default alignment preference.
-    pub fn set_centered(&mut self, centered: bool) {
-        self.centered = centered;
-    }
-
-    /// Persisted compact-notifications preference.
-    pub fn set_compact_notifications(&mut self, compact: bool) {
-        self.compact_notifications = compact;
+    /// Apply one persisted preference change.
+    pub fn apply(&mut self, preference: DisplayPreference) {
+        match preference {
+            DisplayPreference::Centered(centered) => self.centered = centered,
+            DisplayPreference::CompactNotifications(compact) => {
+                self.compact_notifications = compact;
+            }
+            DisplayPreference::ShowAgentgrepOutput(show) => self.show_agentgrep_output = show,
+            DisplayPreference::LatexRendering(mode) => self.latex_rendering = mode,
+            DisplayPreference::ToolCallDetails(show) => self.tool_call_details = show,
+        }
     }
 
     /// Set the todo header mode and keep the legacy pin flag in sync.
     pub fn set_todo_header_mode(&mut self, mode: TodoHeaderMode) {
         self.todo_header = mode;
         self.pin_todos = mode.is_visible();
-    }
-
-    /// Persisted show-agentgrep-output preference.
-    pub fn set_show_agentgrep_output(&mut self, show: bool) {
-        self.show_agentgrep_output = show;
-    }
-
-    /// Persisted LaTeX rendering mode.
-    pub fn set_latex_rendering(&mut self, mode: LatexRenderingMode) {
-        self.latex_rendering = mode;
-    }
-
-    /// Persisted tool-call-details preference.
-    pub fn set_tool_call_details(&mut self, show: bool) {
-        self.tool_call_details = show;
-    }
-
-    /// The configured LaTeX rendering mode.
-    pub fn latex_rendering(&self) -> LatexRenderingMode {
-        self.latex_rendering
-    }
-
-    /// Animation variants the user switched off by name.
-    pub fn disabled_animations(&self) -> &[String] {
-        &self.disabled_animations
-    }
-
-    /// Per-role color overrides.
-    pub fn colors(&self) -> &std::collections::BTreeMap<String, String> {
-        &self.colors
     }
 
     /// The `**Display:**` block of the `/config` summary.

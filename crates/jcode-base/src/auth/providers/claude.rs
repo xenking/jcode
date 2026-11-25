@@ -559,19 +559,14 @@ pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
         .ok()
         .map(|path| match source {
             ExternalClaudeAuthSource::OpenCode => {
-                crate::config::Config::external_auth_source_allowed_for_path(
-                    source.source_id(),
-                    &path,
-                ) || crate::config::Config::external_auth_source_allowed_for_path(
-                    crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
-                    &path,
-                )
+                crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
+                    || crate::auth::external_trust::source_allowed_for_path(
+                        crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
+                        &path,
+                    )
             }
             ExternalClaudeAuthSource::ClaudeCode => {
-                crate::config::Config::external_auth_source_allowed_for_path(
-                    source.source_id(),
-                    &path,
-                )
+                crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
             }
         })
         .unwrap_or(false);
@@ -580,9 +575,9 @@ pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
 
 pub fn trust_external_auth_source(source: ExternalClaudeAuthSource) -> Result<()> {
     let path = source.path()?;
-    crate::config::Config::allow_external_auth_source_for_path(source.source_id(), &path)?;
+    crate::auth::external_trust::allow_source_for_path(source.source_id(), &path)?;
     if matches!(source, ExternalClaudeAuthSource::OpenCode) {
-        crate::config::Config::allow_external_auth_source_for_path(
+        crate::auth::external_trust::allow_source_for_path(
             crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
             &path,
         )?;
@@ -618,7 +613,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
             // Hot path: this runs per credential probe (route pricing, auth
             // status, subscription checks). Use the process-cached config
             // snapshot instead of re-parsing config.toml on every call.
-            crate::config::Config::external_auth_source_allowed_for_path_cached(
+            crate::auth::external_trust::source_allowed_for_path_cached(
                 CLAUDE_CODE_AUTH_SOURCE_ID,
                 &path,
             )
@@ -657,10 +652,10 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     if opencode_path()
         .ok()
         .map(|path| {
-            crate::config::Config::external_auth_source_allowed_for_path_cached(
+            crate::auth::external_trust::source_allowed_for_path_cached(
                 crate::auth::external::OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
                 &path,
-            ) || crate::config::Config::external_auth_source_allowed_for_path_cached(
+            ) || crate::auth::external_trust::source_allowed_for_path_cached(
                 crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
                 &path,
             )
@@ -917,7 +912,7 @@ pub fn load_native_credentials() -> Result<ClaudeCredentials> {
 
 /// Whether the user has approved importing Claude Code's native credentials.
 pub fn native_source_allowed() -> bool {
-    crate::config::Config::external_auth_source_allowed(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID)
+    crate::auth::external_trust::source_allowed(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID)
 }
 
 /// Whether unapproved Claude Code native credentials (macOS Keychain or
@@ -961,7 +956,7 @@ pub fn native_source_path_hint() -> PathBuf {
 
 /// Remember approval to import Claude Code's native credentials.
 pub fn trust_native_source() -> Result<()> {
-    crate::config::Config::allow_external_auth_source(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID)?;
+    crate::auth::external_trust::allow_source(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID)?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }

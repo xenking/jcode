@@ -158,11 +158,8 @@ fn imports_cli_oauth_tokens_when_native_tokens_missing() {
         r#"{"access_token":"at-123","refresh_token":"rt-456","expiry_date":4102444800000}"#,
     )
     .expect("write cli token file");
-    crate::config::Config::allow_external_auth_source_for_path(
-        GEMINI_CLI_AUTH_SOURCE_ID,
-        &cli_path,
-    )
-    .expect("trust cli auth path");
+    crate::auth::external_trust::allow_source_for_path(GEMINI_CLI_AUTH_SOURCE_ID, &cli_path)
+        .expect("trust cli auth path");
 
     let tokens = load_tokens().expect("load tokens");
     assert_eq!(tokens.access_token, "at-123");
@@ -200,11 +197,8 @@ fn imports_cli_oauth_tokens_without_changing_external_permissions() {
     .expect("set dir perms");
     std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o644))
         .expect("set file perms");
-    crate::config::Config::allow_external_auth_source_for_path(
-        GEMINI_CLI_AUTH_SOURCE_ID,
-        &cli_path,
-    )
-    .expect("trust cli auth path");
+    crate::auth::external_trust::allow_source_for_path(GEMINI_CLI_AUTH_SOURCE_ID, &cli_path)
+        .expect("trust cli auth path");
 
     let tokens = load_tokens().expect("load tokens");
     assert_eq!(tokens.access_token, "at-123");

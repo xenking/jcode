@@ -36,6 +36,7 @@ pub use agents::{
 pub use ambient::{AmbientConfig, NotificationsConfig, SafetyConfig};
 pub use compaction::{CompactionConfig, CompactionMode, CompactionOverride};
 pub use display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode, TodoHeaderMode};
+pub use display_env::DisplayPreference;
 pub use features::{
     DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, FeatureConfig, NativeScrollbarConfig,
 };

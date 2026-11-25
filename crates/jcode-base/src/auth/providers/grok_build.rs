@@ -332,12 +332,12 @@ fn jcode_auth_path() -> Option<PathBuf> {
 }
 
 fn cli_auth_trusted(path: &Path) -> bool {
-    crate::config::Config::external_auth_source_allowed_for_path(GROK_CLI_AUTH_SOURCE_ID, path)
+    crate::auth::external_trust::source_allowed_for_path(GROK_CLI_AUTH_SOURCE_ID, path)
 }
 
 pub fn trust_cli_auth_for_future_use() -> Result<()> {
     let path = auth_json_path().context("No home directory for Grok credentials")?;
-    crate::config::Config::allow_external_auth_source_for_path(GROK_CLI_AUTH_SOURCE_ID, &path)?;
+    crate::auth::external_trust::allow_source_for_path(GROK_CLI_AUTH_SOURCE_ID, &path)?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }

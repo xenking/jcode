@@ -135,3 +135,34 @@ fn display_setters_keep_the_legacy_todo_pin_in_sync() {
     assert!(display.pin_todos);
     assert_eq!(display.todo_header_mode(), crate::TodoHeaderMode::Minimal);
 }
+
+#[test]
+fn display_preferences_write_the_key_they_are_named_after() {
+    use crate::{DisplayPreference as Pref, LatexRenderingMode};
+    let mut display = DisplayConfig::default();
+    let changes = [
+        Pref::Centered(true),
+        Pref::CompactNotifications(true),
+        Pref::ShowAgentgrepOutput(true),
+        Pref::ToolCallDetails(true),
+        Pref::LatexRendering(LatexRenderingMode::Unicode),
+    ];
+    let before = serde_json::to_value(&display).unwrap();
+    for change in changes {
+        display.apply(change);
+        let after = serde_json::to_value(&display).unwrap();
+        let changed: Vec<_> = after
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, value)| before[key.as_str()] != **value)
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert!(changed.contains(&change.key()), "{change:?} -> {changed:?}");
+    }
+    assert_eq!(Pref::Centered(false).value_label(), "false");
+    assert_eq!(
+        Pref::LatexRendering(LatexRenderingMode::Unicode).value_label(),
+        "unicode"
+    );
+}

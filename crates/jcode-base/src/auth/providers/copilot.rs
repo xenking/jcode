@@ -170,7 +170,7 @@ pub fn load_github_token() -> Result<String> {
     }
 
     let config_path = ExternalCopilotAuthSource::ConfigJson.path();
-    if crate::config::Config::external_auth_source_allowed_for_path(
+    if crate::auth::external_trust::source_allowed_for_path(
         COPILOT_CONFIG_JSON_SOURCE_ID,
         &config_path,
     ) && let Ok(token) = load_token_from_config_json(&config_path)
@@ -180,7 +180,7 @@ pub fn load_github_token() -> Result<String> {
     }
 
     let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
-    if crate::config::Config::external_auth_source_allowed_for_path(
+    if crate::auth::external_trust::source_allowed_for_path(
         COPILOT_HOSTS_AUTH_SOURCE_ID,
         &hosts_path,
     ) && let Ok(token) = load_token_from_json(&hosts_path)
@@ -190,10 +190,8 @@ pub fn load_github_token() -> Result<String> {
     }
 
     let apps_path = ExternalCopilotAuthSource::AppsJson.path();
-    if crate::config::Config::external_auth_source_allowed_for_path(
-        COPILOT_APPS_AUTH_SOURCE_ID,
-        &apps_path,
-    ) && let Ok(token) = load_token_from_json(&apps_path)
+    if crate::auth::external_trust::source_allowed_for_path(COPILOT_APPS_AUTH_SOURCE_ID, &apps_path)
+        && let Ok(token) = load_token_from_json(&apps_path)
     {
         cache_github_token(&token);
         return Ok(token);
@@ -300,7 +298,7 @@ pub fn has_copilot_credentials_fast() -> bool {
 
     let config_path = ExternalCopilotAuthSource::ConfigJson.path();
     if config_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
+        && crate::auth::external_trust::source_allowed_for_path_cached(
             COPILOT_CONFIG_JSON_SOURCE_ID,
             &config_path,
         )
@@ -312,7 +310,7 @@ pub fn has_copilot_credentials_fast() -> bool {
 
     let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
     if hosts_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
+        && crate::auth::external_trust::source_allowed_for_path_cached(
             COPILOT_HOSTS_AUTH_SOURCE_ID,
             &hosts_path,
         )
@@ -324,7 +322,7 @@ pub fn has_copilot_credentials_fast() -> bool {
 
     let apps_path = ExternalCopilotAuthSource::AppsJson.path();
     if apps_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
+        && crate::auth::external_trust::source_allowed_for_path_cached(
             COPILOT_APPS_AUTH_SOURCE_ID,
             &apps_path,
         )
@@ -341,10 +339,8 @@ pub fn has_copilot_credentials_fast() -> bool {
         if !path.exists() {
             continue;
         }
-        if crate::config::Config::external_auth_source_allowed_for_path_cached(
-            source.source_id(),
-            &path,
-        ) && source_has_copilot_oauth(source)
+        if crate::auth::external_trust::source_allowed_for_path_cached(source.source_id(), &path)
+            && source_has_copilot_oauth(source)
         {
             if let Some(token) = crate::auth::external::load_copilot_oauth_token() {
                 cache_github_token(&token);
@@ -399,10 +395,9 @@ pub fn has_unconsented_external_auth() -> Option<ExternalCopilotAuthSource> {
         ExternalCopilotAuthSource::PiAuth => {
             crate::auth::external::source_allowed(crate::auth::external::ExternalAuthSource::Pi)
         }
-        _ => crate::config::Config::external_auth_source_allowed_for_path(
-            source.source_id(),
-            &source.path(),
-        ),
+        _ => {
+            crate::auth::external_trust::source_allowed_for_path(source.source_id(), &source.path())
+        }
     };
     if allowed { None } else { Some(source) }
 }
@@ -420,10 +415,7 @@ pub fn trust_external_auth_source(source: ExternalCopilotAuthSource) -> Result<(
             )?;
         }
         _ => {
-            crate::config::Config::allow_external_auth_source_for_path(
-                source.source_id(),
-                &source.path(),
-            )?;
+            crate::auth::external_trust::allow_source_for_path(source.source_id(), &source.path())?;
         }
     }
     super::AuthStatus::invalidate_cache();
@@ -832,10 +824,7 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     // usable in future sessions. Without this, later reads treat the saved
     // hosts.json as an untrusted external auth source and appear to "lose"
     // the Copilot login after restart/new session.
-    crate::config::Config::allow_external_auth_source_for_path(
-        COPILOT_HOSTS_AUTH_SOURCE_ID,
-        &hosts_path,
-    )?;
+    crate::auth::external_trust::allow_source_for_path(COPILOT_HOSTS_AUTH_SOURCE_ID, &hosts_path)?;
     super::AuthStatus::invalidate_cache();
 
     Ok(())

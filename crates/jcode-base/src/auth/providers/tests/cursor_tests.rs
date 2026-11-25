@@ -208,7 +208,7 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
     )
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    crate::config::Config::allow_external_auth_source_for_path(CURSOR_AUTH_FILE_SOURCE_ID, &path)
+    crate::auth::external_trust::allow_source_for_path(CURSOR_AUTH_FILE_SOURCE_ID, &path)
         .expect("trust cursor auth path");
 
     let tokens = load_access_token_from_env_or_file().expect("load auth file token");

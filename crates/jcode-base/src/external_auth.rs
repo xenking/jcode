@@ -454,28 +454,39 @@ fn prompt_to_review_external_auth_sources(
 /// stay idempotent: re-running onboarding (or importing again) must never undo
 /// or duplicate a decision the user already made.
 fn external_auth_review_candidate_trusted(candidate: &ExternalAuthReviewCandidate) -> bool {
-    use crate::config::Config;
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => auth::external::source_allowed(source),
         ExternalAuthReviewAction::CodexLegacy => auth::codex::legacy_auth_allowed(),
-        ExternalAuthReviewAction::ClaudeCode => Config::external_auth_source_allowed_for_path(
-            auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
-            &candidate.path,
-        ),
+        ExternalAuthReviewAction::ClaudeCode => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
         ExternalAuthReviewAction::ClaudeCodeNative => auth::claude::native_source_allowed(),
-        ExternalAuthReviewAction::GeminiCli => Config::external_auth_source_allowed_for_path(
-            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
-            &candidate.path,
-        ),
-        ExternalAuthReviewAction::GrokBuild => Config::external_auth_source_allowed_for_path(
-            auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
-            &candidate.path,
-        ),
+        ExternalAuthReviewAction::GeminiCli => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
+        ExternalAuthReviewAction::GrokBuild => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
         ExternalAuthReviewAction::Copilot(source) => {
-            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+            crate::auth::external_trust::source_allowed_for_path(
+                source.source_id(),
+                &candidate.path,
+            )
         }
         ExternalAuthReviewAction::Cursor(source) => {
-            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+            crate::auth::external_trust::source_allowed_for_path(
+                source.source_id(),
+                &candidate.path,
+            )
         }
     }
 }
@@ -524,48 +535,42 @@ fn approve_external_auth_review_candidate(
 fn revoke_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate) -> Result<()> {
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::CodexLegacy => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 auth::codex::LEGACY_CODEX_AUTH_SOURCE_ID,
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::ClaudeCode => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
                 &candidate.path,
             )?
         }
-        ExternalAuthReviewAction::ClaudeCodeNative => {
-            crate::config::Config::revoke_external_auth_source(
-                auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
-            )?
-        }
-        ExternalAuthReviewAction::GeminiCli => {
-            crate::config::Config::revoke_external_auth_source_for_path(
-                auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
-                &candidate.path,
-            )?
-        }
-        ExternalAuthReviewAction::GrokBuild => {
-            crate::config::Config::revoke_external_auth_source_for_path(
-                auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
-                &candidate.path,
-            )?
-        }
+        ExternalAuthReviewAction::ClaudeCodeNative => crate::auth::external_trust::revoke_source(
+            auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+        )?,
+        ExternalAuthReviewAction::GeminiCli => crate::auth::external_trust::revoke_source_for_path(
+            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        )?,
+        ExternalAuthReviewAction::GrokBuild => crate::auth::external_trust::revoke_source_for_path(
+            auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        )?,
         ExternalAuthReviewAction::Copilot(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::Cursor(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
@@ -936,7 +941,7 @@ mod rerun_safety_tests {
     }
 
     fn gemini_trusted() -> bool {
-        crate::config::Config::external_auth_source_allowed_for_path(
+        crate::auth::external_trust::source_allowed_for_path(
             auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
             &gemini_path(),
         )

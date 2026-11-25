@@ -297,12 +297,10 @@ fn save_github_token_makes_future_loads_available() -> Result<()> {
     save_github_token("gho_persisted_token", "testuser")?;
 
     let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
-    assert!(
-        crate::config::Config::external_auth_source_allowed_for_path(
-            COPILOT_HOSTS_AUTH_SOURCE_ID,
-            &hosts_path
-        )
-    );
+    assert!(crate::auth::external_trust::source_allowed_for_path(
+        COPILOT_HOSTS_AUTH_SOURCE_ID,
+        &hosts_path
+    ));
     assert_eq!(load_github_token()?, "gho_persisted_token");
 
     if let Some(prev) = prev_jcode_home {

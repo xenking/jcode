@@ -207,16 +207,13 @@ pub fn has_unconsented_cli_auth() -> bool {
         .ok()
         .filter(|path| path.exists())
         .map(|path| {
-            !crate::config::Config::external_auth_source_allowed_for_path(
-                GEMINI_CLI_AUTH_SOURCE_ID,
-                &path,
-            )
+            !crate::auth::external_trust::source_allowed_for_path(GEMINI_CLI_AUTH_SOURCE_ID, &path)
         })
         .unwrap_or(false)
 }
 
 pub fn trust_cli_auth_for_future_use() -> Result<()> {
-    crate::config::Config::allow_external_auth_source_for_path(
+    crate::auth::external_trust::allow_source_for_path(
         GEMINI_CLI_AUTH_SOURCE_ID,
         &gemini_cli_oauth_path()?,
     )?;
@@ -234,7 +231,7 @@ pub fn load_tokens() -> Result<GeminiTokens> {
 
     let cli_path = gemini_cli_oauth_path()?;
     if cli_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path(
+        && crate::auth::external_trust::source_allowed_for_path(
             GEMINI_CLI_AUTH_SOURCE_ID,
             &cli_path,
         )

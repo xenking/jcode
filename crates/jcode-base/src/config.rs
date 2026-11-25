@@ -8,14 +8,14 @@ pub use jcode_config_types::{
     ApiKeyProfileConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger, AutoReviewConfig,
     CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
     CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode,
-    DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig,
-    HookCommands, HooksConfig, KeybindingsConfig, LabelledApiKeyConfig, LatexRenderingMode,
-    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, ModelPromptConfig,
-    ModelPromptMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
-    ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
-    SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, TodoHeaderMode, UpdateChannel,
-    WebSearchConfig, WebSearchEngine, WorkerModelSlot,
+    DiagramPanePosition, DiffDisplayMode, DisplayConfig, DisplayPreference, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LabelledApiKeyConfig,
+    LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig,
+    ModelPromptConfig, ModelPromptMode, NamedProviderAuth, NamedProviderConfig,
+    NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
+    PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode,
+    SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig,
+    TodoHeaderMode, UpdateChannel, WebSearchConfig, WebSearchEngine, WorkerModelSlot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};

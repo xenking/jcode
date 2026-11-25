@@ -14,6 +14,65 @@ pub struct AuthConfig {
     pub trusted_external_source_paths: Vec<String>,
 }
 
+impl AuthConfig {
+    fn same(value: &str, wanted: &str) -> bool {
+        value.trim().eq_ignore_ascii_case(wanted)
+    }
+
+    /// Whether the user approved this source id (already normalized).
+    pub fn trusts_source(&self, source_id: &str) -> bool {
+        self.trusted_external_sources
+            .iter()
+            .any(|value| Self::same(value, source_id))
+    }
+
+    /// Whether the user approved this `source|path` entry.
+    pub fn trusts_path_entry(&self, entry: &str) -> bool {
+        self.trusted_external_source_paths
+            .iter()
+            .any(|value| Self::same(value, entry))
+    }
+
+    /// Approve a source id. Returns whether the list changed.
+    pub fn trust_source(&mut self, source_id: &str) -> bool {
+        if self.trusts_source(source_id) {
+            return false;
+        }
+        self.trusted_external_sources.push(source_id.to_string());
+        self.trusted_external_sources.sort();
+        self.trusted_external_sources.dedup();
+        true
+    }
+
+    /// Approve a `source|path` entry. Returns whether the list changed.
+    pub fn trust_path_entry(&mut self, entry: &str) -> bool {
+        if self.trusts_path_entry(entry) {
+            return false;
+        }
+        self.trusted_external_source_paths.push(entry.to_string());
+        self.trusted_external_source_paths.sort();
+        self.trusted_external_source_paths.dedup();
+        true
+    }
+
+    /// Withdraw approval of a source id. Returns whether the list changed.
+    pub fn revoke_source(&mut self, source_id: &str) -> bool {
+        let before = self.trusted_external_sources.len();
+        self.trusted_external_sources
+            .retain(|value| !Self::same(value, source_id));
+        self.trusted_external_sources.len() != before
+    }
+
+    /// Withdraw approval of a `source|path` entry. Returns whether the list
+    /// changed.
+    pub fn revoke_path_entry(&mut self, entry: &str) -> bool {
+        let before = self.trusted_external_source_paths.len();
+        self.trusted_external_source_paths
+            .retain(|value| !Self::same(value, entry));
+        self.trusted_external_source_paths.len() != before
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {

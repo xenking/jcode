@@ -30,6 +30,8 @@ pub mod doctor;
 pub mod env_facts;
 #[path = "providers/external.rs"]
 pub mod external;
+#[path = "providers/external_trust.rs"]
+pub(crate) mod external_trust;
 #[path = "providers/gemini.rs"]
 pub mod gemini;
 #[path = "providers/google.rs"]
@@ -1402,7 +1404,7 @@ fn anthropic_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, 
     }
     if let Some(source) = crate::auth::claude::preferred_external_auth_source()
         && let Ok(path) = source.path()
-        && crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path)
+        && crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
     {
         return Some((
             AuthCredentialSource::TrustedExternalFile,
@@ -1458,7 +1460,7 @@ fn gemini_source() -> Option<(AuthCredentialSource, String)> {
     }
     if let Ok(path) = crate::auth::gemini::gemini_cli_oauth_path()
         && path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path(
+        && crate::auth::external_trust::source_allowed_for_path(
             crate::auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
             &path,
         )
@@ -1517,7 +1519,7 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
     }
     if let Ok(file_path) = crate::auth::cursor::cursor_auth_file_path()
         && file_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path(
+        && crate::auth::external_trust::source_allowed_for_path(
             crate::auth::cursor::CURSOR_AUTH_FILE_SOURCE_ID,
             &file_path,
         )
@@ -1563,10 +1565,7 @@ fn copilot_source() -> Option<(AuthCredentialSource, String)> {
     ] {
         let path = source.path();
         if path.exists()
-            && crate::config::Config::external_auth_source_allowed_for_path(
-                source.source_id(),
-                &path,
-            )
+            && crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
         {
             return Some((
                 AuthCredentialSource::TrustedExternalFile,

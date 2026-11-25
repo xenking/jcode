@@ -2,17 +2,6 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
-type TrustedExternalAuthKey = (
-    Option<PathBuf>,
-    Option<std::time::SystemTime>,
-    Option<u64>,
-    Option<String>,
-);
-type TrustedExternalAuthLists = std::sync::Arc<(Vec<String>, Vec<String>)>;
-static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
-    Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
-> = std::sync::Mutex::new(None);
-
 /// Root of the shared config, as far as this module cares.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -108,7 +97,7 @@ impl Config {
     /// Saving those defaults would destroy the user's existing config. It also
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
-    fn load_for_update() -> anyhow::Result<Self> {
+    pub(crate) fn load_for_update() -> anyhow::Result<Self> {
         Ok(Self::load_from_file_strict()?.unwrap_or_default())
     }
 
@@ -162,9 +151,7 @@ impl Config {
     pub fn invalidate_cache() {
         // Also drop the trust-list memo: its mtime key can miss two same-length
         // saves inside one filesystem timestamp tick.
-        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
-            *guard = None;
-        }
+        crate::auth::external_trust::forget_memo();
         super::invalidate_config_cache();
     }
 
@@ -288,13 +275,21 @@ impl Config {
         Ok(())
     }
 
+    fn save_display_preference(preference: DisplayPreference) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.apply(preference);
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.{} to config: {}",
+            preference.key(),
+            preference.value_label()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.set_centered(centered);
-        cfg.save()?;
-        crate::logging::info(&format!("Saved display.centered to config: {}", centered));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::Centered(centered))
     }
 
     /// Update the persisted reasoning display mode preference.
@@ -311,14 +306,7 @@ impl Config {
 
     /// Update the persisted compact-notifications preference.
     pub fn set_compact_notifications(compact: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.set_compact_notifications(compact);
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.compact_notifications to config: {}",
-            compact
-        ));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::CompactNotifications(compact))
     }
 
     /// Save the todo header mode and keep the legacy pin flag in sync.
@@ -335,38 +323,17 @@ impl Config {
 
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.set_show_agentgrep_output(show);
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.show_agentgrep_output to config: {}",
-            show
-        ));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::ShowAgentgrepOutput(show))
     }
 
     /// Update the persisted LaTeX rendering mode.
     pub fn set_latex_rendering(mode: LatexRenderingMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.set_latex_rendering(mode);
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.latex_rendering to config: {}",
-            mode.as_str()
-        ));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::LatexRendering(mode))
     }
 
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.set_tool_call_details(show);
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.tool_call_details to config: {}",
-            show
-        ));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::ToolCallDetails(show))
     }
 
     /// Persist the baked global launch-hotkey mapping.
@@ -672,210 +639,6 @@ impl Config {
                 false
             }
         }
-    }
-
-    fn normalize_external_auth_source_id(source_id: &str) -> String {
-        source_id.trim().to_ascii_lowercase()
-    }
-
-    pub(crate) fn trusted_external_auth_path_entry(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<String> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            anyhow::bail!("External auth source id cannot be empty");
-        }
-        let canonical = crate::storage::validate_external_auth_file(path)?;
-        Ok(format!(
-            "{}|{}",
-            source_id,
-            canonical.to_string_lossy().to_ascii_lowercase()
-        ))
-    }
-
-    pub(crate) fn external_auth_source_allowed(source_id: &str) -> bool {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            return false;
-        }
-
-        Self::trusted_external_auth_lists()
-            .0
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
-    }
-
-    pub(crate) fn external_auth_source_allowed_for_path(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-
-        Self::trusted_external_auth_lists()
-            .1
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-
-    /// Fresh `(trusted_external_sources, trusted_external_source_paths)`.
-    ///
-    /// Trust checks must observe a just-saved decision immediately, so they
-    /// cannot use the throttled [`config()`] snapshot. Re-parsing config.toml
-    /// on every call was the alternative, and a single auth probe makes a dozen
-    /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
-    /// Memoize the two lists keyed on everything that can change them: the
-    /// config path, the file's mtime and length, and the env override.
-    fn trusted_external_auth_lists() -> TrustedExternalAuthLists {
-        let path = Self::path();
-        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
-        let key: TrustedExternalAuthKey = (
-            path,
-            metadata.as_ref().and_then(|meta| meta.modified().ok()),
-            metadata.as_ref().map(std::fs::Metadata::len),
-            std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
-        );
-        if let Ok(guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock()
-            && let Some((cached_key, lists)) = guard.as_ref()
-            && *cached_key == key
-        {
-            return lists.clone();
-        }
-
-        let cfg = Self::load();
-        let lists = std::sync::Arc::new((
-            cfg.auth.trusted_external_sources,
-            cfg.auth.trusted_external_source_paths,
-        ));
-        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
-            *guard = Some((key, lists.clone()));
-        }
-        lists
-    }
-
-    /// Startup-sensitive variant that uses the process-cached config snapshot.
-    ///
-    /// This avoids reloading config.toml repeatedly during cold-start probes.
-    pub(crate) fn external_auth_source_allowed_for_path_cached(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-
-        if config()
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            return true;
-        }
-
-        // The global config snapshot can be initialized before an auth flow saves
-        // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
-        // back to a fresh read on cache misses so fast auth probes remain correct
-        // without penalizing the common already-trusted path. The memo re-stats
-        // config.toml, so it is as fresh as a full reload.
-        Self::trusted_external_auth_lists()
-            .1
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-
-    pub(crate) fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            anyhow::bail!("External auth source id cannot be empty");
-        }
-
-        let mut cfg = Self::load_for_update()?;
-        if !cfg
-            .auth
-            .trusted_external_sources
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
-        {
-            cfg.auth.trusted_external_sources.push(source_id.clone());
-            cfg.auth.trusted_external_sources.sort();
-            cfg.auth.trusted_external_sources.dedup();
-            cfg.save()?;
-        }
-
-        crate::logging::info(&format!(
-            "Saved trusted external auth source to config: {}",
-            source_id
-        ));
-        Ok(())
-    }
-
-    pub(crate) fn allow_external_auth_source_for_path(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load_for_update()?;
-        if !cfg
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            cfg.auth.trusted_external_source_paths.push(entry.clone());
-            cfg.auth.trusted_external_source_paths.sort();
-            cfg.auth.trusted_external_source_paths.dedup();
-            cfg.save()?;
-        }
-        crate::logging::info(&format!(
-            "Saved trusted external auth source path: {}",
-            entry
-        ));
-        Ok(())
-    }
-
-    pub(crate) fn revoke_external_auth_source_for_path(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load_for_update()?;
-        let before = cfg.auth.trusted_external_source_paths.len();
-        cfg.auth
-            .trusted_external_source_paths
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
-        if cfg.auth.trusted_external_source_paths.len() != before {
-            cfg.save()?;
-            crate::logging::info(&format!(
-                "Removed trusted external auth source path: {}",
-                entry
-            ));
-        }
-        Ok(())
-    }
-
-    /// Remove a source-level (non-path) trust decision, e.g. for credentials
-    /// that have no stable on-disk path (macOS Keychain items).
-    pub(crate) fn revoke_external_auth_source(source_id: &str) -> anyhow::Result<()> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            return Ok(());
-        }
-        let mut cfg = Self::load_for_update()?;
-        let before = cfg.auth.trusted_external_sources.len();
-        cfg.auth
-            .trusted_external_sources
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&source_id));
-        if cfg.auth.trusted_external_sources.len() != before {
-            cfg.save()?;
-            crate::logging::info(&format!(
-                "Removed trusted external auth source: {}",
-                source_id
-            ));
-        }
-        Ok(())
     }
 }
 

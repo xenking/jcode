@@ -1033,9 +1033,9 @@ fn cached_external_auth_trust_observes_manual_revocation() {
 
     let auth_file = dir.path().join("external-auth.json");
     std::fs::write(&auth_file, "{}\n").expect("write external auth file");
-    Config::allow_external_auth_source_for_path("test_source", &auth_file)
+    crate::auth::external_trust::allow_source_for_path("test_source", &auth_file)
         .expect("trust external auth path");
-    assert!(Config::external_auth_source_allowed_for_path_cached(
+    assert!(crate::auth::external_trust::source_allowed_for_path_cached(
         "test_source",
         &auth_file
     ));
@@ -1047,10 +1047,9 @@ fn cached_external_auth_trust_observes_manual_revocation() {
     )
     .expect("manually revoke external auth trust");
 
-    assert!(!Config::external_auth_source_allowed_for_path_cached(
-        "test_source",
-        &auth_file
-    ));
+    assert!(
+        !crate::auth::external_trust::source_allowed_for_path_cached("test_source", &auth_file)
+    );
 
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
