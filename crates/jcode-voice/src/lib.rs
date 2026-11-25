@@ -921,19 +921,17 @@ mod tests {
 
     #[tokio::test]
     async fn requests_time_out_and_redirects_are_not_followed() {
-        let (base, worker) = mock(
-            200,
-            "",
-            br#"{"text":"late"}"#.to_vec(),
-            Duration::from_millis(100),
-        );
+        // A listening socket that never serves HTTP guarantees a timeout without
+        // a worker that could block in accept if the request expires first.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
         assert_eq!(
             upload(&base, None, Duration::from_millis(20))
                 .await
                 .unwrap_err(),
             VoiceError::Timeout
         );
-        worker.join().unwrap();
+        drop(listener);
         let (base, worker) = mock(
             307,
             "Location: http://127.0.0.1:1/secret\r\n",
