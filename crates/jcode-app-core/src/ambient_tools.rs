@@ -900,7 +900,8 @@ impl ScheduleTool {
 
     async fn execute_list(&self) -> Result<ToolOutput> {
         let manager = AmbientManager::new()?;
-        let mut items: Vec<&ScheduledItem> = manager.queue().items().iter().collect();
+        let queued = manager.scheduled_items();
+        let mut items: Vec<&ScheduledItem> = queued.iter().collect();
         items.sort_by_key(|item| item.scheduled_for);
 
         if items.is_empty() {

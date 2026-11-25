@@ -208,7 +208,7 @@ impl AmbientRunnerHandle {
     /// Get current ambient state snapshot.
     pub async fn state(&self) -> AmbientState {
         let mut state = self
-            .with_manager(|mgr| Ok(mgr.state().clone()))
+            .with_manager(|mgr| Ok(mgr.state_snapshot()))
             .unwrap_or_default();
         if !matches!(state.status, AmbientStatus::Disabled)
             && self.inner.paused_for_user.load(Ordering::Relaxed)
@@ -269,7 +269,7 @@ impl AmbientRunnerHandle {
     pub async fn trigger(&self) {
         if let Err(e) = self.with_manager(|mgr| {
             mgr.refresh_state()?;
-            if matches!(mgr.state().status, AmbientStatus::Scheduled { .. }) {
+            if matches!(mgr.status(), AmbientStatus::Scheduled { .. }) {
                 mgr.set_status(AmbientStatus::Idle)?;
             }
             Ok(())
@@ -318,7 +318,7 @@ impl AmbientRunnerHandle {
         ) = self
             .with_manager(|mgr| {
                 let now = Utc::now();
-                let items = mgr.queue().items();
+                let items = mgr.scheduled_items();
                 let queue_count = items.len();
                 let next_item = items.iter().min_by_key(|item| item.scheduled_for);
                 let overdue_queue_count = items
@@ -407,8 +407,7 @@ impl AmbientRunnerHandle {
     pub async fn queue_json(&self) -> String {
         match self.with_manager(|mgr| {
             let items: Vec<serde_json::Value> = mgr
-                .queue()
-                .items()
+                .scheduled_items()
                 .iter()
                 .map(|item| {
                     let (target_kind, target_session_id, target_parent_session_id) =
@@ -675,13 +674,13 @@ impl AmbientRunnerHandle {
                     logging::warn(&format!("Ambient runner: failed to refresh state: {e:#}"));
                 }
                 let (ready, next_check) = match mgr.maintain_schedule(now) {
-                    Ok(ready) => (ready, mgr.queue().next_maintenance()),
+                    Ok(ready) => (ready, mgr.next_queue_check()),
                     Err(e) => {
                         logging::warn(&format!("Ambient runner: failed to maintain queue: {e:#}"));
                         (Vec::new(), None)
                     }
                 };
-                Ok((mgr.state().status.clone(), ready, next_check))
+                Ok((mgr.status(), ready, next_check))
             }) {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
@@ -692,8 +691,8 @@ impl AmbientRunnerHandle {
                 }
             };
             let ambient_allowed = ambient_allowed(&status);
-            scheduler.set_user_active(*self.inner.active_user_sessions.read().await > 0);
-            let paused = ambient_allowed && scheduler.should_pause();
+            let user_active = *self.inner.active_user_sessions.read().await > 0;
+            let paused = ambient_allowed && scheduler.should_pause(user_active);
             self.inner.paused_for_user.store(paused, Ordering::Relaxed);
 
             let disconnected = self
@@ -872,7 +871,7 @@ impl AmbientRunnerHandle {
             // Update state with scheduled wake
             if let Err(e) = self.with_manager(|mgr| {
                 if matches!(
-                    mgr.state().status,
+                    mgr.status(),
                     AmbientStatus::Running { .. } | AmbientStatus::Idle
                 ) {
                     mgr.set_status(AmbientStatus::Scheduled {
@@ -902,7 +901,7 @@ impl AmbientRunnerHandle {
     async fn set_running_detail(&self, detail: &str) {
         if let Err(e) = self.with_manager(|mgr| {
             mgr.refresh_state()?;
-            if !matches!(mgr.state().status, AmbientStatus::Disabled) {
+            if !matches!(mgr.status(), AmbientStatus::Disabled) {
                 mgr.set_status(AmbientStatus::Running {
                     detail: detail.into(),
                 })?;
@@ -921,7 +920,7 @@ impl AmbientRunnerHandle {
         provider: &Arc<dyn Provider>,
     ) -> anyhow::Result<(String, String)> {
         let (state, queue_items) =
-            self.with_manager(|mgr| Ok((mgr.state().clone(), mgr.queue().items().to_vec())))?;
+            self.with_manager(|mgr| Ok((mgr.state_snapshot(), mgr.scheduled_items())))?;
 
         let memory_manager = MemoryManager::new();
         let graph_health = ambient::gather_memory_graph_health(&memory_manager);

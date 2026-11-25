@@ -97,16 +97,16 @@ fn scheduled_queue_stale_managers_preserve_add_remove_and_claim() {
     let mut second = AmbientManager::new().unwrap();
     let a = first.schedule(request("a", true)).unwrap();
     let b = second.schedule(request("b", true)).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().len(), 2);
+    assert_eq!(AmbientManager::new().unwrap().queued_count(), 2);
     first.cancel_schedule(&a).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().items()[0].id, b);
+    assert_eq!(AmbientManager::new().unwrap().scheduled_items()[0].id, b);
     assert!(second.cancel_schedule(&a).unwrap().is_none());
     let claimed = first.take_ready_direct_items();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, b);
     assert!(second.take_ready_items().is_empty());
     second.schedule(request("later", false)).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().len(), 1);
+    assert_eq!(AmbientManager::new().unwrap().queued_count(), 1);
     assert!(first.take_ready_direct_items().is_empty());
 }
 

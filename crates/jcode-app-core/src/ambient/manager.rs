@@ -162,11 +162,25 @@ impl AmbientManager {
         self.queue.remove_by_id(id)
     }
 
-    pub fn state(&self) -> &AmbientState {
-        &self.state
+    /// A copy of the persisted ambient state.
+    pub fn state_snapshot(&self) -> AmbientState {
+        self.state.clone()
     }
 
-    pub fn queue(&self) -> &ScheduledQueue {
-        &self.queue
+    pub fn status(&self) -> AmbientStatus {
+        self.state.status.clone()
+    }
+
+    /// A copy of the queued items, in storage order.
+    pub fn scheduled_items(&self) -> Vec<ScheduledItem> {
+        self.queue.items().to_vec()
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub(super) fn next_queue_check(&self) -> Option<DateTime<Utc>> {
+        self.queue.next_maintenance()
     }
 }

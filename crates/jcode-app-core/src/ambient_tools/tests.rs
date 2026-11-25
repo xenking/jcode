@@ -463,11 +463,8 @@ async fn test_schedule_tool_defaults_to_resuming_originating_session() {
     );
 
     let manager = AmbientManager::new().expect("ambient manager");
-    let scheduled = manager
-        .queue()
-        .items()
-        .first()
-        .expect("scheduled item should exist");
+    let queued = manager.scheduled_items();
+    let scheduled = queued.first().expect("scheduled item should exist");
     assert_eq!(
         scheduled.target,
         ScheduleTarget::Session {
