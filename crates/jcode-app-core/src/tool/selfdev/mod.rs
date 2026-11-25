@@ -696,7 +696,7 @@ impl Tool for SelfDevTool {
             "enter" => self.do_enter(params.prompt, &ctx).await,
             "setup" => self.do_setup(&ctx).await,
             "logs" if is_selfdev => {
-                logs::output(SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref())).await
+                logs::output(resolve_repo_dir(ctx.working_dir.as_deref())).await
             }
             "logs" => Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
                 "logs",
@@ -816,7 +816,7 @@ impl Tool for SelfDevTool {
                             sanitize: params.sanitize,
                             synthetic: params.synthetic,
                         },
-                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        resolve_repo_dir(ctx.working_dir.as_deref()),
                         &ctx,
                     )
                     .await
@@ -846,7 +846,7 @@ impl Tool for SelfDevTool {
                             synthetic: params.synthetic,
                             attach_to_discord: params.attach_to_discord,
                         },
-                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        resolve_repo_dir(ctx.working_dir.as_deref()),
                         &ctx,
                     )
                     .await
@@ -867,6 +867,27 @@ impl Tool for SelfDevTool {
 
         result.map(|output| output.with_title(title))
     }
+}
+
+/// The jcode checkout a self-dev action should act on: the one containing
+/// `working_dir`, else the registered repo.
+fn resolve_repo_dir(working_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if let Some(dir) = working_dir {
+        for ancestor in dir.ancestors() {
+            if build::is_jcode_repo(ancestor) {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+    }
+
+    build::get_repo_dir()
+}
+
+fn launch_binary() -> Result<std::path::PathBuf> {
+    build::client_update_candidate(true)
+        .map(|(path, _label)| path)
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| anyhow::anyhow!("Could not resolve jcode executable to launch"))
 }
 
 /// Whether this process runs under the synthetic-session test harness.
@@ -914,25 +935,6 @@ impl SelfDevTool {
              self-dev session, which exposes builds, tests, reloads, and the \
              debug socket."
         )
-    }
-
-    fn resolve_repo_dir(working_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
-        if let Some(dir) = working_dir {
-            for ancestor in dir.ancestors() {
-                if build::is_jcode_repo(ancestor) {
-                    return Some(ancestor.to_path_buf());
-                }
-            }
-        }
-
-        build::get_repo_dir()
-    }
-
-    fn launch_binary() -> Result<std::path::PathBuf> {
-        build::client_update_candidate(true)
-            .map(|(path, _label)| path)
-            .or_else(|| std::env::current_exe().ok())
-            .ok_or_else(|| anyhow::anyhow!("Could not resolve jcode executable to launch"))
     }
 
     fn build_command(repo_dir: &Path, target: build::SelfDevBuildTarget) -> SelfDevBuildCommand {

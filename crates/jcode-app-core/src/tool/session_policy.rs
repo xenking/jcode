@@ -25,17 +25,6 @@ pub(super) fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Resu
     Ok(())
 }
 
-pub(crate) fn tool_name_is_disabled(disabled: &HashSet<String>, name: &str) -> bool {
-    disabled.contains(name) || (disabled.contains("mcp") && is_mcp_tool_name(name))
-}
-
-pub(super) fn is_fixed_mcp_tool(name: &str) -> bool {
-    matches!(name, "mcp_search" | "mcp_call")
-}
-
-pub(super) fn is_mcp_tool_name(name: &str) -> bool {
-    name == "mcp" || name.starts_with("mcp__") || is_fixed_mcp_tool(name)
-}
 #[derive(Clone, Debug, Default)]
 pub(super) struct SessionToolPolicy {
     pub(super) allowed_tools: Option<HashSet<String>>,

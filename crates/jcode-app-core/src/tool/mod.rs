@@ -96,21 +96,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "name_policy.rs"]
 mod name_policy;
-pub(crate) use name_policy::tool_name_is_allowed;
+use name_policy::{is_fixed_mcp_tool, is_mcp_tool_name};
+pub(crate) use name_policy::{tool_name_is_allowed, tool_name_is_disabled};
 
 mod session_policy;
 pub(crate) use session_policy::{
     SessionToolPolicyRegistration, register_session_tool_policy, session_allows_tool,
-    session_mcp_alias_is_allowed, tool_name_is_disabled,
+    session_mcp_alias_is_allowed,
 };
 #[cfg(test)]
 pub(crate) use session_policy::{
     clear_session_tool_policy, session_mcp_dispatch_is_allowed,
     session_tool_policy_allows_tool_for_test, set_session_tool_policy,
 };
-use session_policy::{
-    ensure_mcp_action_allowed, is_fixed_mcp_tool, is_mcp_tool_name, session_tool_policy,
-};
+use session_policy::{ensure_mcp_action_allowed, session_tool_policy};
 
 fn parse_tool_args<T: serde::de::DeserializeOwned>(input: Value, example: &str) -> Result<T> {
     serde_path_to_error::deserialize(input).map_err(|err| {

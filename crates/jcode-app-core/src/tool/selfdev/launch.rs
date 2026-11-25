@@ -4,7 +4,7 @@ pub fn enter_selfdev_session(
     parent_session_id: Option<&str>,
     working_dir: Option<&Path>,
 ) -> Result<SelfDevLaunchResult> {
-    let repo_dir = SelfDevTool::resolve_repo_dir(working_dir).ok_or_else(|| {
+    let repo_dir = super::resolve_repo_dir(working_dir).ok_or_else(|| {
         anyhow::anyhow!("Could not find the jcode repository to enter self-dev mode")
     })?;
 
@@ -59,7 +59,7 @@ pub fn enter_selfdev_session(
         });
     }
 
-    let exe = SelfDevTool::launch_binary()?;
+    let exe = super::launch_binary()?;
     let launched = session_launch::spawn_selfdev_in_new_terminal(&exe, &session_id, &repo_dir)?;
 
     Ok(SelfDevLaunchResult {

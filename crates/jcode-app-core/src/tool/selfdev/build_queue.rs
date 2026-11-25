@@ -637,10 +637,9 @@ impl SelfDevTool {
             .map(|notes| notes.trim().to_owned())
             .filter(|notes| !notes.is_empty())
             .ok_or_else(|| anyhow::anyhow!("`selfdev build` and `build-reload` require nonblank `release_notes` suitable for public release."))?;
-        let repo_dir =
-            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
-                anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
-            })?;
+        let repo_dir = super::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
+        })?;
 
         let requested_source = SelfDevTool::requested_source_state(&repo_dir)?;
         let target = build::SelfDevBuildTarget::parse(target.as_deref())?;
@@ -1006,10 +1005,9 @@ impl SelfDevTool {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| command.clone());
-        let repo_dir =
-            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
-                anyhow::anyhow!("Could not find the jcode repository directory for selfdev test")
-            })?;
+        let repo_dir = super::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("Could not find the jcode repository directory for selfdev test")
+        })?;
         let requested_source = SelfDevTool::requested_source_state(&repo_dir)?;
         let shell_command = SelfDevBuildCommand {
             program: "bash".to_string(),

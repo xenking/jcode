@@ -92,7 +92,7 @@ impl SelfDevTool {
 
         // Repository checkout: locate an existing repo or clone the source.
         let mut repo_dir: Option<std::path::PathBuf> =
-            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref());
+            super::resolve_repo_dir(ctx.working_dir.as_deref());
         let mut clone_note: Option<String> = None;
 
         if repo_dir.is_none() {
@@ -201,7 +201,7 @@ impl SelfDevTool {
         let jcode_home = storage::jcode_dir().ok();
         let config_path = jcode_home.as_ref().map(|home| home.join("config.toml"));
         let logs_dir = storage::logs_dir().ok();
-        let repo_dir = SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref());
+        let repo_dir = super::resolve_repo_dir(ctx.working_dir.as_deref());
 
         let format_path = |path: Option<&std::path::Path>| match path {
             Some(p) => {
