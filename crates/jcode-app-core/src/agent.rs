@@ -36,6 +36,7 @@ mod tools;
 mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
+mod user_asks;
 pub(crate) use reload_resume::{ResumeOutcome, ResumePlan, last_turn_message_for_recovery};
 pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,

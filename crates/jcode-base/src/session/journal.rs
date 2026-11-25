@@ -32,6 +32,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) provider_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) model_usage_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "super::UserAskLedger::is_default")]
+    pub(super) user_asks: super::UserAskLedger,
     pub(super) provider_key: Option<String>,
     #[serde(default)]
     pub(super) route_api_method: Option<String>,

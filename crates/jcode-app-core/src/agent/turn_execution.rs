@@ -50,6 +50,9 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
+        if self.record_user_ask(None, user_message, false) {
+            self.session.user_asks.reminder_sent = false;
+        }
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -95,6 +98,9 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
+        if self.record_user_ask(display_role, user_message, false) {
+            self.session.user_asks.reminder_sent = false;
+        }
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -252,7 +258,32 @@ impl Agent {
                 lease.identity(),
                 queued_client_id.as_deref(),
                 || {
-                    if has_queued_skills {
+                    let previous_asks = self.session.user_asks.clone();
+                    if !continues_turn && !has_queued_skills {
+                        if queued_items.is_empty() {
+                            self.record_user_ask(
+                                display_role,
+                                attachment_data
+                                    .as_ref()
+                                    .map_or(&*user_message, |data| &data.display_content),
+                                !images.is_empty() || attachment_data.is_some(),
+                            );
+                        } else {
+                            for item in &queued_items {
+                                self.record_user_ask(
+                                    super::interrupts::soft_interrupt_session_display_role(
+                                        item.source,
+                                    ),
+                                    &item.content,
+                                    !item.images.is_empty() || !item.attachments.is_empty(),
+                                );
+                            }
+                        }
+                        if self.session.user_asks.last_id != previous_asks.last_id {
+                            self.session.user_asks.reminder_sent = false;
+                        }
+                    }
+                    let result = if has_queued_skills {
                         let previous_count = self.session.messages.len();
                         let previous_skill = self.active_skill.clone();
                         let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
@@ -265,6 +296,17 @@ impl Agent {
                                     );
                                 } else {
                                     self.set_queued_active_skill(None);
+                                }
+                                if !continues_turn
+                                    && self.record_user_ask(
+                                        super::interrupts::soft_interrupt_session_display_role(
+                                            item.source,
+                                        ),
+                                        &item.content,
+                                        !item.images.is_empty() || !item.attachments.is_empty(),
+                                    )
+                                {
+                                    self.session.user_asks.reminder_sent = false;
                                 }
                                 let ids: Vec<String> = item.client_id.into_iter().collect();
                                 let attachment_data = if item.attachments.is_empty() {
@@ -310,7 +352,11 @@ impl Agent {
                             queued_client_id.as_deref(),
                             attachment_data,
                         )
+                    };
+                    if result.is_err() {
+                        self.session.user_asks = previous_asks;
                     }
+                    result
                 },
             )? {
                 return Ok(());
@@ -545,6 +591,13 @@ impl Agent {
         images: Vec<(String, String)>,
         attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
+        self.record_user_ask(
+            None,
+            attachment_data
+                .as_ref()
+                .map_or(user_message, |data| &data.display_content),
+            !images.is_empty() || attachment_data.is_some(),
+        );
         self.append_user_context_message_with_display_role(
             user_message,
             images,

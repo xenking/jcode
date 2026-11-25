@@ -300,6 +300,9 @@ impl Agent {
                 nudge.timestamp = None;
                 messages_with_memory.push(nudge.into_request_only());
             }
+            let prompt_has_recent_tool_result =
+                Self::messages_end_with_tool_result(&messages_with_memory);
+            messages_with_memory.extend(self.user_ask_instructions());
 
             logging::debug_lazy(|| {
                 format!(
@@ -322,7 +325,6 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
-            let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.enforce_worker_request()?;
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
@@ -1296,6 +1298,28 @@ impl Agent {
                     }
                     if text_content.trim().is_empty() {
                         text_content = format!("[provider guardrail] {}", notice);
+                    }
+                } else if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && super::turn_streaming_mpsc::tool_handoff::incomplete_turn_stop(
+                        stop_reason.as_deref(),
+                    )
+                    .is_none()
+                {
+                    match self.finish_user_asks(&text_content)? {
+                        super::user_asks::AskReport::Accept => {}
+                        super::user_asks::AskReport::Retry => {
+                            if print_output {
+                                println!();
+                            }
+                            continue;
+                        }
+                        super::user_asks::AskReport::Unreported(notice) => {
+                            if print_output {
+                                print!("{notice}");
+                            }
+                            text_content.push_str(&notice);
+                        }
                     }
                 }
                 logging::info("Turn complete - no tool calls, returning");
