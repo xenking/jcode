@@ -8,68 +8,68 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[path = "agent_tests/mcp_exposure.rs"]
+#[path = "agent_tests/mcp/mcp_exposure.rs"]
 mod mcp_exposure;
 use mcp_exposure::*;
 
-#[path = "agent_tests/guardrail_recovery.rs"]
+#[path = "agent_tests/recovery/guardrail_recovery.rs"]
 mod guardrail_recovery;
 
 #[path = "agent_tests/steering.rs"]
 mod steering;
 
-#[path = "agent_tests/session_restore.rs"]
+#[path = "agent_tests/session/session_restore.rs"]
 mod session_restore;
 
 #[path = "agent_tests/compaction.rs"]
 mod compaction;
 
-#[path = "agent_tests/pinned_mode.rs"]
+#[path = "agent_tests/session/pinned_mode.rs"]
 mod pinned_mode;
 
-#[path = "agent_tests/cache_session_affinity.rs"]
+#[path = "agent_tests/cache/cache_session_affinity.rs"]
 mod cache_session_affinity;
 
-#[path = "agent_tests/cache_keepalive.rs"]
+#[path = "agent_tests/cache/cache_keepalive.rs"]
 mod cache_keepalive;
 
 #[path = "agent_tests/request_only_recall_wire.rs"]
 mod request_only_recall_wire;
 
-#[path = "agent_tests/worker_http_capture.rs"]
+#[path = "agent_tests/worker/worker_http_capture.rs"]
 mod worker_http_capture;
 
-#[path = "agent_tests/worker_tool_capture.rs"]
+#[path = "agent_tests/worker/worker_tool_capture.rs"]
 mod worker_tool_capture;
 
-#[path = "agent_tests/tool_streaming.rs"]
+#[path = "agent_tests/worker/tool_streaming.rs"]
 mod tool_streaming;
 
 #[path = "agent_tests/pending_effort.rs"]
 mod pending_effort;
 
-#[path = "agent_tests/concurrency.rs"]
+#[path = "agent_tests/concurrency/concurrency.rs"]
 mod concurrency;
 
-#[path = "agent_tests/concurrency_construction.rs"]
+#[path = "agent_tests/concurrency/concurrency_construction.rs"]
 mod concurrency_construction;
 
 #[path = "agent_tests/desktop_selfdev.rs"]
 mod desktop_selfdev;
 
-#[path = "agent_tests/compile_remote.rs"]
+#[path = "agent_tests/mcp/compile_remote.rs"]
 mod compile_remote;
 
-#[path = "agent_tests/mcp_remote_cache.rs"]
+#[path = "agent_tests/mcp/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
 
-#[path = "agent_tests/cold_cache.rs"]
+#[path = "agent_tests/cache/cold_cache.rs"]
 mod cold_cache;
 
 #[path = "agent_tests/prompt_inputs_reload.rs"]
 mod prompt_inputs_reload;
 
-#[path = "agent_tests/restart_cache.rs"]
+#[path = "agent_tests/cache/restart_cache.rs"]
 mod restart_cache;
 
 struct DelayedProvider {
@@ -1298,7 +1298,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
 #[path = "agent_tests/system_prompt_reminder.rs"]
 mod system_prompt_reminder;
 
-#[path = "agent_tests/network_disconnect_recovery.rs"]
+#[path = "agent_tests/recovery/network_disconnect_recovery.rs"]
 mod network_disconnect_recovery;
 
 #[tokio::test]
@@ -1568,7 +1568,7 @@ fn transcript_texts(agent: &Agent) -> Vec<String> {
         .collect()
 }
 
-#[path = "agent_tests/deferred_tools.rs"]
+#[path = "agent_tests/mcp/deferred_tools.rs"]
 mod deferred_tools;
 
 #[test]
