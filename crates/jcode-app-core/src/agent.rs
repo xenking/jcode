@@ -1,50 +1,87 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[path = "agent/session/advisor_review.rs"]
 mod advisor_review;
+#[path = "agent/recovery/ask_recovery.rs"]
 mod ask_recovery;
 #[cfg(test)]
+#[path = "agent/context/cache_monitor_tests.rs"]
 mod cache_monitor_tests;
+#[path = "agent/context/compaction.rs"]
 mod compaction;
+#[path = "agent/session/construction.rs"]
 mod construction;
+#[path = "agent/context/context_breakdown.rs"]
 pub(crate) mod context_breakdown;
+#[path = "agent/context/conversation_reset.rs"]
 mod conversation_reset;
+#[path = "agent/context/environment.rs"]
 mod environment;
+#[path = "agent/recovery/idle_hibernation.rs"]
 mod idle_hibernation;
+#[path = "agent/context/inline_tail.rs"]
 mod inline_tail;
+#[path = "agent/recovery/interrupts.rs"]
 mod interrupts;
+#[path = "agent/context/messages.rs"]
 mod messages;
 #[cfg(test)]
+#[path = "agent/session/model_usage_tests.rs"]
 mod model_usage_tests;
+#[path = "agent/tools/parallel_reads.rs"]
 mod parallel_reads;
+#[path = "agent/session/profile.rs"]
 mod profile;
 use profile::profile_tool_selection;
+#[path = "agent/context/prompting.rs"]
 mod prompting;
+#[path = "agent/session/provider.rs"]
 pub(crate) mod provider;
+#[path = "agent/recovery/reload_resume.rs"]
 mod reload_resume;
 #[cfg(test)]
+#[path = "agent/recovery/reload_resume_tests.rs"]
 mod reload_resume_tests;
+#[path = "agent/recovery/response_recovery.rs"]
 mod response_recovery;
+#[path = "agent/session/routing.rs"]
 mod routing;
+#[path = "agent/recovery/runtime_recovery.rs"]
 mod runtime_recovery;
+#[path = "agent/session/session_title.rs"]
 mod session_title;
+#[path = "agent/tools/shake_tools.rs"]
 mod shake_tools;
+#[path = "agent/session/status.rs"]
 mod status;
+#[path = "agent/turn/streaming.rs"]
 mod streaming;
 #[cfg(test)]
+#[path = "agent/session/swarm_reminder_tests.rs"]
 mod swarm_reminder_tests;
+#[path = "agent/tools/tool_handoff.rs"]
 mod tool_handoff;
+#[path = "agent/tools/tool_surface.rs"]
 mod tool_surface;
+#[path = "agent/tools/tools.rs"]
 mod tools;
+#[path = "agent/turn/turn_execution.rs"]
 mod turn_execution;
+#[path = "agent/turn/turn_loop_policy.rs"]
 mod turn_loop_policy;
+#[path = "agent/turn/turn_loops.rs"]
 mod turn_loops;
+#[path = "agent/turn/turn_ownership.rs"]
 mod turn_ownership;
+#[path = "agent/recovery/user_asks.rs"]
 mod user_asks;
 pub(crate) use reload_resume::{ResumeOutcome, ResumePlan, last_turn_message_for_recovery};
 pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
 };
+#[path = "agent/turn/turn_streaming_mpsc.rs"]
 mod turn_streaming_mpsc;
+#[path = "agent/session/utils.rs"]
 mod utils;
 
 /// No tool call may hold a turn longer than this many seconds. Model-requested
@@ -111,8 +148,10 @@ enum CompactionBoundary {
     Idle,
 }
 
-#[path = "agent/cache_request.rs"]
+#[path = "agent/context/cache_request.rs"]
+#[path = "agent/context/cache_request.rs"]
 mod cache_request;
+#[path = "agent/tools/tool_replay.rs"]
 mod tool_replay;
 use cache_request::kv_cache_request_event;
 
