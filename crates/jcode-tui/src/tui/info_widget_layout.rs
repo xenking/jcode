@@ -1,4 +1,4 @@
-use super::info_widget::{
+use super::{
     InfoWidgetData, Side, WidgetKind, WidgetPlacement, calculate_widget_height,
     is_overview_mergeable,
 };
@@ -343,7 +343,7 @@ pub(crate) fn calculate_placements_anchored(
         // directly above or below when there are any (the render path truncates
         // when there are not, so the widget never disappears).
         let (row_start, row_end, target_y, content_top) = {
-            let needed = super::info_widget::calculate_widget_height(
+            let needed = super::calculate_widget_height(
                 prev.kind,
                 data,
                 kept_width,

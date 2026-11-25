@@ -13,6 +13,82 @@
 #[path = "ui_copy_pane_drag.rs"]
 mod copy_pane_drag;
 pub(crate) use copy_pane_drag::*;
+impl BodyCacheState {
+    fn take_best_incremental_base(
+        &mut self,
+        key: &BodyCacheKey,
+    ) -> Option<(Arc<PreparedMessages>, usize, usize)> {
+        let regular = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.msg_count > 0
+                    && entry.key.width == key.width
+                    && entry.key.diff_mode == key.diff_mode
+                    && entry.key.diagram_mode == key.diagram_mode
+                    && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
+                    && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
+                    // Anchored inline images render inside the body, and a
+                    // late-arriving image may target an already-prepared
+                    // message; only reuse bases built with the same image set.
+                    && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
+                    && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
+                    && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
+            })
+            .max_by_key(|(_, entry)| entry.msg_count)
+            .map(|(idx, entry)| (false, idx, entry.msg_count));
+        let oversized = self
+            .oversized_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.msg_count > 0
+                    && entry.key.width == key.width
+                    && entry.key.diff_mode == key.diff_mode
+                    && entry.key.diagram_mode == key.diagram_mode
+                    && entry.key.centered == key.centered
+                    && entry.key.compact_thinking == key.compact_thinking
+                    && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
+                    // Anchored inline images render inside the body, and a
+                    // late-arriving image may target an already-prepared
+                    // message; only reuse bases built with the same image set.
+                    && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
+                    && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
+                    && entry.key.latex_rendering == key.latex_rendering
+                    && entry.key.show_link_urls == key.show_link_urls
+            })
+            .max_by_key(|(_, entry)| entry.msg_count)
+            .map(|(idx, entry)| (true, idx, entry.msg_count));
+
+        let chosen = match (regular, oversized) {
+            (Some(left), Some(right)) => {
+                if left.2 >= right.2 {
+                    left
+                } else {
+                    right
+                }
+            }
+            (Some(entry), None) | (None, Some(entry)) => entry,
+            (None, None) => return None,
+        };
+
+        let (is_oversized, idx, msg_count) = chosen;
+        let entry = if is_oversized {
+            self.oversized_entries.remove(idx)?
+        } else {
+            self.entries.remove(idx)?
+        };
+        Some((entry.prepared, msg_count, entry.prompt_offset))
+    }
+}
+
 #[path = "ui_frame_rendering.rs"]
 mod frame_rendering;
 pub use frame_rendering::draw;
@@ -1852,6 +1928,9 @@ mod tests;
 
 #[path = "ui/copy_selection.rs"]
 mod copy_selection;
+#[path = "ui/copy_snapshot.rs"]
+mod copy_snapshot;
+use copy_snapshot::{CopyViewportData, CopyViewportSnapshot};
 #[path = "ui/display_width.rs"]
 mod display_width;
 #[path = "ui/draw_recovery.rs"]

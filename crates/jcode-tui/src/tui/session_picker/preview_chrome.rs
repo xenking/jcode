@@ -227,7 +227,7 @@ pub(super) fn draw_widgets(
             }
         }
     }
-    let placements = super::super::info_widget_layout::calculate_placements_anchored(
+    let placements = super::super::info_widget::layout::calculate_placements_anchored(
         area,
         &margins,
         &data,

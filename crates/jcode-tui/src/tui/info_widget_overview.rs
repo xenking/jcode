@@ -1,4 +1,4 @@
-use super::info_widget::{
+use super::{
     AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
     is_traceworthy_memory_event, model_info_height,
 };
@@ -119,7 +119,7 @@ pub(super) fn render_overview_usage(
     width: u16,
 ) -> Vec<ratatui::text::Line<'static>> {
     if data.usage_pending_at_startup() {
-        return super::info_widget::startup_usage_lines(width);
+        return super::startup_usage_lines(width);
     }
     data.usage_info
         .as_ref()
@@ -141,7 +141,7 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if !info.available {
         return 0;
     }
-    if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
+    if matches!(info.provider, super::UsageProvider::CostBased) {
         return 1;
     }
     // Mirror render_usage_compact without formatting bars during measurement.

@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::info_widget_overview::compute_page_layout;
+use crate::tui::info_widget::overview::compute_page_layout;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
@@ -85,7 +85,7 @@ fn startup_slots_keep_changes_at_same_row_as_runtime_then_usage_arrive() {
             ..Default::default()
         };
         for data in [&initial, &runtime, &ready] {
-            let placed = crate::tui::info_widget_layout::calculate_placements_anchored(
+            let placed = crate::tui::info_widget::layout::calculate_placements_anchored(
                 inner, &margins, data, true, &anchors,
             );
             overview_rects.push(
@@ -190,7 +190,7 @@ fn known_usage_and_limit_warning_override_startup_reservation() {
             ..pending()
         };
         assert!(!data.usage_pending_at_startup());
-        let rows = crate::tui::info_widget_overview::render_overview_usage(&data, 40);
+        let rows = crate::tui::info_widget::overview::render_overview_usage(&data, 40);
         assert_eq!(rows.len(), if limit_reached { 1 } else { 3 });
         assert!(!rows.iter().any(|line| line_text(line).contains("Loading")));
         let all = render_sections(&data, Rect::new(0, 0, 40, 30), None);

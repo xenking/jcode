@@ -1,9 +1,9 @@
 //! Cached directory inventory for an attached cloud VM, separate from telemetry.
-use super::cloud_status::CloudProbeState;
-use super::info_widget::{
+use super::{
     InfoWidgetData,
     frame::{self, Framed},
 };
+use crate::tui::cloud_status::CloudProbeState;
 use ratatui::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -125,11 +125,9 @@ pub(super) fn render_cloud_directories(data: &InfoWidgetData, inner: Rect) -> Fr
 
 #[cfg(test)]
 mod tests {
-    use super::super::cloud_status::{
-        CloudDirectoryEntry, CloudDirectorySnapshot, CloudStatusInfo,
-    };
-    use super::super::info_widget::{Margins, WidgetKind, calculate_widget_height};
+    use super::super::{Margins, WidgetKind, calculate_widget_height};
     use super::*;
+    use crate::tui::cloud_status::{CloudDirectoryEntry, CloudDirectorySnapshot, CloudStatusInfo};
     use std::time::SystemTime;
     fn fixture() -> InfoWidgetData {
         InfoWidgetData {
@@ -308,7 +306,7 @@ mod tests {
             centered: true,
             ..Default::default()
         };
-        let result = super::super::info_widget_layout::calculate_placements_anchored(
+        let result = super::super::layout::calculate_placements_anchored(
             Rect::new(0, 0, 180, 60),
             &margins,
             &data,

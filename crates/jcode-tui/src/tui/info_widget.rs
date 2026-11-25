@@ -11,6 +11,10 @@ pub use super::cloud_status::{
     CloudStatusInfo,
 };
 use super::color_support::rgb;
+#[path = "info_widget_cloud.rs"]
+mod cloud;
+#[path = "info_widget_cloud_directories.rs"]
+mod cloud_directories;
 #[path = "info_widget_commits.rs"]
 mod commits;
 #[path = "info_widget_frame.rs"]
@@ -19,12 +23,18 @@ pub(crate) mod frame;
 mod git;
 #[path = "info_widget_graph.rs"]
 mod graph;
+#[path = "info_widget_layout.rs"]
+pub(crate) mod layout;
 #[path = "info_widget_memory_render.rs"]
 mod memory_render;
 #[path = "info_widget_memory_utils.rs"]
 mod memory_utils;
 #[path = "info_widget_model.rs"]
 pub(crate) mod model;
+#[path = "info_widget_overview.rs"]
+pub(crate) mod overview;
+#[path = "info_widget_settle.rs"]
+mod settle;
 #[path = "info_widget_swarm_background.rs"]
 mod swarm_background;
 #[path = "info_widget_swarm_gallery.rs"]
@@ -35,7 +45,6 @@ mod text;
 mod tips;
 #[path = "info_widget_usage.rs"]
 mod usage_render;
-use super::info_widget_overview::{InfoPageKind, compute_page_layout};
 use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 pub use crate::memory_types::{
@@ -45,6 +54,7 @@ pub use crate::memory_types::{
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
 use memory_render::{render_memory_compact, render_memory_expanded, render_memory_widget};
+use overview::{InfoPageKind, compute_page_layout};
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -272,7 +282,7 @@ pub struct WidgetPlacement {
     pub side: Side,
 }
 
-pub use super::info_widget_layout::Margins;
+pub use layout::Margins;
 
 /// Swarm/subagent status for the info widget
 #[derive(Debug, Default, Clone)]
@@ -1412,20 +1422,14 @@ fn render_sections(
     }
 
     // Usage info (subscription limits)
-    lines.extend(super::info_widget_overview::render_overview_usage(
-        data,
-        inner.width,
-    ));
+    lines.extend(overview::render_overview_usage(data, inner.width));
 
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
     }
 
-    lines.extend(super::info_widget_cloud::render_cloud_summary(
-        data,
-        inner.width,
-    ));
+    lines.extend(cloud::render_cloud_summary(data, inner.width));
     lines
 }
 

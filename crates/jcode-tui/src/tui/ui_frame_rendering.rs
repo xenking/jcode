@@ -2,82 +2,6 @@
 
 use super::*;
 
-impl BodyCacheState {
-    pub(super) fn take_best_incremental_base(
-        &mut self,
-        key: &BodyCacheKey,
-    ) -> Option<(Arc<PreparedMessages>, usize, usize)> {
-        let regular = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry.msg_count > 0
-                    && entry.key.width == key.width
-                    && entry.key.diff_mode == key.diff_mode
-                    && entry.key.diagram_mode == key.diagram_mode
-                    && entry.key.centered == key.centered
-                    && entry.key.compact_thinking == key.compact_thinking
-                    && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
-                    // Anchored inline images render inside the body, and a
-                    // late-arriving image may target an already-prepared
-                    // message; only reuse bases built with the same image set.
-                    && entry.key.pin_images == key.pin_images
-                    && entry.key.inline_images_visible == key.inline_images_visible
-                    && entry.key.images_signature == key.images_signature
-                    && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.latex_rendering == key.latex_rendering
-                    && entry.key.show_link_urls == key.show_link_urls
-            })
-            .max_by_key(|(_, entry)| entry.msg_count)
-            .map(|(idx, entry)| (false, idx, entry.msg_count));
-        let oversized = self
-            .oversized_entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry.msg_count > 0
-                    && entry.key.width == key.width
-                    && entry.key.diff_mode == key.diff_mode
-                    && entry.key.diagram_mode == key.diagram_mode
-                    && entry.key.centered == key.centered
-                    && entry.key.compact_thinking == key.compact_thinking
-                    && entry.key.mermaid_aspect_bucket == key.mermaid_aspect_bucket
-                    // Anchored inline images render inside the body, and a
-                    // late-arriving image may target an already-prepared
-                    // message; only reuse bases built with the same image set.
-                    && entry.key.pin_images == key.pin_images
-                    && entry.key.inline_images_visible == key.inline_images_visible
-                    && entry.key.images_signature == key.images_signature
-                    && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.latex_rendering == key.latex_rendering
-                    && entry.key.show_link_urls == key.show_link_urls
-            })
-            .max_by_key(|(_, entry)| entry.msg_count)
-            .map(|(idx, entry)| (true, idx, entry.msg_count));
-
-        let chosen = match (regular, oversized) {
-            (Some(left), Some(right)) => {
-                if left.2 >= right.2 {
-                    left
-                } else {
-                    right
-                }
-            }
-            (Some(entry), None) | (None, Some(entry)) => entry,
-            (None, None) => return None,
-        };
-
-        let (is_oversized, idx, msg_count) = chosen;
-        let entry = if is_oversized {
-            self.oversized_entries.remove(idx)?
-        } else {
-            self.entries.remove(idx)?
-        };
-        Some((entry.prepared, msg_count, entry.prompt_offset))
-    }
-}
-
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     if !secondary_render_active() {
         record_idle_animation_area(None);
@@ -111,16 +35,15 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         if visual_debug::is_enabled() {
             let area = frame.area();
             let mut capture = FrameCaptureBuilder::new(area.width, area.height);
-            capture.state.status = "hibernated".to_string();
-            capture.state.input_len = app.input().len();
-            capture.state.input_preview = app.input().chars().take(200).collect();
-            capture.state.cursor_pos = app.cursor_pos();
-            capture.state.scroll_offset = app.scroll_offset();
-            capture.state.message_count = app.display_messages().len();
-            capture.rendered_text.status_line = app.hibernation_notice().unwrap_or("").to_string();
-            capture
-                .render_order
-                .push("frozen_hibernation_frame".to_string());
+            capture.state_mut().status = "hibernated".to_string();
+            capture.state_mut().input_len = app.input().len();
+            capture.state_mut().input_preview = app.input().chars().take(200).collect();
+            capture.state_mut().cursor_pos = app.cursor_pos();
+            capture.state_mut().scroll_offset = app.scroll_offset();
+            capture.state_mut().message_count = app.display_messages().len();
+            capture.rendered_text_mut().status_line =
+                app.hibernation_notice().unwrap_or("").to_string();
+            capture.step("frozen_hibernation_frame");
             if !secondary_render_active() {
                 visual_debug::record_frame(capture.build());
             }

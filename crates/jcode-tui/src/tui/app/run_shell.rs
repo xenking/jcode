@@ -4,6 +4,7 @@ mod remote_execution;
 
 use super::spinner_ticker::SpinnerTicker;
 use super::*;
+use crate::tui::picker_overlay::SessionPickerOverlay;
 
 fn should_start_remote_btw(pending: bool, connected: bool) -> bool {
     pending && !connected

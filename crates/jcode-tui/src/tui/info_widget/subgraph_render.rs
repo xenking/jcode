@@ -188,9 +188,9 @@ pub(super) fn render_widget_content(
         WidgetKind::ModelInfo => render_model_widget(data, inner),
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_changes_framed(data, inner),
-        WidgetKind::CloudVm => super::super::info_widget_cloud::render_cloud_widget(data, inner),
+        WidgetKind::CloudVm => super::cloud::render_cloud_widget(data, inner),
         WidgetKind::CloudDirectories => {
-            super::super::info_widget_cloud_directories::render_cloud_directories(data, inner)
+            super::cloud_directories::render_cloud_directories(data, inner)
         }
         WidgetKind::Commits => render_commits_widget(data, inner),
     };

@@ -163,7 +163,7 @@ fn persisted_session_widget_matches_real_margin_engine_and_buffer() {
     let lines = vec![Line::from("short transcript")];
     let data = selected_info(&session, Some(&extras));
     let margins = crate::tui::ui::viewport::compute_visible_margins(&lines, &[], area, false);
-    let placements = crate::tui::info_widget_layout::calculate_placements_anchored(
+    let placements = crate::tui::info_widget::layout::calculate_placements_anchored(
         area,
         &margins,
         &data,

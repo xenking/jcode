@@ -255,3 +255,17 @@ impl SessionPicker {
         self.render_claude_takeover_confirmation(frame);
     }
 }
+
+impl crate::tui::picker_overlay::SessionPickerOverlay for SessionPicker {
+    fn render(&mut self, frame: &mut Frame) {
+        SessionPicker::render(self, frame)
+    }
+
+    fn has_visible_running_sessions(&self) -> bool {
+        SessionPicker::has_visible_running_sessions(self)
+    }
+
+    fn has_pending_preview_work(&self) -> bool {
+        SessionPicker::has_pending_preview_work(self)
+    }
+}

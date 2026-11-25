@@ -41,13 +41,15 @@ mod commit_log;
 mod composer_grammar;
 mod copy_badge_state;
 mod core;
+mod idle_donut;
+mod picker_overlay;
+mod redraw_reason;
+pub(crate) use idle_donut::idle_donut_active;
 mod effort_labels;
 pub(crate) mod fuzzy;
 mod git_info;
 mod git_porcelain;
 pub mod herdr;
-mod info_widget_cloud;
-mod info_widget_cloud_directories;
 pub mod rex;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
@@ -58,9 +60,6 @@ mod text_filter;
 
 mod focus_carryover;
 pub mod info_widget;
-mod info_widget_layout;
-mod info_widget_overview;
-mod info_widget_settle;
 pub mod info_widget_stability;
 pub mod keybind;
 mod layout_utils;
@@ -78,8 +77,8 @@ mod secondary_render;
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
     REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
-    current_full_frame_redraw_reason, idle_donut_active, last_full_frame_redraw_reason,
-    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    current_full_frame_redraw_reason, periodic_redraw_required,
+    periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
@@ -696,7 +695,9 @@ pub trait TuiState {
         None
     }
     /// Session picker overlay for /resume command
-    fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<dyn picker_overlay::SessionPickerOverlay>>;
     /// Login picker overlay for /login command
     fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
     /// Account picker overlay for /account command

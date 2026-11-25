@@ -341,7 +341,7 @@ impl TuiState for SessionView<'_> {
     }
     fn session_picker_overlay(
         &self,
-    ) -> Option<&std::cell::RefCell<crate::tui::session_picker::SessionPicker>> {
+    ) -> Option<&std::cell::RefCell<dyn crate::tui::picker_overlay::SessionPickerOverlay>> {
         None
     }
     fn login_picker_overlay(

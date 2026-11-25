@@ -765,19 +765,28 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
 /// Builder for constructing frame captures during rendering
 #[derive(Default)]
 pub struct FrameCaptureBuilder {
-    pub layout: LayoutCapture,
-    pub state: StateSnapshot,
-    pub rendered_text: RenderedText,
-    pub image_regions: Vec<ImageRegionCapture>,
-    pub anomalies: Vec<String>,
-    pub render_timing: Option<RenderTimingCapture>,
-    pub info_widgets: Option<InfoWidgetCapture>,
-    pub render_order: Vec<String>,
+    layout: LayoutCapture,
+    state: StateSnapshot,
+    rendered_text: RenderedText,
+    image_regions: Vec<ImageRegionCapture>,
+    anomalies: Vec<String>,
+    render_timing: Option<RenderTimingCapture>,
+    info_widgets: Option<InfoWidgetCapture>,
+    render_order: Vec<String>,
+    mermaid: Option<Value>,
+    side_panel: Option<Value>,
+    markdown: Option<Value>,
+    theme: Option<Value>,
+    terminal_size: (u16, u16),
+}
+
+/// Subsystem debug blobs attached to a frame once it has been drawn.
+pub struct FrameDiagnostics {
+    pub render_timing: RenderTimingCapture,
     pub mermaid: Option<Value>,
     pub side_panel: Option<Value>,
     pub markdown: Option<Value>,
     pub theme: Option<Value>,
-    terminal_size: (u16, u16),
 }
 
 impl FrameCaptureBuilder {
@@ -786,6 +795,43 @@ impl FrameCaptureBuilder {
             terminal_size: (width, height),
             ..Default::default()
         }
+    }
+
+    /// Layout geometry recorded so far.
+    pub fn layout_mut(&mut self) -> &mut LayoutCapture {
+        &mut self.layout
+    }
+
+    /// App state snapshot recorded so far.
+    pub fn state_mut(&mut self) -> &mut StateSnapshot {
+        &mut self.state
+    }
+
+    /// Text that was rendered into the frame.
+    pub fn rendered_text_mut(&mut self) -> &mut RenderedText {
+        &mut self.rendered_text
+    }
+
+    /// Note that a render stage ran, in order.
+    pub fn step(&mut self, stage: &str) {
+        self.render_order.push(stage.to_string());
+    }
+
+    pub fn set_image_regions(&mut self, regions: Vec<ImageRegionCapture>) {
+        self.image_regions = regions;
+    }
+
+    pub fn set_info_widgets(&mut self, info_widgets: InfoWidgetCapture) {
+        self.info_widgets = Some(info_widgets);
+    }
+
+    /// Attach timing and subsystem debug data once the frame is drawn.
+    pub fn attach_diagnostics(&mut self, diagnostics: FrameDiagnostics) {
+        self.render_timing = Some(diagnostics.render_timing);
+        self.mermaid = diagnostics.mermaid;
+        self.side_panel = diagnostics.side_panel;
+        self.markdown = diagnostics.markdown;
+        self.theme = diagnostics.theme;
     }
 
     /// Record an anomaly detected during rendering

@@ -19,10 +19,10 @@ pub(super) struct WidgetsState {
     /// Current placements (updated each frame)
     pub(super) placements: Vec<WidgetPlacement>,
     /// Persistent widget anchors (HUD slot memory, including hidden-in-place ones)
-    pub(super) anchors: Vec<super::super::info_widget_layout::WidgetAnchor>,
+    pub(super) anchors: Vec<super::layout::WidgetAnchor>,
     /// Settlement tracker: which transcript lines' negative space has stopped
     /// changing and may therefore host a *new* resident widget.
-    pub(super) settlement: super::super::info_widget_settle::SettlementTracker,
+    pub(super) settlement: super::settle::SettlementTracker,
     /// Content width the current anchors were computed at. A width change means
     /// every transcript line re-wrapped, so anchors (keyed by absolute line) are
     /// meaningless and must be flushed for one clean global re-layout.
@@ -46,7 +46,7 @@ impl Default for WidgetsState {
             widget_states: HashMap::new(),
             placements: Vec::new(),
             anchors: Vec::new(),
-            settlement: super::super::info_widget_settle::SettlementTracker::default(),
+            settlement: super::settle::SettlementTracker::default(),
             anchors_area_width: 0,
             swarm_dock_last_engaged: None,
             last_scroll_top: None,
@@ -184,9 +184,9 @@ pub(in super::super) fn calculate_placements_with_cloud_reflow(
     margins: &Margins,
     data: &InfoWidgetData,
     enabled: bool,
-    anchors: &[super::super::info_widget_layout::WidgetAnchor],
-) -> super::super::info_widget_layout::PlacementOutcome {
-    use super::super::info_widget_layout::calculate_placements_anchored;
+    anchors: &[super::layout::WidgetAnchor],
+) -> super::layout::PlacementOutcome {
+    use super::layout::calculate_placements_anchored;
     let resident = calculate_placements_anchored(area, margins, data, enabled, anchors);
     if data.cloud_info.is_none() || anchors.is_empty() {
         return resident;

@@ -237,7 +237,10 @@ fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'s
     }
 
     if is_last {
-        spans.push(Span::styled(NOW_MARKER, Style::default().fg(rgb(255, 200, 100))));
+        spans.push(Span::styled(
+            NOW_MARKER,
+            Style::default().fg(rgb(255, 200, 100)),
+        ));
     }
 
     Line::from(spans)
@@ -304,10 +307,7 @@ pub(super) fn render_timeline_compact(data: &InfoWidgetData) -> Vec<Line<'static
 
     let mut spans = vec![
         Span::styled("⟳ ", Style::default().fg(rgb(130, 170, 250))),
-        Span::styled(
-            clip(last, 24),
-            Style::default().fg(rgb(185, 185, 200)),
-        ),
+        Span::styled(clip(last, 24), Style::default().fg(rgb(185, 185, 200))),
     ];
     if edits > 0 {
         spans.push(Span::styled(

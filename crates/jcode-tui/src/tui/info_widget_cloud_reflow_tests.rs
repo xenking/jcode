@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn cloud_overview_reflows_when_git_loading_finishes_in_short_viewport() {
-    use super::super::info_widget_layout::calculate_placements_anchored;
+    use super::layout::calculate_placements_anchored;
     let now = std::time::SystemTime::now();
     let mut data = InfoWidgetData {
         session_name: Some("meadow duckling".into()),

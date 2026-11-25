@@ -97,7 +97,7 @@ pub(crate) fn idle_animation_debug_json() -> serde_json::Value {
             .load(std::sync::atomic::Ordering::Relaxed),
         "full_repaints": IDLE_ANIMATION_FULL_REPAINTS
             .load(std::sync::atomic::Ordering::Relaxed),
-        "last_full_frame_reason": crate::tui::last_full_frame_redraw_reason(),
+        "last_full_frame_reason": crate::tui::redraw_reason::last_full_frame_redraw_reason(),
         "fast_path_blocked": idle_animation_fast_path_blocked_reasons(),
     })
 }

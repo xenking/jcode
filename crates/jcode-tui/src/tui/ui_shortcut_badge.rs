@@ -7,6 +7,13 @@ pub(crate) const COPY_BADGE_ALT_LABEL: &str = "⌥";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const COPY_BADGE_ALT_LABEL: &str = "Alt";
 
+/// Trailing badge text appended to a collapsed swarm tldr line. Kept as
+/// constants so click hit-testing and rendering stay in sync.
+pub(crate) const SWARM_EXPAND_BADGE: &str = "⊞";
+pub(crate) const SWARM_COLLAPSE_BADGE: &str = "⊟";
+pub(crate) const SWARM_DIFF_EXPAND_BADGE: &str = "▸ diff";
+pub(crate) const SWARM_DIFF_COLLAPSE_BADGE: &str = "▾ hide";
+
 pub(crate) fn copy_badge_alt_label() -> String {
     let config = crate::config::config();
     copy_badge_alt_label_from_config(&config.display.copy_badge_alt_label)

@@ -481,8 +481,12 @@ impl crate::tui::TuiState for TestState {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         None
     }
-    fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
-        self.session_picker.as_deref()
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<dyn crate::tui::picker_overlay::SessionPickerOverlay>> {
+        self.session_picker.as_deref().map(|picker| {
+            picker as &std::cell::RefCell<dyn crate::tui::picker_overlay::SessionPickerOverlay>
+        })
     }
     fn login_picker_overlay(
         &self,

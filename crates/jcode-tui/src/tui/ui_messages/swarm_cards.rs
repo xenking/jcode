@@ -216,10 +216,9 @@ pub(super) fn swarm_notification_style(title: Option<&str>) -> (&'static str, Co
 
 /// Trailing badge text appended to a collapsed swarm tldr line. Kept as
 /// constants so click hit-testing and rendering stay in sync.
-pub(crate) const SWARM_EXPAND_BADGE: &str = "⊞";
-pub(crate) const SWARM_COLLAPSE_BADGE: &str = "⊟";
-pub(crate) const SWARM_DIFF_EXPAND_BADGE: &str = "▸ diff";
-pub(crate) const SWARM_DIFF_COLLAPSE_BADGE: &str = "▾ hide";
+pub(crate) use crate::tui::ui::shortcut_badge::{
+    SWARM_COLLAPSE_BADGE, SWARM_DIFF_COLLAPSE_BADGE, SWARM_DIFF_EXPAND_BADGE, SWARM_EXPAND_BADGE,
+};
 pub(crate) const SWARM_AGENT_SNAPSHOT_TITLE: &str = "swarm-agent-snapshot";
 
 pub(crate) fn compact_swarm_await_summary(message: &str) -> String {

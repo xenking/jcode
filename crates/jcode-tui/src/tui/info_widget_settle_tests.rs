@@ -4,7 +4,7 @@
 //! flushes everything.
 
 use super::{SETTLE_AFTER_FRAMES, SettlementTracker};
-use crate::tui::info_widget_layout::Margins;
+use crate::tui::info_widget::layout::Margins;
 
 fn margins(right: Vec<u16>, scroll_top: usize) -> Margins {
     Margins {

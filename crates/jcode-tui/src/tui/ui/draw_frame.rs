@@ -314,7 +314,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let input_height = base_input_height + hint_line_height;
 
     if let Some(ref mut capture) = debug_capture {
-        capture.render_order.push("prepare_messages".to_string());
+        capture.step("prepare_messages");
     }
     let prep_start = Instant::now();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
@@ -369,7 +369,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
-    let show_donut = !onboarding_welcome && super::super::idle_donut_active(app);
+    let show_donut = !onboarding_welcome && crate::tui::idle_donut::idle_donut_active(app);
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
     let notification_height =
         input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
@@ -447,15 +447,17 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     set_last_chat_scrollbar_visible(chat_scrollbar_visible);
     if let Some(ref mut capture) = debug_capture {
-        capture.image_regions = prepared
-            .image_regions
-            .iter()
-            .map(|region| ImageRegionCapture {
-                hash: format!("{:016x}", region.hash),
-                abs_line_idx: region.abs_line_idx,
-                height: region.height,
-            })
-            .collect();
+        capture.set_image_regions(
+            prepared
+                .image_regions
+                .iter()
+                .map(|region| ImageRegionCapture {
+                    hash: format!("{:016x}", region.hash),
+                    abs_line_idx: region.abs_line_idx,
+                    height: region.height,
+                })
+                .collect(),
+        );
     }
     let prep_elapsed = prep_start.elapsed();
     let clear_start = terminal_clear_start(app, &prepared);
@@ -566,45 +568,46 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {
-        capture.layout.use_packed = use_packed;
-        capture.layout.estimated_content_height = content_height as usize;
-        capture.layout.messages_area = Some(chunks[0].into());
+        capture.layout_mut().use_packed = use_packed;
+        capture.layout_mut().estimated_content_height = content_height as usize;
+        capture.layout_mut().messages_area = Some(chunks[0].into());
         if queued_height > 0 {
-            capture.layout.queued_area = Some(chunks[1].into());
+            capture.layout_mut().queued_area = Some(chunks[1].into());
         }
-        capture.layout.status_area = Some(chunks[3].into());
-        capture.layout.input_area = Some(chunks[7].into());
-        capture.layout.input_lines_raw = app.input().lines().count().max(1);
-        capture.layout.input_lines_wrapped = base_input_height as usize;
+        capture.layout_mut().status_area = Some(chunks[3].into());
+        capture.layout_mut().input_area = Some(chunks[7].into());
+        capture.layout_mut().input_lines_raw = app.input().lines().count().max(1);
+        capture.layout_mut().input_lines_wrapped = base_input_height as usize;
 
         // Capture state snapshot
-        capture.state.is_processing = app.is_processing();
-        capture.state.input_len = app.input().len();
-        capture.state.input_preview = app.input().chars().take(100).collect();
-        capture.state.cursor_pos = app.cursor_pos();
-        capture.state.scroll_offset = app.scroll_offset();
-        capture.state.queued_count = pending_count;
-        capture.state.message_count = app.display_messages().len();
-        capture.state.streaming_text_len = app.streaming_text().len();
-        capture.state.has_suggestions = !app.command_suggestions().is_empty();
-        capture.state.status = format!("{:?}", app.status());
-        capture.state.diagram_mode = Some(format!("{:?}", diagram_mode));
-        capture.state.diagram_focus = diagram_focus;
-        capture.state.diagram_index = selected_index;
-        capture.state.diagram_count = diagram_count;
-        capture.state.diagram_scroll_x = diagram_scroll_x;
-        capture.state.diagram_scroll_y = diagram_scroll_y;
-        capture.state.diagram_pane_ratio = app.diagram_pane_ratio();
-        capture.state.diagram_pane_enabled = app.diagram_pane_enabled();
-        capture.state.diagram_pane_position = Some(format!("{:?}", app.diagram_pane_position()));
-        capture.state.diagram_zoom = app.diagram_zoom();
+        capture.state_mut().is_processing = app.is_processing();
+        capture.state_mut().input_len = app.input().len();
+        capture.state_mut().input_preview = app.input().chars().take(100).collect();
+        capture.state_mut().cursor_pos = app.cursor_pos();
+        capture.state_mut().scroll_offset = app.scroll_offset();
+        capture.state_mut().queued_count = pending_count;
+        capture.state_mut().message_count = app.display_messages().len();
+        capture.state_mut().streaming_text_len = app.streaming_text().len();
+        capture.state_mut().has_suggestions = !app.command_suggestions().is_empty();
+        capture.state_mut().status = format!("{:?}", app.status());
+        capture.state_mut().diagram_mode = Some(format!("{:?}", diagram_mode));
+        capture.state_mut().diagram_focus = diagram_focus;
+        capture.state_mut().diagram_index = selected_index;
+        capture.state_mut().diagram_count = diagram_count;
+        capture.state_mut().diagram_scroll_x = diagram_scroll_x;
+        capture.state_mut().diagram_scroll_y = diagram_scroll_y;
+        capture.state_mut().diagram_pane_ratio = app.diagram_pane_ratio();
+        capture.state_mut().diagram_pane_enabled = app.diagram_pane_enabled();
+        capture.state_mut().diagram_pane_position =
+            Some(format!("{:?}", app.diagram_pane_position()));
+        capture.state_mut().diagram_zoom = app.diagram_zoom();
 
         // Capture rendered content
         // Queued messages
-        capture.rendered_text.queued_messages = input_ui::pending_queue_preview(app);
+        capture.rendered_text_mut().queued_messages = input_ui::pending_queue_preview(app);
 
         // Recent display messages (last 5 for context)
-        capture.rendered_text.recent_messages = app
+        capture.rendered_text_mut().recent_messages = app
             .display_messages()
             .iter()
             .rev()
@@ -619,15 +622,16 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         // Streaming text preview
         let streaming = app.streaming_text();
         if !streaming.is_empty() {
-            capture.rendered_text.streaming_text_preview = streaming.chars().take(500).collect();
+            capture.rendered_text_mut().streaming_text_preview =
+                streaming.chars().take(500).collect();
         }
 
         // Status line content
-        capture.rendered_text.status_line = format_status_for_debug(app);
+        capture.rendered_text_mut().status_line = format_status_for_debug(app);
     }
 
     if let Some(ref mut capture) = debug_capture {
-        capture.render_order.push("draw_messages".to_string());
+        capture.step("draw_messages");
     }
     let draw_start = Instant::now();
 
@@ -650,8 +654,8 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     });
 
     if let Some(ref mut capture) = debug_capture {
-        capture.layout.messages_area = Some(messages_area.into());
-        capture.layout.diagram_area = diagram_area.map(|r| r.into());
+        capture.layout_mut().messages_area = Some(messages_area.into());
+        capture.layout_mut().diagram_area = diagram_area.map(|r| r.into());
     }
     record_layout_snapshot(messages_area, diagram_area, diff_pane_area, Some(chunks[7]));
 
@@ -714,7 +718,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Render pinned diagram if we have one
     if let (Some(diagram_info), Some(area)) = (&pinned_diagram, diagram_area) {
         if let Some(ref mut capture) = debug_capture {
-            capture.render_order.push("draw_pinned_diagram".to_string());
+            capture.step("draw_pinned_diagram");
         }
         draw_pinned_diagram(
             frame,
@@ -735,9 +739,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(diff_area) = diff_pane_area {
         if has_side_panel_content {
             if let Some(ref mut capture) = debug_capture {
-                capture
-                    .render_order
-                    .push("draw_side_panel_markdown".to_string());
+                capture.step("draw_side_panel_markdown");
             }
             draw_side_panel_markdown(
                 frame,
@@ -750,7 +752,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             );
         } else if has_file_diff_edits {
             if let Some(ref mut capture) = debug_capture {
-                capture.render_order.push("draw_file_diff_view".to_string());
+                capture.step("draw_file_diff_view");
             }
             draw_file_diff_view(
                 frame,
@@ -766,7 +768,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let messages_draw = draw_start.elapsed();
 
     if let Some(ref mut capture) = debug_capture {
-        capture.layout.margins = Some(MarginsCapture {
+        capture.layout_mut().margins = Some(MarginsCapture {
             left_widths: margins.left_widths.clone(),
             right_widths: margins.right_widths.clone(),
             centered: margins.centered,
@@ -775,19 +777,19 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let chrome_start = Instant::now();
     if queued_height > 0 {
         if let Some(ref mut capture) = debug_capture {
-            capture.render_order.push("draw_queued".to_string());
+            capture.step("draw_queued");
         }
         input_ui::draw_queued(frame, app, chunks[1], user_count + 1);
     }
     if let Some(ref mut capture) = debug_capture {
-        capture.render_order.push("draw_status".to_string());
+        capture.step("draw_status");
     }
     input_ui::draw_status(frame, app, chunks[3], pending_count);
     if notification_height > 0 {
         input_ui::draw_notification(frame, app, chunks[4]);
     }
     if let Some(ref mut capture) = debug_capture {
-        capture.render_order.push("draw_input".to_string());
+        capture.step("draw_input");
     }
     // Draw inline UI if active
     if inline_block_height > 0 {
@@ -821,14 +823,14 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !side_panel_fullscreen
     {
         if let Some(ref mut capture) = debug_capture {
-            capture.render_order.push("render_info_widgets".to_string());
+            capture.step("render_info_widgets");
         }
         placements = info_widget::calculate_placements(widget_bounds, &margins, &widget_data);
 
         if let Some(ref mut capture) = debug_capture {
             let placement_captures = capture_widget_placements(&placements);
-            capture.layout.widget_placements = placement_captures.clone();
-            capture.info_widgets = Some(InfoWidgetCapture {
+            capture.layout_mut().widget_placements = placement_captures.clone();
+            capture.set_info_widgets(InfoWidgetCapture {
                 summary: build_info_widget_summary(&widget_data),
                 placements: placement_captures,
             });
@@ -893,7 +895,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         // widgets that are no longer drawn.
         info_widget::note_widget_pass_skipped();
         if let Some(ref mut capture) = debug_capture {
-            capture.info_widgets = Some(InfoWidgetCapture {
+            capture.set_info_widgets(InfoWidgetCapture {
                 summary: build_info_widget_summary(&widget_data),
                 placements: Vec::new(),
             });
@@ -956,11 +958,13 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         };
 
         let mut capture = capture;
-        capture.render_timing = Some(render_timing);
-        capture.mermaid = crate::tui::mermaid::debug_stats_json();
-        capture.side_panel = crate::tui::side_panel_debug_json();
-        capture.markdown = crate::tui::markdown::debug_stats_json();
-        capture.theme = overlays::debug_palette_json();
+        capture.attach_diagnostics(visual_debug::FrameDiagnostics {
+            render_timing,
+            mermaid: crate::tui::mermaid::debug_stats_json(),
+            side_panel: crate::tui::side_panel_debug_json(),
+            markdown: crate::tui::markdown::debug_stats_json(),
+            theme: overlays::debug_palette_json(),
+        });
         if !secondary_render_active() {
             visual_debug::record_frame(capture.build());
         }

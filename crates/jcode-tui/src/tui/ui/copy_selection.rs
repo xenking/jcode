@@ -1,10 +1,10 @@
 use unicode_width::UnicodeWidthStr;
 
+use super::copy_snapshot::{CopyViewportData, CopyViewportSnapshot};
 use super::display_width::{
     clamp_display_col, display_col_slice, display_col_slice_copy, line_display_width,
 };
 use super::url_regex_support::link_target_for_display_column;
-use super::{CopyViewportData, CopyViewportSnapshot};
 
 pub(super) fn copy_point_from_snapshot(
     snapshot: &CopyViewportSnapshot,
