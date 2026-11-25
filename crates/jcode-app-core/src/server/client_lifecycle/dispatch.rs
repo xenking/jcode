@@ -180,3 +180,51 @@ impl ClientConnection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// `route_of` proves every request is placed. It cannot prove the placed
+    /// handler has an arm for it, and a missing arm is a runtime panic on a
+    /// client request. This reads both sides from source.
+    #[test]
+    fn every_routed_request_has_an_arm_in_its_handler() {
+        let source = include_str!("dispatch.rs");
+        let start = source.find("fn route_of").unwrap();
+        let end = source.find("impl ClientConnection").unwrap();
+        let table = &source[start..end];
+        let handlers = [
+            ("Turn", include_str!("turn_requests.rs")),
+            ("Session", include_str!("session_requests.rs")),
+            ("Attach", include_str!("attach_requests.rs")),
+            ("Settings", include_str!("settings_requests.rs")),
+            ("RuntimeCommand", include_str!("runtime_command.rs")),
+            ("Actions", include_str!("actions.rs")),
+        ];
+        let mut routed = 0;
+        for arm in table.split(',') {
+            let Some((patterns, route)) = arm.split_once("=> Route::") else {
+                continue;
+            };
+            let route = route.trim();
+            let Some((_, handler)) = handlers.iter().find(|(name, _)| *name == route) else {
+                assert_eq!(route, "Early", "unknown route {route}");
+                continue;
+            };
+            for (at, _) in patterns.match_indices("Request::") {
+                let name: String = patterns[at + "Request::".len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                assert!(
+                    handler.contains(&format!("Request::{name}")),
+                    "Request::{name} is routed to {route} but that handler has no arm for it"
+                );
+                routed += 1;
+            }
+        }
+        assert!(
+            routed > 100,
+            "route table was not parsed: {routed} variants"
+        );
+    }
+}
