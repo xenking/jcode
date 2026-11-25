@@ -1,7 +1,6 @@
 //! Commit log overlay (default Alt+G): a scrollable `git log` of the project
 //! the session is working in.
 
-
 /// Maximum number of commits loaded into the overlay.
 const COMMIT_LOG_LIMIT: usize = 500;
 

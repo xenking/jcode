@@ -41,6 +41,7 @@ mod commit_log;
 mod composer_grammar;
 mod copy_badge_state;
 mod effort_labels;
+mod git_info;
 mod git_porcelain;
 mod core;
 pub(crate) mod fuzzy;
@@ -72,6 +73,7 @@ pub mod permissions {
 }
 mod progress_bar;
 mod redraw_schedule;
+mod secondary_render;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,

@@ -2976,9 +2976,9 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
 /// Kept as a focused test helper for the external transcript importers.
 #[cfg(test)]
 pub(crate) fn load_external_cli_sessions_grouped(
-    cli: crate::tui::app::onboarding_flow::ExternalCli,
+    cli: crate::tui::session_picker::ExternalCli,
 ) -> (Vec<ServerGroup>, Vec<SessionInfo>) {
-    use crate::tui::app::onboarding_flow::ExternalCli;
+    use crate::tui::session_picker::ExternalCli;
     let scan_limit = session_scan_limit();
     let sessions = match cli {
         ExternalCli::Codex => load_external_codex_sessions(scan_limit),

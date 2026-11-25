@@ -27,27 +27,7 @@ use std::time::{Duration, Instant};
 /// read the prompt.
 pub(crate) const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Which external CLI an OAuth login was detected for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExternalCli {
-    Codex,
-    ClaudeCode,
-    Pi,
-    OpenCode,
-    Cursor,
-}
-
-impl ExternalCli {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            ExternalCli::Codex => "Codex",
-            ExternalCli::ClaudeCode => "Claude Code",
-            ExternalCli::Pi => "Pi",
-            ExternalCli::OpenCode => "OpenCode",
-            ExternalCli::Cursor => "Cursor",
-        }
-    }
-}
+pub(crate) use crate::tui::session_picker::ExternalCli;
 
 /// State of the informational "Telemetry" page (telemetry is removed in this
 /// build): just the focused "Continue" button.

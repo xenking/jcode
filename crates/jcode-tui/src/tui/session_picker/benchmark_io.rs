@@ -99,7 +99,7 @@ fn fixtures(home: &Path, count: usize) -> Vec<SessionInfo> {
         .collect();
     sessions.extend(
         loading::load_external_cli_sessions_grouped(
-            crate::tui::app::onboarding_flow::ExternalCli::Codex,
+            crate::tui::session_picker::ExternalCli::Codex,
         )
         .1
         .into_iter()

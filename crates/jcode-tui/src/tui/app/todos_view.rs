@@ -1,7 +1,7 @@
 use super::App;
 use crate::tui::todo_card_payload::{
     load_current_session_goals, load_current_session_plan, load_current_session_todos,
-    todo_card_payload_json, todo_card_payload_json_with_agents, visible_todos,
+    todo_card_payload_json, todo_card_payload_value, visible_todos,
 };
 use crate::config::{Config, TodoHeaderMode, config};
 use crate::side_panel::{
@@ -596,6 +596,24 @@ fn hash_background_tasks(tasks: &[crate::tui::ui::TodoCardBackgroundTask]) -> u6
         }
     }
     hasher.finish()
+}
+
+fn todo_card_payload_json_with_agents(
+    todos: &[TodoItem],
+    plan: &crate::todo::TodoPlan,
+    goals: &[crate::todo::TodoGoal],
+    agents: &[crate::tui::ui::TodoCardAgent],
+) -> String {
+    let mut payload = todo_card_payload_value(todos, plan, goals);
+    if !agents.is_empty() {
+        match serde_json::to_value(agents) {
+            Ok(agents) => payload["agents"] = agents,
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot encode todo agents: {error}"));
+            }
+        }
+    }
+    serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
 
 fn advance_todo_agent_elapsed(

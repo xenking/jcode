@@ -205,8 +205,7 @@ fn copy_to_local_clipboard(text: &str) -> bool {
         if helper::copy_via_clipboard_helper("wl-copy", &[], text) {
             return true;
         }
-        if helper::copy_via_clipboard_helper("xclip", &["-selection", "clipboard"], text)
-        {
+        if helper::copy_via_clipboard_helper("xclip", &["-selection", "clipboard"], text) {
             return true;
         }
         if helper::copy_via_clipboard_helper("xsel", &["--clipboard", "--input"], text) {

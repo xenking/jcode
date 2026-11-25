@@ -50,27 +50,18 @@ pub(crate) fn todo_card_payload_json(
     plan: &crate::todo::TodoPlan,
     goals: &[crate::todo::TodoGoal],
 ) -> String {
-    todo_card_payload_json_with_agents(todos, plan, goals, &[])
+    serde_json::to_string(&todo_card_payload_value(todos, plan, goals))
+        .unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
 
-pub(crate) fn todo_card_payload_json_with_agents(
+pub(crate) fn todo_card_payload_value(
     todos: &[TodoItem],
     plan: &crate::todo::TodoPlan,
     goals: &[crate::todo::TodoGoal],
-    agents: &[crate::tui::ui::TodoCardAgent],
-) -> String {
-    let mut payload = serde_json::json!({
+) -> serde_json::Value {
+    serde_json::json!({
         "todos": todos,
         "plan": plan,
         "goals": goals,
-    });
-    if !agents.is_empty() {
-        match serde_json::to_value(agents) {
-            Ok(agents) => payload["agents"] = agents,
-            Err(error) => {
-                crate::logging::warn(&format!("Cannot encode todo agents: {error}"));
-            }
-        }
-    }
-    serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
+    })
 }

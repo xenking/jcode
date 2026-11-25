@@ -280,54 +280,22 @@ pub fn last_max_scroll() -> usize {
     }
 }
 
-thread_local! {
-    static SECONDARY_RENDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static SECONDARY_FRAME: std::cell::RefCell<Option<Arc<PreparedChatFrame>>> =
-        const { std::cell::RefCell::new(None) };
-    static SECONDARY_GEOMETRY: std::cell::Cell<SecondaryGeometry> =
-        const { std::cell::Cell::new(SecondaryGeometry { max_scroll: 0, scroll: 0, total_lines: 0, viewport_height: 0 }) };
-}
-
-/// Transcript geometry a secondary render resolved. The live session's
-/// globals stay untouched, so embedders read their own results from here.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SecondaryGeometry {
-    pub max_scroll: usize,
-    pub scroll: usize,
-    pub total_lines: usize,
-    pub viewport_height: usize,
-}
-
-fn note_secondary_geometry(update: impl FnOnce(&mut SecondaryGeometry)) {
-    SECONDARY_GEOMETRY.with(|cell| {
-        let mut geometry = cell.get();
-        update(&mut geometry);
-        cell.set(geometry);
-    });
-}
-
-/// True while drawing a non-live view (for example the resume preview).
-/// Such renders must not publish layout, scroll, copy, or status state that
-/// the live session's input handling reads back.
-pub(crate) fn secondary_render_active() -> bool {
-    SECONDARY_RENDER.with(std::cell::Cell::get)
-}
+pub(crate) use super::secondary_render::{SecondaryGeometry, active as secondary_render_active};
+use super::secondary_render::note_geometry as note_secondary_geometry;
 
 /// Run `f` with secondary-render isolation enabled on this thread.
 /// Returns the geometry the render resolved alongside `f`'s result.
 pub(crate) fn with_secondary_render<R>(f: impl FnOnce() -> R) -> (R, SecondaryGeometry) {
-    struct Reset(bool);
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            SECONDARY_RENDER.with(|c| c.set(self.0));
-        }
-    }
-    SECONDARY_GEOMETRY.with(|cell| cell.set(SecondaryGeometry::default()));
     SECONDARY_FRAME.with(|slot| slot.borrow_mut().take());
-    let _reset = Reset(SECONDARY_RENDER.with(|c| c.replace(true)));
-    let result = f();
-    (result, SECONDARY_GEOMETRY.with(std::cell::Cell::get))
+    super::secondary_render::run(f)
 }
+
+thread_local! {
+    static SECONDARY_FRAME: std::cell::RefCell<Option<Arc<PreparedChatFrame>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+
 
 /// The prepared transcript the most recent secondary render drew.
 pub(crate) fn take_secondary_chat_frame() -> Option<Arc<PreparedChatFrame>> {

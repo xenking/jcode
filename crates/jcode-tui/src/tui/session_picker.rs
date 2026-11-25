@@ -85,6 +85,28 @@ const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
 type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
 
+/// Which external CLI an OAuth login was detected for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExternalCli {
+    Codex,
+    ClaudeCode,
+    Pi,
+    OpenCode,
+    Cursor,
+}
+
+impl ExternalCli {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ExternalCli::Codex => "Codex",
+            ExternalCli::ClaudeCode => "Claude Code",
+            ExternalCli::Pi => "Pi",
+            ExternalCli::OpenCode => "OpenCode",
+            ExternalCli::Cursor => "Cursor",
+        }
+    }
+}
+
 pub(crate) enum SessionListUpdate {
     Cached(GroupedSessionList),
     CloudUnavailable(String),
