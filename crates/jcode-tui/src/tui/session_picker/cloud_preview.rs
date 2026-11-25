@@ -24,7 +24,7 @@ impl StageTimer {
         }
     }
 
-    pub(super) fn resolve(&mut self, outcome: &'static str) {
+    pub(super) fn finish(mut self, outcome: &'static str) {
         self.outcome = outcome;
     }
 }
@@ -48,10 +48,10 @@ impl Drop for StageTimer {
 }
 
 fn stage_result<T, E>(operation: impl FnOnce() -> Result<T, E>, stage: &'static str) -> Option<T> {
-    let mut timer = StageTimer::new(stage);
+    let timer = StageTimer::new(stage);
     match operation() {
         Ok(value) => {
-            timer.resolve("success");
+            timer.finish("success");
             Some(value)
         }
         Err(_) => None,
@@ -66,7 +66,7 @@ pub(in crate::tui::session_picker) fn projection_script(mode: &str) -> String {
 }
 
 pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
-    let mut timer = StageTimer::new("load");
+    let timer = StageTimer::new("load");
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -74,7 +74,7 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
         || host.is_empty()
         || host.starts_with('-')
     {
-        timer.resolve("skipped_invalid_target");
+        timer.finish("skipped_invalid_target");
         return None;
     }
     let epoch = crate::storage::read_session_lease(session_id)
@@ -85,7 +85,7 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
     let host = host.to_owned();
     let result = load_cached_or_fetch(session_id, path, move || fetch_bytes(&id, &host));
     if result.is_some() {
-        timer.resolve("success");
+        timer.finish("success");
     }
     result
 }
@@ -98,14 +98,12 @@ fn load_cached_or_fetch(
     path: Option<std::path::PathBuf>,
     fetch: impl FnOnce() -> Option<Vec<u8>> + Send + 'static,
 ) -> Option<CloudSnapshot> {
-    let mut timer = StageTimer::new("cache_lookup");
+    let timer = StageTimer::new("cache_lookup");
     if let Some(path) = path.as_deref()
         && let Some(bytes) = cache::read(path)
         && let Some(snapshot) = parse_for_session(&bytes, session_id)
     {
-        timer.resolve("hit");
-        let mut refresh_timer = StageTimer::new("refresh_schedule");
-        refresh_timer.resolve("skipped_fresh_or_in_flight");
+        let refresh_timer = StageTimer::new("refresh_schedule");
         if !cache::fresh(path)
             && let Some(guard) = cache::begin_refresh(path)
         {
@@ -117,12 +115,14 @@ fn load_cached_or_fetch(
                     let _guard = guard;
                     fetch_and_cache(&id, Some(&path), fetch);
                 });
-            refresh_timer.resolve(if refresh.is_ok() { "success" } else { "error" });
+            refresh_timer.finish(if refresh.is_ok() { "success" } else { "error" });
+        } else {
+            refresh_timer.finish("skipped_fresh_or_in_flight");
         }
+        timer.finish("hit");
         return Some(snapshot);
     }
-    timer.resolve("miss");
-    drop(timer);
+    timer.finish("miss");
     fetch_and_cache(session_id, path.as_deref(), fetch)
 }
 
@@ -131,39 +131,38 @@ fn fetch_and_cache(
     path: Option<&std::path::Path>,
     fetch: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<CloudSnapshot> {
-    let mut timer = StageTimer::new("refresh");
-    let mut network = StageTimer::new("fetch");
+    let timer = StageTimer::new("refresh");
+    let network = StageTimer::new("fetch");
     let bytes = fetch()?;
-    network.resolve("success");
-    drop(network);
+    network.finish("success");
     // Validate the full snapshot + journal before replacing the last good copy.
     let snapshot = parse_for_session(&bytes, session_id)?;
     if let Some(path) = path {
         if cache::write(path, &bytes).is_err() {
-            timer.resolve("success_cache_unavailable");
+            timer.finish("success_cache_unavailable");
             return Some(snapshot);
         }
     } else {
-        let mut skipped = StageTimer::new("cache_write");
-        skipped.resolve("skipped_unavailable");
+        let skipped = StageTimer::new("cache_write");
+        skipped.finish("skipped_unavailable");
     }
-    timer.resolve("success");
+    timer.finish("success");
     Some(snapshot)
 }
 
 fn parse_for_session(bytes: &[u8], session_id: &str) -> Option<CloudSnapshot> {
-    let mut timer = StageTimer::new("parse");
+    let timer = StageTimer::new("parse");
     let snapshot = parse_preview(bytes)?;
     if snapshot.0.id() != session_id {
-        timer.resolve("identity_mismatch");
+        timer.finish("identity_mismatch");
         return None;
     }
-    timer.resolve("success");
+    timer.finish("success");
     Some(snapshot)
 }
 
 fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
-    let mut timer = StageTimer::new("ssh");
+    let timer = StageTimer::new("ssh");
     let config = stage_result(crate::storage::jcode_dir, "ssh_config")?.join("cloud/ssh_config");
     let command = crate::tui::cloud_git::compressed_script_command(
         Some(host),
@@ -186,10 +185,10 @@ fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
         crate::tui::cloud_git::WorkspaceOperation::Preview,
     ))?;
     if !status.success() {
-        timer.resolve("exit_failure");
+        timer.finish("exit_failure");
         return None;
     }
-    timer.resolve("success");
+    timer.finish("success");
     Some(bytes)
 }
 
@@ -205,15 +204,15 @@ fn parse_preview(
         .map(|offset| first + 1 + offset);
     let session = parse_transcript(&bytes[..second.unwrap_or(bytes.len())])?;
     let telemetry = second.and_then(|split| {
-        let mut timer = StageTimer::new("telemetry_parse");
+        let timer = StageTimer::new("telemetry_parse");
         let bytes = &bytes[split + 1..];
         if bytes.is_empty() {
-            timer.resolve("skipped_absent");
+            timer.finish("skipped_absent");
             None
         } else {
             let result = stage_result(|| serde_json::from_slice(bytes), "telemetry_decode");
             if result.is_some() {
-                timer.resolve("success");
+                timer.finish("success");
             }
             result
         }

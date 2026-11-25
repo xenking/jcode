@@ -25,9 +25,9 @@ pub(super) fn available() -> bool {
 }
 
 pub(super) fn refresh() -> Result<bool> {
-    let mut timer = StageTimer::new("inventory_refresh");
+    let timer = StageTimer::new("inventory_refresh");
     if !available() {
-        timer.resolve("skipped_unavailable");
+        timer.finish("skipped_unavailable");
         return Ok(false);
     }
     let home = storage::jcode_dir()?;
@@ -36,10 +36,9 @@ pub(super) fn refresh() -> Result<bool> {
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let mut discovery = StageTimer::new("inventory_discovery");
+        let discovery = StageTimer::new("inventory_discovery");
         let inventory = crate::mobile_sync::discover_cloud_sessions().await?;
-        discovery.resolve("success");
-        drop(discovery);
+        discovery.finish("success");
         let candidates: Vec<_> = inventory
             .into_iter()
             .filter(|s| should_verify(&home, &s.session_id))
@@ -47,10 +46,9 @@ pub(super) fn refresh() -> Result<bool> {
         if candidates.is_empty() {
             return Ok(false);
         }
-        let mut prepare = StageTimer::new("inventory_prepare_ssh");
+        let prepare = StageTimer::new("inventory_prepare_ssh");
         prepare_ssh_config(&config).await?;
-        prepare.resolve("success");
-        drop(prepare);
+        prepare.finish("success");
         let ids = candidates
             .iter()
             .map(|s| s.session_id.as_str())
@@ -62,7 +60,7 @@ pub(super) fn refresh() -> Result<bool> {
             &ids,
             &super::super::cloud_preview::projection_script("inventory"),
         );
-        let mut fetch = StageTimer::new("inventory_ssh");
+        let fetch = StageTimer::new("inventory_ssh");
         let (status, bytes) = crate::tui::cloud_git::bounded_output_for(
             command,
             Duration::from_secs(10),
@@ -72,21 +70,19 @@ pub(super) fn refresh() -> Result<bool> {
         .await
         .ok_or_else(|| anyhow::anyhow!("cloud inventory verification unavailable"))?;
         anyhow::ensure!(status.success(), "cloud inventory verification failed");
-        fetch.resolve("success");
-        drop(fetch);
-        let mut parse = StageTimer::new("inventory_parse");
+        fetch.finish("success");
+        let parse = StageTimer::new("inventory_parse");
         let verified: VerifiedInventory = serde_json::from_slice(&bytes)?;
-        parse.resolve("success");
-        drop(parse);
-        let mut registration = StageTimer::new("inventory_register");
+        parse.finish("success");
+        let registration = StageTimer::new("inventory_register");
         let result = register(&home, candidates, verified);
         if result.is_ok() {
-            registration.resolve("success");
+            registration.finish("success");
         }
         result
     });
     if result.is_ok() {
-        timer.resolve("success");
+        timer.finish("success");
     }
     result
 }

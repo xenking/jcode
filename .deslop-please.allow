@@ -231,7 +231,6 @@ field-leak jcode_tui::tui::app::jarvis_listen::AlwaysListening::captions
 field-leak jcode_tui::tui::cloud_latency::Span::operation
 field-leak jcode_tui::tui::cloud_latency::Span::outcome
 field-leak jcode_tui::tui::info_widget::MemoryInfo::activity
-field-leak jcode_tui::tui::session_picker::cloud_preview::StageTimer::outcome
 field-leak jcode_tui_markdown::incremental::IncrementalMarkdownRenderer::rendered_show_link_urls
 field-leak jcode_tui_markdown::math_copy::Bounded::entries
 field-leak jcode_tui_mermaid::FittedSourceCache::entries
