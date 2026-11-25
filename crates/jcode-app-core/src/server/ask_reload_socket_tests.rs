@@ -156,7 +156,7 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
         "checkpoint was not acknowledged: {unfinished:?}"
     );
     let persisted = crate::session::Session::load(session_id).unwrap();
-    assert!(persisted.messages().iter().flat_map(|m| &m.content).any(|block| matches!(block,
+    assert!(persisted.iter_messages().flat_map(|m| &m.content).any(|block| matches!(block,
         ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true) }
         if tool_use_id == "parked-question" && content.contains("interrupted by server reload")
     )));
@@ -372,8 +372,7 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
     let restored = crate::session::Session::load(worker).unwrap();
     assert!(
         restored
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|m| &m.content)
             .any(|block| matches!(block,
                 ContentBlock::ToolResult { tool_use_id, content, is_error: None }
@@ -427,7 +426,7 @@ async fn socket_reload_ask_workflow(mode: &str) {
             is_error: Some(true),
         }],
     );
-    let answer_message_id = persisted.messages().last().unwrap().id.clone();
+    let answer_message_id = persisted.last_message().unwrap().id.clone();
     let other_id = crate::session::image_id(session_id, &answer_message_id, 0);
     let comment_id = crate::session::image_id(session_id, &answer_message_id, 1);
     persisted.save().unwrap();
@@ -714,8 +713,7 @@ async fn socket_reload_ask_workflow(mode: &str) {
     .await;
     let restored = crate::session::Session::load(session_id).unwrap();
     let blocks: Vec<_> = restored
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|message| &message.content)
         .collect();
     assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "b3RoZXI=")), "missing free-answer image: {blocks:?}");
@@ -732,7 +730,7 @@ async fn socket_reload_ask_workflow(mode: &str) {
             .any(|image| image.label.as_deref() == Some("Question 1 free answer, image 1"))
     );
     assert!(rendered.iter().any(|image| image.label.as_deref() == Some("Question 1 option \"B\" comment, image 1")));
-    let journal = serde_json::to_string(restored.messages()).unwrap();
+    let journal = serde_json::to_string(&restored.cloned_messages()).unwrap();
     assert!(
         journal.contains("comment: reason") && journal.contains("Other: custom"),
         "{journal}"

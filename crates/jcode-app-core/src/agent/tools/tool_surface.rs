@@ -192,7 +192,7 @@ impl Agent {
             }],
             Some(crate::session::StoredDisplayRole::System),
         );
-        self.announced_skills_scan_index = self.session.messages().len();
+        self.announced_skills_scan_index = self.session.message_count();
     }
 
     /// Replace per-server MCP definitions with the fixed search/call surface
@@ -435,8 +435,8 @@ impl Agent {
     pub(super) fn seed_announced_mcp_tools_from_transcript(&mut self) {
         let start = self
             .announced_mcp_scan_index
-            .min(self.session.messages().len());
-        for message in &self.session.messages()[start..] {
+            .min(self.session.message_count());
+        for message in self.session.iter_messages_from(start) {
             for block in &message.content {
                 match block {
                     ContentBlock::ToolReference { tool_name, .. } => {
@@ -459,7 +459,7 @@ impl Agent {
                 }
             }
         }
-        self.announced_mcp_scan_index = self.session.messages().len();
+        self.announced_mcp_scan_index = self.session.message_count();
     }
 
     /// Mark skills named in earlier announcements as announced, so a
@@ -467,8 +467,8 @@ impl Agent {
     pub(super) fn seed_announced_skills_from_transcript(&mut self) {
         let start = self
             .announced_skills_scan_index
-            .min(self.session.messages().len());
-        for message in &self.session.messages()[start..] {
+            .min(self.session.message_count());
+        for message in self.session.iter_messages_from(start) {
             for block in &message.content {
                 if let ContentBlock::Text { text, .. } = block
                     && text.contains(LATE_SKILL_ANNOUNCEMENT_MARKER)
@@ -485,7 +485,7 @@ impl Agent {
                 }
             }
         }
-        self.announced_skills_scan_index = self.session.messages().len();
+        self.announced_skills_scan_index = self.session.message_count();
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {

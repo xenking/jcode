@@ -66,7 +66,7 @@ impl Agent {
         logging::info(&format!(
             "Restoring session '{}' with {} messages, provider_session_id: {:?}, status: {}",
             session_id,
-            session.messages().len(),
+            session.message_count(),
             session.provider_session_id(),
             session.status().display()
         ));
@@ -123,7 +123,7 @@ impl Agent {
         logging::info(&format!(
             "restore_session: loaded session {} with {} messages, calling seed_compaction",
             session_id,
-            self.session.messages().len()
+            self.session.message_count()
         ));
         let compaction_start = Instant::now();
         self.seed_compaction_from_session();
@@ -147,7 +147,7 @@ impl Agent {
         logging::info(&format!(
             "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms, cpu={:.0}ms",
             session_id,
-            self.session.messages().len(),
+            self.session.message_count(),
             restored_soft_interrupts,
             load_ms,
             assign_ms,
@@ -162,7 +162,7 @@ impl Agent {
         ));
         logging::info(&format!(
             "Session restored: {} messages in session",
-            self.session.messages().len()
+            self.session.message_count()
         ));
         Ok(previous_status)
     }

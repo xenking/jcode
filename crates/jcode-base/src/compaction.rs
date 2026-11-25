@@ -762,15 +762,12 @@ impl CompactionManager {
             .set_exact(all_messages.iter().map(message_char_count).sum());
     }
 
-    pub fn seed_restored_stored_messages_with(
-        &mut self,
-        all_messages: &[crate::session::StoredMessage],
-    ) {
-        self.total_turns = all_messages.len();
-        self.suppress_compaction_until_new_message = !all_messages.is_empty();
+    pub fn seed_restored_stored_messages_with(&mut self, session: &crate::session::Session) {
+        self.total_turns = session.message_count();
+        self.suppress_compaction_until_new_message = !session.has_no_messages();
         self.active_chars.set_exact(
-            all_messages
-                .iter()
+            session
+                .iter_messages()
                 .map(|message| content_char_count(&message.content))
                 .sum(),
         );
@@ -830,13 +827,12 @@ impl CompactionManager {
     pub fn restore_persisted_stored_state_with(
         &mut self,
         state: &crate::session::StoredCompactionState,
-        all_messages: &[crate::session::StoredMessage],
+        session: &crate::session::Session,
     ) {
-        self.restore_persisted_state(state, all_messages.len());
-        let start = self.compacted_count.min(all_messages.len());
+        self.restore_persisted_state(state, session.message_count());
         self.active_chars.set_exact(
-            all_messages[start..]
-                .iter()
+            session
+                .iter_messages_from(self.compacted_count)
                 .map(|message| content_char_count(&message.content))
                 .sum(),
         );

@@ -119,7 +119,7 @@ async fn restored_session_keeps_the_system_prompt_it_was_sending() {
 
     // The new skill is still usable: it is announced in the transcript, which
     // keeps the cached system prefix intact.
-    assert!(restored.session.messages().iter().any(|message| {
+    assert!(restored.session.iter_messages().any(|message| {
         message.content.iter().any(|block| {
             matches!(block, ContentBlock::Text { text, .. } if text.contains("/rollout-skill "))
         })

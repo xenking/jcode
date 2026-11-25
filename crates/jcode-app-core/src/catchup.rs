@@ -372,7 +372,7 @@ fn infer_needs_from_user(status: &SessionStatus, latest_response: Option<&str>) 
 fn collect_touched_files(session: &Session) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for msg in session.messages() {
+    for msg in session.iter_messages() {
         for block in &msg.content {
             if let ContentBlock::ToolUse { input, .. } = block {
                 for key in ["file_path", "path"] {
@@ -396,7 +396,7 @@ fn collect_touched_files(session: &Session) -> Vec<String> {
 
 fn collect_tool_counts(session: &Session) -> Vec<(String, usize)> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for msg in session.messages() {
+    for msg in session.iter_messages() {
         for block in &msg.content {
             if let ContentBlock::ToolUse { name, .. } = block {
                 *counts.entry(name.clone()).or_default() += 1;
@@ -411,7 +411,7 @@ fn collect_tool_counts(session: &Session) -> Vec<(String, usize)> {
 fn collect_activity_steps(session: &Session) -> Vec<String> {
     let mut steps = Vec::new();
     let mut last = String::new();
-    for msg in session.messages() {
+    for msg in session.iter_messages() {
         for block in &msg.content {
             let Some(step) = tool_use_step(block) else {
                 continue;

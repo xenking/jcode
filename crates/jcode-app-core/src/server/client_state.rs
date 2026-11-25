@@ -694,7 +694,7 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
 
 fn session_interrupted_by_reload(session: &Session) -> bool {
     let session_id = session.id();
-    let last = crate::agent::last_turn_message_for_recovery(session.messages());
+    let last = crate::agent::last_turn_message_for_recovery(session.iter_messages());
     let last_is_user = last.is_some_and(|message| message.role == Role::User);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
     let pending_turn =

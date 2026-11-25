@@ -36,7 +36,7 @@ fn build_harness_context(
         .as_deref()
         .map(|path| resolve_path_arg(ctx, path))
         .or_else(|| ctx.working_dir.clone())?;
-    let total_messages = session.messages().len().max(1);
+    let total_messages = session.message_count().max(1);
     let compaction_cutoff = session
         .compaction()
         .map(|state| state.covers_up_to_turn.min(total_messages));
@@ -107,7 +107,7 @@ fn collect_tool_exposures(session: &Session) -> Vec<ToolExposureObservation> {
     let mut observations = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
 
-    for (message_index, msg) in session.messages().iter().enumerate() {
+    for (message_index, msg) in session.iter_messages().enumerate() {
         for block in &msg.content {
             match block {
                 ContentBlock::ToolUse {

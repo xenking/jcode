@@ -191,8 +191,7 @@ async fn streaming_turn_rolls_back_partial_stream_and_resumes_after_disconnect()
     assert_eq!(text_after_rollback, "clean full answer");
     let assistant_messages: Vec<String> = agent
         .session
-        .messages()
-        .iter()
+        .iter_messages()
         .filter(|m| m.role == Role::Assistant)
         .map(|m| {
             m.content

@@ -775,8 +775,7 @@ mod malformed_tool_call_recovery_tests {
     fn correction_reminders(agent: &Agent) -> Vec<String> {
         agent
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| &message.content)
             .filter_map(|block| match block {
                 ContentBlock::Text { text, .. }
@@ -794,8 +793,7 @@ mod malformed_tool_call_recovery_tests {
     fn null_tool_use_count(agent: &Agent) -> usize {
         agent
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| &message.content)
             .filter(|block| matches!(block, ContentBlock::ToolUse { input, .. } if input.is_null()))
             .count()
@@ -804,8 +802,7 @@ mod malformed_tool_call_recovery_tests {
     fn error_tool_result_count(agent: &Agent) -> usize {
         agent
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| &message.content)
             .filter(|block| {
                 matches!(
@@ -875,8 +872,7 @@ mod malformed_tool_call_recovery_tests {
             run_scripted_turn(&mut agent, streaming).await.unwrap();
             let results: Vec<_> = agent
                 .session
-                .messages()
-                .iter()
+                .iter_messages()
                 .flat_map(|m| &m.content)
                 .filter_map(|block| match block {
                     ContentBlock::ToolResult {
@@ -943,8 +939,7 @@ mod malformed_tool_call_recovery_tests {
             result.expect("reads did not overlap").unwrap();
             let ids: Vec<_> = agent
                 .session
-                .messages()
-                .iter()
+                .iter_messages()
                 .flat_map(|m| &m.content)
                 .filter_map(|block| match block {
                     ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
@@ -993,8 +988,7 @@ mod malformed_tool_call_recovery_tests {
                 );
                 let assistant = agent
                     .session
-                    .messages()
-                    .iter()
+                    .iter_messages()
                     .rfind(|m| m.role == Role::Assistant)
                     .unwrap();
                 assert!(assistant.content.iter().any(

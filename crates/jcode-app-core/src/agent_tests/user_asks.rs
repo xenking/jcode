@@ -142,8 +142,7 @@ async fn a_reply_without_any_status_never_costs_a_second_model_call() {
     assert!(requests(&agent).iter().all(|todo| todo.status == "pending"));
     let transcript = agent
         .session
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),

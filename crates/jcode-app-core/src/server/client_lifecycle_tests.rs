@@ -489,11 +489,11 @@ async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
     .await
     .unwrap();
     let persisted = crate::session::Session::load(&session_id).unwrap();
-    let reminder = persisted.messages().iter().position(|message| {
+    let reminder = persisted.iter_messages().position(|message| {
         message.display_role == Some(crate::session::StoredDisplayRole::System)
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Be concise.")))
     }).expect("skill reminder in journal");
-    assert!(persisted.messages().iter().skip(reminder + 1).any(|message| {
+    assert!(persisted.iter_messages().skip(reminder + 1).any(|message| {
         matches!(message.role, crate::message::Role::User) && message.display_role.is_none()
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "fix this please"))
     }));
@@ -1757,7 +1757,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let persisted = crate::session::Session::load(session_id).unwrap();
     for expected in ["first turn", "acceptance back on laptop"] {
         assert!(
-            persisted.messages().iter().any(|message| {
+            persisted.iter_messages().any(|message| {
                 message.content.iter().any(
                     |block| matches!(block, ContentBlock::Text { text, .. } if text == expected),
                 )

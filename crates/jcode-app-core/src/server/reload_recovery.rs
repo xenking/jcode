@@ -661,7 +661,7 @@ fn finish_pending(session_id: &str, status: ReloadRecoveryStatus, reason: &str) 
 }
 
 fn has_receipt(session: &crate::session::Session, record: &ReloadRecoveryRecord) -> bool {
-    session.messages().iter().any(|message| {
+    session.iter_messages().any(|message| {
         message.id.strip_prefix("queued:")
             .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
             .is_some_and(|ids| ids.contains(&record.input_id()))

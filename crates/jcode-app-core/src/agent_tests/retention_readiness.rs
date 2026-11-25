@@ -329,7 +329,7 @@ async fn retention_readiness_scorecard() {
     // durable, the process-like rehydrate must work, and one retry must produce
     // value that depends on BOTH earlier sessions.
     let persisted_d1 = Session::load(&session_id).expect("load D1 session");
-    let d1_message_count = persisted_d1.messages().len();
+    let d1_message_count = persisted_d1.message_count();
     let title_preserved = persisted_d1.custom_title() == Some("Retention cohort project");
     let working_dir_preserved = persisted_d1.working_dir() == Some("/synthetic/retention-project");
     let memory_marker_preserved = persisted_d1
@@ -345,8 +345,8 @@ async fn retention_readiness_scorecard() {
     drop(d7);
 
     let after_failure = Session::load(&session_id).expect("session survives outage");
-    let history_preserved_after_failure = after_failure.messages().len() > d1_message_count
-        && after_failure.messages().iter().any(|stored| {
+    let history_preserved_after_failure = after_failure.message_count() > d1_message_count
+        && after_failure.iter_messages().any(|stored| {
             message_text(&stored.to_message()).contains("D7_RECOVER finish the longitudinal task")
         });
     let recovered_provider: std::sync::Arc<dyn Provider> =

@@ -912,7 +912,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     )));
     // Agent construction persists its session. Force a full snapshot of the
     // older transcript rather than a metadata-only journal update.
-    session.replace_messages(session.messages().to_vec());
+    session.replace_messages(session.cloned_messages());
     session.save().expect("restore persisted history snapshot");
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
 

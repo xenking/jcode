@@ -354,8 +354,8 @@ async fn context_message_persists_without_starting_turn() {
     assert!(!forked.load(Ordering::SeqCst));
 
     let persisted = crate::session::Session::load(session_id).expect("persisted session");
-    assert_eq!(persisted.messages().len(), before + 1);
-    let message = persisted.messages().last().unwrap();
+    assert_eq!(persisted.message_count(), before + 1);
+    let message = persisted.last_message().unwrap();
     assert_eq!(format!("{:?}", message.role), "User");
     assert!(matches!(
         &message.content[0],

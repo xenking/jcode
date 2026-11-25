@@ -502,8 +502,7 @@ impl Agent {
             .map_or(0, |state| state.compacted_count);
         let announced = self
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .skip(start)
             .rev()
             .flat_map(|m| &m.content)

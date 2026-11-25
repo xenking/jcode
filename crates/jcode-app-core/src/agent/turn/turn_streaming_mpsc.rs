@@ -1243,7 +1243,7 @@ impl Agent {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction.get_or_insert((
                                 encrypted_content,
-                                self.session.messages().len(),
+                                self.session.message_count(),
                                 pre_tokens,
                                 trigger,
                             ));

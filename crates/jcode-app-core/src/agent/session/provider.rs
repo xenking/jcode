@@ -1374,7 +1374,7 @@ impl Agent {
 
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
-        self.session.messages()
+        self.session.iter_messages().as_slice()
     }
 }
 

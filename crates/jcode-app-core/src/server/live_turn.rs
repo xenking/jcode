@@ -597,7 +597,7 @@ mod durable_error_tests {
         let loaded = Session::load(&session_id).unwrap();
         assert_eq!(loaded.replay_events().len(), 1);
         assert!(
-            !serde_json::to_string(loaded.messages())
+            !serde_json::to_string(&loaded.cloned_messages())
                 .unwrap()
                 .contains(FAILURE)
         );

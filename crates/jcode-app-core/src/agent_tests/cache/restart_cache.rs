@@ -127,7 +127,7 @@ async fn restore_wire(dialect: Dialect, case: &str) {
     agent.session.ensure_initial_session_context_message();
     append_text(&mut agent, Role::User, "Retain this exact user text.");
     append_text(&mut agent, Role::Assistant, "Archived answer.");
-    let cutoff = agent.session.messages().len();
+    let cutoff = agent.session.message_count();
     append_text(&mut agent, Role::User, "Still active.");
     if deferred {
         agent.add_message(

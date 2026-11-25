@@ -11,18 +11,18 @@ impl Agent {
         }
 
         // Need at least 4 messages for meaningful extraction
-        if self.session.messages().len() < 4 {
+        if self.session.message_count() < 4 {
             return 0;
         }
 
         logging::info(&format!(
             "Extracting memories from {} messages",
-            self.session.messages().len()
+            self.session.message_count()
         ));
 
         // Build transcript
         let mut transcript = String::new();
-        for msg in self.session.messages() {
+        for msg in self.session.iter_messages() {
             let role = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",

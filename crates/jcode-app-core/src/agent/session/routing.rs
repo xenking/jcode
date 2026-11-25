@@ -16,8 +16,7 @@ impl Agent {
         let factors = self.routing_cache_factors(provider);
         let usages: Vec<_> = self
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .rev()
             .filter_map(|message| message.token_usage.as_ref())
             .take(RECENT_REQUESTS)

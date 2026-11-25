@@ -277,7 +277,7 @@ async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages().len();
+    let before = agent.session.message_count();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Use ephemeral mode".to_string(),
         display_prompt: None,
@@ -291,7 +291,7 @@ async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
         .unwrap();
 
     assert!(!persisted);
-    assert_eq!(agent.session.messages().len(), before);
+    assert_eq!(agent.session.message_count(), before);
     assert!(matches!(message.role, Role::User));
     assert!(message_text(&message).contains("Use ephemeral mode"));
 
@@ -312,7 +312,7 @@ async fn memory_injection_message_can_persist_to_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages().len();
+    let before = agent.session.message_count();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Persist for cache".to_string(),
         display_prompt: None,
@@ -326,13 +326,13 @@ async fn memory_injection_message_can_persist_to_history() {
         .unwrap();
 
     assert!(persisted);
-    assert_eq!(agent.session.messages().len(), before + 1);
+    assert_eq!(agent.session.message_count(), before + 1);
     assert_eq!(
-        content_text(&agent.session.messages().last().unwrap().content),
+        content_text(&agent.session.last_message().unwrap().content),
         message_text(&message)
     );
     assert!(
-        content_text(&agent.session.messages().last().unwrap().content).contains("Persist for cache")
+        content_text(&agent.session.last_message().unwrap().content).contains("Persist for cache")
     );
 
     match previous {

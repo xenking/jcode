@@ -349,7 +349,7 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     );
     let persisted = crate::session::Session::load(worker).unwrap();
     assert_eq!(persisted.working_dir(), Some(worktree));
-    assert_eq!(persisted.messages().len(), 30);
+    assert_eq!(persisted.message_count(), 30);
     assert_eq!(persisted.reasoning_effort(), Some("medium"));
     assert!(Arc::ptr_eq(&sessions.read().await[worker], &agent));
     assert_eq!(
@@ -374,7 +374,7 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     }).await.expect("headless compaction reaches the coordinator");
     let persisted = crate::session::Session::load(worker).unwrap();
     assert_eq!(
-        persisted.messages().len(),
+        persisted.message_count(),
         30,
         "compaction must not erase the original transcript"
     );
@@ -1895,7 +1895,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         serde_json::to_value(&stored_child).unwrap()["pinned_skill"],
         "pinned-probe"
     );
-    assert_eq!(stored_child.messages().iter().flat_map(|m| &m.content).filter(|b| matches!(b,
+    assert_eq!(stored_child.iter_messages().flat_map(|m| &m.content).filter(|b| matches!(b,
         crate::message::ContentBlock::Text { text, .. } if text.contains("INHERITED_MODE_BODY")
     )).count(), 1, "worker receives the announcement before any turn");
     assert_eq!(child.provider_model(), "gpt-5.5");

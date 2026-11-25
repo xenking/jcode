@@ -166,10 +166,10 @@ impl crate::tool::Tool for ParkTool {
         _: Value,
         ctx: crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
-        let before = serde_json::to_value(Session::load(&ctx.session_id)?.messages())?;
+        let before = serde_json::to_value(Session::load(&ctx.session_id)?.cloned_messages())?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(crate::cache_keepalive::load_usage(&ctx.session_id).is_none());
-        let after = serde_json::to_value(Session::load(&ctx.session_id)?.messages())?;
+        let after = serde_json::to_value(Session::load(&ctx.session_id)?.cloned_messages())?;
         assert_eq!(
             before, after,
             "cache keepalive must not write transcript messages"

@@ -14,8 +14,10 @@ pub(crate) use crate::session::RELOAD_INTERRUPTED_MARKER;
 
 /// Session bootstrap and mode changes persist model-visible context without
 /// starting a turn. They must neither create nor hide pending work.
-pub(crate) fn last_turn_message_for_recovery(messages: &[StoredMessage]) -> Option<&StoredMessage> {
-    messages.iter().rev().find(|message| {
+pub(crate) fn last_turn_message_for_recovery<'a>(
+    mut messages: impl DoubleEndedIterator<Item = &'a StoredMessage>,
+) -> Option<&'a StoredMessage> {
+    messages.rfind(|message| {
         !crate::session::is_initial_session_context_message(message)
             && !(message.role == Role::User
                 && message.display_role == Some(StoredDisplayRole::System)
@@ -60,8 +62,7 @@ pub(crate) enum ResumeOutcome {
 
 fn tool_result_ids(session: &crate::session::Session) -> HashSet<&str> {
     session
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
@@ -74,7 +75,7 @@ fn tool_result_ids(session: &crate::session::Session) -> HashSet<&str> {
 pub(crate) fn pending_tool_uses(session: &crate::session::Session) -> Vec<PendingToolUse> {
     let results = tool_result_ids(session);
     let mut pending = Vec::new();
-    for (message_index, message) in session.messages().iter().enumerate() {
+    for (message_index, message) in session.iter_messages().enumerate() {
         if message.role != Role::Assistant {
             continue;
         }
@@ -96,8 +97,7 @@ pub(crate) fn pending_tool_uses(session: &crate::session::Session) -> Vec<Pendin
 /// True when the last assistant message was cut off by a reload.
 pub(crate) fn ends_with_reload_marker(session: &crate::session::Session) -> bool {
     session
-        .messages()
-        .iter()
+        .iter_messages()
         .rev()
         .find(|message| message.role == Role::Assistant)
         .is_some_and(|message| {
@@ -132,7 +132,7 @@ impl Agent {
     /// authoritative evidence that work was in flight. Without that evidence a
     /// finished turn is never re-prompted.
     pub(crate) fn reload_resume_plan(&self, durable_intent: bool) -> ResumePlan {
-        let Some(last) = last_turn_message_for_recovery(self.session.messages()) else {
+        let Some(last) = last_turn_message_for_recovery(self.session.iter_messages()) else {
             return ResumePlan::Nothing;
         };
         // An unanswered ask owns the continuation even when other tools from
@@ -208,7 +208,7 @@ impl Agent {
             index = end;
         }
         if !repaired.is_empty() {
-            self.tool_output_scan_index = self.session.messages().len();
+            self.tool_output_scan_index = self.session.message_count();
             self.persist_session_now()?;
         }
         Ok(repaired)
@@ -247,7 +247,7 @@ impl Agent {
             crate::running_tool_registry::register(self.session.id(), &tool.id, &tool.name);
         let started = Instant::now();
         let sole_rollout_wait = tool.name == crate::tool::rollout_wait::NAME
-            && self.session.messages()[tool.message_index]
+            && self.session.message_at(tool.message_index).expect("transcript message")
                 .content
                 .iter()
                 .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))

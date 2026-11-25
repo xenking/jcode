@@ -89,10 +89,10 @@ pub(in crate::server) fn handle_split_side_question(
 pub(super) fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
     let start = session
         .compaction()
-        .map(|state| state.compacted_count.min(session.messages().len()))
+        .map(|state| state.compacted_count.min(session.message_count()))
         .unwrap_or(0);
-    session.messages()[start..]
-        .iter()
+    session
+        .iter_messages_from(start)
         .map(crate::session::StoredMessage::to_message)
         .collect()
 }

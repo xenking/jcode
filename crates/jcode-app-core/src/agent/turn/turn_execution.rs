@@ -145,7 +145,7 @@ impl Agent {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         // Inject any pending notifications before the user message
-        let alert_start = self.session.messages().len();
+        let alert_start = self.session.message_count();
         let alerts = self.take_alerts();
         for alert in alerts {
             let alert_text = format!(
@@ -186,11 +186,11 @@ impl Agent {
                 false,
             ),
         };
-        let announcement_start = self.session.messages().len();
+        let announcement_start = self.session.message_count();
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         self.emit_context_messages_since(announcement_start, &event_tx);
-        let input_start = self.session.messages().len();
+        let input_start = self.session.message_count();
         if !resuming_ask {
             let queued_items = queued_client_id
                 .as_ref()
@@ -241,7 +241,7 @@ impl Agent {
                         }
                     }
                     let result = if has_queued_skills {
-                        let previous_count = self.session.messages().len();
+                        let previous_count = self.session.message_count();
                         let previous_skill = self.active_skill.clone();
                         let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
                         let result = (|| {
@@ -366,7 +366,7 @@ impl Agent {
         // invalidated the whole cached conversation on that turn and again on
         // the next turn when it disappeared.
         if let Some(reminder) = system_reminder {
-            let reminder_start = self.session.messages().len();
+            let reminder_start = self.session.message_count();
             self.append_turn_system_reminder(&reminder)?;
             self.emit_context_messages_since(reminder_start, &event_tx);
         }
@@ -438,7 +438,7 @@ impl Agent {
         start: usize,
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
     ) {
-        for message in &self.session.messages()[start..] {
+        for message in self.session.iter_messages_from(start) {
             let content = message
                 .content
                 .iter()
@@ -637,7 +637,7 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
-        if let Some(usage) = turn_token_usage_after(self.session.messages(), start_message_index) {
+        if let Some(usage) = turn_token_usage_after(self.session.iter_messages(), start_message_index) {
             if let Some(value) = usage.prompt_tokens {
                 event = event.field("PROMPT_TOKENS", value.to_string());
             }
@@ -919,7 +919,7 @@ impl Agent {
             ResumePlan::ToolResults(pending) => {
                 let mut interrupted = Vec::new();
                 for tool in pending {
-                    let message = &self.session.messages()[tool.message_index];
+                    let message = &self.session.message_at(tool.message_index).expect("transcript message");
                     let wait = message.content.iter().find_map(|block| match block {
                         ContentBlock::ToolUse { id, input, .. }
                             if *id == tool.id

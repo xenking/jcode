@@ -242,7 +242,7 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
             let duration = (session.updated_at() - session.created_at())
                 .num_seconds()
                 .max(0);
-            let extraction = if session.messages().is_empty() {
+            let extraction = if session.has_no_messages() {
                 "no messages"
             } else {
                 // Heuristic: if session closed normally, assume extracted

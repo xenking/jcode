@@ -165,7 +165,7 @@ fn summarize(messages: &[Message]) -> Vec<String> {
 }
 
 fn session_has_synthetic_user_prompt(session: &crate::session::Session) -> bool {
-    session.messages().iter().any(|message| {
+    session.iter_messages().any(|message| {
         message.role == Role::User
             && message.content.iter().any(|block| match block {
                 ContentBlock::Text { text, .. } => {
@@ -283,8 +283,7 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     }
     let stored = resumed
         .session
-        .messages()
-        .iter()
+        .iter_messages()
         .find(|message| {
             message
                 .content
@@ -339,7 +338,7 @@ async fn reload_resume_compacts_over_budget_context_before_inference() {
         compaction_enabled: true,
         ..Default::default()
     };
-    let full_count = session.messages().len();
+    let full_count = session.message_count();
     let mut agent =
         Agent::new_with_session(Arc::new(capture.clone()), Registry::empty(), session, None);
     let lease = agent.claim_server_turn().unwrap();
@@ -404,7 +403,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             Role::Assistant,
             Message::assistant_text("Archived answer").content.to_vec(),
         );
-        let cutoff = session.messages().len();
+        let cutoff = session.message_count();
         session.adopt_compaction(Some(crate::session::StoredCompactionState {
             summary_text: "Retain the archived summary".into(),
             plan_context: None,
@@ -562,7 +561,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
         !session_has_synthetic_user_prompt(&persisted),
         "no synthetic user prompt may be persisted"
     );
-    assert!(persisted.messages().iter().flat_map(|m| m.content.iter()).any(
+    assert!(persisted.iter_messages().flat_map(|m| m.content.iter()).any(
         |block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call-1")
     ));
 }
@@ -716,7 +715,7 @@ async fn reload_mid_stream_continues_without_a_user_message() {
     assert!(!has_synthetic_user_prompt(&request));
     let saved = crate::session::Session::load(&session_id).unwrap();
     assert!(
-        !saved.messages().iter().any(|message| message.role == Role::User
+        !saved.iter_messages().any(|message| message.role == Role::User
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.ends_with("Continue.")))),
         "the nudge is request-only, never persisted"
     );
@@ -845,8 +844,7 @@ async fn reload_while_idle_injects_nothing() {
     let session_id = session.id().to_owned();
     let before = crate::session::Session::load(&session_id)
         .unwrap()
-        .messages()
-        .len();
+        .message_count();
 
     let capture = ScriptedProvider::default();
     let provider: Arc<dyn Provider> = Arc::new(capture.clone());
@@ -867,6 +865,6 @@ async fn reload_while_idle_injects_nothing() {
     assert_eq!(outcome, ResumeOutcome::NothingToResume);
     assert!(capture.requests().is_empty(), "no model turn may run");
     let after = crate::session::Session::load(&session_id).unwrap();
-    assert_eq!(after.messages().len(), before);
+    assert_eq!(after.message_count(), before);
     assert!(!session_has_synthetic_user_prompt(&after));
 }

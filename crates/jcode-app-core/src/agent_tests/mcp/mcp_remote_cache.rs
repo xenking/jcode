@@ -513,7 +513,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                     cache_control: None,
                 }],
             );
-            let original_messages = serde_json::to_value(agent.session.messages()).unwrap();
+            let original_messages = serde_json::to_value(agent.session.cloned_messages()).unwrap();
             let before = agent.tool_definitions().await;
             let eager_before = serde_json::to_value(ToolDefinition::eager(&before)).unwrap();
             let static_before = agent.build_system_prompt_split(None).static_part;
@@ -539,7 +539,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
             let monitor_before = format!("{:?}", agent.kv_cache_monitor);
             for connected in [true, false, true] {
                 let messages_before_action =
-                    serde_json::to_value(agent.session.messages()).unwrap();
+                    serde_json::to_value(agent.session.cloned_messages()).unwrap();
                 let input = if connected {
                     peer.release.add_permits(1);
                     json!({"action": "connect", "server": "remote", "url": peer.url, "headers": {"Authorization": "Bearer test-only"}})
@@ -588,7 +588,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                 );
                 assert_eq!(
                     messages_before_action,
-                    serde_json::to_value(agent.session.messages()).unwrap()
+                    serde_json::to_value(agent.session.cloned_messages()).unwrap()
                 );
                 assert_eq!(
                     tools.iter().any(|tool| tool.name == "mcp__remote__echo"),
@@ -610,13 +610,13 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                         matches!(&called.content[0], crate::mcp::ContentBlock::Text { text } if text == "still callable")
                     );
                     agent.announce_late_mcp_tools().await;
-                    let messages = serde_json::to_value(agent.session.messages()).unwrap();
+                    let messages = serde_json::to_value(agent.session.cloned_messages()).unwrap();
                     assert_eq!(
                         messages.as_array().unwrap()[..original_messages.as_array().unwrap().len()],
                         original_messages.as_array().unwrap()[..]
                     );
                     assert_eq!(
-                        agent.session.messages().len(),
+                        agent.session.message_count(),
                         original_messages.as_array().unwrap().len() + usize::from(!native)
                     );
                     // Announcement is append-only and never repeats on reconnect.

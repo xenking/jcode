@@ -111,7 +111,7 @@ impl Agent {
             .try_write()
             .map_err(|_| "Compaction state is busy. Try rewinding again.")?;
         let mut snapshot = RewindUndoSnapshot {
-            messages: self.session.messages().to_vec(),
+            messages: self.session.cloned_messages(),
             compaction: self.session.compaction(),
             removed_compaction_events: Vec::new(),
             provider_session_id: self.provider_session_id.clone(),
@@ -120,8 +120,7 @@ impl Agent {
         };
         if let Some(cutoff) = self
             .session
-            .messages()
-            .get(stored_len)
+            .message_at(stored_len)
             .map(|message| message.timestamp)
         {
             if snapshot

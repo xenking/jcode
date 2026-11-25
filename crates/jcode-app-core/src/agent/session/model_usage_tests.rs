@@ -119,8 +119,7 @@ async fn both_turn_paths_record_once_across_continuations_and_attribute_serving_
         assert!(
             agent
                 .session
-                .messages()
-                .iter()
+                .iter_messages()
                 .filter(|m| m.role == Role::Assistant)
                 .count()
                 >= 2
@@ -174,8 +173,7 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
         .unwrap();
     let continuation_texts: Vec<String> = resumed
         .session
-        .messages()
-        .iter()
+        .iter_messages()
         .filter(|message| message.role == crate::message::Role::User)
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {

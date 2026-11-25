@@ -154,7 +154,7 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
         }
     }
 
-    for (msg_idx, msg) in session.messages().iter().enumerate() {
+    for (msg_idx, msg) in session.iter_messages().enumerate() {
         // Insert memory injections before this message
         if let Some(injs) = memory_by_msg.get(&msg_idx) {
             for inj in injs {

@@ -257,8 +257,7 @@ async fn remote_skill_activation_persists_system_entry_before_user_prompt() {
         .unwrap();
     let persisted = crate::session::Session::load(agent.session.id()).unwrap();
     let reminder = persisted
-        .messages()
-        .iter()
+        .iter_messages()
         .position(|message| {
             message.display_role == Some(crate::session::StoredDisplayRole::System)
                 && content_text(&message.content).contains("# Active Skill")
@@ -267,8 +266,7 @@ async fn remote_skill_activation_persists_system_entry_before_user_prompt() {
         .expect("skill reminder persisted");
     assert!(
         persisted
-            .messages()
-            .iter()
+            .iter_messages()
             .skip(reminder + 1)
             .any(|message| {
                 matches!(message.role, Role::User)
@@ -424,8 +422,7 @@ async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
     for entry in entries {
         assert!(
             persisted
-                .messages()
-                .iter()
+                .iter_messages()
                 .any(|message| content_text(&message.content) == entry
                     && message.display_role == Some(crate::session::StoredDisplayRole::System))
         );

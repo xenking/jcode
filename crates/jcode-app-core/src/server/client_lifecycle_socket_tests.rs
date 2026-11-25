@@ -714,15 +714,14 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     let journal = crate::session::Session::load(&session_id).unwrap();
     assert_eq!(journal.pinned_skill(), Some("queued-test"));
     let skill_index = journal
-        .messages()
-        .iter()
+        .iter_messages()
         .position(|message| {
             message.display_role == Some(crate::session::StoredDisplayRole::System)
                 && format!("{:?}", message.content).contains("Queued skill instructions")
         })
         .expect("missing skill system entry");
     assert!(
-        format!("{:?}", journal.messages()[skill_index + 1].content).contains("survive restart"),
+        format!("{:?}", journal.message_at(skill_index + 1).expect("transcript message").content).contains("survive restart"),
         "skill should precede queued user text"
     );
     assert!(
@@ -893,15 +892,14 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
         let session_id = server.sessions.read().await.keys().next().unwrap().clone();
         let journal = crate::session::Session::load(&session_id).unwrap();
         let skill = journal
-            .messages()
-            .iter()
+            .iter_messages()
             .position(|m| {
                 m.display_role == Some(crate::session::StoredDisplayRole::System)
                     && format!("{:?}", m.content).contains("Modes skill instructions")
             })
             .expect("skill entry");
         assert!(
-            format!("{:?}", journal.messages()[skill + 1].content).contains("follow-up"),
+            format!("{:?}", journal.message_at(skill + 1).expect("transcript message").content).contains("follow-up"),
             "{mode}"
         );
         drop(writer);
@@ -1091,7 +1089,7 @@ async fn attachments_reach_the_provider_over_daemon_socket() {
         matches!(&user.attachments[2], jcode_session_types::StoredAttachment::PastedText { text } if text == "one\ntwo")
     );
     let persisted = crate::session::Session::load(&history.0).unwrap();
-    assert!(persisted.messages().iter().any(|message| {
+    assert!(persisted.iter_messages().any(|message| {
         message
             .attachment_data
             .as_ref()
@@ -1239,7 +1237,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
         if should_resume {
             assert!(after > before, "unfinished turn never reached the provider");
             let session = Session::load(&id).unwrap();
-            assert!(session.messages().last().is_some_and(|last| {
+            assert!(session.last_message().is_some_and(|last| {
                 last.role == Role::Assistant && last.content.iter().any(|block| {
                     matches!(block, ContentBlock::Text { text, .. } if text == "completed")
                 })
@@ -1953,7 +1951,7 @@ async fn sdk_socket_cancel_workflow(
             }
             let history = crate::session::Session::load(&session_id).unwrap();
             assert!(
-                serde_json::to_string(history.messages())
+                serde_json::to_string(&history.cloned_messages())
                     .unwrap()
                     .contains("stopped by user")
             );
@@ -2062,8 +2060,7 @@ async fn sdk_socket_cancel_workflow(
             );
             let reloaded = crate::session::Session::load(&session_id).unwrap();
             let blocks: Vec<_> = reloaded
-                .messages()
-                .iter()
+                .iter_messages()
                 .flat_map(|message| &message.content)
                 .collect();
             assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "b3RoZXI=")));

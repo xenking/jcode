@@ -31,7 +31,7 @@ impl Agent {
         }
         // A backgrounded tool can outlive the Agent lock. Do not disturb even
         // derived state until every tool belonging to this history has settled.
-        if self.session.messages().iter().any(|message| {
+        if self.session.iter_messages().any(|message| {
             message.content.iter().any(|block| match block {
                 ContentBlock::ToolUse { id, .. } => crate::tool::inflight::is_tool_in_flight(id),
                 _ => false,
@@ -176,7 +176,7 @@ mod tests {
         agent.agents_md_snapshot.0 = Some("Frozen instructions, not recaptured on wake".into());
         agent.provider_session_id = Some("upstream-live-session".into());
         agent.rewind_undo_snapshot = Some(RewindUndoSnapshot {
-            messages: agent.session.messages().to_vec(),
+            messages: agent.session.cloned_messages(),
             provider_session_id: Some("undo-provider".into()),
             session_provider_session_id: None,
             compaction: None,
@@ -217,7 +217,7 @@ mod tests {
         // paired results must not gain synthetic duplicates after eviction.
         paired_tool_history(&mut agent, "tool_new", "next result".into());
         assert_eq!(agent.repair_missing_tool_outputs(), 0);
-        assert_eq!(agent.session.messages().len(), 4);
+        assert_eq!(agent.session.message_count(), 4);
         assert!(agent.tool_result_ids.contains("tool_old"));
         assert!(agent.tool_result_ids.contains("tool_new"));
         assert_eq!(agent.tool_output_scan_index, 4);
@@ -313,7 +313,7 @@ mod tests {
         assert!(agent.session.save_prepared().is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(agent.hibernate_idle_caches().is_none());
-        assert_eq!(agent.session.messages().len(), 3);
+        assert_eq!(agent.session.message_count(), 3);
         assert_eq!(
             agent
                 .session
@@ -406,7 +406,7 @@ mod tests {
                 .zip(after.rss_bytes)
                 .map(|(before, after)| before as i128 - after as i128)
         );
-        assert_eq!(agent.session.messages().len(), 2);
+        assert_eq!(agent.session.message_count(), 2);
         assert_eq!(
             agent
                 .session

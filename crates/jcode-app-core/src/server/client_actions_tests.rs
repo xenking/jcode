@@ -198,15 +198,15 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.parent_id(), Some(parent.id()));
     assert_eq!(child.system_prompt(), parent.system_prompt());
     assert_eq!(
-        child.messages().len(),
-        parent.messages().len() + 1,
+        child.message_count(),
+        parent.message_count() + 1,
         "fork should inherit the transcript plus one fork notice"
     );
     assert_eq!(
-        child.messages()[0].content_preview(),
-        parent.messages()[0].content_preview()
+        child.message_at(0).expect("transcript message").content_preview(),
+        parent.message_at(0).expect("transcript message").content_preview()
     );
-    let fork_notice = child.messages().last().expect("fork notice message");
+    let fork_notice = child.last_message().expect("fork notice message");
     assert_eq!(
         fork_notice.display_role,
         Some(crate::session::StoredDisplayRole::System),
@@ -307,8 +307,8 @@ async fn split_empty_live_session_without_persisted_parent() {
     assert_eq!(child.working_dir(), parent.working_dir());
     assert_eq!(child.model(), parent.model());
     assert_eq!(child.status(), crate::session::SessionStatus::Closed);
-    assert_eq!(child.messages().len(), parent.messages().len() + 1);
-    let notice = child.messages().last().unwrap();
+    assert_eq!(child.message_count(), parent.message_count() + 1);
+    let notice = child.last_message().unwrap();
     assert_eq!(
         notice.display_role,
         Some(crate::session::StoredDisplayRole::System)
@@ -352,21 +352,19 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
     .await
     .expect("split must not wait on the held streaming Agent lock");
     let child = split_response(&mut rx, 18);
-    assert_eq!(child.messages().len(), parent.messages().len() + 1);
+    assert_eq!(child.message_count(), parent.message_count() + 1);
     assert_eq!(
-        child.messages()[0].content_preview(),
-        parent.messages()[0].content_preview()
+        child.message_at(0).expect("transcript message").content_preview(),
+        parent.message_at(0).expect("transcript message").content_preview()
     );
     assert!(
         !child
-            .messages()
-            .iter()
+            .iter_messages()
             .any(|m| m.content_preview().contains("unsaved streaming output"))
     );
     assert!(
         child
-            .messages()
-            .last()
+            .last_message()
             .unwrap()
             .content_preview()
             .contains("forked")
@@ -1020,7 +1018,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
     .expect("interrupted session should resume promptly");
     let saved = crate::session::Session::load(&session_id).unwrap();
     assert_eq!(
-        saved.messages().iter().filter(|message| message.role == Role::Assistant)
+        saved.iter_messages().filter(|message| message.role == Role::Assistant)
             .flat_map(|message| message.content.iter())
             .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text == "Continuing where I left off."))
             .count(),

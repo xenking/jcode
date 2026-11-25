@@ -146,8 +146,7 @@ pub(super) async fn assess(
         let tokens = use_sample.or_else(|| {
             stored
                 .as_ref()?
-                .messages()
-                .iter()
+                .iter_messages()
                 .rev()
                 .find_map(|message| {
                     let usage = message.token_usage.as_ref()?;

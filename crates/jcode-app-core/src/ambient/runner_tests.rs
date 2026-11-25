@@ -536,12 +536,12 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     let child = Session::load(&child_session_id).expect("load spawned child session");
     assert_eq!(child.parent_id(), Some(parent.id()));
     assert_eq!(child.working_dir(), parent.working_dir());
-    assert!(child.messages().iter().any(|message| {
+    assert!(child.iter_messages().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")
             && message.content_preview().contains("Follow up later")
     }));
-    assert!(child.messages().iter().any(|message| {
+    assert!(child.iter_messages().any(|message| {
         message.role == Role::Assistant
             && message
                 .content_preview()

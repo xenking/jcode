@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 fn restored_active_bootstrap_context_is_not_an_interrupted_turn() {
     let mut session = crate::session::Session::create(None, None);
     assert!(session.ensure_initial_session_context_message());
-    let agent = test_agent(session.messages().to_vec());
+    let agent = test_agent(session.cloned_messages());
     assert!(!restored_session_was_interrupted(
         session.id(),
         &crate::session::SessionStatus::Active,
@@ -24,7 +24,7 @@ fn restored_active_bootstrap_context_is_not_an_interrupted_turn() {
         }],
         Some(crate::session::StoredDisplayRole::System),
     );
-    let agent = test_agent(session.messages().to_vec());
+    let agent = test_agent(session.cloned_messages());
     assert!(restored_session_was_interrupted(
         session.id(),
         &crate::session::SessionStatus::Active,

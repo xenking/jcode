@@ -608,8 +608,8 @@ async fn enter_creates_selfdev_session_in_test_mode() {
         Some(repo.path().to_string_lossy().as_ref())
     );
     assert_eq!(session.parent_id(), Some(parent.id()));
-    assert_eq!(session.messages().len(), parent.messages().len());
-    assert_eq!(session.messages()[0].content_preview(), "hello from parent");
+    assert_eq!(session.message_count(), parent.message_count());
+    assert_eq!(session.message_at(0).expect("transcript message").content_preview(), "hello from parent");
     assert_eq!(session.compaction(), parent.compaction());
     assert_eq!(session.model(), parent.model());
     assert_eq!(session.provider_key(), parent.provider_key());
@@ -639,7 +639,7 @@ async fn enter_falls_back_to_fresh_session_when_parent_missing() {
     assert_eq!(metadata["inherited_context"].as_bool(), Some(false));
 
     let session = session::Session::load(session_id).expect("load spawned session");
-    assert!(session.messages().is_empty());
+    assert!(session.has_no_messages());
     assert!(session.parent_id().is_none());
     assert_eq!(
         session.working_dir(),

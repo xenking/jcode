@@ -340,8 +340,7 @@ impl Agent {
                         }
                         let output_text = self
                             .session
-                            .messages()
-                            .last()
+                            .last_message()
                             .and_then(|message| {
                                 message.content.iter().find_map(|block| match block {
                                     ContentBlock::ToolResult {

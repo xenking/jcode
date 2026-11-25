@@ -855,8 +855,7 @@ mod tests {
         }
         let saved = crate::session::Session::load(agent.session_id()).unwrap();
         let rendered: Vec<_> = saved
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| &message.content)
             .filter_map(|block| match block {
                 crate::message::ContentBlock::Text { text, .. }

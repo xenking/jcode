@@ -93,7 +93,7 @@ impl Agent {
     fn record_env_snapshot_inner(&mut self, reason: &str, persist: bool) {
         let snapshot = self.build_env_snapshot(reason, self.env_snapshot_detail());
         self.session.record_env_snapshot(snapshot.clone());
-        if persist && !self.session.messages().is_empty() {
+        if persist && !self.session.has_no_messages() {
             self.persist_session_best_effort("environment snapshot");
         }
         if let Ok(json) = serde_json::to_string(&snapshot) {

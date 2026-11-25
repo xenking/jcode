@@ -86,7 +86,7 @@ impl Agent {
     }
 
     fn note_session_message_added(&self) {
-        let message = self.session.messages().last();
+        let message = self.session.last_message();
         if let Some(message) = message.filter(|message| message.role == Role::Assistant) {
             self.turn_ownership.append_tool_call_snapshot(
                 self.session.id(),
@@ -111,7 +111,7 @@ impl Agent {
     /// Export the full conversation as a markdown transcript.
     pub fn export_conversation_markdown(&self) -> String {
         let mut md = String::new();
-        for msg in self.session.messages() {
+        for msg in self.session.iter_messages() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -254,8 +254,7 @@ mod durable_error_tests {
         assert!(
             agent
                 .session
-                .messages()
-                .last()
+                .last_message()
                 .unwrap()
                 .content
                 .shares_storage_with(&message.content)
@@ -346,7 +345,7 @@ mod durable_error_tests {
             Message::user("discard this answer").content,
         );
         let summary_text = "summary of the discarded answer";
-        let folded_count = agent.session.messages().len();
+        let folded_count = agent.session.message_count();
         agent
             .session
             .adopt_compaction(Some(crate::session::StoredCompactionState {
@@ -393,7 +392,7 @@ mod durable_error_tests {
             saved.compaction().is_none(),
             "rewind retained a summary of discarded turns"
         );
-        assert_eq!(saved.messages().len(), folded_count - 1);
+        assert_eq!(saved.message_count(), folded_count - 1);
         assert_eq!(saved.context_occupancy_tokens(), None);
         assert_eq!(
             saved.replay_events().len(),
@@ -410,7 +409,7 @@ mod durable_error_tests {
         );
         agent.undo_rewind().unwrap();
         let saved = Session::load(&session_id).unwrap();
-        assert_eq!(saved.messages().len(), folded_count);
+        assert_eq!(saved.message_count(), folded_count);
         assert_eq!(saved.compaction().unwrap().summary_text, summary_text);
         assert_eq!(saved.context_occupancy_tokens(), Some(4321));
         assert_eq!(saved.replay_events().len(), 2);
@@ -440,14 +439,14 @@ mod durable_error_tests {
         let error = anyhow::anyhow!("invalid_request_error: missing call_id")
             .context("provider rejected wake");
         let message = crate::util::format_error_chain(&error);
-        let message_count = agent.session.messages().len();
-        let provider_messages = serde_json::to_value(agent.session.messages()).unwrap();
+        let message_count = agent.session.message_count();
+        let provider_messages = serde_json::to_value(agent.session.cloned_messages()).unwrap();
         agent.persist_turn_error(&message).unwrap();
         let loaded = Session::load(agent.session_id()).unwrap();
-        assert_eq!(loaded.messages().len(), message_count);
-        assert_eq!(agent.session.messages().len(), message_count);
+        assert_eq!(loaded.message_count(), message_count);
+        assert_eq!(agent.session.message_count(), message_count);
         assert_eq!(
-            serde_json::to_value(loaded.messages()).unwrap(),
+            serde_json::to_value(loaded.cloned_messages()).unwrap(),
             provider_messages
         );
         let history = crate::session::render_messages(&loaded);

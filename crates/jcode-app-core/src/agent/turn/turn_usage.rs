@@ -9,8 +9,8 @@ pub(super) struct TurnTokenUsage {
     pub(super) cache_creation_input_tokens: Option<u64>,
 }
 
-pub(super) fn turn_token_usage_after(
-    messages: &[crate::session::StoredMessage],
+pub(super) fn turn_token_usage_after<'a>(
+    messages: impl IntoIterator<Item = &'a crate::session::StoredMessage>,
     start_message_index: usize,
 ) -> Option<TurnTokenUsage> {
     let mut usage = TurnTokenUsage {
@@ -22,7 +22,7 @@ pub(super) fn turn_token_usage_after(
     };
     let mut saw_usage = false;
 
-    for message in messages.iter().skip(start_message_index) {
+    for message in messages.into_iter().skip(start_message_index) {
         if !matches!(&message.role, Role::Assistant) {
             continue;
         }

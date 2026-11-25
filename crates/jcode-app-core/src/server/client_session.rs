@@ -43,7 +43,7 @@ pub(super) fn last_message_has_pending_tool(session: &crate::session::StoredMess
 }
 
 pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
-    last_turn_message_for_recovery(agent.messages()).is_some_and(message_has_reload_interruption)
+    last_turn_message_for_recovery(agent.messages().iter()).is_some_and(message_has_reload_interruption)
 }
 
 pub(super) fn message_has_reload_interruption(message: &crate::session::StoredMessage) -> bool {
@@ -68,7 +68,7 @@ pub(super) fn restored_session_was_interrupted(
     previous_status: &crate::session::SessionStatus,
     agent: &Agent,
 ) -> bool {
-    let last = last_turn_message_for_recovery(agent.messages());
+    let last = last_turn_message_for_recovery(agent.messages().iter());
     let last_is_reload_interrupted = last.is_some_and(message_has_reload_interruption);
     let pending_turn = last.is_some_and(|message| {
         message.role == crate::message::Role::User || last_message_has_pending_tool(message)

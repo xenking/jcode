@@ -249,8 +249,7 @@ pub(crate) fn inspect_saved(
     let past_request = meter.occupied_tokens.is_some()
         || session.last_provider_request_at().is_some()
         || session
-            .messages()
-            .iter()
+            .iter_messages()
             .any(|message| message.role == Role::Assistant);
     let mut counts = Counts {
         include_snapcompact,
@@ -452,7 +451,7 @@ fn apply_occupancy(
             )
         })
     } else {
-        session.messages().iter().rev().find_map(|message| {
+        session.iter_messages().rev().find_map(|message| {
             let tokens = message.token_usage.as_ref()?.prompt_tokens?;
             (tokens > 0).then_some((message.timestamp, tokens, Source::HistoricalReport))
         })
@@ -524,8 +523,7 @@ impl Counts {
         snapcompact_known: bool,
     ) {
         let reminders: HashSet<_> = session
-            .messages()
-            .iter()
+            .iter_messages()
             .filter_map(|message| {
                 if message.display_role != Some(StoredDisplayRole::System) {
                     return None;

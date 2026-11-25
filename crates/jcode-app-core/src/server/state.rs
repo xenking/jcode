@@ -912,7 +912,7 @@ impl SessionControlHandle {
             return Ok(false);
         }
         let session = crate::session::Session::load(&self.session_id)?;
-        for message in session.messages() {
+        for message in session.iter_messages() {
             if let Some(receipt) = message.id.strip_prefix("queued:") {
                 let ids: Vec<String> = serde_json::from_str(receipt)
                     .context("invalid queued prompt delivery receipt")?;

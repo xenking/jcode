@@ -659,7 +659,7 @@ impl Agent {
     fn seed_compaction_from_session(&mut self) {
         logging::info(&format!(
             "seed_compaction_from_session: session has {} messages",
-            self.session.messages().len()
+            self.session.message_count()
         ));
         let compaction = self.registry.compaction();
         let mut manager = match compaction.try_write() {
@@ -679,7 +679,7 @@ impl Agent {
         };
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
-            self.session.messages().len()
+            self.session.message_count()
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
@@ -714,9 +714,9 @@ impl Agent {
             }
         }
         if let Some(state) = self.session.compaction() {
-            manager.restore_persisted_stored_state_with(&state, self.session.messages());
+            manager.restore_persisted_stored_state_with(&state, &self.session);
         } else {
-            manager.seed_restored_stored_messages_with(self.session.messages());
+            manager.seed_restored_stored_messages_with(&self.session);
         }
     }
 
@@ -760,7 +760,7 @@ impl Agent {
             message.content.clone(),
             Some(StoredDisplayRole::System),
         );
-        message.timestamp = self.session.messages().last().and_then(|m| m.timestamp);
+        message.timestamp = self.session.last_message().and_then(|m| m.timestamp);
         message
     }
 
@@ -925,7 +925,7 @@ impl Agent {
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
             manager.set_budget(self.provider.context_window());
-            manager.restore_persisted_stored_state_with(&state, self.session.messages());
+            manager.restore_persisted_stored_state_with(&state, &self.session);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
@@ -1192,8 +1192,7 @@ impl Agent {
             .last_provider_request_at()
             .or_else(|| {
                 self.session
-                    .messages()
-                    .iter()
+                    .iter_messages()
                     .rev()
                     .find(|message| matches!(message.role, Role::Assistant))
                     .and_then(|message| message.timestamp)
@@ -1559,8 +1558,7 @@ impl Agent {
     ) -> Vec<(String, String)> {
         let results: std::collections::HashSet<String> = self
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
                 ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
@@ -1569,8 +1567,7 @@ impl Agent {
             .collect();
         let pending = self
             .session
-            .messages()
-            .iter()
+            .iter_messages()
             .skip(start_index)
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
@@ -1581,7 +1578,7 @@ impl Agent {
             })
             .collect();
         self.reset_tool_output_tracking();
-        self.tool_output_scan_index = start_index.min(self.session.messages().len());
+        self.tool_output_scan_index = start_index.min(self.session.message_count());
         if self.repair_missing_tool_outputs_with("[Tool stopped by user]", false) == 0 {
             self.persist_session_best_effort("force-stopped turn");
         }
@@ -1589,7 +1586,7 @@ impl Agent {
     }
 
     fn repair_missing_tool_outputs_with(&mut self, text: &str, skip_inflight: bool) -> usize {
-        if self.tool_output_scan_index > self.session.messages().len() {
+        if self.tool_output_scan_index > self.session.message_count() {
             self.reset_tool_output_tracking();
         }
 
@@ -1597,7 +1594,7 @@ impl Agent {
         let mut new_result_ids = Vec::new();
         let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
 
-        for (index, msg) in self.session.messages().iter().enumerate().skip(scan_start) {
+        for (index, msg) in self.session.iter_messages().enumerate().skip(scan_start) {
             match msg.role {
                 Role::User => {
                     for block in &msg.content {
@@ -1649,7 +1646,7 @@ impl Agent {
             }
         }
 
-        self.tool_output_scan_index = self.session.messages().len();
+        self.tool_output_scan_index = self.session.message_count();
 
         let mut repaired = 0usize;
         let mut inserted = 0usize;
@@ -1679,7 +1676,7 @@ impl Agent {
             inserted += missing_for_message.len();
         }
 
-        self.tool_output_scan_index = self.session.messages().len();
+        self.tool_output_scan_index = self.session.message_count();
 
         if repaired > 0 {
             self.persist_session_best_effort("missing tool-output repair");
@@ -1753,7 +1750,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
-        if !self.session.messages().is_empty() {
+        if !self.session.has_no_messages() {
             self.persist_session_best_effort("session close state");
         }
         self.upload_transcript_telemetry(end_reason);
@@ -1789,7 +1786,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
-        if !self.session.messages().is_empty() {
+        if !self.session.has_no_messages() {
             self.persist_session_best_effort("session crash state");
         }
         self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::Unknown);
@@ -1851,7 +1848,7 @@ impl Agent {
     }
 
     fn upload_transcript_telemetry(&mut self, end_reason: crate::telemetry::SessionEndReason) {
-        if self.transcript_telemetry_sent || self.session.messages().is_empty() {
+        if self.transcript_telemetry_sent || self.session.has_no_messages() {
             return;
         }
         // Keep code and ordinary transcript content intact, but reuse the
@@ -1859,7 +1856,7 @@ impl Agent {
         // text, reasoning, tool inputs, and tool results before leaving the
         // machine.
         let redacted_session = self.session.redacted_for_export();
-        let Ok(messages) = serde_json::to_value(redacted_session.messages()) else {
+        let Ok(messages) = serde_json::to_value(redacted_session.cloned_messages()) else {
             crate::logging::warn("failed to serialize consented transcript telemetry");
             return;
         };

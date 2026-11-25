@@ -785,7 +785,7 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
                 .to_vec(),
         );
     }
-    let cutoff = agent.session.messages().len();
+    let cutoff = agent.session.message_count();
     agent.add_message(
         Role::User,
         Message::user("Continue the approved plan").content.to_vec(),
@@ -822,7 +822,7 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&state, agent.session.messages());
+        .restore_persisted_stored_state_with(&state, &agent.session);
     let (outgoing, _) = agent.messages_for_provider(None).await.unwrap();
     let wire = anthropic_wire(&outgoing);
     let texts: Vec<_> = wire
@@ -871,7 +871,7 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&restored, agent.session.messages());
+        .restore_persisted_stored_state_with(&restored, &agent.session);
     let (after_reload, _) = agent.messages_for_provider(None).await.unwrap();
     assert_eq!(anthropic_wire(&after_reload), wire);
 
@@ -912,7 +912,7 @@ async fn compaction_missing_native_summary_warns_once_without_dropping_live_cont
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&state, agent.session.messages());
+        .restore_persisted_stored_state_with(&state, &agent.session);
     for _ in 0..2 {
         let (messages, _) = agent.messages_for_provider(None).await.unwrap();
         let wire = anthropic_wire(&messages).to_string();

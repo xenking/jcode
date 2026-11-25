@@ -550,10 +550,10 @@ impl Tool for SessionSearchTool {
 
 fn current_message_by_index(session_id: &str, index: usize) -> Result<String> {
     let session = Session::load(session_id)?;
-    let Some(message) = session.messages().get(index) else {
+    let Some(message) = session.message_at(index) else {
         return Ok(format!(
             "UNKNOWN: message {index} is unavailable in the current session ({} messages).",
-            session.messages().len()
+            session.message_count()
         ));
     };
     let mut value = serde_json::to_value(message)?;
@@ -1523,8 +1523,8 @@ fn append_session_results(
         });
     }
 
-    let ask_ids = ask_tool_ids(session.messages());
-    for (message_index, msg) in session.messages().iter().enumerate() {
+    let ask_ids = ask_tool_ids(session.iter_messages());
+    for (message_index, msg) in session.iter_messages().enumerate() {
         if !options.include_system && is_system_like_message(msg) {
             continue;
         }
@@ -1571,7 +1571,7 @@ fn append_session_results(
             score,
             matched_terms: match_score.matched_terms,
             exact_match: match_score.exact_match,
-            context: build_jcode_context(session.messages(), message_index, options),
+            context: build_jcode_context(session, message_index, options),
         });
     }
 }
@@ -1709,20 +1709,20 @@ fn role_filter_allows_external_message(role: &str, options: &SearchOptions) -> b
 }
 
 fn build_jcode_context(
-    messages: &[StoredMessage],
+    session: &Session,
     hit_index: usize,
     options: &SearchOptions,
 ) -> Vec<ResultContextLine> {
     if options.context_before == 0 && options.context_after == 0 {
         return Vec::new();
     }
-    let ask_ids = ask_tool_ids(messages);
+    let ask_ids = ask_tool_ids(session.iter_messages());
     let start = hit_index.saturating_sub(options.context_before);
-    let end = (hit_index + options.context_after + 1).min(messages.len());
+    let end = (hit_index + options.context_after + 1).min(session.message_count());
     (start..end)
         .filter(|&idx| idx != hit_index)
         .filter_map(|idx| {
-            let msg = &messages[idx];
+            let msg = session.message_at(idx)?;
             if !options.include_system && is_system_like_message(msg) {
                 return None;
             }
@@ -1753,9 +1753,11 @@ fn truncate_context_text(text: &str) -> String {
 mod searchable_text;
 use searchable_text::searchable_message_text;
 
-fn ask_tool_ids(messages: &[StoredMessage]) -> std::collections::HashSet<&str> {
+fn ask_tool_ids<'a>(
+    messages: impl IntoIterator<Item = &'a StoredMessage>,
+) -> std::collections::HashSet<&'a str> {
     messages
-        .iter()
+        .into_iter()
         .flat_map(|msg| msg.content.iter())
         .filter_map(|block| match block {
             ContentBlock::ToolUse { id, name, .. } if name == "ask" => Some(id.as_str()),

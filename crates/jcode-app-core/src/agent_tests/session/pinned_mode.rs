@@ -131,13 +131,13 @@ async fn pinned_mode_reappears_once_in_compacted_provider_transcript() {
             1,
             "first request after compaction, poll_first={poll_first}"
         );
-        let len = agent.session.messages().len();
+        let len = agent.session.message_count();
         assert_eq!(
             mode_announcements(&agent.messages_for_provider(None).await.unwrap().0),
             1
         );
         assert!(agent.poll_compaction_completion_event().is_none());
-        assert_eq!(agent.session.messages().len(), len);
+        assert_eq!(agent.session.message_count(), len);
     }
 }
 

@@ -1568,8 +1568,7 @@ impl Provider for SwitchableDeferredProvider {
 fn transcript_texts(agent: &Agent) -> Vec<String> {
     agent
         .session
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
             ContentBlock::Text { text, .. } => Some(text.clone()),
