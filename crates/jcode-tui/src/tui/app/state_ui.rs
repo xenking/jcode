@@ -909,7 +909,7 @@ impl App {
             &self.side_panel,
             terminal_width,
             terminal_height,
-            self.diagram_pane_ratio,
+            self.diagram.view().ratio,
             has_protocol,
             self.centered,
         );

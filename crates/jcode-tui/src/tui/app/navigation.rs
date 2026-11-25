@@ -35,10 +35,10 @@ impl MouseScrollTraceState {
             mouse_target: app.mouse_scroll_target,
             diff_offset: app.diff_pane_scroll,
             diff_auto_scroll: app.diff_pane_auto_scroll,
-            diagram_focus: app.diagram_focus,
-            diagram_x: app.diagram_scroll_x,
-            diagram_y: app.diagram_scroll_y,
-            diagram_zoom: app.diagram_zoom,
+            diagram_focus: app.diagram.view().focus,
+            diagram_x: app.diagram.view().scroll_x,
+            diagram_y: app.diagram.view().scroll_y,
+            diagram_zoom: app.diagram.view().zoom,
             help_scroll: app.help_scroll,
             changelog_scroll: app.changelog_scroll,
         }
@@ -503,48 +503,18 @@ impl App {
     }
 
     pub(super) fn diagram_available(&self) -> bool {
-        self.diagram_mode == crate::config::DiagramDisplayMode::Pinned
-            && self.diagram_pane_enabled
-            && !crate::tui::mermaid::get_active_diagrams().is_empty()
+        self.diagram.available()
     }
 
     pub(super) fn normalize_diagram_state(&mut self) {
-        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned {
-            self.diagram_focus = false;
-            self.diagram_index = 0;
-            self.diagram_scroll_x = 0;
-            self.diagram_scroll_y = 0;
-            self.last_visible_diagram_hash = None;
-            return;
-        }
-        if !self.diagram_pane_enabled {
-            self.diagram_focus = false;
-        }
-
-        let diagram_count = crate::tui::mermaid::get_active_diagrams().len();
-        if diagram_count == 0 {
-            self.diagram_focus = false;
-            self.diagram_index = 0;
-            self.diagram_scroll_x = 0;
-            self.diagram_scroll_y = 0;
-            self.last_visible_diagram_hash = None;
-            return;
-        }
-
-        if self.diagram_index >= diagram_count {
-            self.diagram_index = 0;
-            self.diagram_scroll_x = 0;
-            self.diagram_scroll_y = 0;
-        }
-
-        self.last_visible_diagram_hash = self.current_visible_diagram_hash();
+        let side_panel_focused = self.side_panel.focused_page().is_some();
+        self.diagram.normalize(side_panel_focused);
     }
 
     pub(super) fn set_diagram_focus(&mut self, focus: bool) {
-        if self.diagram_focus == focus {
+        if !self.diagram.focus_to(focus) {
             return;
         }
-        self.diagram_focus = focus;
         self.diff_pane_focus = false;
         if focus {
             self.set_status_notice("Focus: diagram (hjkl pan, [/] zoom, +/- resize)");
@@ -565,7 +535,7 @@ impl App {
             return;
         }
         self.diff_pane_focus = focus;
-        self.diagram_focus = false;
+        self.diagram.blur();
         if focus {
             if self.side_panel.focused_page_id.as_deref()
                 == Some(super::split_view::SPLIT_VIEW_PAGE_ID)
@@ -1025,96 +995,42 @@ impl App {
     }
 
     pub(super) fn cycle_diagram(&mut self, direction: i32) {
-        let diagrams = crate::tui::mermaid::get_active_diagrams();
-        let count = diagrams.len();
-        if count == 0 {
-            return;
+        if let Some((position, count)) = self.diagram.cycle(direction) {
+            self.set_status_notice(format!("Diagram {position}/{count}"));
         }
-        let current = self.diagram_index.min(count - 1);
-        let next = if direction < 0 {
-            if current == 0 { count - 1 } else { current - 1 }
-        } else if current + 1 >= count {
-            0
-        } else {
-            current + 1
-        };
-        self.diagram_index = next;
-        self.reset_diagram_view_to_fit();
-        self.last_visible_diagram_hash = diagrams.get(next).map(|diagram| diagram.hash);
-        self.set_status_notice(format!("Diagram {}/{}", next + 1, count));
     }
 
     pub(super) fn pan_diagram(&mut self, dx: i32, dy: i32) {
-        self.diagram_scroll_x = (self.diagram_scroll_x + dx).max(0);
-        self.diagram_scroll_y = (self.diagram_scroll_y + dy).max(0);
+        self.diagram.pan(dx, dy);
     }
 
-    pub(super) const DIAGRAM_PANE_ANIM_DURATION: f32 = 0.15;
-
-    fn diagram_pane_ratio_limits(&self) -> (u8, u8) {
-        match self.diagram_pane_position {
-            crate::config::DiagramPanePosition::Side => (25, 100),
-            crate::config::DiagramPanePosition::Top => (20, 100),
-        }
-    }
-
-    fn set_diagram_pane_ratio(&mut self, next: i16, animate: bool, announce: bool) {
-        let (min_ratio, max_ratio) = self.diagram_pane_ratio_limits();
-        let next = next.clamp(min_ratio as i16, max_ratio as i16) as u8;
-        let current_target = self.diagram_pane_ratio_target;
-        if next == current_target {
-            if !animate {
-                self.diagram_pane_ratio = next;
-                self.diagram_pane_ratio_from = next;
-                self.diagram_pane_anim_start = None;
-            }
-            return;
-        }
-
-        if animate {
-            self.diagram_pane_ratio_from = self.animated_diagram_pane_ratio();
-            self.diagram_pane_ratio_target = next;
-            self.diagram_pane_anim_start = Some(Instant::now());
-        } else {
-            self.diagram_pane_ratio = next;
-            self.diagram_pane_ratio_from = next;
-            self.diagram_pane_ratio_target = next;
-            self.diagram_pane_anim_start = None;
-        }
-
+    /// Refit the diagram after the pane geometry changed and clear render caches.
+    fn apply_diagram_ratio_change(&mut self, change: Option<diagram_pane::RatioChange>) -> Option<u8> {
+        let target = change?.target;
         self.handle_diagram_geometry_change();
-
-        if announce {
-            self.set_status_notice(format!("Diagram pane: {}%", next));
-        }
+        Some(target)
     }
 
     pub(super) fn animated_diagram_pane_ratio(&self) -> u8 {
-        let Some(start) = self.diagram_pane_anim_start else {
-            return self.diagram_pane_ratio_target;
-        };
-        let elapsed = start.elapsed().as_secs_f32();
-        let t = (elapsed / Self::DIAGRAM_PANE_ANIM_DURATION).clamp(0.0, 1.0);
-        let t = t * t * (3.0 - 2.0 * t);
-        let from = self.diagram_pane_ratio_from as f32;
-        let to = self.diagram_pane_ratio_target as f32;
-        (from + (to - from) * t).round() as u8
+        self.diagram.animated_ratio()
     }
 
     pub(super) fn adjust_diagram_pane_ratio(&mut self, delta: i8) {
-        let next = self.diagram_pane_ratio_target as i16 + delta as i16;
-        self.diagram_pane_ratio_user_adjusted = true;
-        self.set_diagram_pane_ratio(next, true, true);
+        let change = self.diagram.nudge_ratio(delta);
+        if let Some(target) = self.apply_diagram_ratio_change(change) {
+            self.set_status_notice(format!("Diagram pane: {}%", target));
+        }
     }
 
     pub(super) fn set_diagram_pane_ratio_immediate(&mut self, next: u8) {
-        self.diagram_pane_ratio_user_adjusted = true;
-        self.set_diagram_pane_ratio(next as i16, false, false);
+        let change = self.diagram.drag_ratio(next);
+        self.apply_diagram_ratio_change(change);
     }
 
     pub(super) fn set_side_panel_ratio_preset(&mut self, next: u8) {
-        self.set_diagram_pane_ratio(next as i16, false, false);
-        self.set_status_notice(format!("Side panel: {}%", self.diagram_pane_ratio_target));
+        let change = self.diagram.preset_ratio(next);
+        self.apply_diagram_ratio_change(change);
+        self.set_status_notice(format!("Side panel: {}%", self.diagram.view().ratio_target));
     }
 
     /// Toggle whether inline transcript images render expanded or as
@@ -1168,23 +1084,13 @@ impl App {
     }
 
     pub(super) fn adjust_diagram_zoom(&mut self, delta: i8) {
-        let next = (self.diagram_zoom as i16 + delta as i16).clamp(50, 200) as u8;
-        if next != self.diagram_zoom {
-            self.diagram_zoom = next;
-            self.set_status_notice(format!("Diagram zoom: {}%", next));
+        if let Some(zoom) = self.diagram.zoom_by(delta) {
+            self.set_status_notice(format!("Diagram zoom: {}%", zoom));
         }
     }
 
     pub(super) fn toggle_diagram_pane(&mut self) {
-        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned {
-            self.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-        }
-        super::super::markdown::set_diagram_mode_override(Some(self.diagram_mode));
-        self.diagram_pane_enabled = !self.diagram_pane_enabled;
-        if !self.diagram_pane_enabled {
-            self.diagram_focus = false;
-        }
-        let status = if self.diagram_pane_enabled {
+        let status = if self.diagram.toggle_enabled() {
             "Diagram pane: ON"
         } else {
             "Diagram pane: OFF"
@@ -1194,17 +1100,9 @@ impl App {
 
     pub(super) fn toggle_diagram_pane_position(&mut self) {
         use crate::config::DiagramPanePosition;
-        self.diagram_pane_position = match self.diagram_pane_position {
-            DiagramPanePosition::Side => DiagramPanePosition::Top,
-            DiagramPanePosition::Top => DiagramPanePosition::Side,
-        };
-        let (min_ratio, max_ratio) = self.diagram_pane_ratio_limits();
-        self.diagram_pane_ratio_target = self.diagram_pane_ratio_target.clamp(min_ratio, max_ratio);
-        self.diagram_pane_ratio = self.diagram_pane_ratio_target;
-        self.diagram_pane_ratio_from = self.diagram_pane_ratio_target;
-        self.diagram_pane_anim_start = None;
+        let position = self.diagram.toggle_position();
         self.handle_diagram_geometry_change();
-        let label = match self.diagram_pane_position {
+        let label = match position {
             DiagramPanePosition::Side => "side",
             DiagramPanePosition::Top => "top",
         };
@@ -1218,7 +1116,7 @@ impl App {
             self.set_status_notice("No diagrams to open");
             return;
         }
-        let index = self.diagram_index.min(total - 1);
+        let index = self.diagram.selected(total);
         let diagram = &diagrams[index];
         if let Some(path) = super::super::mermaid::get_cached_path(diagram.hash) {
             if path.exists() {
@@ -1246,21 +1144,21 @@ impl App {
         if diagram_available {
             match code {
                 KeyCode::Left => {
-                    if !self.diagram_focus {
+                    if !self.diagram.focus {
                         return false;
                     }
                     self.cycle_diagram(-1);
                     return true;
                 }
                 KeyCode::Right => {
-                    if !self.diagram_focus {
+                    if !self.diagram.focus {
                         return false;
                     }
                     self.cycle_diagram(1);
                     return true;
                 }
                 KeyCode::Char('h') => {
-                    if !self.diagram_focus {
+                    if !self.diagram.focus {
                         return false;
                     }
                     self.set_diagram_focus(false);
@@ -1327,7 +1225,7 @@ impl App {
         modifiers: KeyModifiers,
         diagram_available: bool,
     ) -> bool {
-        if !diagram_available || !self.diagram_focus || modifiers.contains(KeyModifiers::CONTROL) {
+        if !diagram_available || !self.diagram.focus || modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
 
@@ -1526,7 +1424,7 @@ impl App {
                     diagram_area,
                 );
                 let is_side = matches!(
-                    self.diagram_pane_position,
+                    self.diagram.position,
                     crate::config::DiagramPanePosition::Side
                 );
                 if is_side {
@@ -1545,7 +1443,7 @@ impl App {
             }
             if diagram_available && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if on_diagram_border {
-                    self.diagram_pane_dragging = true;
+                    self.diagram.begin_drag();
                 } else if over_diagram {
                     self.set_diagram_focus(true);
                 } else {
@@ -1622,13 +1520,14 @@ impl App {
             finish_mouse_event!(false, "input_cursor_click");
         }
 
-        if self.diagram_pane_dragging {
+        if self.diagram.is_dragging() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     if diagram_available {
-                        self.diagram_pane_anim_start = None;
+                        self.diagram.stop_animation();
+                        let diagram_view = self.diagram.view();
                         let is_side = matches!(
-                            self.diagram_pane_position,
+                            diagram_view.position,
                             crate::config::DiagramPanePosition::Side
                         );
                         let new_ratio = if is_side {
@@ -1639,7 +1538,7 @@ impl App {
                                 let total_width = right_edge.saturating_sub(messages_area.x);
                                 let desired_width = right_edge.saturating_sub(mouse.column);
                                 if desired_width == diagram_area.width || total_width == 0 {
-                                    self.diagram_pane_ratio_target
+                                    diagram_view.ratio_target
                                 } else {
                                     ((desired_width as u32 * 100) / total_width as u32) as u8
                                 }
@@ -1647,18 +1546,18 @@ impl App {
                                 ((terminal_width.saturating_sub(mouse.column)) as u32 * 100
                                     / terminal_width as u32) as u8
                             } else {
-                                self.diagram_pane_ratio_target
+                                diagram_view.ratio_target
                             }
                         } else if !is_side && terminal_height > 0 {
                             (mouse.row as u32 * 100 / terminal_height as u32) as u8
                         } else {
-                            self.diagram_pane_ratio_target
+                            diagram_view.ratio_target
                         };
                         self.set_diagram_pane_ratio_immediate(new_ratio);
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    self.diagram_pane_dragging = false;
+                    self.diagram.end_drag();
                 }
                 _ => {}
             }

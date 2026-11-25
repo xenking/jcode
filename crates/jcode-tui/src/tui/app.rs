@@ -1,6 +1,7 @@
 #[path = "app/cache_fingerprints.rs"]
 mod cache_fingerprints;
 mod cache_request;
+mod diagram_pane;
 use cache_fingerprints::*;
 #[path = "app_kv_cache_summary.rs"]
 mod kv_cache_summary;
@@ -1441,35 +1442,8 @@ pub struct App {
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
-    // Diagram display mode (from config)
-    diagram_mode: crate::config::DiagramDisplayMode,
-    // Whether the pinned diagram pane has focus
-    diagram_focus: bool,
-    // Selected diagram index in pinned mode (most recent = 0)
-    diagram_index: usize,
-    // Diagram scroll offsets in cells (only used when focused)
-    diagram_scroll_x: i32,
-    diagram_scroll_y: i32,
-    // Diagram pane width ratio (percentage)
-    diagram_pane_ratio: u8,
-    // Animation state for smooth pane ratio transitions
-    diagram_pane_ratio_from: u8,
-    diagram_pane_ratio_target: u8,
-    diagram_pane_anim_start: Option<Instant>,
-    // Set once the user manually resizes the pane (drag or +/- keys), so the
-    // adaptive image-width default stops overriding their explicit choice.
-    diagram_pane_ratio_user_adjusted: bool,
-    // Whether the pinned diagram pane is visible
-    diagram_pane_enabled: bool,
-    // Position of pinned diagram pane (side or top)
-    diagram_pane_position: crate::config::DiagramPanePosition,
-    // Diagram zoom percentage (100 = normal)
-    diagram_zoom: u8,
-    // Last diagram hash that was actually visible in the pinned pane.
-    // Used to detect identity/layout changes that should reset back to fit.
-    last_visible_diagram_hash: Option<u64>,
-    // Whether the user is dragging the diagram pane border
-    diagram_pane_dragging: bool,
+    // Pinned diagram pane (mode, focus, selection, size, zoom)
+    diagram: diagram_pane::DiagramPane,
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,

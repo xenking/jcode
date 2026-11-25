@@ -1308,7 +1308,7 @@ impl crate::tui::TuiState for App {
         });
 
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
-        let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
+        let diagrams = if self.diagram.view().mode == crate::config::DiagramDisplayMode::Margin {
             crate::tui::mermaid::get_active_diagrams()
         } else {
             Vec::new()
@@ -1542,7 +1542,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
-        self.diagram_mode
+        self.diagram.view().mode
     }
 
     fn inline_swarm_gallery_active(&self) -> bool {
@@ -1607,15 +1607,16 @@ impl crate::tui::TuiState for App {
     }
 
     fn diagram_focus(&self) -> bool {
-        self.diagram_focus
+        self.diagram.view().focus
     }
 
     fn diagram_index(&self) -> usize {
-        self.diagram_index
+        self.diagram.view().index
     }
 
     fn diagram_scroll(&self) -> (i32, i32) {
-        (self.diagram_scroll_x, self.diagram_scroll_y)
+        let view = self.diagram.view();
+        (view.scroll_x, view.scroll_y)
     }
 
     fn diagram_pane_ratio(&self) -> u8 {
@@ -1623,25 +1624,23 @@ impl crate::tui::TuiState for App {
     }
 
     fn diagram_pane_ratio_user_adjusted(&self) -> bool {
-        self.diagram_pane_ratio_user_adjusted
+        self.diagram.view().user_adjusted
     }
 
     fn diagram_pane_animating(&self) -> bool {
-        self.diagram_pane_anim_start
-            .map(|s| s.elapsed().as_secs_f32() < Self::DIAGRAM_PANE_ANIM_DURATION)
-            .unwrap_or(false)
+        self.diagram.animating()
     }
 
     fn diagram_pane_enabled(&self) -> bool {
-        self.diagram_pane_enabled
+        self.diagram.view().enabled
     }
 
     fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition {
-        self.diagram_pane_position
+        self.diagram.view().position
     }
 
     fn diagram_zoom(&self) -> u8 {
-        self.diagram_zoom
+        self.diagram.view().zoom
     }
     fn diff_pane_scroll(&self) -> usize {
         self.diff_pane_scroll

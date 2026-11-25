@@ -685,7 +685,7 @@ fn test_rendered_markdown_link_labels_open_their_own_message_targets() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(false);
-    app.diagram_pane_enabled = false;
+    app.diagram.enabled = false;
     app.push_display_message(DisplayMessage::assistant(
         "First [guide](https://one.example/docs).",
     ));
@@ -721,7 +721,7 @@ fn test_rendered_wrapped_markdown_link_label_is_clickable() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(false);
-    app.diagram_pane_enabled = false;
+    app.diagram.enabled = false;
     app.push_display_message(DisplayMessage::assistant(
         "Read [a long linked guide with several words and destination](https://wrapped.example).",
     ));
@@ -785,8 +785,8 @@ fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
     // A persisted first-run state can otherwise replace the composer with the
     // suggestion welcome screen, leaving a zero-height input hit target.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.input = "hello world".to_string();
     app.cursor_pos = app.input.len();
     app.set_centered(false);
@@ -909,7 +909,7 @@ fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
         tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
     }
     app.bump_display_messages_version();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
     app.diff_pane_focus = true;
@@ -949,8 +949,8 @@ fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
 fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
     app.diff_pane_focus = true;
@@ -996,8 +996,8 @@ fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let mut app = create_test_app();
     // Keep first-run suggestions from replacing the composer under test.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
@@ -1050,8 +1050,8 @@ fn test_mouse_click_in_wrapped_input_moves_cursor_to_second_visual_line() {
     let mut app = create_test_app();
     // Keep first-run suggestions from replacing the composer under test.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.input = "abcdefghij".to_string();
     app.cursor_pos = 0;
     app.set_centered(false);

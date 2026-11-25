@@ -47,7 +47,7 @@ pub(in super::super) fn is_scroll_only_key(
     }
 
     let diagram_available = app.diagram_available();
-    if diagram_available && app.diagram_focus && !modifiers.contains(KeyModifiers::CONTROL) {
+    if diagram_available && app.diagram.view().focus && !modifiers.contains(KeyModifiers::CONTROL) {
         match code {
             KeyCode::Char('h')
             | KeyCode::Left

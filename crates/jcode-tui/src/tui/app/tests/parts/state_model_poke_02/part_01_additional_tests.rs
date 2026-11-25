@@ -4,9 +4,9 @@ use super::*;
 fn test_side_diagram_uses_left_splitter_instead_of_rounded_box() {
     let _lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
+    app.diagram.mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram.enabled = true;
+    app.diagram.position = crate::config::DiagramPanePosition::Side;
 
     crate::tui::mermaid::clear_active_diagrams();
     crate::tui::mermaid::register_active_diagram(0x444, 900, 450, Some("side".to_string()));

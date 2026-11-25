@@ -110,7 +110,7 @@ impl App {
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.status_notice = None;
-        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram.view().mode));
 
         use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
@@ -354,7 +354,7 @@ impl App {
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.status_notice = None;
-        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram.view().mode));
         crate::tui::clear_side_panel_render_caches();
         crate::tui::reset_side_panel_debug_stats();
         crate::tui::markdown::reset_debug_stats();
@@ -563,10 +563,10 @@ impl App {
                     .state
                     .diagram_mode
                     .clone()
-                    .unwrap_or_else(|| format!("{:?}", self.diagram_mode));
+                    .unwrap_or_else(|| format!("{:?}", self.diagram.view().mode));
                 (frame.layout.diagram_area, widget_present, mode)
             }
-            None => (None, false, format!("{:?}", self.diagram_mode)),
+            None => (None, false, format!("{:?}", self.diagram.view().mode)),
         };
 
         let diagram_area_rect =
@@ -711,7 +711,7 @@ impl App {
             }
         };
 
-        let diagram_mode = cfg.diagram_mode.unwrap_or(self.diagram_mode);
+        let diagram_mode = cfg.diagram_mode.unwrap_or(self.diagram.view().mode);
         let expectations = ScrollTestExpectations {
             // Diagrams flow inline (via the inline-image fit pipeline) in every
             // mode; Pinned additionally mirrors them into the side pane.
@@ -739,7 +739,7 @@ impl App {
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
 
-        self.diagram_mode = diagram_mode;
+        self.diagram.use_mode(diagram_mode);
         crate::tui::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
@@ -1003,7 +1003,7 @@ impl App {
 
         let widths = cfg.widths.unwrap_or_else(|| vec![80, 100, 120]);
         let heights = cfg.heights.unwrap_or_else(|| vec![24, 40]);
-        let diagram_modes = cfg.diagram_modes.unwrap_or_else(|| vec![self.diagram_mode]);
+        let diagram_modes = cfg.diagram_modes.unwrap_or_else(|| vec![self.diagram.view().mode]);
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let step = cfg.step.unwrap_or(5).max(1);
         let max_steps = cfg.max_steps.unwrap_or(12).clamp(4, 100);

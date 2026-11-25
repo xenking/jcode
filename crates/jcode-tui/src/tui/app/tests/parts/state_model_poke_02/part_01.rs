@@ -366,14 +366,14 @@ fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
 fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(120, 30, 0, 80);
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
-    app.diagram_pane_ratio = 40;
-    app.diagram_pane_ratio_from = 40;
-    app.diagram_pane_ratio_target = 40;
-    app.diagram_pane_anim_start = None;
-    app.diagram_focus = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram.enabled = true;
+    app.diagram.position = crate::config::DiagramPanePosition::Side;
+    app.diagram.ratio = 40;
+    app.diagram.ratio_from = 40;
+    app.diagram.ratio_target = 40;
+    app.diagram.anim_start = None;
+    app.diagram.focus = false;
 
     crate::tui::mermaid::clear_active_diagrams();
     crate::tui::mermaid::register_active_diagram(0x444, 900, 450, None);
@@ -392,7 +392,7 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
             Rect::new(0, 0, 120, 12),
         ),
     ] {
-        app.diagram_pane_position = position;
+        app.diagram.position = position;
         crate::tui::ui::record_layout_snapshot(messages_area, Some(diagram_area), None, None);
         for focused in [false, true] {
             for (column, row) in [
@@ -406,9 +406,9 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
                     (MouseEventKind::ScrollLeft, (4, 5)),
                     (MouseEventKind::ScrollRight, (6, 5)),
                 ] {
-                    app.diagram_focus = focused;
-                    app.diagram_scroll_x = 5;
-                    app.diagram_scroll_y = 5;
+                    app.diagram.focus = focused;
+                    app.diagram.scroll_x = 5;
+                    app.diagram.scroll_y = 5;
 
                     let scroll_only = app.handle_mouse_event(MouseEvent {
                         kind,
@@ -418,8 +418,8 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
                     });
 
                     assert!(scroll_only, "diagram wheel should be scroll-only");
-                    assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), expected);
-                    assert_eq!(app.diagram_focus, focused, "hover must not steal focus");
+                    assert_eq!((app.diagram.scroll_x, app.diagram.scroll_y), expected);
+                    assert_eq!(app.diagram.focus, focused, "hover must not steal focus");
                     assert!(
                         !app.auto_scroll_paused,
                         "hover must not pause chat auto-scroll"
@@ -427,10 +427,10 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
                     assert_eq!(app.scroll_offset, 0, "hover must not scroll chat");
                     assert_eq!(app.mouse_scroll_queue, 0);
                     assert_eq!(app.mouse_scroll_target, None);
-                    assert_eq!(app.diagram_pane_ratio, 40);
-                    assert_eq!(app.diagram_pane_ratio_from, 40);
-                    assert_eq!(app.diagram_pane_ratio_target, 40);
-                    assert!(app.diagram_pane_anim_start.is_none());
+                    assert_eq!(app.diagram.ratio, 40);
+                    assert_eq!(app.diagram.ratio_from, 40);
+                    assert_eq!(app.diagram.ratio_target, 40);
+                    assert!(app.diagram.anim_start.is_none());
                 }
             }
         }
@@ -443,10 +443,10 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
 fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(120, 30, 0, 80);
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
-    app.diagram_focus = true;
+    app.diagram.mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram.enabled = true;
+    app.diagram.position = crate::config::DiagramPanePosition::Side;
+    app.diagram.focus = true;
 
     crate::tui::mermaid::register_active_diagram(0x447, 900, 450, None);
     let _ = render_and_snap(&app, &mut terminal);
@@ -457,8 +457,8 @@ fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
         None,
         None,
     );
-    app.diagram_scroll_x = 5;
-    app.diagram_scroll_y = 5;
+    app.diagram.scroll_x = 5;
+    app.diagram.scroll_y = 5;
 
     app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollUp,
@@ -469,8 +469,8 @@ fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
 
     assert!(app.auto_scroll_paused);
     assert_ne!(app.scroll_offset, 0);
-    assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), (5, 5));
-    assert!(app.diagram_focus, "wheel must not change keyboard focus");
+    assert_eq!((app.diagram.scroll_x, app.diagram.scroll_y), (5, 5));
+    assert!(app.diagram.focus, "wheel must not change keyboard focus");
 
     crate::tui::mermaid::clear_active_diagrams();
 }
@@ -479,11 +479,11 @@ fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
 fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
-    app.diagram_focus = true;
-    app.diagram_scroll_y = 0;
+    app.diagram.mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram.enabled = true;
+    app.diagram.position = crate::config::DiagramPanePosition::Side;
+    app.diagram.focus = true;
+    app.diagram.scroll_y = 0;
 
     crate::tui::mermaid::clear_active_diagrams();
     crate::tui::mermaid::register_active_diagram(0x446, 900, 450, None);
@@ -495,7 +495,7 @@ fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
     );
 
     for focused in [false, true] {
-        app.diagram_focus = focused;
+        app.diagram.focus = focused;
         let scroll_only = app.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 90,
@@ -507,8 +507,8 @@ fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
             scroll_only,
             "hovered diagram owns wheel events even at its limit"
         );
-        assert_eq!(app.diagram_scroll_y, 0);
-        assert_eq!(app.diagram_focus, focused);
+        assert_eq!(app.diagram.scroll_y, 0);
+        assert_eq!(app.diagram.focus, focused);
         assert_eq!(
             app.mouse_scroll_target, None,
             "must not enqueue chat scrolling"
@@ -521,14 +521,14 @@ fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
 #[test]
 fn test_dragging_diagram_border_resizes_immediately_without_animation() {
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
-    app.diagram_pane_ratio = 40;
-    app.diagram_pane_ratio_from = 40;
-    app.diagram_pane_ratio_target = 40;
-    app.diagram_pane_anim_start = Some(Instant::now());
-    app.diagram_pane_dragging = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram.enabled = true;
+    app.diagram.position = crate::config::DiagramPanePosition::Side;
+    app.diagram.ratio = 40;
+    app.diagram.ratio_from = 40;
+    app.diagram.ratio_target = 40;
+    app.diagram.anim_start = Some(Instant::now());
+    app.diagram.end_drag();
 
     crate::tui::mermaid::clear_active_diagrams();
     crate::tui::mermaid::register_active_diagram(0x445, 900, 450, None);
@@ -545,7 +545,7 @@ fn test_dragging_diagram_border_resizes_immediately_without_animation() {
         row: 10,
         modifiers: KeyModifiers::empty(),
     });
-    assert!(app.diagram_pane_dragging);
+    assert!(app.diagram.is_dragging());
 
     app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Drag(MouseButton::Left),
@@ -554,10 +554,10 @@ fn test_dragging_diagram_border_resizes_immediately_without_animation() {
         modifiers: KeyModifiers::empty(),
     });
 
-    assert_eq!(app.diagram_pane_ratio, 40);
-    assert_eq!(app.diagram_pane_ratio_from, 40);
-    assert_eq!(app.diagram_pane_ratio_target, 40);
-    assert!(app.diagram_pane_anim_start.is_none());
+    assert_eq!(app.diagram.ratio, 40);
+    assert_eq!(app.diagram.ratio_from, 40);
+    assert_eq!(app.diagram.ratio_target, 40);
+    assert!(app.diagram.anim_start.is_none());
 
     crate::tui::mermaid::clear_active_diagrams();
 }

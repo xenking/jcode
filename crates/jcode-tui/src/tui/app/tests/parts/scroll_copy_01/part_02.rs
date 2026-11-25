@@ -76,8 +76,8 @@ fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
 fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.push_display_message(DisplayMessage::user("OLD PROMPT MARKER"));
     app.push_display_message(DisplayMessage::assistant("OLD RESPONSE MARKER"));
     let backend = ratatui::backend::TestBackend::new(80, 25);
@@ -553,7 +553,7 @@ fn test_remote_ctrl_digit_side_panel_preset() {
 
     rt.block_on(app.handle_remote_key(KeyCode::Char('4'), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert_eq!(app.diagram_pane_ratio_target, 100);
+    assert_eq!(app.diagram.ratio_target, 100);
 }
 
 #[test]
@@ -729,8 +729,8 @@ fn test_remote_copy_badge_shortcut_supported() {
 fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     let mut messages = Vec::new();
     for prompt in 0..4 {
         messages.push(DisplayMessage::user(format!("prompt number {prompt}")));

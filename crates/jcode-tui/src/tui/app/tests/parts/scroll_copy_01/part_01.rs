@@ -36,8 +36,8 @@ fn create_scroll_test_app(
     if diagrams == 0 {
         // Process-global diagrams can be registered by sibling tests after the
         // clear above. Keep text-only geometry deterministic at the App level.
-        app.diagram_mode = crate::config::DiagramDisplayMode::None;
-        app.diagram_pane_enabled = false;
+        app.diagram.mode = crate::config::DiagramDisplayMode::None;
+        app.diagram.enabled = false;
     }
     let content = App::build_scroll_test_content(diagrams, padding, None);
     app.display_messages = vec![
@@ -339,8 +339,8 @@ fn render_and_snap(
 fn test_blockquote_paragraph_border_is_continuous_in_terminal_cells() {
     let _lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_blockquote_copy_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.display_messages[1].content =
         "Draft only:\n\n> Hello,\n>\n> A quoted paragraph.\n>\n> Thanks,\n> Someone\n\nOutside the quote."
             .to_string();
@@ -954,12 +954,12 @@ fn test_local_alt_m_hidden_side_panel_stays_hidden_across_snapshot_update() {
 fn test_local_alt_m_does_not_toggle_diagram_pane_when_side_panel_is_empty() {
     let mut app = create_test_app();
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
-    app.diagram_pane_enabled = true;
+    app.diagram.enabled = true;
 
     app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
         .unwrap();
 
-    assert!(app.diagram_pane_enabled);
+    assert!(app.diagram.enabled);
     assert!(
         app.status_notice()
             .is_some_and(|notice| notice.starts_with("Side panel: no pages")),
@@ -972,17 +972,17 @@ fn test_local_alt_m_does_not_toggle_diagram_pane_when_side_panel_is_empty() {
 fn test_local_alt_shift_m_toggles_diagram_pane() {
     let mut app = create_test_app();
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
-    app.diagram_pane_enabled = true;
+    app.diagram.enabled = true;
 
     app.handle_key(KeyCode::Char('M'), KeyModifiers::ALT | KeyModifiers::SHIFT)
         .unwrap();
-    assert!(!app.diagram_pane_enabled);
+    assert!(!app.diagram.enabled);
     assert_eq!(app.status_notice(), Some("Diagram pane: OFF".to_string()));
 
     // Legacy terminals send uppercase with only ALT.
     app.handle_key(KeyCode::Char('M'), KeyModifiers::ALT)
         .unwrap();
-    assert!(app.diagram_pane_enabled);
+    assert!(app.diagram.enabled);
     assert_eq!(app.status_notice(), Some("Diagram pane: ON".to_string()));
 }
 
@@ -1263,19 +1263,19 @@ fn test_ctrl_digit_side_panel_preset_in_app() {
 
     app.handle_key(KeyCode::Char('1'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.diagram_pane_ratio_target, 25);
+    assert_eq!(app.diagram.ratio_target, 25);
 
     app.handle_key(KeyCode::Char('2'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.diagram_pane_ratio_target, 50);
+    assert_eq!(app.diagram.ratio_target, 50);
 
     app.handle_key(KeyCode::Char('3'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.diagram_pane_ratio_target, 75);
+    assert_eq!(app.diagram.ratio_target, 75);
 
     app.handle_key(KeyCode::Char('4'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.diagram_pane_ratio_target, 100);
+    assert_eq!(app.diagram.ratio_target, 100);
 }
 
 #[test]

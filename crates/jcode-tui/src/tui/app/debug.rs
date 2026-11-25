@@ -479,18 +479,7 @@ pub(super) struct ScrollTestState {
     status: ProcessingStatus,
     processing_started: Option<Instant>,
     status_notice: Option<(String, Instant)>,
-    diagram_mode: crate::config::DiagramDisplayMode,
-    diagram_focus: bool,
-    diagram_index: usize,
-    diagram_scroll_x: i32,
-    diagram_scroll_y: i32,
-    diagram_pane_ratio: u8,
-    diagram_pane_ratio_from: u8,
-    diagram_pane_ratio_target: u8,
-    diagram_pane_anim_start: Option<Instant>,
-    diagram_pane_enabled: bool,
-    diagram_pane_position: crate::config::DiagramPanePosition,
-    diagram_zoom: u8,
+    diagram: super::diagram_pane::DiagramSnapshot,
 }
 
 impl ScrollTestState {
@@ -517,18 +506,7 @@ impl ScrollTestState {
             status: app.status.clone(),
             processing_started: app.processing_started,
             status_notice: app.status_notice.clone(),
-            diagram_mode: app.diagram_mode,
-            diagram_focus: app.diagram_focus,
-            diagram_index: app.diagram_index,
-            diagram_scroll_x: app.diagram_scroll_x,
-            diagram_scroll_y: app.diagram_scroll_y,
-            diagram_pane_ratio: app.diagram_pane_ratio,
-            diagram_pane_ratio_from: app.diagram_pane_ratio_from,
-            diagram_pane_ratio_target: app.diagram_pane_ratio_target,
-            diagram_pane_anim_start: app.diagram_pane_anim_start,
-            diagram_pane_enabled: app.diagram_pane_enabled,
-            diagram_pane_position: app.diagram_pane_position,
-            diagram_zoom: app.diagram_zoom,
+            diagram: app.diagram.snapshot(),
         }
     }
 
@@ -554,18 +532,7 @@ impl ScrollTestState {
         app.status = self.status;
         app.processing_started = self.processing_started;
         app.status_notice = self.status_notice;
-        app.diagram_mode = self.diagram_mode;
-        app.diagram_focus = self.diagram_focus;
-        app.diagram_index = self.diagram_index;
-        app.diagram_scroll_x = self.diagram_scroll_x;
-        app.diagram_scroll_y = self.diagram_scroll_y;
-        app.diagram_pane_ratio = self.diagram_pane_ratio;
-        app.diagram_pane_ratio_from = self.diagram_pane_ratio_from;
-        app.diagram_pane_ratio_target = self.diagram_pane_ratio_target;
-        app.diagram_pane_anim_start = self.diagram_pane_anim_start;
-        app.diagram_pane_enabled = self.diagram_pane_enabled;
-        app.diagram_pane_position = self.diagram_pane_position;
-        app.diagram_zoom = self.diagram_zoom;
+        app.diagram.restore(&self.diagram);
     }
 }
 

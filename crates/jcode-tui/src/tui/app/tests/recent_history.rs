@@ -14,8 +14,8 @@ fn recent_history_test_app() -> App {
 fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
     let _lock = scroll_render_test_lock();
     let mut app = recent_history_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.status = ProcessingStatus::Idle;
     let messages = std::iter::once(app.display_messages[0].clone())
         .chain((0..128).map(|i| {

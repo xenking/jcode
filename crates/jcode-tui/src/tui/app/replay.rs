@@ -589,7 +589,7 @@ mod tests {
                     },
                     Some(false),
                 );
-                pane.app.diagram_mode = crate::config::DiagramDisplayMode::None;
+                pane.app.diagram.hide();
                 pane.app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content: jcode_tui_mermaid::image_widget_placeholder_markdown(hash),
