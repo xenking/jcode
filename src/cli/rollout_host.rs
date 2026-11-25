@@ -37,6 +37,7 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
         jcode_ref: args.jcode_ref,
         desktop_ref: args.desktop_ref,
         desktop: !args.no_desktop,
+        skip_acceptance_smoke: args.skip_acceptance_smoke,
     };
     let mut host = MacHost::new()?;
     tokio::task::block_in_place(|| {
@@ -46,9 +47,6 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
             host.terminal_at_start = crate::server::rollout::read_journal()?
                 .filter(|journal| journal.phase.terminal())
                 .map(|journal| journal.id);
-            if let Err(error) = crate::server::rollout::sweep_before_rollout(&host.layout.app) {
-                eprintln!("Could not prune stale rollout bundles: {error:#}");
-            }
         }
         if options.reviewed {
             let super::rollout::Outcome::Submitted(id) =
@@ -143,6 +141,7 @@ impl MacHost {
                 target_dir,
                 app: crate::server::rollout::app_path(),
                 builds: crate::build::builds_dir()?,
+                acceptance_dir: jcode_home.join("rollout-acceptance"),
             },
             jcode_home,
             own_session: std::env::var_os("JCODE_SESSION_ID")
@@ -434,6 +433,9 @@ impl Host for MacHost {
                         bail!("the running daemon does not support reviewed updates");
                     }
                     self.require_reviewed_update(pair)?;
+                }
+                if let Err(error) = crate::server::rollout::sweep_before_rollout(&self.layout.app) {
+                    eprintln!("Could not prune stale rollout bundles: {error:#}");
                 }
                 self.preparation = Some(lease);
                 Ok(None)
@@ -997,6 +999,7 @@ mod tests {
                 dist_dir: root.join("dist"),
                 app: root.join("app"),
                 builds: root.join("builds"),
+                acceptance_dir: root.join("rollout-acceptance"),
             },
             jcode_home: root.to_owned(),
             own_session: None,

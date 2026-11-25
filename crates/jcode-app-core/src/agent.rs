@@ -1260,9 +1260,19 @@ impl Agent {
         if fold_planned || matches!(boundary, CompactionBoundary::Idle) {
             return None;
         }
+        // The message estimate leaves out the system prompt and tool schemas,
+        // and the provider's own count lives in memory, so right after a daemon
+        // restart this said "76K" for a 116K prompt (2026-11-25). The cache
+        // checkpoint keeps the last request's real size across the restart.
+        let prompt_tokens = tokens_before.max(
+            self.kv_cache_monitor
+                .last_request_tokens()
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .unwrap_or(0),
+        );
         let detail = format!(
             "🧊 Cache cold · ~{}K tok re-cached in full",
-            tokens_before / 1000
+            prompt_tokens / 1000
         );
         let already_noted = self.session.replay_events.last().is_some_and(|last| {
             matches!(
@@ -1278,8 +1288,8 @@ impl Agent {
         let event = CompactionEvent {
             trigger: reason.label().to_string(),
             method: Some(crate::session::CACHE_COLD_DIVIDER_METHOD.to_string()),
-            pre_tokens: Some(tokens_before as u64),
-            post_tokens: Some(tokens_before as u64),
+            pre_tokens: Some(prompt_tokens as u64),
+            post_tokens: Some(prompt_tokens as u64),
             tokens_saved: Some(0),
             duration_ms: None,
             messages_dropped: None,

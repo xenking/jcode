@@ -1,7 +1,18 @@
 use super::*;
 use std::cell::RefCell;
 
+const CLI_SHA: &str = "abcdef1234567890000000000000000000000000";
+const DESKTOP_SHA: &str = "7654321fedcba000000000000000000000000000";
+
+fn pair() -> Pair {
+    Pair {
+        cli: CLI_SHA.into(),
+        desktop: DESKTOP_SHA.into(),
+    }
+}
+
 struct Fake {
+    _receipts: tempfile::TempDir,
     layout: Layout,
     arch: String,
     free: u64,
@@ -13,6 +24,8 @@ struct Fake {
 
 impl Fake {
     fn new() -> Self {
+        let receipts = tempfile::tempdir().unwrap();
+        acceptance::write_fixture(receipts.path(), &pair(), None);
         Self {
             layout: Layout {
                 jcode_repo: "/repos/jcode".into(),
@@ -23,7 +36,9 @@ impl Fake {
                 dist_dir: "/dist".into(),
                 app: "/fake/Applications/Jcode.app".into(),
                 builds: "/home/builds".into(),
+                acceptance_dir: receipts.path().to_owned(),
             },
+            _receipts: receipts,
             arch: "arm64".into(),
             free: 100,
             built: false,
@@ -49,8 +64,8 @@ impl Host for Fake {
             self.mutations.borrow_mut().push("fetch".into());
         }
         Ok(match repo {
-            Repo::Jcode => "abcdef123456789",
-            Repo::Desktop => "7654321fedcba",
+            Repo::Jcode => CLI_SHA,
+            Repo::Desktop => DESKTOP_SHA,
         }
         .into())
     }
@@ -105,6 +120,63 @@ impl Host for Fake {
         ));
         Ok("rollout_fixture".into())
     }
+}
+
+#[test]
+fn paired_rollout_refuses_missing_blocked_and_wrong_pair_receipts_before_build() {
+    let mut host = Fake::new();
+    let dir = host.layout.acceptance_dir.clone();
+    let receipt = acceptance::require(&host.layout, &pair()).unwrap();
+    let dry_run = RolloutOptions {
+        dry_run: true,
+        ..RolloutOptions::default()
+    };
+
+    std::fs::remove_file(&receipt).unwrap();
+    let err = run(&mut host, &dry_run, &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("rollout refused") && err.contains("scripts/accept-smoke.py"));
+    assert!(err.contains(CLI_SHA) && err.contains(DESKTOP_SHA));
+    assert!(host.mutations.borrow().is_empty());
+
+    acceptance::write_fixture(&dir, &pair(), Some("ask_answer"));
+    let err = run(&mut host, &RolloutOptions::default(), &mut Vec::new()).unwrap_err();
+    assert!(format!("{err:#}").contains("required flow ask_answer did not pass"));
+    assert_eq!(*host.mutations.borrow(), ["fetch", "fetch"]);
+    assert!(host.submitted.is_none());
+
+    let wrong = Pair {
+        cli: DESKTOP_SHA.into(),
+        desktop: CLI_SHA.into(),
+    };
+    let wrong_path = acceptance::write_fixture(&dir, &wrong, None);
+    std::fs::copy(wrong_path, &receipt).unwrap();
+    let err = run(&mut host, &dry_run, &mut Vec::new()).unwrap_err();
+    assert!(format!("{err:#}").contains("SHA pair does not match"));
+
+    acceptance::write_fixture(&dir, &pair(), None);
+    assert_eq!(
+        run(&mut host, &dry_run, &mut Vec::new()).unwrap(),
+        Outcome::Planned
+    );
+}
+
+#[test]
+fn explicit_emergency_override_is_visible_without_a_receipt() {
+    let mut host = Fake::new();
+    std::fs::remove_file(acceptance::require(&host.layout, &pair()).unwrap()).unwrap();
+    let opts = RolloutOptions {
+        dry_run: true,
+        skip_acceptance_smoke: true,
+        ..RolloutOptions::default()
+    };
+    let mut out = Vec::new();
+    assert_eq!(run(&mut host, &opts, &mut out).unwrap(), Outcome::Planned);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("WARN") && text.contains("--skip-acceptance-smoke"));
+    assert!(text.contains(CLI_SHA) && text.contains(DESKTOP_SHA));
+    assert!(host.mutations.borrow().is_empty());
 }
 
 #[test]
