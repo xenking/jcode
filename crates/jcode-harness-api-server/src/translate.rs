@@ -13,7 +13,8 @@ mod turn_identity_tests;
 use crate::background_progress::parse_background_notification;
 use control_replies::SimpleKind;
 use jcode_harness_api::{
-    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, RewindAnchor, ServerFrame, SessionInfo,
+    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ModelSwitchState, RewindAnchor,
+    ServerFrame, SessionInfo,
     TextMatch,
 };
 use rusqlite::{Connection, params};
@@ -75,6 +76,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "get_compacted_history",
     "list_models",
     "set_model",
+    "cancel_pending_model",
     "set_context_cap",
     "routing_gate_answer",
     "routing_intent",
@@ -254,6 +256,9 @@ pub struct BridgeState {
     /// Reasoning effort last reported by the daemon, so identity events can
     /// carry it without a round trip.
     current_effort: Option<String>,
+    /// Legacy id of the model switch the daemon queued behind a running
+    /// turn. Its `model_changed` settles it, and carries no reply to correlate.
+    pending_model_switch: Option<u64>,
     current_speed_mode: jcode_harness_api::SpeedMode,
     current_speed_options: Vec<jcode_harness_api::SpeedOption>,
     available_routes: Vec<ModelRouteInfo>,
@@ -1521,6 +1526,15 @@ impl BridgeState {
                     "type": "set_model",
                     "id": id,
                     "model": model,
+                }))]
+            }
+            "cancel_pending_model" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ModelSwitchCancel));
+                vec![Outbound::Legacy(json!({
+                    "type": "cancel_pending_model_change",
+                    "id": id,
                 }))]
             }
             "set_speed_mode" => {
@@ -3124,9 +3138,51 @@ impl BridgeState {
                 }
                 frames
             }
+            "model_change_pending" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                // The switch is accepted, so the request is answered now
+                // instead of timing out behind the running turn.
+                let reply_to = self.take_simple(id, SimpleKind::Model);
+                self.pending_model_switch = Some(id);
+                let queued = ApiEvent::ModelSwitch {
+                    session_id: session(self),
+                    state: ModelSwitchState::Queued,
+                    model: event["model"].as_str().map(str::to_string),
+                    error: None,
+                };
+                let mut frames = vec![ServerFrame::event(queued)];
+                if let Some(api_id) = reply_to {
+                    frames.push(ServerFrame::reply(api_id, ApiEvent::Ok));
+                }
+                frames
+            }
+            "model_change_cancelled" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let reply_to = self.take_simple(id, SimpleKind::ModelSwitchCancel);
+                if event["pending_id"].as_u64() == self.pending_model_switch
+                    || event["pending_id"].is_null()
+                {
+                    self.pending_model_switch = None;
+                }
+                let cancelled = ApiEvent::ModelSwitch {
+                    session_id: session(self),
+                    state: ModelSwitchState::Cancelled,
+                    model: event["model"].as_str().map(str::to_string),
+                    error: None,
+                };
+                let mut frames = vec![ServerFrame::event(cancelled)];
+                if let Some(api_id) = reply_to {
+                    frames.push(ServerFrame::reply(api_id, ApiEvent::Ok));
+                }
+                frames
+            }
             "model_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let reply_to = self.take_simple(id, SimpleKind::Model);
+                let settles_pending = self.pending_model_switch == Some(id);
+                if settles_pending {
+                    self.pending_model_switch = None;
+                }
                 // The daemon reports a rejected switch in-band, as an `error`
                 // field on the success event rather than as an error frame.
                 // Relayed as a real error so a client sees a failed request
@@ -3138,6 +3194,16 @@ impl BridgeState {
                     };
                     return match reply_to {
                         Some(api_id) => vec![ServerFrame::reply(api_id, frame)],
+                        // A queued switch that failed to apply has no request
+                        // left to answer, so it is reported as an event.
+                        None if settles_pending => vec![ServerFrame::event(
+                            ApiEvent::ModelSwitch {
+                                session_id: session(self),
+                                state: ModelSwitchState::Failed,
+                                model: None,
+                                error: Some(error.to_string()),
+                            },
+                        )],
                         None => vec![],
                     };
                 }
@@ -3169,13 +3235,19 @@ impl BridgeState {
                 // Both a reply and a broadcast: the caller needs its request
                 // resolved, and every other client watching the session needs
                 // to know the model moved under them.
-                match reply_to {
-                    Some(api_id) => vec![
-                        ServerFrame::reply(api_id, ApiEvent::Ok),
-                        ServerFrame::event(info),
-                    ],
-                    None => vec![ServerFrame::event(info)],
+                let mut frames = vec![ServerFrame::event(info)];
+                if settles_pending {
+                    frames.push(ServerFrame::event(ApiEvent::ModelSwitch {
+                        session_id: session(self),
+                        state: ModelSwitchState::Applied,
+                        model: self.current_model.clone(),
+                        error: None,
+                    }));
                 }
+                if let Some(api_id) = reply_to {
+                    frames.insert(0, ServerFrame::reply(api_id, ApiEvent::Ok));
+                }
+                frames
             }
             "status_detail"
                 if self.current_speed_mode != jcode_harness_api::SpeedMode::Standard =>

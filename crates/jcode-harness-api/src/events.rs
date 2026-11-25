@@ -690,6 +690,22 @@ pub enum ApiEvent {
         account_label: Option<String>,
     },
 
+    /// Where a model switch stands. A switch asked for mid-turn is answered
+    /// at once with `Queued`, because the model cannot change under a running
+    /// turn. The session keeps its current model, reported by `ModelInfo`,
+    /// until `Applied` (or `Failed`) follows once the turn ends. `Cancelled`
+    /// means the switch was withdrawn or replaced and will not apply.
+    ModelSwitch {
+        session_id: String,
+        state: ModelSwitchState,
+        /// The model the switch targets. `None` when nothing was pending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Why a queued switch failed to apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// Reply to `ListModels`: the models this session can switch to.
     Models {
         session_id: String,
@@ -829,6 +845,20 @@ pub enum ApiEvent {
     /// Forward-compatibility catch-all: clients must skip this silently.
     #[serde(other)]
     Unknown,
+}
+
+/// State of a model switch reported by `ApiEvent::ModelSwitch`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSwitchState {
+    /// Accepted, waiting for the running turn to end.
+    Queued,
+    /// The queued switch took effect.
+    Applied,
+    /// The queued switch was withdrawn or replaced.
+    Cancelled,
+    /// The queued switch could not apply.
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

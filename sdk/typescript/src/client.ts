@@ -1202,6 +1202,11 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_model", session_id: sessionId, model });
   }
 
+  /** Withdraw a model switch that `setModel` queued behind a running turn. */
+  async cancelPendingModel(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "cancel_pending_model", session_id: sessionId });
+  }
+
   /** Override a session context budget. Null or zero restores its default. */
   async setContextCap(sessionId: string, maxContextTokens: number | null): Promise<number> {
     if (maxContextTokens !== null && (!Number.isSafeInteger(maxContextTokens) || maxContextTokens < 0)) {

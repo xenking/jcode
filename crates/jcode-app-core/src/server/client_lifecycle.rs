@@ -45,7 +45,7 @@ use super::comm_sync::{
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
 use super::provider_control::{
-    handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
+    handle_cancel_pending_model_change, handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
     handle_set_route, handle_set_service_tier, handle_set_transport,
@@ -2500,6 +2500,10 @@ pub(super) async fn handle_client(
 
             Request::SetModel { id, model } => {
                 handle_set_model(id, model, &agent, &client_event_tx).await;
+            }
+
+            Request::CancelPendingModelChange { id } => {
+                handle_cancel_pending_model_change(id, &agent, &client_event_tx);
             }
 
             Request::SetRoute { id, selection, automatic_failover } => {

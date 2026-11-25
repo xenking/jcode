@@ -2357,6 +2357,115 @@ fn a_requested_model_change_replies_and_broadcasts() {
     assert_eq!(state.current_model.as_deref(), Some("claude-fable-5"));
 }
 
+/// A switch the daemon cannot apply mid-turn is answered at once, so the
+/// client's request resolves instead of timing out behind the turn. The model
+/// stays as it was until the switch lands, and every step is reported.
+#[test]
+fn a_queued_model_change_answers_immediately_and_settles_later() {
+    let mut state = state_with_session();
+    state.current_model = Some("claude-opus-5-5".into());
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "set_model", "model": "gpt-6.2-sol",
+    }));
+    let legacy_id = match &out[..] {
+        [Outbound::Legacy(value)] => value["id"].as_u64().unwrap(),
+        other => panic!("expected a daemon request, got {other:?}"),
+    };
+
+    let queued = state.legacy_event_to_api(&json!({
+        "type": "model_change_pending", "id": legacy_id, "model": "gpt-6.2-sol",
+    }));
+    assert_eq!(queued.len(), 2, "a queued event and the reply");
+    assert!(matches!(
+        &queued[0].event,
+        ApiEvent::ModelSwitch { state: ModelSwitchState::Queued, model: Some(model), .. }
+            if model == "gpt-6.2-sol"
+    ));
+    assert_eq!(queued[1].reply_to, Some(4));
+    assert!(matches!(queued[1].event, ApiEvent::Ok));
+    assert_eq!(
+        state.current_model.as_deref(),
+        Some("claude-opus-5-5"),
+        "a queued switch must not move the running model"
+    );
+
+    let applied = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": legacy_id,
+        "model": "gpt-6.2-sol", "provider_name": "openai",
+    }));
+    assert!(applied
+        .iter()
+        .all(|frame| frame.reply_to.is_none()), "the request was already answered");
+    assert!(applied
+        .iter()
+        .any(|frame| matches!(frame.event, ApiEvent::ModelInfo { .. })));
+    assert!(applied.iter().any(|frame| matches!(
+        &frame.event,
+        ApiEvent::ModelSwitch { state: ModelSwitchState::Applied, model: Some(model), .. }
+            if model == "gpt-6.2-sol"
+    )));
+    assert_eq!(state.current_model.as_deref(), Some("gpt-6.2-sol"));
+}
+
+#[test]
+fn a_queued_model_change_can_be_cancelled_or_fail() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "set_model", "model": "gpt-6.2-sol",
+    }));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    state.legacy_event_to_api(&json!({
+        "type": "model_change_pending", "id": legacy_id, "model": "gpt-6.2-sol",
+    }));
+
+    let out = state.api_request_to_legacy(&json!({"id": 5, "req": "cancel_pending_model"}));
+    let cancel_id = match &out[..] {
+        [Outbound::Legacy(value)] => {
+            assert_eq!(value["type"], "cancel_pending_model_change");
+            value["id"].as_u64().unwrap()
+        }
+        other => panic!("expected a daemon request, got {other:?}"),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_change_cancelled", "id": cancel_id,
+        "pending_id": legacy_id, "model": "gpt-6.2-sol",
+    }));
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.event,
+        ApiEvent::ModelSwitch { state: ModelSwitchState::Cancelled, model: Some(model), .. }
+            if model == "gpt-6.2-sol"
+    )));
+    assert!(frames
+        .iter()
+        .any(|frame| frame.reply_to == Some(5) && matches!(frame.event, ApiEvent::Ok)));
+
+    // A queued switch that the daemon then rejects is an event, not silence.
+    let out = state.api_request_to_legacy(&json!({
+        "id": 6, "req": "set_model", "model": "nope",
+    }));
+    let failing_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    state.legacy_event_to_api(&json!({
+        "type": "model_change_pending", "id": failing_id, "model": "nope",
+    }));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": failing_id, "model": "a", "error": "unknown model",
+    }));
+    assert!(matches!(
+        &frames[..],
+        [frame] if matches!(
+            &frame.event,
+            ApiEvent::ModelSwitch { state: ModelSwitchState::Failed, error: Some(error), .. }
+                if error == "unknown model"
+        )
+    ));
+}
+
 /// The daemon reports a rejected switch in-band, on a success-shaped event.
 /// Reporting success there would leave the client's picker showing a model
 /// the session is not using.

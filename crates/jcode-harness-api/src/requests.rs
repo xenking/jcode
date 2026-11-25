@@ -514,6 +514,13 @@ pub enum ApiRequest {
         model: String,
     },
 
+    /// Withdraw a model switch that `SetModel` queued behind a running turn.
+    /// Replies with `Ok`, and `ModelSwitch { state: cancelled }` follows. With
+    /// nothing queued the event carries no model.
+    CancelPendingModel {
+        session_id: String,
+    },
+
     /// Answer a `RoutingGate` event. Replies with `Ok`, or an error when the
     /// gate is no longer waiting.
     RoutingGateAnswer {

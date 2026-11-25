@@ -99,6 +99,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("todo_state", "todoState"),
     cap("ack_todo_follow_up", "ackTodoFollowUp"),
     cap("set_model", "setModel"),
+    cap("cancel_pending_model", "cancelPendingModel"),
     cap("set_context_cap", "setContextCap"),
     cap("answer_routing_gate", "answerRoutingGate"),
     cap("routing_intent", "routingIntent"),

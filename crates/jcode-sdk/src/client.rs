@@ -1810,11 +1810,22 @@ impl JcodeClient {
     }
 
     /// Switch the session to a different model. `model` is an id from
-    /// `list_models`.
+    /// `list_models`. While a turn is running the switch cannot apply yet:
+    /// the call returns at once, [`ApiEvent::ModelSwitch`] reports it as
+    /// queued, and the session keeps its model until the turn ends.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
         self.request_ok(ApiRequest::SetModel {
             session_id: session_id.to_string(),
             model: model.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Withdraw a model switch that [`Self::set_model`] queued behind a
+    /// running turn. The switch is reported through [`ApiEvent::ModelSwitch`].
+    pub fn cancel_pending_model(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::CancelPendingModel {
+            session_id: session_id.to_string(),
         })
         .map(drop)
     }
@@ -2195,6 +2206,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SwarmStatus { session_id, .. }
         | SessionRecovery { session_id, .. }
         | ModelInfo { session_id, .. }
+        | ModelSwitch { session_id, .. }
         | RuntimeInfo { session_id, .. }
         | SpeedModeChanged { session_id, .. }
         | SpeedModeReported { session_id, .. }

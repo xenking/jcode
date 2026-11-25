@@ -578,6 +578,7 @@ export type ApiRequest =
   | { req: "get_todo_state"; session_id: string }
   | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
+  | { req: "cancel_pending_model"; session_id: string }
   | { req: "set_context_cap"; session_id: string; max_context_tokens: number | null }
   | { req: "routing_gate_answer"; session_id: string; gate_id: string; choice: RoutingGateChoice }
   | { req: "routing_intent"; session_id: string; action: RoutingIntentAction }
@@ -915,6 +916,18 @@ export type ApiEvent =
       /** OAuth account the daemon's account router selected. */
       account_label?: string;
     }
+  /**
+   * Where a model switch stands. A switch asked for mid-turn is answered with
+   * `queued` and applies once the turn ends. `model_info` keeps the model the
+   * session actually runs until `applied` follows.
+   */
+  | {
+      ev: "model_switch";
+      session_id: string;
+      state: "queued" | "applied" | "cancelled" | "failed";
+      model?: string;
+      error?: string;
+    }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
       ev: "runtime_info";
@@ -1087,6 +1100,7 @@ export const KNOWN_EVENT_KINDS = [
   "session_recovery",
   "connection_phase",
   "model_info",
+  "model_switch",
   "models",
   "runtime_info",
   "speed_mode_changed",
@@ -1168,6 +1182,7 @@ export const KNOWN_REQUEST_KINDS = [
   "get_todo_state",
   "ack_todo_follow_up",
   "set_model",
+  "cancel_pending_model",
   "set_context_cap",
   "routing_gate_answer",
   "routing_intent",

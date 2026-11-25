@@ -596,6 +596,11 @@ pub enum Request {
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
 
+    /// Withdraw the model switch the daemon accepted but deferred until the
+    /// running turn ends. Answered with `model_change_cancelled`.
+    #[serde(rename = "cancel_pending_model_change")]
+    CancelPendingModelChange { id: u64 },
+
     /// Set a session context budget override. Null or zero clears the override.
     #[serde(rename = "set_context_cap")]
     SetContextCap {

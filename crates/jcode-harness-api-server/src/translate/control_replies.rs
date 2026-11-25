@@ -31,6 +31,9 @@ pub(super) enum SimpleKind {
     OkOnHistory,
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
+    /// Awaiting `model_change_cancelled`, the answer to withdrawing a queued
+    /// model switch.
+    ModelSwitchCancel,
     ContextCap,
     /// Awaiting `routing_status`, the text answer to a routing intent.
     Routing,

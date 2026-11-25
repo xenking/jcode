@@ -1019,6 +1019,31 @@ pub enum ServerEvent {
         reasoning_effort: Option<String>,
     },
 
+    /// A model switch was accepted but cannot apply until the running turn
+    /// ends. The session keeps running its current model until a later
+    /// `model_changed` carrying the same `id` (or `model_change_cancelled`)
+    /// settles it.
+    #[serde(rename = "model_change_pending")]
+    ModelChangePending {
+        id: u64,
+        /// The model the switch will move to, or a short description when
+        /// the target is only known once it applies (cycling).
+        model: String,
+    },
+
+    /// A pending model switch will not apply: the user withdrew it, a newer
+    /// request replaced it, or the session ended. `id` is the id of the
+    /// request that settled it, `pending_id` the id of the switch itself.
+    #[serde(rename = "model_change_cancelled")]
+    ModelChangeCancelled {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_id: Option<u64>,
+        /// None when nothing was pending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+
     /// Reasoning effort changed (response to set_reasoning_effort)
     #[serde(rename = "reasoning_effort_changed")]
     ReasoningEffortChanged {

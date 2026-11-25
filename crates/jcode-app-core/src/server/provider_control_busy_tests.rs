@@ -664,13 +664,21 @@ async fn set_model_does_not_wait_for_busy_agent_lock() {
     .await
     .expect("model changes must not wait for a busy agent mutex");
 
-    assert!(client_event_rx.try_recv().is_err());
+    // The client hears at once that the switch waits for the turn, and the
+    // session keeps its current model until then.
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 8, model }) if model == "test-model-b"
+    ));
+    assert_eq!(provider.model(), "test-model-a");
+    assert!(has_pending_model_switch(&agent));
 
     drop(busy_agent_lock);
 
     let event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
         .expect("deferred model change should finish after agent is idle");
+    assert!(!has_pending_model_switch(&agent));
     assert_eq!(provider.model(), "test-model-b");
     assert_eq!(agent.lock().await.compaction_token_budget().await, 32_000);
     assert!(matches!(
@@ -683,6 +691,88 @@ async fn set_model_does_not_wait_for_busy_agent_lock() {
             ..
         }) if model == "test-model-b" && provider_name == "test-effort"
     ));
+}
+
+#[tokio::test]
+async fn cancelled_pending_model_change_never_applies() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, tx, mut rx) = test_agent("session_cancel_pending_model").await;
+    let busy_agent_lock = agent.lock().await;
+
+    handle_set_model(21, "test-model-b".to_string(), &agent, &tx).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 21, .. })
+    ));
+
+    handle_cancel_pending_model_change(22, &agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 22,
+            pending_id: Some(21),
+            model: Some(model),
+        }) if model == "test-model-b"
+    ));
+    assert!(!has_pending_model_switch(&agent));
+
+    drop(busy_agent_lock);
+    // Let the queued task run and see it was withdrawn.
+    let _ = agent.lock().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(provider.model(), "test-model-a");
+    assert!(rx.try_recv().is_err(), "a withdrawn switch stays silent");
+
+    // Nothing waiting: the answer says so.
+    handle_cancel_pending_model_change(23, &agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 23,
+            pending_id: None,
+            model: None,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn newer_pending_model_change_replaces_the_older_one() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, tx, mut rx) = test_agent("session_replace_pending_model").await;
+    let busy_agent_lock = agent.lock().await;
+
+    handle_set_model(31, "test-model-b".to_string(), &agent, &tx).await;
+    handle_set_model(32, "test-model-a".to_string(), &agent, &tx).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 31, .. })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 32,
+            pending_id: Some(31),
+            ..
+        })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 32, .. })
+    ));
+
+    drop(busy_agent_lock);
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the newest switch applies")
+        .unwrap();
+    assert!(matches!(event, ServerEvent::ModelChanged { id: 32, .. }));
+    assert_eq!(provider.model(), "test-model-a");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rx.try_recv().is_err(), "the replaced switch never applies");
 }
 
 #[tokio::test]

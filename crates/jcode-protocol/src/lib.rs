@@ -960,6 +960,7 @@ impl Request {
             Request::CycleModel { id, .. } => *id,
             Request::RefreshModels { id } => *id,
             Request::SetModel { id, .. } => *id,
+            Request::CancelPendingModelChange { id } => *id,
             Request::SetContextCap { id, .. } => *id,
             Request::SetRoute { id, .. } => *id,
             Request::SetSubagentModel { id, .. } | Request::SetAgentModel { id, .. } => *id,

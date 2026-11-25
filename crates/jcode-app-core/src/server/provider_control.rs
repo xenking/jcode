@@ -92,6 +92,13 @@ pub(super) async fn try_available_models_catalog_offloaded(
 mod catalog_activity;
 use catalog_activity::format_auth_catalog_refresh_complete;
 
+#[path = "provider_control/pending_model_switch.rs"]
+mod pending_model_switch;
+pub(super) use pending_model_switch::handle_cancel_pending_model_change;
+use pending_model_switch::defer_model_switch;
+#[cfg(test)]
+use pending_model_switch::has_pending_model_switch;
+
 #[path = "provider_control/deferred_operations.rs"]
 mod deferred_operations;
 use deferred_operations::{
@@ -227,11 +234,12 @@ pub(super) async fn handle_cycle_model(
     if let Ok(mut agent_guard) = agent.try_lock() {
         apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
     } else {
-        spawn_deferred_agent_mutation(
+        defer_model_switch(
             "cycle_model",
             id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
+            if direction >= 0 { "next model" } else { "previous model" }.to_string(),
+            agent,
+            client_event_tx,
             move |agent_guard, client_event_tx| {
                 apply_cycle_model(id, direction, agent_guard, client_event_tx);
             },
@@ -421,11 +429,12 @@ pub(super) async fn handle_set_model(
     if let Ok(mut agent_guard) = agent.try_lock() {
         apply_set_model(id, model, &mut agent_guard, client_event_tx);
     } else {
-        spawn_deferred_agent_mutation(
+        defer_model_switch(
             "set_model",
             id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
+            model.clone(),
+            agent,
+            client_event_tx,
             move |agent_guard, client_event_tx| {
                 apply_set_model(id, model, agent_guard, client_event_tx);
             },
@@ -449,11 +458,12 @@ pub(super) async fn handle_set_route(
             client_event_tx,
         );
     } else {
-        spawn_deferred_agent_mutation(
+        defer_model_switch(
             "set_route",
             id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
+            selection.model.clone(),
+            agent,
+            client_event_tx,
             move |agent_guard, client_event_tx| {
                 apply_set_route(
                     id,

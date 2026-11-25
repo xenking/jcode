@@ -48,6 +48,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("AskUserResponse", Covered),
     ("BackgroundTool", Covered),
     ("Cancel", Covered),
+    ("CancelPendingModelChange", Covered),
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
