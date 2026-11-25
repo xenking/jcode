@@ -35,7 +35,7 @@ pub(crate) struct Refusal {
 }
 
 impl Refusal {
-    fn new(category: &'static str, message: String) -> anyhow::Error {
+    fn error(category: &'static str, message: String) -> anyhow::Error {
         anyhow::Error::new(Self { category, message })
     }
 }
@@ -69,7 +69,7 @@ pub(crate) async fn require(
     let route = super::interactive::sender(&ctx.session_id)
         .or_else(|| ctx.stdin_request_tx.clone().filter(|tx| !tx.is_closed()));
     let Some(route) = route else {
-        return Err(Refusal::new(
+        return Err(Refusal::error(
             "Needs a human yes",
             format!(
                 "MCP tool '{tool}' on server '{server}' needs a human yes (approval = \"annotations\") \
@@ -112,7 +112,7 @@ pub(crate) async fn require(
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            return Err(Refusal::new(
+            return Err(Refusal::error(
                 "No answer to the prompt",
                 format!(
                     "MCP tool '{tool}' on server '{server}' was not approved: no answer ({error:#}). \
@@ -125,7 +125,7 @@ pub(crate) async fn require(
         matches!(answers.as_slice(), [answer] if answer.selected == [ALLOW] && answer.other.is_none())
     });
     if !allowed {
-        return Err(Refusal::new(
+        return Err(Refusal::error(
             "Denied by the user",
             format!(
                 "MCP tool '{tool}' on server '{server}' was denied by the user. The call did not run; \

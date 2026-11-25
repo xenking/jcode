@@ -383,7 +383,7 @@ impl Tool for McpCallTool {
             });
         config
             .requires_approval(&tool_def)
-            .then(|| jcode_tool_core::McpApprovalRequest {
+            .then_some(jcode_tool_core::McpApprovalRequest {
                 server: params.server,
                 tool: params.tool,
                 arguments: params.arguments,

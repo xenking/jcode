@@ -77,10 +77,10 @@ pub fn parse_verdict(reply: &str) -> Verdict {
         let keyword_len = level.as_str().len();
         let rest_of_first = first
             .trim()
-            .trim_start_matches(|c: char| matches!(c, '*' | '#' | '['))
+            .trim_start_matches(['*', '#', '['])
             .get(keyword_len..)
             .unwrap_or("")
-            .trim_start_matches(|c: char| matches!(c, '*' | ']' | ':' | '.' | '-' | ' '));
+            .trim_start_matches(['*', ']', ':', '.', '-', ' ']);
         let body: Vec<&str> = trimmed.lines().skip(1).collect();
         [rest_of_first, body.join("\n").trim()]
             .into_iter()
