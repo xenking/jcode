@@ -2,7 +2,7 @@
 //! agent sees it.
 //!
 //! The durable recovery journal belongs to the server, which installs itself
-//! here the first time it touches the journal. A process that never ran a
+//! here when it starts owning recovery. A process that never ran a
 //! server (a plain headless run) has no journal: every input is admitted and
 //! nothing is pending to cancel, which is exactly what the journal answers
 //! when it holds no record.

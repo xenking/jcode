@@ -68,7 +68,7 @@ async fn await_dependency_id_survives_retry_and_releases_on_completion() {
         ids.push(id);
     }
     assert_eq!(ids[0], ids[1], "duplicate requests retain their generation");
-    crate::server::subscribe_await_dependency(&ids[0], requester).unwrap();
+    crate::await_members_state::subscribe_dependency(&ids[0], requester).unwrap();
     let mut bus = crate::bus::Bus::global().subscribe();
     members.write().await.get_mut(peer).unwrap().status = "completed".into();
     let _ = events.send(swarm_event(
@@ -99,7 +99,7 @@ async fn await_dependency_id_survives_retry_and_releases_on_completion() {
     let terminal = crate::todo::await_dependency::load(runtime_dir.path(), &ids[0]).unwrap();
     assert!(terminal.final_response.is_some());
     // Completion won the race with a late subscription: it must stay terminal.
-    crate::server::subscribe_await_dependency(&ids[0], requester).unwrap();
+    crate::await_members_state::subscribe_dependency(&ids[0], requester).unwrap();
     assert!(!crate::todo::await_dependency::running(
         runtime_dir.path(),
         &ids[0],

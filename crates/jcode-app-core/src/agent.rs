@@ -323,44 +323,6 @@ pub(crate) fn compaction_context_usage_event(
     })
 }
 
-fn log_agent_provider_stream_lifecycle(
-    level: logging::LogLevel,
-    agent: &Agent,
-    phase: &str,
-    api_start: Instant,
-    fields: impl FnOnce() -> Vec<(&'static str, String)>,
-) {
-    if !level.is_enabled() {
-        return;
-    }
-    let mut owned = vec![
-        ("phase", phase.to_string()),
-        ("provider", agent.provider.name().to_string()),
-        ("model", agent.provider.model()),
-        ("session_id", agent.session.id.clone()),
-        (
-            "connection_type",
-            agent
-                .last_connection_type
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-        ("elapsed_ms", api_start.elapsed().as_millis().to_string()),
-    ];
-    if phase != "stream_complete" || logging::LogLevel::Debug.is_enabled() {
-        owned.push((
-            "provider_session_id",
-            agent
-                .provider_session_id
-                .as_deref()
-                .unwrap_or("none")
-                .to_owned(),
-        ));
-    }
-    owned.extend(fields());
-    logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
-}
-
 /// Token usage from the last API request
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TokenUsage {
@@ -1945,6 +1907,46 @@ impl Agent {
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
         self.session.token_usage_totals()
+    }
+}
+
+impl Agent {
+    pub(in crate::agent) fn log_agent_provider_stream_lifecycle(
+        level: logging::LogLevel,
+        agent: &Agent,
+        phase: &str,
+        api_start: Instant,
+        fields: impl FnOnce() -> Vec<(&'static str, String)>,
+    ) {
+        if !level.is_enabled() {
+            return;
+        }
+        let mut owned = vec![
+            ("phase", phase.to_string()),
+            ("provider", agent.provider.name().to_string()),
+            ("model", agent.provider.model()),
+            ("session_id", agent.session.id.clone()),
+            (
+                "connection_type",
+                agent
+                    .last_connection_type
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+            ("elapsed_ms", api_start.elapsed().as_millis().to_string()),
+        ];
+        if phase != "stream_complete" || logging::LogLevel::Debug.is_enabled() {
+            owned.push((
+                "provider_session_id",
+                agent
+                    .provider_session_id
+                    .as_deref()
+                    .unwrap_or("none")
+                    .to_owned(),
+            ));
+        }
+        owned.extend(fields());
+        logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
     }
 }
 

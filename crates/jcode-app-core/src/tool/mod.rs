@@ -134,7 +134,7 @@ mod todo;
 #[path = "ui/user_response.rs"]
 mod user_response;
 #[path = "web/webfetch.rs"]
-mod webfetch;
+pub(crate) mod webfetch;
 #[path = "web/websearch.rs"]
 mod websearch;
 #[path = "registry/withheld_identity.rs"]

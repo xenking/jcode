@@ -4,8 +4,6 @@
 //! to control visual debugging, spawn test instances, and inspect agent state.
 
 use crate::protocol::{Request, ServerEvent};
-#[cfg(test)]
-use crate::server;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::transport::Stream;
 use anyhow::Result;

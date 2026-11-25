@@ -1,4 +1,5 @@
 use super::*;
+use crate::ambient_session::{register_ambient_session, unregister_ambient_session};
 
 #[test]
 fn schedule_description_stays_one_short_sentence() {

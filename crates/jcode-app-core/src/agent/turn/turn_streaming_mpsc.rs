@@ -4,8 +4,6 @@ use super::*;
 
 use super::streaming::StreamUsageRecorder;
 
-use super::tool_handoff::incomplete_turn_stop;
-
 #[path = "stream_request_preparation.rs"]
 mod stream_request_preparation;
 #[path = "streamed_tools.rs"]
@@ -450,7 +448,7 @@ impl Agent {
                     api_start.elapsed().as_secs_f64()
                 )
             });
-            log_agent_provider_stream_lifecycle(
+            Agent::log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Debug,
                 self,
                 "stream_opened",
@@ -544,7 +542,7 @@ impl Agent {
                         continue;
                     }
                     _ = self.graceful_shutdown.notified() => {
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Warn,
                             self,
                             "stream_cancelled",
@@ -567,7 +565,7 @@ impl Agent {
                     crate::session_metrics::record_activity(&self.session.id);
                 }
                 let Some(event) = event else {
-                    log_agent_provider_stream_lifecycle(
+                    Agent::log_agent_provider_stream_lifecycle(
                         if saw_message_end {
                             logging::LogLevel::Debug
                         } else {
@@ -622,7 +620,7 @@ impl Agent {
                         let err_str = crate::util::format_error_chain(&e);
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             self.record_failed_account_route(&err_str);
-                            log_agent_provider_stream_lifecycle(
+                            Agent::log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
                                 "stream_error_retry_after_compaction",
@@ -691,7 +689,7 @@ impl Agent {
                             }
                         }
                         self.record_failed_account_route(&err_str);
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
                             "stream_error",
@@ -1139,7 +1137,7 @@ impl Agent {
                             text_content.len(),
                             tool_calls.len(),
                         ));
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Warn,
                             self,
                             "retry_rollback",
@@ -1297,7 +1295,7 @@ impl Agent {
                     } => {
                         usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
-                            log_agent_provider_stream_lifecycle(
+                            Agent::log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
                                 "stream_event_retry_after_compaction",
@@ -1365,7 +1363,7 @@ impl Agent {
                                 NetworkRecoveryAction::GiveUp => {}
                             }
                         }
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
                             "stream_event_error",
@@ -1392,7 +1390,7 @@ impl Agent {
             event_tx.flush();
             usage_recorder.finish();
             if retry_after_compaction {
-                log_agent_provider_stream_lifecycle(
+                Agent::log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Debug,
                     self,
                     "retry_after_compaction",
@@ -1402,7 +1400,7 @@ impl Agent {
                 continue 'turn_loop;
             }
             if retry_after_network_recovery {
-                log_agent_provider_stream_lifecycle(
+                Agent::log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
                     self,
                     "retry_after_network_recovery",
@@ -1413,7 +1411,7 @@ impl Agent {
             }
             network_recovery.record_success();
 
-            log_agent_provider_stream_lifecycle(
+            Agent::log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Info,
                 self,
                 "stream_complete",
@@ -1730,7 +1728,7 @@ impl Agent {
                         }
                         if saw_message_end
                             && !self.is_graceful_shutdown()
-                            && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())
+                            && let Some(event) = Agent::incomplete_turn_stop(stop_reason.as_deref())
                         {
                             let _ = event_tx.send(event);
                         }

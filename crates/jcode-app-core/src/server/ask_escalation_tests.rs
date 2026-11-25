@@ -2,6 +2,7 @@
 //! Tests for escalating a headless worker's `ask` to the swarm root.
 
 use super::*;
+use crate::ask_route::escalate;
 use crate::protocol::{AskOption, AskQuestion, ServerEvent, format_ask_answers};
 use crate::tool::interactive;
 use std::collections::HashMap;

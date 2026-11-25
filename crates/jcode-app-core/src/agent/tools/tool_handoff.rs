@@ -271,6 +271,26 @@ pub(super) async fn wait_for_tool_handoff(
     }
 }
 
+impl Agent {
+    /// Called only after automatic continuations have been exhausted.
+    pub(in crate::agent) fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
+        let reason = stop_reason?;
+        if Self::should_continue_after_stop_reason(reason)
+            || Self::is_stranded_tool_use_stop(Some(reason))
+        {
+            Some(ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::LimitReached,
+                message: format!(
+                    "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
+                ),
+                provider_stop_reason: Some(reason.to_string()),
+            })
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "turn_streaming_mpsc_handoff_tests.rs"]
 mod handoff_tests;
@@ -287,22 +307,4 @@ pub(super) fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -
         ),
         true,
     )
-}
-
-/// Called only after automatic continuations have been exhausted.
-pub(in crate::agent) fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
-    let reason = stop_reason?;
-    if Agent::should_continue_after_stop_reason(reason)
-        || Agent::is_stranded_tool_use_stop(Some(reason))
-    {
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::LimitReached,
-            message: format!(
-                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
-            ),
-            provider_stop_reason: Some(reason.to_string()),
-        })
-    } else {
-        None
-    }
 }

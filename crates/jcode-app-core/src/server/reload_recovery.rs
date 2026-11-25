@@ -25,7 +25,6 @@ struct StoreGuard {
 }
 
 fn lock_store() -> Result<StoreGuard> {
-    install_recovery_gate();
     let local = STORE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -837,7 +836,8 @@ impl crate::recovery_gate::RecoveryGate for JournalGate {
 
 static JOURNAL_GATE: JournalGate = JournalGate;
 
-/// Let the agent consult this journal. Idempotent.
+/// Let the agent consult this journal. Idempotent. Called when the server
+/// starts owning recovery, never from the journal's own operations.
 pub(super) fn install_recovery_gate() {
     crate::recovery_gate::install(&JOURNAL_GATE);
 }
@@ -904,6 +904,7 @@ enum RecoveryAdmission {
 
 impl RecoveryOwner {
     pub(super) fn new(server: &super::Server) -> Self {
+        install_recovery_gate();
         Self {
             provider: Arc::clone(&server.provider),
             sessions: Arc::clone(&server.sessions),

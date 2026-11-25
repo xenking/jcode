@@ -72,7 +72,7 @@ impl Agent {
             let (forecast, compact) = self.forecast_context_actions(&source);
             (Some(forecast), compact)
         };
-        let projection = inspect_messages(
+        let projection = Agent::inspect_messages(
             &self.session,
             source,
             compaction::snapcompact_pages_usable(self.provider.supports_image_input(), &model),
@@ -280,7 +280,7 @@ pub(crate) fn inspect_saved(
     // model policy that explicitly rules pages out makes this projection known.
     let snapcompact_known =
         model.is_some_and(|model| !compaction::snapcompact_pages_usable(true, model));
-    let projection = inspect_messages(
+    let projection = Agent::inspect_messages(
         session,
         session.messages_for_provider_uncached(),
         false,
@@ -477,26 +477,6 @@ fn apply_occupancy(
         meter.source = source;
         meter.measured_at_ms = when.map(|when| when.timestamp_millis());
     }
-}
-
-fn inspect_messages(
-    session: &Session,
-    messages: Vec<Message>,
-    archive: bool,
-    native: bool,
-) -> CompactionProjection {
-    let mut projection = if let Some(state) = session.compaction.as_deref() {
-        let mut manager = CompactionManager::new();
-        manager.restore_persisted_state(state, messages.len());
-        manager.inspect_provider_messages(session, &messages, archive, native)
-    } else {
-        CompactionProjection {
-            messages,
-            snapcompact_message_index: None,
-        }
-    };
-    projection.messages = Agent::bounded_outbound_images(projection.messages);
-    projection
 }
 
 #[derive(Default)]
@@ -752,5 +732,27 @@ impl Agent {
             tools.splice(..0, locked.iter().cloned());
         }
         self.inspect_revealed_tools(tools, messages)
+    }
+}
+
+impl Agent {
+    fn inspect_messages(
+        session: &Session,
+        messages: Vec<Message>,
+        archive: bool,
+        native: bool,
+    ) -> CompactionProjection {
+        let mut projection = if let Some(state) = session.compaction.as_deref() {
+            let mut manager = CompactionManager::new();
+            manager.restore_persisted_state(state, messages.len());
+            manager.inspect_provider_messages(session, &messages, archive, native)
+        } else {
+            CompactionProjection {
+                messages,
+                snapcompact_message_index: None,
+            }
+        };
+        projection.messages = Self::bounded_outbound_images(projection.messages);
+        projection
     }
 }

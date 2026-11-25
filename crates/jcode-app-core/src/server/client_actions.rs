@@ -242,7 +242,7 @@ pub(super) async fn set_session_agent_model(
 ) -> anyhow::Result<crate::session::AgentModelOverrides> {
     if let Ok(mut guard) = agent.try_lock() {
         guard.set_agent_model_override(target, model)?;
-        Ok(guard.session_for_split().agent_model_overrides.clone())
+        Ok(guard.with_session(|session| session.agent_model_overrides.clone()))
     } else {
         let mut session = Session::load_startup_stub(session_id)?;
         session.set_agent_model_override(target, model)?;
@@ -261,7 +261,7 @@ pub(super) async fn set_global_agent_model(
     crate::config::Config::set_agent_model_default(target, model.as_deref())?;
     // Report the session's current overrides so the client view stays exact.
     if let Ok(guard) = agent.try_lock() {
-        Ok(guard.session_for_split().agent_model_overrides.clone())
+        Ok(guard.with_session(|session| session.agent_model_overrides.clone()))
     } else {
         Ok(Session::load_startup_stub(session_id)?.agent_model_overrides)
     }

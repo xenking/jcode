@@ -27,6 +27,11 @@ impl Agent {
         &self.session
     }
 
+    /// Run `read` over the in-memory session without handing the session out.
+    pub(crate) fn with_session<R>(&self, read: impl FnOnce(&Session) -> R) -> R {
+        read(&self.session)
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

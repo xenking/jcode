@@ -405,7 +405,7 @@ impl Agent {
                     api_start.elapsed().as_secs_f64()
                 )
             });
-            log_agent_provider_stream_lifecycle(
+            Agent::log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Debug,
                 self,
                 "stream_opened",
@@ -458,7 +458,7 @@ impl Agent {
                         usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             self.record_failed_account_route(&err_str);
-                            log_agent_provider_stream_lifecycle(
+                            Agent::log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
                                 "stream_error_retry_after_compaction",
@@ -512,7 +512,7 @@ impl Agent {
                             }
                         }
                         self.record_failed_account_route(&err_str);
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
                             "stream_error",
@@ -976,7 +976,7 @@ impl Agent {
                         }
                         usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
-                            log_agent_provider_stream_lifecycle(
+                            Agent::log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
                                 "stream_event_retry_after_compaction",
@@ -1029,7 +1029,7 @@ impl Agent {
                                 NetworkRecoveryAction::GiveUp => {}
                             }
                         }
-                        log_agent_provider_stream_lifecycle(
+                        Agent::log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
                             "stream_event_error",
@@ -1054,7 +1054,7 @@ impl Agent {
 
             usage_recorder.finish();
             if retry_after_compaction {
-                log_agent_provider_stream_lifecycle(
+                Agent::log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Debug,
                     self,
                     "retry_after_compaction",
@@ -1092,7 +1092,7 @@ impl Agent {
                 }
             }
             if retry_after_network_recovery {
-                log_agent_provider_stream_lifecycle(
+                Agent::log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
                     self,
                     "retry_after_network_recovery",
@@ -1103,7 +1103,7 @@ impl Agent {
             }
             network_recovery.record_success();
 
-            log_agent_provider_stream_lifecycle(
+            Agent::log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Info,
                 self,
                 "stream_complete",
@@ -1530,7 +1530,9 @@ impl Agent {
                 match result {
                     Ok(output) => {
                         if tc.name == "end_ambient_cycle"
-                            && crate::ambient_session::is_ambient_session_registered(&self.session.id)
+                            && crate::ambient_session::is_ambient_session_registered(
+                                &self.session.id,
+                            )
                         {
                             ambient_cycle_ended = true;
                         }
