@@ -118,6 +118,13 @@ class H(BaseHTTPRequestHandler):
                     "intent": "Prove a real tool side effect in the isolated workspace",
                     "file_path": "verify-tool.txt", "content": "verification tool side effect\n",
                 })}}]
+        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:ask-done:([0-9]+)\]", prompt)):
+            # Finish a tracked user request through the real todo tool.
+            tool_calls = [{"id": "call_ask_done_" + match.group(1), "type": "function", "function": {
+                "name": "todo", "arguments": json.dumps({
+                    "intent": "Mark the user's request finished",
+                    "update": [{"id": "request_" + match.group(1), "status": "completed"}],
+                })}}]
         elif CONTROL and "[e2e:todo]" in prompt and not has_tool_result:
             # Go through the real tool executor, rather than mutating TUI state.
             tool_calls = [{"id": "call_acceptance_todo", "type": "function", "function": {
