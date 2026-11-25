@@ -34,6 +34,7 @@ mod ssh_host;
 pub(super) mod ssh_sessions;
 mod swarm_plan_core;
 mod swarm_status_core;
+mod transcript_input;
 pub(super) mod turn_identity;
 mod workspace;
 
@@ -62,12 +63,15 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 // Re-export remote input dispatch helpers for sibling modules/tests.
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
-    apply_remote_transcript_event, apply_transcript_event, apply_voice_transcript,
     begin_remote_send, begin_remote_send_with_origin, begin_remote_split_launch,
     finish_remote_split_launch, history_matches_pending_startup_prompt,
     route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
-    submit_voice_transcript, voice_transcript_mode,
+    submit_prepared_remote_input,
+};
+pub(super) use key_handling::submit_remote_slash_input;
+pub(super) use transcript_input::{
+    apply_remote_transcript_event, apply_transcript_event, apply_voice_transcript,
+    submit_remote_voice_transcript, submit_voice_transcript, voice_transcript_mode,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
