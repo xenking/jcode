@@ -2,7 +2,6 @@ use super::*;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
-use super::prompt_context::StaticPromptState;
 
 impl Agent {
     /// Adopt the exact bytes this session sent, and its AGENTS.md and skill
@@ -15,7 +14,10 @@ impl Agent {
         if recorded.working_dir != self.session.working_dir().map(str::to_owned) {
             return false;
         }
-        self.prompt.adopt(recorded, self.session.working_dir().map(std::path::Path::new));
+        self.prompt.adopt(
+            recorded,
+            self.session.working_dir().map(std::path::Path::new),
+        );
         true
     }
 
@@ -27,7 +29,7 @@ impl Agent {
         }
         let Some(inputs) = self
             .prompt
-            .unrecorded_inputs(self.session.working_dir.clone())
+            .unrecorded_inputs(self.session.working_dir().map(str::to_owned))
         else {
             return Ok(());
         };
@@ -82,8 +84,9 @@ impl Agent {
     pub async fn debug_context(&self) -> serde_json::Value {
         let prompt = self.build_system_prompt_split(None);
         let current_tools = self.tool_definitions_for_debug().await;
-        let effective_tools = self.tool_lock.locked().unwrap_or(&current_tools);
-        let locked_tool_names = self.tool_lock.locked().map(|tools| {
+        let locked = self.tool_lock.request_snapshot();
+        let effective_tools = locked.as_deref().unwrap_or(&current_tools);
+        let locked_tool_names = locked.as_deref().map(|tools| {
             tools
                 .iter()
                 .map(|tool| tool.name.as_str())
@@ -175,23 +178,21 @@ impl Agent {
         memory_prompt: Option<&str>,
         account_skills: bool,
     ) -> (SplitSystemPrompt, Option<usize>) {
-        let (static_part, custom_prompt, skills_chars) = match self.prompt.static_prompt() {
-            StaticPromptState::Frozen(snapshot) => (
-                snapshot.text.clone(),
-                snapshot.file_versions.is_none(),
-                account_skills
-                    .then(|| snapshot.skills_chars(self.prompt.skills()))
-                    .flatten(),
-            ),
-            StaticPromptState::Bootstrap(sources) => {
+        let (static_part, custom_prompt, skills_chars) = self
+            .prompt
+            .frozen_prompt(account_skills)
+            .unwrap_or_else(|| {
+                let sources = self
+                    .prompt
+                    .bootstrap_sources()
+                    .expect("unfrozen prompt has bootstrap sources");
                 let (text, skills_chars) = self.render_static_prompt(sources);
                 (
                     text,
                     self.session.system_prompt().is_some(),
                     Some(skills_chars),
                 )
-            }
-        };
+            });
         let mut dynamic_part = match (custom_prompt, memory_prompt) {
             (false, Some(memory)) => memory.to_owned(),
             _ => String::new(),
@@ -232,20 +233,10 @@ impl Agent {
             profile: profile.as_ref(),
             model_prompt: Some(&model_prompt),
         };
-        let (split, info) = crate::prompt::build_system_prompt_split_composed(
-            None,
-            self.prompt.skills(),
-            self.session.is_canary(),
-            None,
-            working_dir,
-            sources,
-            self.prompt.agents_md().clone(),
-            &composition,
-        );
-        (
-            self.append_session_system_prompt(split.static_part),
-            info.skills_chars,
-        )
+        let (text, skills_chars) =
+            self.prompt
+                .render(sources, self.session.is_canary(), working_dir, &composition);
+        (self.append_session_system_prompt(text), skills_chars)
     }
 
     /// `[[agents.model_prompts]]` for the model this session runs on now.
@@ -294,7 +285,8 @@ impl Agent {
         {
             return;
         }
-        self.prompt.rebootstrap(self.session.working_dir().map(std::path::Path::new));
+        self.prompt
+            .rebootstrap(self.session.working_dir().map(std::path::Path::new));
     }
 
     pub(super) fn announce_prompt_file_changes(&mut self) -> anyhow::Result<()> {
@@ -496,9 +488,7 @@ impl Agent {
             skills.get(name).map(|skill| {
                 skill.render_prompt(
                     self.session.pinned_skill_arguments(name),
-                    self.session
-                        .working_dir()
-                        .map(std::path::Path::new),
+                    self.session.working_dir().map(std::path::Path::new),
                 )
             })
         })

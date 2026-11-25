@@ -47,6 +47,25 @@ pub(in crate::agent) struct PromptContext {
     inputs_recorded: bool,
 }
 
+pub(in crate::agent) fn prompt_memory_metrics(
+    agents_md: Option<&String>,
+    skills: &[SkillInfo],
+) -> (usize, usize, usize) {
+    (
+        agents_md.map_or(0, String::capacity),
+        skills.len(),
+        skills
+            .iter()
+            .map(|skill| {
+                skill
+                    .name
+                    .capacity()
+                    .saturating_add(skill.description.capacity())
+            })
+            .fold(0usize, usize::saturating_add),
+    )
+}
+
 impl PromptContext {
     pub(in crate::agent) fn new(
         agents_md: (Option<String>, ContextInfo),
@@ -62,16 +81,47 @@ impl PromptContext {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::agent) fn agents_md(&self) -> &(Option<String>, ContextInfo) {
         &self.agents_md
     }
 
-    pub(in crate::agent) fn skills(&self) -> &[SkillInfo] {
-        &self.skills
+    pub(in crate::agent) fn memory_metrics(&self) -> (usize, usize, usize) {
+        prompt_memory_metrics(self.agents_md.0.as_ref(), &self.skills)
     }
 
-    pub(in crate::agent) fn static_prompt(&self) -> &StaticPromptState {
-        &self.static_prompt
+    pub(in crate::agent) fn frozen_prompt(
+        &self,
+        account_skills: bool,
+    ) -> Option<(String, bool, Option<usize>)> {
+        let snapshot = self.frozen()?;
+        Some((
+            snapshot.text.clone(),
+            snapshot.file_versions.is_none(),
+            account_skills
+                .then(|| snapshot.skills_chars(&self.skills))
+                .flatten(),
+        ))
+    }
+
+    pub(in crate::agent) fn render(
+        &self,
+        sources: &StaticPromptSources,
+        is_canary: bool,
+        working_dir: Option<&Path>,
+        composition: &crate::prompt::PromptComposition<'_>,
+    ) -> (String, usize) {
+        let (split, info) = crate::prompt::build_system_prompt_split_composed(
+            None,
+            &self.skills,
+            is_canary,
+            None,
+            working_dir,
+            sources,
+            self.agents_md.clone(),
+            composition,
+        );
+        (split.static_part, info.skills_chars)
     }
 
     /// The not-yet-sent static prompt inputs, while the prompt is still being
@@ -192,14 +242,14 @@ impl PromptContext {
         self.announced_skills.contains(name)
     }
 
-    pub(in crate::agent) fn announce_skill(&mut self, name: String) {
-        self.announced_skills.insert(name);
-    }
-
-    /// Record that the transcript up to `len` messages has been scanned for
-    /// late-skill announcements.
-    pub(in crate::agent) fn mark_skills_scanned(&mut self, len: usize) {
-        self.announced_skills_scanned = len;
+    pub(in crate::agent) fn record_skill_announcement(
+        &mut self,
+        skills: Vec<SkillInfo>,
+        transcript_len: usize,
+    ) {
+        self.announced_skills
+            .extend(skills.into_iter().map(|skill| skill.name));
+        self.announced_skills_scanned = transcript_len;
     }
 
     /// Mark skills named in earlier announcements as announced, so a

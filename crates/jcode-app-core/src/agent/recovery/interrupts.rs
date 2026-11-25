@@ -9,21 +9,17 @@ use jcode_agent_runtime::{
 use std::sync::Arc;
 
 fn frozen_snapshot_memory_profile(
-    locked_tools: Option<&[crate::message::ToolDefinition]>,
-    agents_md: Option<&String>,
-    skills: &[crate::prompt::SkillInfo],
+    (tool_count, tool_bytes): (usize, usize),
+    (agents_md_bytes, skill_count, skill_bytes): (usize, usize, usize),
 ) -> serde_json::Value {
     // Serialized schemas are an attribution proxy, not an allocation bound or
     // capacity. The prompt strings report capacity without copying their text.
     serde_json::json!({
-        "locked_tools_count": locked_tools.map_or(0, <[_]>::len),
-        "locked_tools_json_bytes": locked_tools
-            .map_or(0, |tools| crate::process_memory::estimate_json_bytes(&tools)),
-        "agents_md_snapshot_capacity_bytes": agents_md.map_or(0, String::capacity),
-        "prompt_skills_snapshot_count": skills.len(),
-        "prompt_skills_snapshot_capacity_bytes": skills.iter()
-            .map(|skill| skill.name.capacity().saturating_add(skill.description.capacity()))
-            .fold(0usize, usize::saturating_add),
+        "locked_tools_count": tool_count,
+        "locked_tools_json_bytes": tool_bytes,
+        "agents_md_snapshot_capacity_bytes": agents_md_bytes,
+        "prompt_skills_snapshot_count": skill_count,
+        "prompt_skills_snapshot_capacity_bytes": skill_bytes,
     })
 }
 
@@ -393,9 +389,8 @@ impl Agent {
             },
             "agent": {
                 "frozen_snapshots": frozen_snapshot_memory_profile(
-                    self.tool_lock.locked(),
-                    self.prompt.agents_md().0.as_ref(),
-                    self.prompt.skills(),
+                    self.tool_lock.memory_metrics(),
+                    self.prompt.memory_metrics(),
                 ),
                 "memory_enabled": self.memory_enabled,
                 "allowed_tools_count": self.allowed_tools.as_ref().map(|tools| tools.len()),
@@ -759,6 +754,8 @@ impl Agent {
 #[cfg(test)]
 mod frozen_snapshot_memory_tests {
     use super::frozen_snapshot_memory_profile;
+    use crate::agent::prompt_context::prompt_memory_metrics;
+    use crate::agent::tool_lock::tool_memory_metrics;
 
     #[test]
     fn frozen_snapshot_memory_counts_schema_json_without_disclosing_schema() {
@@ -767,7 +764,7 @@ mod frozen_snapshot_memory_tests {
             "private-description",
             serde_json::json!({"type": "object", "properties": {"private-key": {"type": "string"}}}),
         )];
-        let profile = frozen_snapshot_memory_profile(Some(&tools), None, &[]);
+        let profile = frozen_snapshot_memory_profile(tool_memory_metrics(Some(&tools)), (0, 0, 0));
         assert_eq!(profile["locked_tools_count"], 1);
         assert_eq!(
             profile["locked_tools_json_bytes"],
@@ -778,13 +775,13 @@ mod frozen_snapshot_memory_tests {
 
     #[test]
     fn frozen_snapshot_memory_empty_and_absent_values() {
-        let absent = frozen_snapshot_memory_profile(None, None, &[]);
+        let absent = frozen_snapshot_memory_profile(tool_memory_metrics(None), (0, 0, 0));
         assert_eq!(absent["locked_tools_count"], 0);
         assert_eq!(absent["locked_tools_json_bytes"], 0);
         assert_eq!(absent["agents_md_snapshot_capacity_bytes"], 0);
         assert_eq!(absent["prompt_skills_snapshot_count"], 0);
         assert_eq!(absent["prompt_skills_snapshot_capacity_bytes"], 0);
-        let empty = frozen_snapshot_memory_profile(Some(&[]), None, &[]);
+        let empty = frozen_snapshot_memory_profile(tool_memory_metrics(Some(&[])), (0, 0, 0));
         assert_eq!(empty["locked_tools_json_bytes"], 2);
     }
 
@@ -798,7 +795,10 @@ mod frozen_snapshot_memory_tests {
         description.push_str("private-skill-description");
         let expected_capacity = name.capacity() + description.capacity();
         let skills = [crate::prompt::SkillInfo { name, description }];
-        let profile = frozen_snapshot_memory_profile(None, Some(&agents_md), &skills);
+        let profile = frozen_snapshot_memory_profile(
+            (0, 0),
+            prompt_memory_metrics(Some(&agents_md), &skills),
+        );
         assert_eq!(
             profile["agents_md_snapshot_capacity_bytes"],
             agents_md.capacity()

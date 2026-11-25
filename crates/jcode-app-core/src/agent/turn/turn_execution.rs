@@ -637,7 +637,9 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
-        if let Some(usage) = turn_token_usage_after(self.session.iter_messages(), start_message_index) {
+        if let Some(usage) =
+            turn_token_usage_after(self.session.iter_messages(), start_message_index)
+        {
             if let Some(value) = usage.prompt_tokens {
                 event = event.field("PROMPT_TOKENS", value.to_string());
             }
@@ -702,8 +704,8 @@ impl Agent {
         if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
-        let tools = match self.tool_lock.locked() {
-            Some(tools) => tools.to_vec(),
+        let tools = match self.tool_lock.request_snapshot() {
+            Some(tools) => tools,
             None => self.build_filtered_tool_definitions().await,
         };
         let prompt = self.build_system_prompt_split(None);
@@ -919,7 +921,10 @@ impl Agent {
             ResumePlan::ToolResults(pending) => {
                 let mut interrupted = Vec::new();
                 for tool in pending {
-                    let message = &self.session.message_at(tool.message_index).expect("transcript message");
+                    let message = &self
+                        .session
+                        .message_at(tool.message_index)
+                        .expect("transcript message");
                     let wait = message.content.iter().find_map(|block| match block {
                         ContentBlock::ToolUse { id, input, .. }
                             if *id == tool.id

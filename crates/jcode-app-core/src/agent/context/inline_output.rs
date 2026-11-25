@@ -8,14 +8,14 @@ impl Agent {
     /// deliver recent output when transcript collection cannot finish.
     pub(crate) fn inline_output_tap(&self) -> bool {
         self.inline_output
-            .is_tapped(self.session.parent_id.is_some())
+            .is_tapped(self.session.parent_id().is_some())
     }
 
     /// Publish the current rolling activity tail to the bus for the
     /// coordinator's inline gallery. No-op unless the inline tap is enabled.
     pub(crate) fn publish_inline_tail(&self) {
         self.inline_output
-            .publish(&self.session.id, self.session.parent_id.is_some());
+            .publish(self.session.id(), self.session.parent_id().is_some());
     }
 
     /// Mark this session as an inline swarm worker. The streaming loop then

@@ -38,6 +38,15 @@ pub(in crate::agent) struct ToolLock {
     announced_mcp_scanned: usize,
 }
 
+pub(in crate::agent) fn tool_memory_metrics(tools: Option<&[ToolDefinition]>) -> (usize, usize) {
+    (
+        tools.map_or(0, <[_]>::len),
+        tools.map_or(0, |tools| {
+            crate::process_memory::estimate_json_bytes(&tools)
+        }),
+    )
+}
+
 impl ToolLock {
     pub(in crate::agent) fn new(mcp_mode: McpToolsMode) -> Self {
         Self {
@@ -77,8 +86,12 @@ impl ToolLock {
     }
 
     /// The locked list whatever it was built for.
-    pub(in crate::agent) fn locked(&self) -> Option<&[ToolDefinition]> {
-        self.locked.as_deref()
+    pub(in crate::agent) fn request_snapshot(&self) -> Option<Vec<ToolDefinition>> {
+        self.locked.clone()
+    }
+
+    pub(in crate::agent) fn memory_metrics(&self) -> (usize, usize) {
+        tool_memory_metrics(self.locked.as_deref())
     }
 
     /// Whether a lock exists that was built for a different MCP loading
@@ -156,7 +169,11 @@ impl ToolLock {
     /// loaded by a tool reference (`mcp connect` / `mcp search` results carry
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
-    pub(in crate::agent) fn seed_announced_from_transcript<'a>(&mut self, len: usize, messages_from: impl FnOnce(usize) -> std::slice::Iter<'a, StoredMessage>) {
+    pub(in crate::agent) fn seed_announced_from_transcript<'a>(
+        &mut self,
+        len: usize,
+        messages_from: impl FnOnce(usize) -> std::slice::Iter<'a, StoredMessage>,
+    ) {
         let start = self.announced_mcp_scanned.min(len);
         for message in messages_from(start) {
             for block in &message.content {

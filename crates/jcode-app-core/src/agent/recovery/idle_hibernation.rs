@@ -202,7 +202,10 @@ mod tests {
             agent.provider_session_id.as_deref(),
             Some("upstream-live-session")
         );
-        assert_eq!(agent.tool_lock.locked().unwrap()[0].name, "frozen");
+        assert_eq!(
+            agent.tool_lock.request_snapshot().unwrap()[0].name,
+            "frozen"
+        );
         assert_eq!(
             agent.prompt.agents_md().0.as_deref(),
             Some("Frozen instructions, not recaptured on wake")

@@ -173,9 +173,6 @@ impl Agent {
             text.push_str(&format!("- `/{} ` - {}\n", skill.name, description));
         }
         text.push_str("</system-reminder>");
-        for skill in &fresh {
-            self.prompt.announce_skill(skill.name.clone());
-        }
         logging::info(&format!(
             "Announcing {} late skill(s) in the transcript (system prompt stays cache-stable)",
             fresh.len()
@@ -188,7 +185,8 @@ impl Agent {
             }],
             Some(crate::session::StoredDisplayRole::System),
         );
-        self.prompt.mark_skills_scanned(self.session.message_count());
+        self.prompt
+            .record_skill_announcement(fresh, self.session.message_count());
     }
 
     /// Replace per-server MCP definitions with the fixed search/call surface
@@ -380,11 +378,11 @@ impl Agent {
     /// reconnecting servers costs no prompt-cache miss.
     pub(super) async fn native_deferred_tool_definitions(&mut self) -> Vec<ToolDefinition> {
         let current = self.build_filtered_tool_definitions().await;
-        let eager = match self.tool_lock.locked() {
+        let eager = match self.tool_lock.request_snapshot() {
             // A snapshot locked before switching to the native path may still
             // carry eager MCP definitions; keep them eager for cache stability
             // (they are still callable) but never duplicate them as deferred.
-            Some(locked) => locked.to_vec(),
+            Some(locked) => locked,
             None => {
                 let eager = ToolDefinition::eager(&current);
                 logging::info(&format!(
@@ -427,13 +425,19 @@ impl Agent {
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
     pub(super) fn seed_announced_mcp_tools_from_transcript(&mut self) {
-        self.tool_lock.seed_announced_from_transcript(self.session.message_count(), |start| self.session.iter_messages_from(start));
+        self.tool_lock
+            .seed_announced_from_transcript(self.session.message_count(), |start| {
+                self.session.iter_messages_from(start)
+            });
     }
 
     /// Mark skills named in earlier announcements as announced, so a
     /// restored session does not describe them again.
     pub(super) fn seed_announced_skills_from_transcript(&mut self) {
-        self.prompt.seed_announced_skills_from_transcript(self.session.message_count(), |start| self.session.iter_messages_from(start));
+        self.prompt
+            .seed_announced_skills_from_transcript(self.session.message_count(), |start| {
+                self.session.iter_messages_from(start)
+            });
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
@@ -484,9 +488,7 @@ impl Agent {
         // Every mode except explicit `eager` keeps a cache-stable MCP surface:
         // per-server tools registering later never change the locked list.
         let locked_uses_fixed_mcp_surface = !self.tool_lock.mcp_eager();
-        if locked_uses_fixed_mcp_surface
-            && let Some(locked) = self.tool_lock.locked().map(<[ToolDefinition]>::to_vec)
-        {
+        if locked_uses_fixed_mcp_surface && let Some(locked) = self.tool_lock.request_snapshot() {
             // Per-server tools may continue registering in the background, but
             // the fixed surface cannot change as a result. Avoid a provider
             // cache reset and registry scan; new tools are announced in the
@@ -494,11 +496,11 @@ impl Agent {
             self.tool_lock.resolve_late_register();
             return locked;
         }
-        if let Some(locked) = self.tool_lock.locked() {
+        if let Some(locked) = self.tool_lock.request_snapshot() {
             if self.tool_lock.late_register_resolved() {
-                return locked.to_vec();
+                return locked;
             }
-            if self.registry_has_new_mcp_tools(locked).await {
+            if self.registry_has_new_mcp_tools(&locked).await {
                 logging::info(
                     "MCP tools registered after first turn locked the tool snapshot — \
                      rebuilding once to expose them. This is one intentional prompt-cache \
@@ -517,7 +519,7 @@ impl Agent {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
                 // appear (or never do, after the registry settles) we stop.
-                return locked.to_vec();
+                return locked;
             }
         }
 
