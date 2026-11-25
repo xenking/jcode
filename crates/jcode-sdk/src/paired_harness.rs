@@ -230,6 +230,9 @@ async fn classify_handshake(
             _ if secure && looks_like_tls_failure(&error) => PairedFailure::Tls,
             _ => PairedFailure::Unreachable,
         },
+        // The reply was not a usable HTTP/1.1 answer at all (for example an
+        // HTTP/1.0 error page). Ask `/health` whether a Harness gateway is there.
+        Ws::Protocol(_) | Ws::HttpFormat(_) => classify_missing_route(origin).await,
         _ => PairedFailure::UpgradeRejected,
     }
 }
@@ -241,7 +244,7 @@ fn looks_like_tls_failure(error: &std::io::Error) -> bool {
         .any(|word| text.contains(word))
 }
 
-/// The upgrade route answered 404. A gateway that serves `/health` without
+/// The upgrade route is missing or its answer was unusable. A gateway that serves `/health` without
 /// `harness_v1` is merely old. Anything else is the wrong address.
 async fn classify_missing_route(origin: &str) -> PairedFailure {
     #[derive(serde::Deserialize)]
@@ -555,6 +558,15 @@ mod tests {
     #[test]
     fn missing_route_on_a_foreign_origin_is_wrong_origin() {
         let address = serve(|_| http("404 Not Found", "nope"), 2);
+        let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::WrongOrigin));
+    }
+
+    #[test]
+    fn http_1_0_not_found_is_still_wrong_origin() {
+        // Some servers answer HTTP/1.0. The websocket client reports that as a
+        // protocol error, not a status, so the health probe must still run.
+        let address = serve(|_| "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".into(), 2);
         let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
         assert_eq!(kind, ErrorKind::Paired(PairedFailure::WrongOrigin));
     }
