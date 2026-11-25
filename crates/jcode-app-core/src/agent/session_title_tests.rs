@@ -132,6 +132,8 @@ impl Provider for SequenceProvider {
 #[tokio::test]
 async fn first_turn_publishes_a_session_renamed_event() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    // Titles are only generated for real sessions, not for test-flagged ones.
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let (mut agent, calls) = titled_agent("Fix flaky session titles").await;
     agent
         .append_user_context_message(
@@ -206,6 +208,8 @@ async fn debug_sessions_never_spend_a_title_call() {
 #[tokio::test]
 async fn third_turn_refines_its_own_title_once() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    // Titles are only generated for real sessions, not for test-flagged ones.
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let calls = Arc::new(Mutex::new(0));
     let provider: Arc<dyn Provider> = Arc::new(SequenceProvider {
         answers: Arc::new(Mutex::new(vec![
