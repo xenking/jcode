@@ -221,7 +221,7 @@ impl RemoteConnection {
             ));
         }
 
-        let mut timing = super::super::cloud_latency::begin_request(&request);
+        let timing = super::super::cloud_latency::begin_request(&request);
         let total_start = Instant::now();
         let backlogged = self
             .outbound_pending
@@ -254,7 +254,7 @@ impl RemoteConnection {
                 )),
             }
         }
-        if let Some(timing) = &mut timing {
+        if let Some(timing) = timing {
             timing.finish(if result.is_ok() { "ok" } else { "error" });
         }
         result?;

@@ -56,7 +56,7 @@ impl Span {
     pub(super) fn during(&mut self, operation: &'static str) {
         self.operation = operation;
     }
-    pub(super) fn finish(&mut self, outcome: &'static str) {
+    pub(super) fn finish(mut self, outcome: &'static str) {
         self.outcome = outcome;
     }
 }
