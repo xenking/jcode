@@ -43,6 +43,14 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
+    /// The pool's `provider:model` routes with surrounding whitespace removed.
+    fn pool_routes(&self) -> Vec<String> {
+        self.swarm_pool
+            .keys()
+            .map(|route| route.trim().to_string())
+            .collect()
+    }
+
     fn push_unique(list: &mut Vec<String>, route: String) {
         if !list.contains(&route) {
             list.push(route);
@@ -72,8 +80,7 @@ impl AgentsConfig {
         if self.swarm_pool.is_empty() {
             return;
         }
-        for route in self.swarm_pool.keys() {
-            let route = route.trim().to_string();
+        for route in self.pool_routes() {
             Self::push_unique(&mut self.spawn_allowed_models, route.clone());
             Self::push_unique(&mut self.swarm_model_allowlist, route);
         }

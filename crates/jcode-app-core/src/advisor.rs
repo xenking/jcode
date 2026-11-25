@@ -323,7 +323,7 @@ impl AdvisorSettings {
         }
         let rubric = match config.instructions_file.as_deref() {
             Some(path) => {
-                let path = crate::agent_profile::expand_home(path);
+                let path = crate::home_path::expand_home(path);
                 match std::fs::read_to_string(&path) {
                     Ok(text) if !text.trim().is_empty() => text,
                     Ok(_) => DEFAULT_RUBRIC.to_string(),

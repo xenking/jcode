@@ -302,9 +302,9 @@ impl CompactionConfig {
         self.mode == CompactionMode::Reactive
     }
 
-    /// Switch the compaction mode.
-    pub fn set_mode(&mut self, mode: CompactionMode) {
-        self.mode = mode;
+    /// The same settings under another compaction mode.
+    pub fn with_mode(self, mode: CompactionMode) -> Self {
+        Self { mode, ..self }
     }
 
     /// Take the context ceiling from `other`, keeping every other setting.

@@ -56,7 +56,7 @@ pub use agents::{
 pub use ambient::{AmbientConfig, NotificationsConfig, SafetyConfig};
 pub use compaction::{CompactionConfig, CompactionMode, CompactionOverride, CompactionSummary};
 pub use display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode, TodoHeaderMode};
-pub use display_env::{AnimationPrefs, ColorPrefs, DisplayPreference, RenderPrefs};
+pub use display_env::{AnimationPrefs, ColorEdit, ColorPrefs, DisplayPreference, RenderPrefs};
 pub use features::{
     DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, FeatureConfig, NativeScrollbarConfig,
 };

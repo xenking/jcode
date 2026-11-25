@@ -6,7 +6,7 @@
 pub use jcode_config_types::{
     AdvisorConfig, AgentProfileConfig, AgentsConfig, AmbientConfig, ApiKeyModelCost,
     ApiKeyProfileConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger, AutoReviewConfig,
-    CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
+    ColorEdit, CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
     CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode,
     DiagramPanePosition, DiffDisplayMode, DisplayConfig, DisplayPreference, FeatureConfig,
     GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LabelledApiKeyConfig,

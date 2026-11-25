@@ -156,12 +156,13 @@ fn generate_palette(app: &mut App, seed: Option<&str>) {
     let generated = jcode_tui_style::harmony::generate_from_seed(seed_rgb, background);
     let report = jcode_tui_style::analyze_harmony(&generated, background);
 
-    let result = persist(|colors| {
-        colors.clear();
-        for role in ALL_ROLES.iter().copied() {
-            colors.insert(role.key().to_string(), to_hex(generated.rgb(role)));
-        }
-    });
+    let result = persist(crate::config::ColorEdit::Replace(
+        ALL_ROLES
+            .iter()
+            .copied()
+            .map(|role| (role.key().to_string(), to_hex(generated.rgb(role))))
+            .collect(),
+    ));
 
     match result {
         Ok(()) => app.push_display_message(DisplayMessage::system(format!(
@@ -192,9 +193,10 @@ fn set_color(app: &mut App, role_key: &str, value: &str) {
         return;
     };
 
-    match persist(|colors| {
-        colors.insert(role.key().to_string(), to_hex(rgb));
-    }) {
+    match persist(crate::config::ColorEdit::Set(
+        role.key().to_string(),
+        to_hex(rgb),
+    )) {
         Ok(()) => {
             let report_line = harmony_delta_line();
             app.push_display_message(DisplayMessage::system(format!(
@@ -219,12 +221,10 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
                 )));
                 return;
             };
-            persist(|colors| {
-                colors.remove(role.key());
-            })
-            .map(|()| format!("Reset {} to its default.", role.key()))
+            persist(crate::config::ColorEdit::Remove(role.key().to_string()))
+                .map(|()| format!("Reset {} to its default.", role.key()))
         }
-        None => persist(|colors| colors.clear())
+        None => persist(crate::config::ColorEdit::Clear)
             .map(|()| "Reset every color to its default.".to_string()),
     };
 
@@ -240,11 +240,9 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
 ///
 /// Reload-then-patch-then-save (rather than serializing cached state) so a
 /// concurrent config edit by another jcode session is not clobbered.
-fn persist(
-    mutate: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
-) -> anyhow::Result<()> {
+fn persist(edit: crate::config::ColorEdit) -> anyhow::Result<()> {
     let mut config = crate::config::Config::load();
-    config.display.update_colors(mutate);
+    config.display.edit_colors(edit);
     config.save()?;
     crate::tui::theme_detect::init_palette();
     Ok(())

@@ -661,8 +661,7 @@ impl CompactionManager {
         let resolved = self.resolved_config();
         if self.active_route.0.is_some() || self.active_route.1.is_some() {
             let mode = resolved.effective_mode(self.mode_overridden.then_some(&self.mode));
-            self.compaction_config = resolved;
-            self.compaction_config.set_mode(mode.clone());
+            self.compaction_config = resolved.with_mode(mode.clone());
             self.mode = mode;
         } else {
             self.compaction_config.adopt_context_cap(&resolved);
@@ -2760,7 +2759,7 @@ impl CompactionManager {
     /// Change the active compaction mode for this session at runtime.
     pub fn set_mode(&mut self, mode: crate::config::CompactionMode) {
         self.mode = mode.clone();
-        self.compaction_config.set_mode(mode);
+        self.compaction_config = std::mem::take(&mut self.compaction_config).with_mode(mode);
         self.mode_overridden = true;
     }
 

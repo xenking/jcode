@@ -61,6 +61,19 @@ pub struct ColorPrefs {
     pub overrides: Vec<(String, String)>,
 }
 
+/// One change to the `[display.colors]` overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColorEdit {
+    /// Replace every override with these role and hex pairs.
+    Replace(Vec<(String, String)>),
+    /// Override one role.
+    Set(String, String),
+    /// Drop one role's override.
+    Remove(String),
+    /// Drop every override.
+    Clear,
+}
+
 impl DisplayConfig {
     /// Render preferences for the TUI.
     pub fn render_prefs(&self) -> RenderPrefs {
@@ -87,12 +100,18 @@ impl DisplayConfig {
         }
     }
 
-    /// Edit the `[display.colors]` table in place.
-    pub fn update_colors(
-        &mut self,
-        edit: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
-    ) {
-        edit(&mut self.colors);
+    /// Change the `[display.colors]` overrides.
+    pub fn edit_colors(&mut self, edit: ColorEdit) {
+        match edit {
+            ColorEdit::Replace(pairs) => self.colors = pairs.into_iter().collect(),
+            ColorEdit::Set(key, value) => {
+                self.colors.insert(key, value);
+            }
+            ColorEdit::Remove(key) => {
+                self.colors.remove(&key);
+            }
+            ColorEdit::Clear => self.colors.clear(),
+        }
     }
 
     /// Apply `JCODE_*` display environment overrides.
