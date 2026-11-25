@@ -201,6 +201,7 @@ mod tests {
                 usable_count: 1,
                 expires_at: None,
                 cached_source: Some("imported".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };

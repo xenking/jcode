@@ -573,8 +573,7 @@ pub(super) fn store_success_with_reset_status(
         let surface_only = reset_status.as_ref().is_some_and(|status| {
             ["cedar_ember", "juniper_tide"].iter().all(|name| {
                 let block = &status[*name];
-                block.is_null()
-                    || block.get("ineligible_reason").and_then(|v| v.as_str()) == Some("surface")
+                block.is_null() || super::anthropic_banked::not_evaluated(block)
             })
         });
         let prior_fresh = entry.reset_status.is_some()

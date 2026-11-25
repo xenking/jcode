@@ -34,7 +34,6 @@ fn sample() -> UsageData {
 fn reset_offers_reuse_the_single_coordinated_usage_response() {
     with_home(|runtime| {
         runtime.block_on(async {
-            assert!(super::super::USAGE_URL.ends_with("?cedar_ember=1&at_wall=1&skip_spend=1"));
             for (index, status) in [
                 serde_json::json!({"eligible": true, "arm": "reset", "available": true}),
                 serde_json::json!({"eligible": false}),

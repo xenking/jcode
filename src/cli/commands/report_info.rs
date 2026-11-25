@@ -141,11 +141,36 @@ struct UsageBankedResetReport {
     expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_reset_available: Option<bool>,
+    /// The line clients show above this login's bars, such as
+    /// `✦ 2 resets · 1 usable · expires 15d`. Absent when nothing is held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// Claude: why nothing is spendable, from the server (`cooldown` while one runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// Claude: RFC3339 end of a running cooldown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cooldown_until: Option<String>,
+    /// Claude: every saved-reset grant, soonest expiry first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grants: Vec<UsageBankedGrantReport>,
     /// OpenAI: the limit is actually enforced, so redeeming is useful now.
     /// Claude: always true, since the offer only exists at the session wall.
     limit_reached: bool,
     /// RFC3339 time the next reset becomes available when none is available.
     next_available_at: Option<String>,
+}
+
+/// One saved-reset grant of a Claude login.
+#[derive(Debug, Serialize, PartialEq)]
+struct UsageBankedGrantReport {
+    label: Option<String>,
+    remaining: u64,
+    expires_at: Option<String>,
+    /// `available`, `unavailable`, `paused`, `redeemed` or `expired`.
+    status: crate::usage::BankedGrantStatus,
+    /// The grant the server spends next.
+    next: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -549,6 +574,13 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
             continue;
         }
 
+        if let Some(summary) = provider
+            .banked_reset
+            .as_ref()
+            .and_then(|reset| reset.summary.as_deref())
+        {
+            println!("{summary}");
+        }
         for limit in &provider.limits {
             match limit.reset_in.as_deref() {
                 Some(reset_in) => println!(
@@ -585,7 +617,11 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         if let Some(credits) = &provider.credits {
             println!("Credits: {}", credits.summary);
         }
-        if let Some(reset) = &provider.banked_reset {
+        if let Some(reset) = provider
+            .banked_reset
+            .as_ref()
+            .filter(|reset| reset.summary.is_none())
+        {
             let name = if reset.provider == "claude" && reset.usable_count.is_none() {
                 "Session resets"
             } else {
@@ -737,6 +773,15 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
                 &credits.available_expirations,
             ),
             session_reset_available: None,
+            summary: crate::usage::resets_summary(
+                credits.available_count,
+                None,
+                crate::usage::AccountBankedResets::earliest_expiry(&credits.available_expirations)
+                    .as_deref(),
+            ),
+            reason: None,
+            cooldown_until: None,
+            grants: Vec::new(),
             limit_reached,
             next_available_at: None,
         });
@@ -758,6 +803,23 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
         cached_source: banked.and_then(|b| b.cached_source.clone()),
         expires_at: banked.and_then(|b| b.expires_at.clone()),
         session_reset_available: Some(session),
+        summary: banked.and_then(crate::usage::anthropic_resets_line),
+        reason: banked.and_then(|b| b.reason.clone()),
+        cooldown_until: banked.and_then(|b| b.cooldown_until.clone()),
+        grants: banked
+            .map(|b| {
+                b.grants
+                    .iter()
+                    .map(|grant| UsageBankedGrantReport {
+                        label: grant.label.clone(),
+                        remaining: grant.remaining,
+                        expires_at: grant.expires_at.clone(),
+                        status: grant.status,
+                        next: grant.next,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         // Only the session offer is claimable from here, at the five-hour wall.
         limit_reached: session
             && provider
@@ -909,11 +971,16 @@ mod tests {
             usable_count: 1,
             expires_at: None,
             cached_source: Some("imported".into()),
+            ..Default::default()
         });
         let saved = banked_reset_report(&saved).unwrap();
         assert_eq!((saved.available_count, saved.limit_reached), (2, false));
         let saved_json = serde_json::to_value(&saved).unwrap();
         assert_eq!(saved_json["usable_count"], 1);
+        assert_eq!(
+            saved.summary.as_deref(),
+            Some("✦ 2 resets · 1 usable · imported")
+        );
         assert!(banked_reset_text(&saved).contains("1 usable / 2"));
         assert_eq!(saved_json["cached_source"], "imported");
         assert!(banked_reset_text(&saved).contains("imported"));

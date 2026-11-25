@@ -161,9 +161,8 @@ pub(super) fn cached_limit_reset_offer(
 // remain unknown and must not be displayed as a confirmed empty balance.
 fn explicitly_ineligible(value: &serde_json::Value) -> bool {
     value
-        .pointer("/juniper_tide/ineligible_reason")
-        .and_then(|v| v.as_str())
-        != Some("surface")
+        .get("juniper_tide")
+        .is_none_or(|block| !super::anthropic_banked::not_evaluated(block))
         && value
             .pointer("/juniper_tide/eligible")
             .and_then(|v| v.as_bool())

@@ -16,7 +16,9 @@ pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthrop
 pub use anthropic_response::record_anthropic_response_limits;
 mod api_keys;
 mod banked;
-pub use banked::{AccountBankedResets, cached_account_banked_resets};
+pub use banked::{
+    AccountBankedResets, anthropic_resets_line, cached_account_banked_resets, provider_resets_line,
+};
 mod cache;
 mod credits;
 mod disk_cache;
@@ -41,6 +43,10 @@ pub enum ResetMode {
     Expiring { within_secs: i64 },
 }
 #[cfg(test)]
+mod anthropic_probe_tests;
+#[cfg(test)]
+mod loopback_tests;
+#[cfg(test)]
 mod egress_tests;
 mod provider_fetch;
 mod remote_accounts;
@@ -52,6 +58,7 @@ pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
 pub use accessors::*;
 pub use anthropic_banked::AnthropicBankedResets;
+pub use jcode_usage_types::{BankedGrant, BankedGrantStatus};
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
     PendingAnthropicLimitReset, consume_anthropic_limit_reset,
@@ -93,7 +100,7 @@ pub use startup_snapshot::{
 };
 
 use anyhow::{Context, Result};
-pub use display::{format_reset_time, format_usage_bar};
+pub use display::{format_reset_compact, format_reset_time, format_usage_bar, resets_summary};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
 use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;
@@ -102,9 +109,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Usage API endpoint
-const USAGE_URL: &str =
-    "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1&skip_spend=1";
+/// Anthropic OAuth API root. Usage, saved resets and session resets live under it.
+const OAUTH_API_BASE: &str = "https://api.anthropic.com/api/oauth";
+
+/// First read: the usage windows and the saved-reset (`cedar_ember`) program.
+const SAVED_RESETS_QUERY: &str = "cedar_ember=1&skip_spend=1";
+
+/// Second read, only when no saved reset is spendable: the session-reset
+/// (`juniper_tide`) program.
+const SESSION_RESET_QUERY: &str = "at_wall=1&skip_spend=1";
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);
@@ -147,36 +160,70 @@ async fn fetch_anthropic_usage_data(
 ) -> Result<UsageData> {
     let account_label = account_label.map(str::to_owned);
     flight::fetch(cache_key.clone(), || {
-        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL, account_label)
+        fetch_anthropic_usage_data_uncached(access_token, cache_key, OAUTH_API_BASE, account_label)
     })
     .await
 }
 
-async fn fetch_anthropic_usage_data_uncached(
-    access_token: String,
-    cache_key: String,
-    url: &str,
-    account_label: Option<String>,
-) -> Result<UsageData> {
-    let mut request_log = flight::RequestLog::new(&cache_key);
-    let probe_started = Instant::now();
-    // Quota meters leave from the same egress as the account's inference.
-    let client = crate::egress::client("claude", account_label.as_deref()).await?;
-    let response = crate::provider::anthropic::apply_oauth_attribution_headers(
+/// One authorized `GET {base}/usage?{query}`.
+fn usage_request(
+    client: &reqwest::Client,
+    base: &str,
+    query: &str,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    crate::provider::anthropic::apply_oauth_attribution_headers(
         client
-            .get(url)
+            .get(format!("{base}/usage?{query}"))
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .header(
                 "User-Agent",
                 crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
             )
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("anthropic-beta", "oauth-2025-04-20"),
         &crate::provider::anthropic::new_oauth_request_id(),
     )
-    .send()
-    .await;
+}
+
+/// The session-reset block, read only when no saved reset can be spent.
+/// Any failure is unknown (`None`), never a denial, and never fails the usage read.
+async fn read_session_reset(
+    client: &reqwest::Client,
+    base: &str,
+    access_token: &str,
+) -> Option<serde_json::Value> {
+    let response = usage_request(client, base, SESSION_RESET_QUERY, access_token)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        crate::logging::info(&format!(
+            "Claude session-reset lookup answered HTTP {}",
+            response.status().as_u16()
+        ));
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    body.get("juniper_tide")
+        .filter(|block| block.is_object())
+        .cloned()
+}
+
+async fn fetch_anthropic_usage_data_uncached(
+    access_token: String,
+    cache_key: String,
+    base: &str,
+    account_label: Option<String>,
+) -> Result<UsageData> {
+    let mut request_log = flight::RequestLog::new(&cache_key);
+    let probe_started = Instant::now();
+    // Quota meters leave from the same egress as the account's inference.
+    let client = crate::egress::client("claude", account_label.as_deref()).await?;
+    let response = usage_request(&client, base, SAVED_RESETS_QUERY, &access_token)
+        .send()
+        .await;
 
     let response = match response {
         Ok(response) => response,
@@ -230,8 +277,19 @@ async fn fetch_anthropic_usage_data_uncached(
             .as_ref()
             .and_then(|window| window.utilization)
             .is_some();
+    let spendable_saved_reset = anthropic_banked::banked_from_status(
+        &serde_json::json!({"cedar_ember": data.cedar_ember}),
+        None,
+        chrono::Utc::now(),
+    )
+    .is_some_and(|banked| banked.usable_count > 0);
+    let session_reset = if spendable_saved_reset {
+        None
+    } else {
+        read_session_reset(&client, base, &access_token).await
+    };
     let reset_status = serde_json::json!({
-        "juniper_tide": data.juniper_tide,
+        "juniper_tide": session_reset.or(data.juniper_tide.clone()),
         "cedar_ember": data.cedar_ember,
     });
     let usage = usage_data_from_response(&data);

@@ -11,12 +11,15 @@ fn claude_banked_card_shows_usable_total_and_expiry() {
             usable_count: 1,
             cached_source: Some("imported".into()),
             expires_at: Some("2099-01-01T00:00:00Z".into()),
+            ..Default::default()
         }),
         ..Default::default()
     }]);
     let content = &app.display_messages().last().unwrap().content;
-    assert!(content.contains("1 usable / 2"), "{content}");
-    assert!(content.contains("expires"), "{content}");
+    assert!(
+        content.contains("✦ 2 resets · 1 usable · expires "),
+        "{content}"
+    );
     assert!(content.contains("imported"), "{content}");
 }
 
@@ -75,11 +78,9 @@ fn test_usage_card_reset_balances() {
             ..Default::default()
         }]);
         let content = &app.display_messages().last().unwrap().content;
-        let marker = if count > 0 { '+' } else { ':' };
-        assert!(
-            content.contains(&format!("{marker} Banked resets\t{count} available")),
-            "{content}"
-        );
+        // Held resets lead the card; none held draws nothing.
+        assert_eq!(content.contains("✦ 3 resets"), count == 3, "{content}");
+        assert!(!content.contains("Banked resets"), "{content}");
         assert!(!content.contains("no data"));
     }
     for available in [false, true] {
@@ -119,7 +120,7 @@ fn test_usage_card_reset_balances() {
             .last()
             .unwrap()
             .content
-            .contains("Banked resets")
+            .contains('✦')
     );
     for error in [None, Some("fetch failed".into())] {
         app.handle_usage_report(vec![crate::usage::ProviderUsage {
@@ -164,7 +165,7 @@ fn test_usage_card_responsive_terminal_layout() {
             .filter(|ch| !ch.is_whitespace() && *ch != '│')
             .collect();
         assert!(
-            normalized.contains("Bankedresets3available"),
+            normalized.contains("✦3resets"),
             "{width} cols:\n{text}"
         );
         assert!(text.contains("OpenAI"), "{width} cols:\n{text}");

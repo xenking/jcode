@@ -37,6 +37,45 @@ impl AccountBankedResets {
     }
 }
 
+/// The line above a Claude login's bars, `✦ 2 resets · 1 usable · expires 15d`,
+/// with why held resets cannot be spent yet and a mark for an observation
+/// another tool cached. `None` when the login holds none.
+pub fn anthropic_resets_line(banked: &jcode_usage_types::AnthropicBankedResets) -> Option<String> {
+    let mut line = super::resets_summary(
+        banked.available_count,
+        Some(banked.usable_count),
+        banked.expires_at.as_deref(),
+    )?;
+    if banked.usable_count == 0
+        && let Some(reason) = banked.reason.as_deref()
+    {
+        line.push_str(&format!(" · not usable now ({reason}"));
+        if let Some(until) = banked.cooldown_until.as_deref() {
+            line.push_str(&format!(", ready in {}", super::format_reset_compact(until)));
+        }
+        line.push(')');
+    }
+    if banked.cached_source.is_some() {
+        line.push_str(" · imported");
+    }
+    Some(line)
+}
+
+/// The held-resets line for any provider report that carries resets.
+pub fn provider_resets_line(provider: &super::ProviderUsage) -> Option<String> {
+    if let Some(credits) = &provider.openai_reset_credits {
+        return super::resets_summary(
+            credits.available_count,
+            None,
+            AccountBankedResets::earliest_expiry(&credits.available_expirations).as_deref(),
+        );
+    }
+    provider
+        .anthropic_banked_resets
+        .as_ref()
+        .and_then(anthropic_resets_line)
+}
+
 fn anthropic_account_resets(
     offer: Option<&jcode_usage_types::AnthropicLimitResetOffer>,
     banked: Option<&jcode_usage_types::AnthropicBankedResets>,
@@ -176,6 +215,7 @@ mod tests {
             usable_count: 1,
             cached_source: None,
             expires_at: Some("2099-02-01T00:00:00Z".into()),
+            ..Default::default()
         };
         let got = anthropic_account_resets(Some(&offer), Some(&banked)).unwrap();
         assert_eq!(got.available, 2);

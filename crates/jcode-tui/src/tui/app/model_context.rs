@@ -1241,6 +1241,11 @@ impl App {
             lines.push("! Hard limit reached".to_string());
         }
 
+        // Held resets lead the gauges, the way every other client shows them.
+        if let Some(resets) = crate::usage::provider_resets_line(provider) {
+            lines.push(one_line(&resets));
+        }
+
         for limit in &provider.limits {
             let reset = limit
                 .resets_at
@@ -1273,34 +1278,6 @@ impl App {
             details.push(format!(
                 "{marker} Credits\t{}",
                 one_line(&crate::usage::credits_line(credits))
-            ));
-        }
-        if let Some(credits) = &provider.openai_reset_credits {
-            let marker = if credits.available_count > 0 {
-                '+'
-            } else {
-                ':'
-            };
-            details.push(format!(
-                "{marker} Banked resets\t{} available",
-                credits.available_count
-            ));
-        }
-        if let Some(banked) = &provider.anthropic_banked_resets {
-            let marker = if banked.available_count > 0 { '+' } else { ':' };
-            let expiry = banked
-                .expires_at
-                .as_deref()
-                .map(|at| format!(" · expires in {}", crate::usage::format_reset_time(at)))
-                .unwrap_or_default();
-            let source = banked
-                .cached_source
-                .as_deref()
-                .map(|_| " · imported")
-                .unwrap_or_default();
-            details.push(format!(
-                "{marker} Banked resets\t{} usable / {}{expiry}{source}",
-                banked.usable_count, banked.available_count
             ));
         }
         if let Some(offer) = &provider.anthropic_limit_reset {

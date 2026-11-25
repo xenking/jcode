@@ -173,6 +173,106 @@ pub fn format_reset_time(timestamp: &str) -> String {
     }
 }
 
+/// Time left until `timestamp` in the tightest readable form: `17d1h`, `15d`,
+/// `5h30m`, `40m`. Used where a line has no room for spaces.
+pub fn format_reset_compact(timestamp: &str) -> String {
+    compact_remaining(timestamp, chrono::Utc::now())
+}
+
+fn compact_remaining(timestamp: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(reset) = parse_reset_timestamp(timestamp) else {
+        return timestamp.to_string();
+    };
+    let left = reset.signed_duration_since(now);
+    if left.num_seconds() <= 0 {
+        return "now".to_string();
+    }
+    let (days, hours, minutes) = (left.num_days(), left.num_hours() % 24, left.num_minutes() % 60);
+    match (days, hours, minutes) {
+        (0, 0, 0) => "1m".to_string(),
+        (0, 0, minutes) => format!("{minutes}m"),
+        (0, hours, 0) => format!("{hours}h"),
+        (0, hours, minutes) => format!("{hours}h{minutes}m"),
+        (days, 0, _) => format!("{days}d"),
+        (days, hours, _) => format!("{days}d{hours}h"),
+    }
+}
+
+/// The line every client shows above a login's quota bars when it holds saved
+/// resets: `✦ 2 resets · 1 usable · expires 15d`. `usable` is only named when
+/// it is fewer than the count. `None` for a login with no resets, so nothing
+/// is drawn for an empty or unknown balance.
+pub fn resets_summary(count: u64, usable: Option<u64>, expires_at: Option<&str>) -> Option<String> {
+    resets_summary_at(count, usable, expires_at, chrono::Utc::now())
+}
+
+fn resets_summary_at(
+    count: u64,
+    usable: Option<u64>,
+    expires_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    if count == 0 {
+        return None;
+    }
+    let mut line = format!("✦ {count} {}", if count == 1 { "reset" } else { "resets" });
+    if let Some(usable) = usable.filter(|usable| *usable < count) {
+        line.push_str(&format!(" · {usable} usable"));
+    }
+    if let Some(at) = expires_at {
+        line.push_str(&format!(" · expires {}", compact_remaining(at, now)));
+    }
+    Some(line)
+}
+
+#[cfg(test)]
+mod reset_line_tests {
+    use super::*;
+
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn compact_remaining_keeps_the_two_leading_units() {
+        let now = at("2026-11-26T00:00:00Z");
+        for (expires, expected) in [
+            ("2026-12-13T01:20:00Z", "17d1h"),
+            ("2026-12-11T00:00:00Z", "15d"),
+            ("2026-11-26T05:30:00Z", "5h30m"),
+            ("2026-11-26T05:00:00Z", "5h"),
+            ("2026-11-26T00:40:00Z", "40m"),
+            ("2026-11-26T00:00:20Z", "1m"),
+            ("2026-11-25T23:00:00Z", "now"),
+        ] {
+            assert_eq!(compact_remaining(expires, now), expected, "{expires}");
+        }
+    }
+
+    #[test]
+    fn summary_matches_the_screenshot_wording() {
+        let now = at("2026-11-26T00:00:00Z");
+        let soonest = Some("2026-12-11T00:00:00Z");
+        assert_eq!(
+            resets_summary_at(2, Some(1), soonest, now).as_deref(),
+            Some("✦ 2 resets · 1 usable · expires 15d")
+        );
+        // All usable, or usability not reported: only the count and expiry.
+        for usable in [Some(2), None] {
+            assert_eq!(
+                resets_summary_at(2, usable, soonest, now).as_deref(),
+                Some("✦ 2 resets · expires 15d")
+            );
+        }
+        assert_eq!(
+            resets_summary_at(1, None, Some("2026-12-13T01:00:00Z"), now).as_deref(),
+            Some("✦ 1 reset · expires 17d1h")
+        );
+        assert_eq!(resets_summary_at(3, Some(0), None, now).as_deref(), Some("✦ 3 resets · 0 usable"));
+        assert_eq!(resets_summary_at(0, Some(0), soonest, now), None);
+    }
+}
+
 pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = ((percent / 100.0) * width as f32).round() as usize;
     let filled = filled.min(width);

@@ -12,7 +12,7 @@ async fn anthropic_usage_follows_the_accounts_egress() {
         format!("http://{}", listener.local_addr().unwrap())
     };
     let upstream = Upstream::start("{}").await;
-    let url = format!("{}/api/oauth/usage", upstream.url);
+    let url = format!("{}/api/oauth", upstream.url);
     install_config(
         &[
             ("corp", proxy.url.as_str(), true),
@@ -36,16 +36,18 @@ async fn anthropic_usage_follows_the_accounts_egress() {
     // (a) The assigned account reads its meter through its proxy.
     let _ = fetch("team").await;
     assert!(
-        proxy.saw(&format!("GET {url} ")),
+        proxy.saw(&format!("GET {url}/usage?")),
         "proxy saw {:?}",
         proxy.seen()
     );
-    assert_eq!(upstream.count(), 1);
+    // Both reads of the reset programs leave through the proxy.
+    assert_eq!(proxy.seen().len(), 2, "proxy saw {:?}", proxy.seen());
+    assert_eq!(upstream.count(), 2);
 
     // (b) Another account reads it directly.
     let _ = fetch("solo").await;
-    assert_eq!(proxy.seen().len(), 1);
-    assert_eq!(upstream.count(), 2);
+    assert_eq!(proxy.seen().len(), 2);
+    assert_eq!(upstream.count(), 4);
 
     // (c) A required proxy that is down sends nothing.
     let error = fetch("strict").await.unwrap_err();
@@ -53,5 +55,5 @@ async fn anthropic_usage_follows_the_accounts_egress() {
         error.to_string().contains("required egress proxy"),
         "{error}"
     );
-    assert_eq!(upstream.count(), 2);
+    assert_eq!(upstream.count(), 4);
 }

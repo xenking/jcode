@@ -92,6 +92,8 @@ enum CardRow<'a> {
     },
     Alert(&'a str),
     Note(&'a str),
+    /// `✦ 2 resets · 1 usable · expires 15d`, shown green above the gauges.
+    Resets(&'a str),
     Spacer,
 }
 
@@ -258,6 +260,8 @@ impl<'a> ProviderCard<'a> {
                     detail(rest, true)
                 } else if let Some(rest) = raw.strip_prefix("! ") {
                     CardRow::Alert(rest)
+                } else if raw.starts_with("✦ ") {
+                    CardRow::Resets(raw)
                 } else {
                     CardRow::Note(raw.strip_prefix("- ").unwrap_or(raw))
                 }
@@ -514,6 +518,12 @@ impl<'a> ProviderCard<'a> {
                 CardRow::Note(text) => {
                     for part in wrap_words(text, inner.max(1)) {
                         lines.push(Line::from(note_spans(&part)));
+                    }
+                }
+                CardRow::Resets(text) => {
+                    let style = usage_utilization_style(0.0).bold();
+                    for part in wrap_words(text, inner.max(1)) {
+                        lines.push(Line::from(Span::styled(part, style)));
                     }
                 }
                 CardRow::Spacer => {

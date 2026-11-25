@@ -26,7 +26,7 @@ pub struct AnthropicLimitResetOffer {
 
 /// Read-only Claude saved limit resets (the `cedar_ember` program, shown by
 /// Claude Code as banked resets), pinned to the login whose usage was fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnthropicBankedResets {
     pub account_label: Option<String>,
     /// Unexpired resets left across all grants, usable now or not.
@@ -35,9 +35,40 @@ pub struct AnthropicBankedResets {
     pub usable_count: u64,
     /// RFC3339 expiry of the soonest-expiring unexpired grant.
     pub expires_at: Option<String>,
+    /// Why nothing is spendable: the server's `ineligible_reason`, or
+    /// `cooldown` while `cooldown_until` is in the future.
+    pub reason: Option<String>,
+    /// RFC3339 time a spent-recently account may claim again.
+    pub cooldown_until: Option<String>,
+    /// Every grant the server listed, soonest expiry first.
+    pub grants: Vec<BankedGrant>,
     /// Stale imported observation, never authority to spend a reset. The
     /// source is displayed to distinguish it from a live provider response.
     pub cached_source: Option<String>,
+}
+
+/// One saved-reset grant and whether it can be spent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BankedGrant {
+    pub id: String,
+    pub label: Option<String>,
+    pub remaining: u64,
+    /// RFC3339 expiry, when the grant has one.
+    pub expires_at: Option<String>,
+    pub status: BankedGrantStatus,
+    /// The grant the server would spend next.
+    pub next: bool,
+}
+
+/// What can be done with a saved-reset grant right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BankedGrantStatus {
+    Expired,
+    Redeemed,
+    Paused,
+    Available,
+    Unavailable,
 }
 
 /// How an account is billed, as shown beside its name and used as the default
