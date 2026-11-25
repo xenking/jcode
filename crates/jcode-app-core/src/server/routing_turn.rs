@@ -161,11 +161,11 @@ pub(super) async fn before_turn(
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
     if !routing_enabled() {
-        agent.set_routing_fail_fast_limits(false);
+        agent.retry_limits_in_place();
         return Ok(());
     }
     let Some(input) = turn_input(agent, agent.routing_seam()) else {
-        agent.set_routing_fail_fast_limits(false);
+        agent.retry_limits_in_place();
         return Ok(());
     };
     let plan = routing_service::global()
@@ -184,18 +184,30 @@ pub async fn route_unattached_turn(agent: &mut Agent) -> anyhow::Result<()> {
     let routed = before_turn(agent, &tx).await;
     // Nothing here re-routes after a failure, so the provider keeps its own
     // same-account retries.
-    agent.set_routing_fail_fast_limits(false);
+    agent.retry_limits_in_place();
     routed
+}
+
+/// A limit reaches routing at once only while another account can serve.
+fn limits_fail_fast_when(agent: &mut Agent, another_account_can_serve: bool) {
+    if another_account_can_serve {
+        agent.fail_fast_on_limits();
+    } else {
+        agent.retry_limits_in_place();
+    }
 }
 
 async fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
     // A limit reaches routing at once only while another account can serve.
-    agent.set_routing_fail_fast_limits(match &plan {
-        Plan::Stay(outcome) | Plan::Move(outcome) | Plan::CompactThenMove(outcome) => {
-            outcome.alternative
-        }
-        _ => false,
-    });
+    limits_fail_fast_when(
+        agent,
+        match &plan {
+            Plan::Stay(outcome) | Plan::Move(outcome) | Plan::CompactThenMove(outcome) => {
+                outcome.alternative
+            }
+            _ => false,
+        },
+    );
     match plan {
         Plan::Stay(outcome) => {
             let _ = event_tx.send(outcome.event());
@@ -324,7 +336,7 @@ pub(super) async fn on_failure(
             let _ = event_tx.send(ServerEvent::ConnectionPhase {
                 phase: format!("retrying on {target}"),
             });
-            agent.set_routing_fail_fast_limits(outcome.alternative);
+            limits_fail_fast_when(agent, outcome.alternative);
             Some(FailureRoute::Retry)
         }
         Ok(_) => Some(FailureRoute::Surface(Some(

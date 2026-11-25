@@ -350,7 +350,9 @@ pub(super) async fn cleanup_client_connection(
                     }
 
                     let memory_enabled = agent.memory_enabled()
-                        && !agent.with_session(|session| session.is_hidden_side_question());
+                        && !crate::agent::Agent::read_session(&agent, |session| {
+                            session.is_hidden_side_question()
+                        });
                     let transcript = if memory_enabled {
                         Some(agent.build_transcript_for_extraction())
                     } else {

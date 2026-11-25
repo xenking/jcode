@@ -6,6 +6,7 @@ mod remote_management_tests;
 
 use crate::mcp::{ContentBlock, McpManager, McpServerConfig, dispatch_name};
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use super::WeakHost;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -154,7 +155,7 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(Str
 /// Fixed MCP discovery surface used when individual server definitions are deferred.
 pub struct McpSearchTool {
     manager: Arc<RwLock<McpManager>>,
-    registry: Option<super::WeakRegistry>,
+    registry: Option<WeakHost>,
 }
 
 impl McpSearchTool {
@@ -165,8 +166,8 @@ impl McpSearchTool {
         }
     }
 
-    pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
-        self.registry = Some(registry.downgrade());
+    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+        self.registry = Some(registry);
         self
     }
 }
@@ -316,7 +317,7 @@ struct McpCallInput {
 /// Fixed MCP execution surface used when individual server definitions are deferred.
 pub struct McpCallTool {
     manager: Arc<RwLock<McpManager>>,
-    registry: Option<super::WeakRegistry>,
+    registry: Option<WeakHost>,
 }
 
 impl McpCallTool {
@@ -327,8 +328,8 @@ impl McpCallTool {
         }
     }
 
-    pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
-        self.registry = Some(registry.downgrade());
+    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+        self.registry = Some(registry);
         self
     }
 }
@@ -604,7 +605,7 @@ fn validate_remote_url(value: &str) -> Result<()> {
 
 pub struct McpManagementTool {
     manager: Arc<RwLock<McpManager>>,
-    registry: Option<crate::tool::WeakRegistry>,
+    registry: Option<WeakHost>,
 }
 
 impl McpManagementTool {
@@ -615,8 +616,8 @@ impl McpManagementTool {
         }
     }
 
-    pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
-        self.registry = Some(registry.downgrade());
+    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+        self.registry = Some(registry);
         self
     }
 }

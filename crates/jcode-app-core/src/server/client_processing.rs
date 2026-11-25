@@ -510,7 +510,7 @@ pub(super) async fn start_processing_message(
     let (start_message_index, pending_queue) = {
         let mut agent_guard = agent.lock().await;
         if owned_worker {
-            agent_guard.set_inline_output_tap(true);
+            agent_guard.tap_inline_output();
         }
         (
             agent_guard.message_count(),

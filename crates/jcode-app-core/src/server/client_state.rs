@@ -1074,17 +1074,22 @@ async fn send_history_with_guard(
             .map(str::to_string)
             .collect(),
     );
-    let pinned_session = agent_guard.session_for_history();
-    let pinned_skill = pinned_session.pinned_skill.clone();
-    let pinned_skills = Some(pinned_session.pinned_skill_names().to_vec());
+    let (pinned_skill, pinned_skills, inferred_interrupted, context_occupancy) =
+        Agent::read_session(&agent_guard, |session| {
+            (
+                session.pinned_skill.clone(),
+                Some(session.pinned_skill_names().to_vec()),
+                was_interrupted
+                    .is_none()
+                    .then(|| session_interrupted_by_reload(session)),
+                // A client attaching after a restart has no live usage report
+                // yet; replay the persisted occupancy so its context meter is
+                // meaningful immediately.
+                session.context_occupancy_tokens(),
+            )
+        });
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
     let provider_oauth_account_label = agent_guard.provider_handle().serving_oauth_account_label();
-    let inferred_interrupted = was_interrupted
-        .is_none()
-        .then(|| session_interrupted_by_reload(agent_guard.session_for_history()));
-    // A client attaching after a restart has no live usage report yet; replay
-    // the persisted occupancy so its context meter is meaningful immediately.
-    let context_occupancy = agent_guard.session_for_history().context_occupancy_tokens();
 
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.

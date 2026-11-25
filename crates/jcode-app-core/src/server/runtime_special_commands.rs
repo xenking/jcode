@@ -336,7 +336,7 @@ async fn overnight(agent: &mut Agent, args: &[String]) -> Result<(Value, String)
         let launch = overnight::start_overnight_run(overnight::OvernightStartOptions {
             duration,
             mission,
-            parent_session: agent.session_for_split().clone(),
+            parent_session: Agent::read_session(agent, crate::session::Session::clone),
             provider: agent.provider_fork(),
             registry: agent.registry(),
             working_dir: agent.working_dir().map(std::path::PathBuf::from),

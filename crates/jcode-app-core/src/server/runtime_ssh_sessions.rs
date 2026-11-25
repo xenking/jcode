@@ -112,10 +112,9 @@ pub(super) async fn execute(
     command: &str,
     args: &[String],
 ) -> Result<(Value, String)> {
-    let session = agent.session_for_history();
     match command {
         "sessions" | "active" | "catchup" => {
-            let current = summary(session);
+            let current = Agent::read_session(agent, summary);
             let command = command.to_owned();
             let args = args.to_vec();
             tokio::task::spawn_blocking(move || list_sessions(current, &command, &args)).await?
@@ -124,12 +123,13 @@ pub(super) async fn execute(
             if !args.is_empty() {
                 bail!("Usage: /session or /resume <id>");
             }
-            let data = summary(session);
+            let data = Agent::read_session(agent, summary);
             Ok((data.clone(), serde_json::to_string_pretty(&data)?))
         }
         "transcript" => {
             if args == ["path"] {
-                let path = crate::session::session_path(&session.id)?;
+                let session_id = Agent::read_session(agent, |session| session.id.clone());
+                let path = crate::session::session_path(&session_id)?;
                 let path = path.display().to_string();
                 return Ok((
                     json!({"scope": "runtime host", "path": path}),
@@ -139,12 +139,14 @@ pub(super) async fn execute(
             if !args.is_empty() {
                 bail!("Usage: /transcript [path]");
             }
-            let messages = crate::session::render_messages(session);
-            let mut text = format!("# Remote transcript: {}\n", session.id);
+            let (session_id, messages) = Agent::read_session(agent, |session| {
+                (session.id.clone(), crate::session::render_messages(session))
+            });
+            let mut text = format!("# Remote transcript: {session_id}\n");
             for message in messages {
                 text.push_str(&format!("\n## {}\n{}\n", message.role, message.content));
             }
-            Ok((json!({"session_id": session.id, "transcript": text}), text))
+            Ok((json!({"session_id": session_id, "transcript": text}), text))
         }
         _ => bail!("Unknown session command: {command}"),
     }

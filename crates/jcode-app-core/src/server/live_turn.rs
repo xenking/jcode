@@ -166,7 +166,7 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
         .get(session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_some())
     {
-        agent.set_inline_output_tap(true);
+        agent.tap_inline_output();
     }
     update_member_status(
         session_id,

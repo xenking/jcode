@@ -480,7 +480,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
             )));
             let management = Arc::new(
                 crate::tool::mcp::McpManagementTool::new(manager.clone())
-                    .with_registry(registry.clone()),
+                    .with_registry(registry.downgrade()),
             );
             registry.register("mcp".into(), management.clone()).await;
             registry
@@ -488,7 +488,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                     "mcp_search".into(),
                     Arc::new(
                         crate::tool::mcp::McpSearchTool::new(manager.clone())
-                            .with_registry(registry.clone()),
+                            .with_registry(registry.downgrade()),
                     ),
                 )
                 .await;
@@ -497,7 +497,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                     "mcp_call".into(),
                     Arc::new(
                         crate::tool::mcp::McpCallTool::new(manager.clone())
-                            .with_registry(registry.clone()),
+                            .with_registry(registry.downgrade()),
                     ),
                 )
                 .await;

@@ -121,19 +121,19 @@ async fn unified_registry() -> crate::tool::Registry {
     registry
         .register(
             "mcp".into(),
-            Arc::new(McpManagementTool::new(manager.clone()).with_registry(registry.clone())),
+            Arc::new(McpManagementTool::new(manager.clone()).with_registry(registry.downgrade())),
         )
         .await;
     registry
         .register(
             "mcp_search".into(),
-            Arc::new(McpSearchTool::new(manager.clone()).with_registry(registry.clone())),
+            Arc::new(McpSearchTool::new(manager.clone()).with_registry(registry.downgrade())),
         )
         .await;
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(McpCallTool::new(manager).with_registry(registry.clone())),
+            Arc::new(McpCallTool::new(manager).with_registry(registry.downgrade())),
         )
         .await;
     registry

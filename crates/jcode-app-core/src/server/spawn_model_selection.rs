@@ -214,7 +214,9 @@ pub(super) async fn session_swarm_model(
     if let Some(agent) = agent
         && let Ok(guard) = agent.try_lock()
     {
-        return guard.with_session(|session| session.effective_agent_model("swarm", global));
+        return crate::agent::Agent::read_session(&guard, |session| {
+            session.effective_agent_model("swarm", global)
+        });
     }
     Session::load_startup_stub(req_session_id)
         .map(|session| session.effective_agent_model("swarm", global.clone()))

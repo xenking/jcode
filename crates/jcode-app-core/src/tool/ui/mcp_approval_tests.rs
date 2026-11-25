@@ -125,7 +125,7 @@ impl Fixture {
                 "mcp".into(),
                 Arc::new(
                     super::super::mcp::McpManagementTool::new(Arc::clone(&manager))
-                        .with_registry(registry.clone()),
+                        .with_registry(registry.downgrade()),
                 ),
             );
         }

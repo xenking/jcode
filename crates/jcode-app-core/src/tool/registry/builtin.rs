@@ -281,18 +281,18 @@ impl Registry {
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
         let mcp_tool =
-            mcp::McpManagementTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone());
+            mcp::McpManagementTool::new(Arc::clone(&mcp_manager)).with_registry(self.downgrade());
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
             .await;
         self.register(
             "mcp_search".to_string(),
-            Arc::new(mcp::McpSearchTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone()))
+            Arc::new(mcp::McpSearchTool::new(Arc::clone(&mcp_manager)).with_registry(self.downgrade()))
                 as Arc<dyn Tool>,
         )
         .await;
         self.register(
             "mcp_call".to_string(),
-            Arc::new(mcp::McpCallTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone()))
+            Arc::new(mcp::McpCallTool::new(Arc::clone(&mcp_manager)).with_registry(self.downgrade()))
                 as Arc<dyn Tool>,
         )
         .await;
@@ -419,15 +419,6 @@ impl Registry {
             tokio::spawn(async move {
                 use futures::StreamExt;
 
-                /// Leaves `connecting` on every path out of one connection's
-                /// handling, including the early `continue`s.
-                struct Settled<'a>(&'a Registry, String);
-                impl Drop for Settled<'_> {
-                    fn drop(&mut self) {
-                        self.0.mark_mcp_settled(&self.1);
-                    }
-                }
-
                 let configs: Vec<_> = mcp_manager
                     .read()
                     .await
@@ -464,7 +455,7 @@ impl Registry {
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
                 while let Some((name, result)) = connections.next().await {
-                    let _settled = Settled(&registry, name.clone());
+                    let _settled = registry.settle_on_drop(name.clone());
                     if let Err(error) = result {
                         crate::logging::event_rate_limited(
                             crate::logging::LogLevel::Error,

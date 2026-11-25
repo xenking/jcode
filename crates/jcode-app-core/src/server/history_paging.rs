@@ -16,11 +16,12 @@ pub(in crate::server) async fn handle_history_page(
     limit: usize,
 ) -> Result<()> {
     let (rows, context_occupancy) = if let Ok(guard) = agent.try_lock() {
-        let session = guard.session_for_history();
-        (
-            bounded::records(session),
-            session.context_occupancy_tokens(),
-        )
+        Agent::read_session(&guard, |session| {
+            (
+                bounded::records(session),
+                session.context_occupancy_tokens(),
+            )
+        })
     } else {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))
@@ -121,7 +122,7 @@ pub(in crate::server) async fn handle_session_images(
                 }
             };
         let result = if let Ok(guard) = agent.try_lock() {
-            build(guard.session_for_history())
+            Agent::read_session(&guard, build)
         } else {
             crate::session::Session::load_for_remote_startup(session_id)
                 .map_err(|e| e.to_string())
@@ -174,7 +175,7 @@ pub(in crate::server) async fn handle_history_image_chunk(
     offset: usize,
 ) -> Result<()> {
     let result = if let Ok(guard) = agent.try_lock() {
-        image_chunk(guard.session_for_history(), &key, offset)
+        Agent::read_session(&guard, |session| image_chunk(session, &key, offset))
     } else {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))

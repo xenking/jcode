@@ -65,7 +65,7 @@ pub(super) async fn register_fake_deferred_mcp_surface(registry: &Registry) {
             "mcp".into(),
             Arc::new(
                 crate::tool::mcp::McpManagementTool::new(manager.clone())
-                    .with_registry(registry.clone()),
+                    .with_registry(registry.downgrade()),
             ),
         )
         .await;
@@ -74,14 +74,14 @@ pub(super) async fn register_fake_deferred_mcp_surface(registry: &Registry) {
             "mcp_search".into(),
             Arc::new(
                 crate::tool::mcp::McpSearchTool::new(manager.clone())
-                    .with_registry(registry.clone()),
+                    .with_registry(registry.downgrade()),
             ),
         )
         .await;
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(crate::tool::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+            Arc::new(crate::tool::mcp::McpCallTool::new(manager).with_registry(registry.downgrade())),
         )
         .await;
 }

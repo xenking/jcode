@@ -118,7 +118,7 @@ pub(super) async fn create_headless_session(
         crate::config::config().agents.swarm_spawn_mode,
         crate::config::SwarmSpawnMode::Inline
     ) {
-        new_agent.set_inline_output_tap(true);
+        new_agent.tap_inline_output();
     }
     let client_session_id = new_agent.session_id().to_string();
 

@@ -111,6 +111,18 @@ pub(crate) fn clear_session_tool_policy(session_id: &str) {
     policies.remove(session_id);
 }
 
+/// Resolve a model-supplied tool name for a session: strips a `functions.`
+/// namespace and maps aliases, but leaves SDK custom tool names untouched so
+/// they are never rewritten to a built-in.
+pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
+    let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+    if sdk::custom(session_id, unqualified_name) {
+        unqualified_name
+    } else {
+        jcode_tool_types::resolve_tool_name(unqualified_name)
+    }
+}
+
 pub(super) fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
     let mut policy = SESSION_TOOL_POLICIES
         .read()

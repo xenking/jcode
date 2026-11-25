@@ -154,6 +154,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "registry/host.rs"]
+mod host;
+use host::{ToolHost, WeakHost};
 #[path = "registry/name_policy.rs"]
 mod name_policy;
 use name_policy::is_fixed_mcp_tool;
@@ -302,11 +305,32 @@ struct McpPolicyIndex {
 }
 
 impl McpPolicyIndex {
+    /// A server finished its first connection attempt, whatever the outcome.
+    fn settle(&mut self, server: &str) {
+        self.connecting.remove(server);
+        self.settled.notify_waiters();
+    }
+
     /// A connecting server that has registered no tools yet.
     fn has_cold_server(&self) -> bool {
         self.connecting
             .iter()
             .any(|server| !self.current.values().any(|(owner, _)| owner == server))
+    }
+}
+
+/// Settles one connecting MCP server when it drops.
+struct SettledOnDrop {
+    policy: Arc<StdRwLock<McpPolicyIndex>>,
+    server: String,
+}
+
+impl Drop for SettledOnDrop {
+    fn drop(&mut self) {
+        self.policy
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .settle(&self.server);
     }
 }
 
@@ -319,29 +343,6 @@ pub struct Registry {
     mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
-}
-
-/// Non-owning handle used by tools stored inside a registry.
-///
-/// A tool cannot strongly own the registry containing it without creating an
-/// Arc cycle. Upgrade this handle only for the duration of a tool call.
-#[derive(Clone)]
-pub(super) struct WeakRegistry {
-    tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
-    mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
-    skills: Arc<RwLock<SkillRegistry>>,
-    compaction: Arc<RwLock<CompactionManager>>,
-}
-
-impl WeakRegistry {
-    pub(super) fn upgrade(&self) -> Option<Registry> {
-        Some(Registry {
-            tools: self.tools.upgrade()?,
-            mcp_policy: Arc::clone(&self.mcp_policy),
-            skills: Arc::clone(&self.skills),
-            compaction: Arc::clone(&self.compaction),
-        })
-    }
 }
 
 impl Clone for Registry {
@@ -409,13 +410,21 @@ impl Registry {
         }
     }
 
-    fn downgrade(&self) -> WeakRegistry {
-        WeakRegistry {
-            tools: Arc::downgrade(&self.tools),
-            mcp_policy: Arc::clone(&self.mcp_policy),
-            skills: Arc::clone(&self.skills),
-            compaction: Arc::clone(&self.compaction),
-        }
+    /// A non-owning handle for the tools stored inside this registry.
+    pub(crate) fn downgrade(&self) -> WeakHost {
+        let tools = Arc::downgrade(&self.tools);
+        let mcp_policy = Arc::clone(&self.mcp_policy);
+        let skills = Arc::clone(&self.skills);
+        let compaction = Arc::clone(&self.compaction);
+        WeakHost::new(move || {
+            let registry = Registry {
+                tools: tools.upgrade()?,
+                mcp_policy: Arc::clone(&mcp_policy),
+                skills: Arc::clone(&skills),
+                compaction: Arc::clone(&compaction),
+            };
+            Some(Arc::new(registry) as Arc<dyn ToolHost>)
+        })
     }
 
     /// Create a lightweight empty registry (no tools, no skill loading).
@@ -496,10 +505,21 @@ impl Registry {
             .extend(servers);
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_mcp_settled(&self, server: &str) {
-        let mut index = self.mcp_policy.write().unwrap_or_else(|e| e.into_inner());
-        index.connecting.remove(server);
-        index.settled.notify_waiters();
+        self.mcp_policy
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .settle(server);
+    }
+
+    /// Leaves `connecting` on every path out of one connection's handling,
+    /// including early `continue`s, when the returned guard drops.
+    fn settle_on_drop(&self, server: String) -> SettledOnDrop {
+        SettledOnDrop {
+            policy: Arc::clone(&self.mcp_policy),
+            server,
+        }
     }
 
     /// Wait up to `max` for servers that are still connecting and have no
@@ -582,6 +602,15 @@ impl Registry {
             .collect()
     }
 
+    /// The input schema of the registered tool `route`, if there is one.
+    async fn parameters_schema(&self, route: &str) -> Option<Value> {
+        self.tools
+            .read()
+            .await
+            .get(route)
+            .map(|tool| tool.parameters_schema())
+    }
+
     /// Resolve tool name aliases.
     ///
     /// When using OAuth, the API presents tools with Claude Code names
@@ -657,12 +686,7 @@ impl Registry {
     /// `functions.` namespace and maps aliases, but leaves SDK custom tool
     /// names untouched so they are never rewritten to a built-in.
     pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
-        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
-        if sdk::custom(session_id, unqualified_name) {
-            unqualified_name
-        } else {
-            Self::resolve_tool_name(unqualified_name)
-        }
+        session_policy::resolve_tool_name_for_session(session_id, name)
     }
 
     /// Execute a tool by name

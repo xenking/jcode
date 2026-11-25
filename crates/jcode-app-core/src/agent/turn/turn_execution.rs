@@ -677,12 +677,21 @@ impl Agent {
         self.persist_session_best_effort("system prompt override");
     }
 
-    /// Set the stdin request channel for interactive stdin forwarding
+    /// Set the stdin request channel for interactive stdin forwarding. A client
+    /// that attaches while another client's channel is still open takes over
+    /// ask routing, which is worth a trace when sessions are shared.
     pub fn set_stdin_request_tx(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>,
     ) {
-        self.stdin_request_tx = Some(tx);
+        if let Some(previous) = self.stdin_request_tx.replace(tx)
+            && !previous.is_closed()
+        {
+            crate::logging::info(&format!(
+                "STDIN_CHANNEL_REPLACED session={} previous channel was still open",
+                self.session.id
+            ));
+        }
     }
 
     /// Prepare the static provider prefix while a client is idle. Unlike
@@ -721,12 +730,6 @@ impl Agent {
                 tool_data: msg.tool_data,
             })
             .collect()
-    }
-
-    /// Borrow the in-memory session so history assembly need not re-read the
-    /// (possibly tens of MB) persisted snapshot.
-    pub(crate) fn session_for_history(&self) -> &crate::session::Session {
-        &self.session
     }
 
     pub fn get_history_and_rendered_images(

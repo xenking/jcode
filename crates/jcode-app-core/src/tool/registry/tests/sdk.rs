@@ -398,13 +398,13 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(mcp::McpCallTool::new(manager.clone()).with_registry(registry.clone())),
+            Arc::new(mcp::McpCallTool::new(manager.clone()).with_registry(registry.downgrade())),
         )
         .await;
     registry
         .register(
             "mcp".into(),
-            Arc::new(mcp::McpManagementTool::new(manager).with_registry(registry.clone())),
+            Arc::new(mcp::McpManagementTool::new(manager).with_registry(registry.downgrade())),
         )
         .await;
     let mut config = SessionToolConfig {

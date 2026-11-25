@@ -4,12 +4,12 @@
 //! Enabled by default (`[features] code_mode` and `[tools] codemode`, both
 //! true unless turned off; `JCODE_CODEMODE=0` also disables it). See
 //! `jcode-codemode` for the sandbox itself. This module is the harness side:
-//! it lists the session's tools, routes calls through [`Registry::execute`]
+//! it lists the session's tools, routes calls through [`ToolHost::execute`]
 //! (so session policy, hooks, and MCP routing all apply), and persists the
 //! script `store()` per session between runs.
 
 use super::codemode_ledger::{self, CallLedger, StoreError};
-use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
+use super::{Tool, ToolContext, ToolHost, ToolOutput, WeakHost};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -40,11 +40,11 @@ listTools(filter?) lists names; types(filter?) and describeTool(name) give TypeS
 No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
 
 pub struct CodemodeTool {
-    registry: WeakRegistry,
+    registry: WeakHost,
 }
 
 impl CodemodeTool {
-    pub(super) fn new(registry: WeakRegistry) -> Self {
+    pub(super) fn new(registry: WeakHost) -> Self {
         Self { registry }
     }
 }
@@ -57,7 +57,7 @@ struct CodemodeInput {
 }
 
 struct RegistryHost {
-    registry: Registry,
+    registry: Arc<dyn ToolHost>,
     ctx: ToolContext,
     counter: AtomicUsize,
     ledger: Arc<CallLedger>,

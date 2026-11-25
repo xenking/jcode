@@ -63,11 +63,13 @@ pub(in crate::server) fn handle_split_side_question(
     agent: &Arc<Mutex<Agent>>,
 ) -> ServerEvent {
     let idle_agent = agent.try_lock().ok();
-    match snapshot_child_session(
-        parent_session_id,
-        idle_agent.as_ref().map(|agent| agent.session_for_split()),
-        true,
-    ) {
+    let built = match idle_agent.as_ref() {
+        Some(idle) => Agent::read_session(idle, |session| {
+            snapshot_child_session(parent_session_id, Some(session), true)
+        }),
+        None => snapshot_child_session(parent_session_id, None, true),
+    };
+    match built {
         Ok(child) => ServerEvent::SideQuestionForked {
             id,
             topic: child

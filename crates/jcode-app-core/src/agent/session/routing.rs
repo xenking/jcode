@@ -93,9 +93,15 @@ impl Agent {
         self.session.parent_id.clone()
     }
 
-    /// Whether a spent allowance must reach routing on its first occurrence.
-    pub(crate) fn set_routing_fail_fast_limits(&mut self, fail_fast: bool) {
-        self.routing_fail_fast_limits = fail_fast;
+    /// A spent allowance must reach routing on its first occurrence, because
+    /// another account can serve this session.
+    pub(crate) fn fail_fast_on_limits(&mut self) {
+        self.routing_fail_fast_limits = true;
+    }
+
+    /// A spent allowance keeps the provider's own same-account retries.
+    pub(crate) fn retry_limits_in_place(&mut self) {
+        self.routing_fail_fast_limits = false;
     }
 
     /// Where the session stands relative to its prompt cache: a session with no

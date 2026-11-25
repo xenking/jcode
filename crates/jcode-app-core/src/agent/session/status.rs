@@ -22,14 +22,17 @@ fn assistant_output_tail_after(messages: &[StoredMessage], start_index: usize) -
 }
 
 impl Agent {
-    /// Read-only source for splitting a new session before its first persistence.
+    /// Test-only borrow of the session for assertions.
+    #[cfg(test)]
     pub(crate) fn session_for_split(&self) -> &Session {
         &self.session
     }
 
-    /// Run `read` over the in-memory session without handing the session out.
-    pub(crate) fn with_session<R>(&self, read: impl FnOnce(&Session) -> R) -> R {
-        read(&self.session)
+    /// The one way code outside `Agent` reads its in-memory session: `read`
+    /// runs over it and only what `read` returns leaves. Callers that hold a
+    /// busy agent's lock load the saved session instead.
+    pub(crate) fn read_session<R>(agent: &Agent, read: impl FnOnce(&Session) -> R) -> R {
+        read(&agent.session)
     }
 
     pub fn session_memory_profile_snapshot(

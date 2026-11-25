@@ -1,4 +1,5 @@
-use super::{MAX_PARALLEL, Registry};
+use super::super::session_policy::resolve_tool_name_for_session;
+use super::{MAX_PARALLEL, ToolHost};
 use anyhow::{Result, bail, ensure};
 use jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY;
 use serde::Deserialize;
@@ -33,7 +34,7 @@ struct Selector {
 impl BatchInput {
     pub(super) async fn for_session(
         input: Value,
-        registry: &Registry,
+        registry: &dyn ToolHost,
         session_id: &str,
     ) -> Result<Self> {
         if let Some(calls) = input.get("tool_calls").and_then(Value::as_array) {
@@ -45,7 +46,6 @@ impl BatchInput {
         }
         let selectors = {
             let configured = super::super::sdk::config(session_id);
-            let tools = registry.tools.read().await;
             let mut selectors = HashMap::new();
             for call in input
                 .get("tool_calls")
@@ -57,12 +57,15 @@ impl BatchInput {
                     .into_iter()
                     .filter_map(|key| call.get(key)?.as_str())
                 {
-                    let route = Registry::resolve_tool_name_for_session(session_id, candidate);
-                    let schema = configured
+                    let route = resolve_tool_name_for_session(session_id, candidate);
+                    let custom = configured
                         .as_ref()
                         .and_then(|config| config.custom.iter().find(|tool| tool.name == route))
-                        .map(|tool| tool.parameters.clone())
-                        .or_else(|| tools.get(route).map(|tool| tool.parameters_schema()));
+                        .map(|tool| tool.parameters.clone());
+                    let schema = match custom {
+                        Some(schema) => Some(schema),
+                        None => registry.parameters_schema(route).await,
+                    };
                     if let Some(schema) = schema {
                         selectors.insert(
                             candidate.to_owned(),

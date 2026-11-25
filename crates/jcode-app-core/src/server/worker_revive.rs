@@ -104,7 +104,7 @@ pub(super) async fn live_or_revived_agent(
                 crate::config::SwarmSpawnMode::Inline
             )
         {
-            agent.set_inline_output_tap(true);
+            agent.tap_inline_output();
         }
         register_session_interrupt_queue(
             &context.soft_interrupt_queues,

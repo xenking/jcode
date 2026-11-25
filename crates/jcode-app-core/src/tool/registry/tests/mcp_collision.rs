@@ -223,7 +223,7 @@ fn mcp_collision_manual_lifecycle_real_stdio() {
             let manager = Arc::new(RwLock::new(crate::mcp::McpManager::with_config(
                 crate::mcp::McpConfig::default(),
             )));
-            let management = mcp::McpManagementTool::new(Arc::clone(&manager)).with_registry(registry.clone());
+            let management = mcp::McpManagementTool::new(Arc::clone(&manager)).with_registry(registry.downgrade());
             let ctx = mcp_test_context(std::path::Path::new("."));
             let catalog = collision_catalog();
             let aliases = crate::mcp::dispatch_names(&catalog);
@@ -257,7 +257,7 @@ fn mcp_collision_manual_lifecycle_real_stdio() {
                 assert_eq!(unified["arguments"]["token"], "unified");
             }
             set_session_tool_policy(&ctx.session_id, None, HashSet::from([aliases[0].clone()]));
-            let deferred = mcp::McpCallTool::new(Arc::clone(&manager)).with_registry(registry.clone());
+            let deferred = mcp::McpCallTool::new(Arc::clone(&manager)).with_registry(registry.downgrade());
             let denied = deferred.execute(serde_json::json!({"server":"server-a","tool":"query-docs","arguments":{}}), ctx.clone()).await.unwrap_err();
             assert!(denied.to_string().contains("not allowed"));
             let peer = deferred.execute(serde_json::json!({"server":"server_a","tool":"query_docs","arguments":{}}), ctx.clone()).await.unwrap();

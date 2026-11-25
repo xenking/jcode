@@ -308,10 +308,10 @@ impl Agent {
         ));
     }
 
-    /// Mark this session as an inline swarm worker. When enabled, the streaming
-    /// loop publishes a throttled output tail to the global bus so a
-    /// coordinator can render a live inline gallery viewport for it.
-    pub fn set_inline_output_tap(&mut self, enabled: bool) {
-        self.inline_output_tap = enabled;
+    /// Mark this session as an inline swarm worker. The streaming loop then
+    /// publishes a throttled output tail to the global bus so a coordinator can
+    /// render a live inline gallery viewport for it.
+    pub fn tap_inline_output(&mut self) {
+        self.inline_output_tap = true;
     }
 }

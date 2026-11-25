@@ -745,7 +745,8 @@ async fn build_server_memory_payload(
             // The compact snapshot omits compaction capacity attribution. Read
             // the same session profile as agent:memory without its discarded
             // process, interrupt, and frozen-snapshot diagnostics.
-            let session_profile = agent.session_for_split().debug_memory_profile();
+            let session_profile =
+                Agent::read_session(&agent, |session| session.debug_memory_profile());
             // Only profiles obtained through try_lock contribute. Capacity is
             // attribution, not serialized length or an estimate of RSS savings.
             compaction_memory.observe(session_id, &session_profile);

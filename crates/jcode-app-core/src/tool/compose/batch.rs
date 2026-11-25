@@ -1,4 +1,5 @@
-use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry, accepts_large_output};
+use super::session_policy::resolve_tool_name_for_session;
+use super::{Tool, ToolContext, ToolHost, ToolOutput, WeakHost, accepts_large_output};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
@@ -83,11 +84,11 @@ fn ordered_batch_subcalls(
 }
 
 pub struct BatchTool {
-    registry: WeakRegistry,
+    registry: WeakHost,
 }
 
 impl BatchTool {
-    pub(super) fn new(registry: WeakRegistry) -> Self {
+    pub(super) fn new(registry: WeakHost) -> Self {
         Self { registry }
     }
 }
@@ -116,11 +117,11 @@ impl Tool for BatchTool {
         // only a flag typed inside an individual entry (or a repeat after a
         // refusal) had any effect.
         let batch_opt_in = accepts_large_output(&input);
-        let params = BatchInput::for_session(input, &registry, &ctx.session_id).await?;
+        let params = BatchInput::for_session(input, registry.as_ref(), &ctx.session_id).await?;
 
         // Check for disallowed tools
         for tc in &params.tool_calls {
-            if Registry::resolve_tool_name_for_session(&ctx.session_id, &tc.tool) == "batch" {
+            if resolve_tool_name_for_session(&ctx.session_id, &tc.tool) == "batch" {
                 return Err(anyhow::anyhow!("Cannot batch the 'batch' tool"));
             }
         }
@@ -142,8 +143,7 @@ impl Tool for BatchTool {
                 // Display and dispatch the canonical name (e.g. `functions.bash`
                 // -> `bash`) while keeping SDK custom tool names intact.
                 let tool_name =
-                    Registry::resolve_tool_name_for_session(&ctx.session_id, &tool_name)
-                        .to_string();
+                    resolve_tool_name_for_session(&ctx.session_id, &tool_name).to_string();
                 (i, tool_name, parameters)
             })
             .collect();

@@ -115,9 +115,11 @@ pub(super) async fn execute(
             } else {
                 agent.mode_command(&args.join(" "))?
             };
-            let session = agent.session_for_split();
+            let pinned = Agent::read_session(agent, |session| {
+                json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()})
+            });
             return Ok((
-                json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()}),
+                pinned,
                 if args.first().is_some_and(|arg| arg == "toggle") {
                     String::new()
                 } else {
@@ -148,9 +150,7 @@ pub(super) async fn execute(
                 _ => agent.subagent_model().or(config.agents.swarm_model.clone()),
             };
             let model = explicit_model.or_else(|| {
-                agent
-                    .session_for_split()
-                    .effective_agent_model(role, global)
+                Agent::read_session(agent, |session| session.effective_agent_model(role, global))
             });
             let output = agent
                 .registry()

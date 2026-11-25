@@ -418,7 +418,7 @@ async fn codemode_exposes_only_unified_mcp_and_can_search() {
             "mcp".into(),
             Arc::new(
                 super::super::mcp::McpManagementTool::new(manager.clone())
-                    .with_registry(registry.clone()),
+                    .with_registry(registry.downgrade()),
             ),
         )
         .await;
@@ -427,14 +427,14 @@ async fn codemode_exposes_only_unified_mcp_and_can_search() {
             "mcp_search".into(),
             Arc::new(
                 super::super::mcp::McpSearchTool::new(manager.clone())
-                    .with_registry(registry.clone()),
+                    .with_registry(registry.downgrade()),
             ),
         )
         .await;
     registry
         .register(
             "mcp_call".into(),
-            Arc::new(super::super::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
+            Arc::new(super::super::mcp::McpCallTool::new(manager).with_registry(registry.downgrade())),
         )
         .await;
     let out = registry
