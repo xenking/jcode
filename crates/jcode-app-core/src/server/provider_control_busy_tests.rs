@@ -578,6 +578,10 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     )
     .await
     .expect("route request must not block on the agent lock");
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 29, .. })
+    ));
     assert!(rx.try_recv().is_err());
     drop(lock);
     let event = timeout(Duration::from_secs(1), rx.recv())
