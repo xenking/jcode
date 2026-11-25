@@ -307,8 +307,8 @@ pub(super) fn gather_ambient_info_inner(ambient_enabled: bool) -> Option<Ambient
             return None;
         }
     };
-    let state = manager.state();
-    let queue_items = manager.queue().items();
+    let state = manager.state_snapshot();
+    let queue_items = manager.scheduled_items();
     let queue_count = queue_items.len();
     let next_queue_item = queue_items.iter().min_by_key(|item| item.scheduled_for);
     let reminder_items: Vec<_> = queue_items
