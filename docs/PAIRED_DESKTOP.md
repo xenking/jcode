@@ -21,9 +21,24 @@ Run Jcode on the Mac that owns the projects. Run Desktop on the Mac you use. Bot
 
 ## Connect from Desktop
 
-1. In **Machines**, choose **Pair Work Mac**. Enter the HTTPS origin, a label such as `Work Mac`, an absolute default project path on that Mac, and the invite. Choose **Pair and save**. Desktop stores the token in macOS Keychain.
-2. Choose **Sessions** to open an existing session. To work in a second project without pairing again, enter its absolute path in **Remote project path for a new session** and choose **New session in remote project**.
+1. In **Machines**, choose **Pair a machine**. Enter the HTTPS origin, a label such as `Work Mac`, an absolute default project path on that Mac, and the invite. Choose **Pair and save**. Desktop stores the token in macOS Keychain.
+2. Choose **Sessions** to open an existing session. Each paired machine row has a **Project** path. Edit it and choose **Save** to change where new sessions start, or edit it and choose **Connect** to open one session in another project without saving.
 3. Confirm that a session opens from the remote machine, not a local checkout with a similar path. Disconnect and reconnect to check that Desktop opens the same session ID.
+
+## When a connect fails
+
+Desktop shows the cause inside the machine's row, with the next step:
+
+| Cause | What you see | Action |
+| --- | --- | --- |
+| The name does not resolve (Tailscale or the VPN is off) | Can't reach the machine (name did not resolve) | Retry |
+| Nothing listens, or the host is asleep | Connection refused, or no answer in time | Retry |
+| The certificate or address is wrong | Can't open a secure connection | Retry, or Re-pair with the right address |
+| The token was revoked or is unknown (HTTP 401 or 403) | The machine no longer accepts this device | Re-pair |
+| The address does not serve Jcode (HTTP 404) | The saved address does not serve Jcode | Re-pair |
+| The gateway has no `harness_v1` | Its Jcode is too old for Desktop | Update Jcode there, then Retry |
+
+**Details** shows the technical cause. **Re-pair** keeps the machine's id, label and project path and replaces its token, so sessions and the default keep pointing at it. A failed name lookup fails at once. Other failures end within the 15 second connect deadline.
 
 ## Remove access
 
