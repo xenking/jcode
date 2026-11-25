@@ -3,10 +3,10 @@ use super::*;
 
 use super::streaming::StreamUsageRecorder;
 
-#[path = "tool_handoff.rs"]
-pub(super) mod tool_handoff;
-pub(super) use tool_handoff::execute_with_background;
-use tool_handoff::{incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff};
+use super::tool_handoff;
+use super::tool_handoff::{
+    incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff,
+};
 
 struct ForegroundToolAbortGuard(Option<tokio::task::AbortHandle>);
 
@@ -1277,7 +1277,7 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                        let tool_result = super::tool_handoff::execute_with_background(
                             self.registry.clone(),
                             tool_name.clone(),
                             ToolCall::normalize_input_to_object(input),
