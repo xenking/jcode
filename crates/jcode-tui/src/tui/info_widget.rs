@@ -970,7 +970,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
-        let (rect, inner) = tight_rects(rect, inner, framed.lines().len());
+        let (rect, inner) = tight_rects(rect, inner, framed.row_count());
         frame.render_widget(framed.apply(block, rect.width), rect);
         frame.render_widget(Paragraph::new(framed.into_lines()), inner);
         return;
@@ -995,7 +995,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
-    let (rect, inner) = tight_rects(rect, inner, framed.lines().len());
+    let (rect, inner) = tight_rects(rect, inner, framed.row_count());
     frame.render_widget(framed.apply(block, rect.width), rect);
     frame.render_widget(Paragraph::new(framed.into_lines()), inner);
 }

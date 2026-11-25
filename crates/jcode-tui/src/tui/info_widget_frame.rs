@@ -55,9 +55,8 @@ impl Framed {
         }
     }
 
-    /// Body rows, without the border text.
-    pub(crate) fn lines(&self) -> &[Line<'static>] {
-        &self.lines
+    pub(crate) fn row_count(&self) -> usize {
+        self.lines.len()
     }
 
     pub(crate) fn into_lines(self) -> Vec<Line<'static>> {

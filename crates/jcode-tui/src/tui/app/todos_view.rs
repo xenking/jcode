@@ -378,7 +378,7 @@ impl App {
         snapshot
     }
 
-    pub(super) fn snapshot_without_todos_view(&self) -> SidePanelSnapshot {
+    fn snapshot_without_todos_view(&self) -> SidePanelSnapshot {
         let mut snapshot = self.side_panel.clone();
         snapshot.pages.retain(|page| page.id != TODOS_VIEW_PAGE_ID);
         if snapshot.focused_page_id.as_deref() == Some(TODOS_VIEW_PAGE_ID) {
@@ -459,7 +459,7 @@ impl App {
     }
 }
 
-pub(super) fn todos_view_status_message(app: &App) -> String {
+fn todos_view_status_message(app: &App) -> String {
     format!(
         "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo header: {}\n\n/todos pin cycles full, minimal, and hidden. This does not change the inline card or side panel.",
         crate::tui::keybind::todo_card_key_label(),

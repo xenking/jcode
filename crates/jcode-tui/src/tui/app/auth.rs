@@ -18,7 +18,7 @@ pub(crate) use self::auth_account_commands::{
     handle_auth_command, handle_ssh_usage_command_remote, save_openai_fast_setting_local,
 };
 
-pub(crate) fn resolve_account_provider_descriptor(
+fn resolve_account_provider_descriptor(
     input: &str,
 ) -> Option<crate::provider_catalog::LoginProviderDescriptor> {
     crate::provider_catalog::resolve_login_provider(input)
@@ -447,7 +447,7 @@ impl App {
         notices.join("\n")
     }
 
-    pub(super) fn show_auth_status(&mut self) {
+    fn show_auth_status(&mut self) {
         let status = crate::auth::AuthStatus::check();
         let validation = crate::auth::validation::load_all();
         let icon = |state: crate::auth::AuthState| match state {
@@ -505,7 +505,7 @@ impl App {
         self.set_status_notice("Login: choose a provider");
     }
 
-    pub(super) fn show_interactive_logout(&mut self) {
+    fn show_interactive_logout(&mut self) {
         self.open_logout_picker_inline();
         self.set_status_notice("Logout: choose a provider");
     }

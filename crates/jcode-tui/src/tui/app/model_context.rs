@@ -636,7 +636,7 @@ impl App {
         };
     }
 
-    pub(super) fn effective_context_tokens_from_usage(
+    fn effective_context_tokens_from_usage(
         &self,
         input_tokens: u64,
         cache_read_input_tokens: Option<u64>,
@@ -896,7 +896,7 @@ impl App {
         }
     }
 
-    pub(super) fn auto_recover_context_limit(&mut self) -> Option<String> {
+    fn auto_recover_context_limit(&mut self) -> Option<String> {
         if self.is_remote || !self.provider.supports_compaction() {
             return None;
         }
@@ -1524,7 +1524,7 @@ pub(super) use messages::*;
 
 /// Match `/usage <provider>` queries against report names such as
 /// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
-pub(super) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
+fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
     let normalize = |text: &str| -> String {
         text.chars()
             .filter(|ch| ch.is_alphanumeric())

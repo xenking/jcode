@@ -249,7 +249,7 @@ impl App {
         self.clear_input_undo_history();
     }
 
-    pub(super) fn cancel_ssh_login(&mut self) {
+    fn cancel_ssh_login(&mut self) {
         let Some(login) = self.remote_login.as_mut() else {
             return;
         };

@@ -156,7 +156,7 @@ impl BodyAcc {
     /// truncate both the wrapped arrays *and* the raw array at a message
     /// boundary, avoiding an unbounded raw leak across repeated tail edits (e.g.
     /// a streaming tool result that updates many times).
-    pub(super) fn push_auto(&mut self, line: Line<'static>) {
+    fn push_auto(&mut self, line: Line<'static>) {
         let raw_text = ui::line_plain_text(&line);
         let raw_width = unicode_width::UnicodeWidthStr::width(raw_text.as_str());
         let raw_line = self.raw_plain_lines.len();
@@ -172,7 +172,7 @@ impl BodyAcc {
 
     /// Push a blank separator line. Routed through `push_auto` so it seeds a
     /// (empty) raw and keeps the raw array contiguous.
-    pub(super) fn push_blank(&mut self) {
+    fn push_blank(&mut self) {
         self.push_auto(Line::from(""));
     }
 }

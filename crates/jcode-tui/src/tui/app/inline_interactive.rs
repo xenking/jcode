@@ -405,7 +405,7 @@ pub(crate) enum AgentModelsPickerView {
     Models(crate::tui::AgentModelTarget),
 }
 
-pub(crate) fn agent_models_picker_view(
+fn agent_models_picker_view(
     picker: &InlineInteractiveState,
 ) -> Option<AgentModelsPickerView> {
     if picker.kind != PickerKind::Model {
@@ -1529,7 +1529,7 @@ impl App {
     /// The model list is stashed so Esc can return to the same place, and the
     /// level rows are ordinary model entries carrying `effort`, so the existing
     /// switch path applies model and level together.
-    pub(super) fn open_model_picker_effort_step(&mut self, entry: &PickerEntry) {
+    fn open_model_picker_effort_step(&mut self, entry: &PickerEntry) {
         let ctx = self.model_picker_build_context();
         let rows = model_picker_stage::effort_entries(
             entry,
@@ -1575,7 +1575,7 @@ impl App {
     }
 
     /// Esc from the effort step: back to the model list it came from.
-    pub(super) fn close_model_picker_effort_step(&mut self) {
+    fn close_model_picker_effort_step(&mut self) {
         if let Some(parent) = self.model_picker_effort_parent.take() {
             self.inline_interactive_state = Some(*parent);
         }

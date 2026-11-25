@@ -325,7 +325,7 @@ impl RemoteConnection {
     }
 
     /// Connect to the server
-    pub async fn connect() -> Result<Self> {
+    async fn connect() -> Result<Self> {
         Self::connect_with_session(None, None, false, None, false, None).await
     }
 
@@ -633,7 +633,7 @@ impl RemoteConnection {
 
     /// Send a message to the server
     /// Send a message to the server and return the request ID
-    pub async fn send_message(&mut self, content: String) -> Result<u64> {
+    async fn send_message(&mut self, content: String) -> Result<u64> {
         self.send_message_with_images_and_reminder(content, vec![], None)
             .await
     }
@@ -654,7 +654,7 @@ impl RemoteConnection {
 
     /// Runtime failures share the Error wire variant with chat failures. Keep
     /// request ownership so the client can render them without ending a turn.
-    pub fn finish_runtime_command(&mut self, id: u64) -> bool {
+    fn finish_runtime_command(&mut self, id: u64) -> bool {
         self.pending_runtime_commands.remove(&id)
     }
 
@@ -674,7 +674,7 @@ impl RemoteConnection {
     }
 
     /// Send a message with images to the server and return the request ID
-    pub async fn send_message_with_images(
+    async fn send_message_with_images(
         &mut self,
         content: String,
         images: Vec<(String, String)>,
@@ -710,7 +710,7 @@ impl RemoteConnection {
         .await
     }
 
-    pub async fn send_message_with_attachments(
+    async fn send_message_with_attachments(
         &mut self,
         content: String,
         images: Vec<(String, String)>,
@@ -1299,7 +1299,7 @@ impl RemoteConnection {
     }
 
     /// Send stdin input back to a running command
-    pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
+    async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
         let request = Request::StdinResponse {
             id: self.next_request_id,
             request_id: request_id.to_string(),
@@ -1587,7 +1587,7 @@ impl RemoteConnection {
     }
 
     /// Get writer for sending requests
-    pub fn writer(&self) -> Arc<Mutex<WriteHalf>> {
+    fn writer(&self) -> Arc<Mutex<WriteHalf>> {
         Arc::clone(&self.writer)
     }
 
@@ -1697,12 +1697,12 @@ impl RemoteConnection {
     }
 
     /// Handle tool done - generate diff if we have pending data
-    pub fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
+    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
         self.tool_diff.finish_tool(id, name, output)
     }
 
     /// Clear pending diff state
-    pub fn clear_pending(&mut self) {
+    fn clear_pending(&mut self) {
         self.tool_diff.clear();
     }
 
@@ -1712,7 +1712,7 @@ impl RemoteConnection {
     }
 
     /// Reset per-call output token watermark.
-    pub fn reset_call_output_tokens_seen(&mut self) {
+    fn reset_call_output_tokens_seen(&mut self) {
         self.call_output_tokens_seen = 0;
     }
 }

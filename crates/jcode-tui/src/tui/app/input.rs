@@ -40,7 +40,7 @@ const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
 /// Largest UTF-8 character boundary at or below `index` (clamped to the string
 /// length). Equivalent to the still-unstable `str::floor_char_boundary`,
 /// reimplemented so slicing/truncation can never panic on multi-byte text.
-pub(super) fn floor_char_boundary(text: &str, index: usize) -> usize {
+fn floor_char_boundary(text: &str, index: usize) -> usize {
     let mut index = index.min(text.len());
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
@@ -220,7 +220,7 @@ fn scrub_osc_color_replies(app: &mut App) {
 /// first component's width. Requiring equal widths keeps a half-arrived reply
 /// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
 /// introducer and string terminator) is removed with it.
-pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
+fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
     let bytes = input.as_bytes();
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut search = 0usize;
@@ -496,7 +496,7 @@ fn composer_area_width() -> Option<u16> {
 /// the set of single modifiers we treat as "recall queued prompts / browse
 /// history" when combined with Up/Down. Shift or any combination is excluded so
 /// it doesn't shadow selection-extension or other chords.
-pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
+fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
     matches!(
         modifiers,
         KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER
@@ -675,7 +675,7 @@ pub(super) fn offset_image_markers(text: &mut String, count: usize, offset: usiz
 
 /// True for composer text that runs as a client command rather than a prompt:
 /// a slash command (`/compact`) or an input-line shell command (`!ls`).
-pub(super) fn is_queueable_command_input(input: &str) -> bool {
+fn is_queueable_command_input(input: &str) -> bool {
     let trimmed = input.trim();
     trimmed.starts_with('/') || extract_input_shell_command(trimmed).is_some()
 }
@@ -824,7 +824,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     had_pending
 }
 
-pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
+fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     // Route through the submission guard rather than consuming this draft
     // into an interleave slot that turn completion would clear.
     if app.cloud_handoff_blocks_work() {
@@ -1037,7 +1037,7 @@ pub(super) fn delete_input_to_end(app: &mut App) {
     app.sync_model_picker_preview_from_input();
 }
 
-pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
+fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         // Cmd+5 toggles the onboarding rehearsal (the real first-run flow, run
         // as if jcode were new on this machine).
@@ -1411,7 +1411,7 @@ mod submission;
 impl App {
     /// Remove reasoning display messages at the given (pre-removal) indices.
     /// Returns how many were removed.
-    pub(in self::super) fn remove_reasoning_trace_messages(
+    fn remove_reasoning_trace_messages(
         &mut self,
         indices: impl Iterator<Item = usize>,
     ) -> usize {
@@ -1630,7 +1630,7 @@ impl App {
     }
 
     /// Expand paste placeholders in input with actual content
-    pub(super) fn expand_paste_placeholders(&mut self, input: &str) -> String {
+    fn expand_paste_placeholders(&mut self, input: &str) -> String {
         expand_paste_placeholders(self, input)
     }
 

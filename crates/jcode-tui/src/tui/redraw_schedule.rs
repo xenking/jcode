@@ -12,7 +12,6 @@
 //!   served by an animation-only partial repaint instead of a full frame.
 
 use super::idle_donut::{deep_idle_dormant, idle_donut_active_with_policy};
-use super::picker_overlay::SessionPickerOverlay;
 use super::redraw_reason::record_full_frame_redraw_reason;
 #[cfg(test)]
 use super::redraw_reason::{FULL_FRAME_REDRAW_REASONS, last_full_frame_redraw_reason};
