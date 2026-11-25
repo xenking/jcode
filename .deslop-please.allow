@@ -242,10 +242,6 @@ field-leak jcode_tui_mermaid::cache_render::LayoutCache::entries
 field-leak jcode_tui_messages::cache::MessageCacheState::entries
 field-leak jcode_tui_render::MockWorker::role
 field-leak jcode_tui_visual_debug::FrameCaptureBuilder::image_regions
-field-leak jcode_tui_visual_debug::FrameCaptureBuilder::info_widgets
-field-leak jcode_tui_visual_debug::FrameCaptureBuilder::layout
-field-leak jcode_tui_visual_debug::FrameCaptureBuilder::rendered_text
-field-leak jcode_tui_visual_debug::FrameCaptureBuilder::state
 field-leak jcode_voice::continuous::GateContext::chat
 field-leak jcode_voice::continuous::GateContext::claimed
 field-leak jcode_voice::continuous::GateContext::inflight
