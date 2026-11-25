@@ -46,6 +46,13 @@ const WEBSOCKET_KEEPALIVE_INTERVAL_SECS: u64 = 20;
 const MAX_HARNESS_CONNECTIONS: usize = 16;
 type PairAttempts = Arc<tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>;
 
+#[derive(Clone)]
+struct HarnessConnectionState {
+    enabled: bool,
+    daemon_socket: std::path::PathBuf,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+
 pub use crate::config::GatewayConfig;
 
 // ---------------------------------------------------------------------------
@@ -75,15 +82,18 @@ pub async fn run_gateway(
 
     let registry = Arc::new(tokio::sync::RwLock::new(DeviceRegistry::load()));
     let pair_attempts: PairAttempts = Arc::default();
-    let harness_slots = Arc::new(tokio::sync::Semaphore::new(MAX_HARNESS_CONNECTIONS));
+    let harness = HarnessConnectionState {
+        enabled: harness_enabled,
+        daemon_socket,
+        slots: Arc::new(tokio::sync::Semaphore::new(MAX_HARNESS_CONNECTIONS)),
+    };
 
     loop {
         let (tcp_stream, peer_addr) = listener.accept().await?;
         let registry = Arc::clone(&registry);
         let client_tx = client_tx.clone();
-        let daemon_socket = daemon_socket.clone();
         let pair_attempts = Arc::clone(&pair_attempts);
-        let harness_slots = Arc::clone(&harness_slots);
+        let harness = harness.clone();
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
@@ -91,10 +101,8 @@ pub async fn run_gateway(
                 peer_addr,
                 registry,
                 client_tx,
-                harness_enabled,
-                daemon_socket,
                 pair_attempts,
-                harness_slots,
+                harness,
             )
             .await
             {
@@ -117,10 +125,8 @@ async fn handle_connection(
     peer_addr: SocketAddr,
     registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
     client_tx: tokio::sync::mpsc::UnboundedSender<GatewayClient>,
-    harness_enabled: bool,
-    daemon_socket: std::path::PathBuf,
     pair_attempts: PairAttempts,
-    harness_slots: Arc<tokio::sync::Semaphore>,
+    harness: HarnessConnectionState,
 ) -> Result<()> {
     let mut peek_buf = [0u8; 16384];
     let n = tokio::time::timeout(Duration::from_secs(5), async {
@@ -149,9 +155,9 @@ async fn handle_connection(
             peer_addr,
             registry,
             client_tx,
-            harness_enabled,
-            daemon_socket,
-            harness_slots,
+            harness.enabled,
+            harness.daemon_socket,
+            harness.slots,
         )
         .await
     } else {
@@ -159,7 +165,7 @@ async fn handle_connection(
             tcp_stream,
             peer_addr,
             registry,
-            harness_enabled,
+            harness.enabled,
             pair_attempts,
         )
         .await

@@ -60,10 +60,12 @@ async fn scoped_pairing_loopback_and_revocation() {
                     peer,
                     reg,
                     tx,
-                    true,
-                    "/missing/test.sock".into(),
                     attempts,
-                    slots,
+                    HarnessConnectionState {
+                        enabled: true,
+                        daemon_socket: "/missing/test.sock".into(),
+                        slots,
+                    },
                 )
                 .await;
             });
@@ -182,10 +184,12 @@ async fn harness_websocket_uses_versioned_bridge_and_selected_daemon_socket() {
             peer,
             registry,
             tx,
-            true,
-            daemon_path,
             Arc::default(),
-            Arc::new(tokio::sync::Semaphore::new(1)),
+            HarnessConnectionState {
+                enabled: true,
+                daemon_socket: daemon_path,
+                slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
         )
         .await
         .unwrap();

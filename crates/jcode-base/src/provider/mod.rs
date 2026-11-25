@@ -1057,7 +1057,7 @@ impl MultiProvider {
                 let provider = external::instantiate_openrouter_runtime(
                     external::OpenRouterRuntimeSpec::NamedProfile {
                         name: profile_name.to_string(),
-                        config,
+                        config: Box::new(config),
                     },
                 )?;
                 registry
