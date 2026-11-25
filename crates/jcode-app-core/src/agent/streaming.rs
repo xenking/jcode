@@ -275,3 +275,9 @@ mod usage_capture_tests {
         );
     }
 }
+
+pub(super) enum NetworkRecoveryAction {
+    Retry,
+    Cancelled,
+    GiveUp,
+}

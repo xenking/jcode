@@ -1,4 +1,4 @@
-use super::turn_execution::{LATE_MCP_ANNOUNCEMENT_MARKER, LATE_SKILL_ANNOUNCEMENT_MARKER};
+use super::tool_surface::{LATE_MCP_ANNOUNCEMENT_MARKER, LATE_SKILL_ANNOUNCEMENT_MARKER};
 use super::*;
 use crate::compaction::{self, CompactionManager, CompactionProjection, ManualSnapcompactPreview};
 use crate::prompt::{self, SplitSystemPrompt};
@@ -724,5 +724,33 @@ fn reminder_kind(text: &str) -> Option<Reminder> {
         Some(Reminder::Mcp)
     } else {
         None
+    }
+}
+
+impl Agent {
+    pub(super) async fn inspect_tool_definitions(
+        &self,
+        messages: &[Message],
+    ) -> Vec<ToolDefinition> {
+        let native = self.native_deferred_mcp();
+        let locked = self
+            .locked_tools
+            .as_ref()
+            .filter(|_| self.locked_tools_native_deferred == native);
+        if !native
+            && let Some(locked) = locked
+            && (self.mcp_tools_mode != crate::config::McpToolsMode::Eager
+                || self.mcp_late_register_resolved
+                || !self.registry_has_new_mcp_tools(locked).await)
+        {
+            return locked.clone();
+        }
+        let mut tools = self.build_filtered_tool_definitions().await;
+        if native && let Some(locked) = locked {
+            let names: HashSet<_> = locked.iter().map(|tool| tool.name.as_str()).collect();
+            tools.retain(|tool| tool.defer_loading && !names.contains(tool.name.as_str()));
+            tools.splice(..0, locked.iter().cloned());
+        }
+        self.inspect_revealed_tools(tools, messages)
     }
 }

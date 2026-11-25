@@ -1,12 +1,13 @@
 use super::response_recovery::MalformedToolCallInfo;
+use super::streaming::NetworkRecoveryAction;
 use super::*;
 
 use super::streaming::StreamUsageRecorder;
 
-#[path = "tool_handoff.rs"]
-pub(super) mod tool_handoff;
-pub(super) use tool_handoff::execute_with_background;
-use tool_handoff::{incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff};
+use super::tool_handoff;
+use super::tool_handoff::{
+    incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff,
+};
 
 struct ForegroundToolAbortGuard(Option<tokio::task::AbortHandle>);
 
@@ -19,12 +20,6 @@ impl Drop for ForegroundToolAbortGuard {
 }
 #[path = "stream_request_preparation.rs"]
 mod stream_request_preparation;
-
-pub(super) enum NetworkRecoveryAction {
-    Retry,
-    Cancelled,
-    GiveUp,
-}
 
 impl Agent {
     async fn wait_for_network_recovery_mpsc(
@@ -281,7 +276,7 @@ impl Agent {
             messages_with_memory.extend(ephemeral_memory);
             messages_with_memory.extend(guardrail_retry_prompt.take());
             if let Some(mut nudge) =
-                super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+                super::messages::trailing_assistant_nudge(&messages_with_memory)
             {
                 nudge.timestamp = None;
                 messages_with_memory.push(nudge.into_request_only());
@@ -1277,7 +1272,7 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                        let tool_result = super::tool_handoff::execute_with_background(
                             self.registry.clone(),
                             tool_name.clone(),
                             ToolCall::normalize_input_to_object(input),

@@ -337,7 +337,7 @@ fn restart_cache_continue_is_outside_anthropic_cached_history() {
     ];
     let mut with_nudge = history.to_vec();
     with_nudge.push(
-        super::super::reload_resume::trailing_assistant_nudge(&history)
+        super::super::messages::trailing_assistant_nudge(&history)
             .unwrap()
             .into_request_only(),
     );

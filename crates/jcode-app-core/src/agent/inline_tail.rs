@@ -14,6 +14,7 @@
 //! survives across turns, plus the current *live* streaming text segment.
 //! Tool executions are interleaved as `⚙ name · summary` markers, updated in
 //! place with a duration or error state on completion.
+use super::Agent;
 
 use std::collections::VecDeque;
 
@@ -282,5 +283,35 @@ mod tests {
         tail.finish_tool(2.0, false);
         let out = tail.render();
         assert!(!out.contains("output line (2.0s)"), "{out}");
+    }
+}
+
+impl Agent {
+    /// Whether this session streams a public output tail to the bus. Owned
+    /// workers retain a tail in every spawn mode so forced stops can still
+    /// deliver recent output when transcript collection cannot finish.
+    pub(crate) fn inline_output_tap(&self) -> bool {
+        self.inline_output_tap || self.session.parent_id.is_some()
+    }
+
+    /// Publish the current rolling activity tail to the bus for the
+    /// coordinator's inline gallery. No-op unless the inline tap is enabled.
+    pub(crate) fn publish_inline_tail(&self) {
+        if !self.inline_output_tap() {
+            return;
+        }
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmOutputTail(
+            crate::bus::SwarmOutputTail {
+                session_id: self.session.id.clone(),
+                tail: self.inline_tail.render(),
+            },
+        ));
+    }
+
+    /// Mark this session as an inline swarm worker. When enabled, the streaming
+    /// loop publishes a throttled output tail to the global bus so a
+    /// coordinator can render a live inline gallery viewport for it.
+    pub fn set_inline_output_tap(&mut self, enabled: bool) {
+        self.inline_output_tap = enabled;
     }
 }

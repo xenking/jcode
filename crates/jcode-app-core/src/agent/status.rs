@@ -404,3 +404,48 @@ mod output_tail_tests {
         assert!(tail.ends_with("LATEST RESULT"));
     }
 }
+
+impl Agent {
+    /// Get the working directory for this session
+    pub fn working_dir(&self) -> Option<&str> {
+        self.session.working_dir.as_deref()
+    }
+
+    pub fn is_canary(&self) -> bool {
+        self.session.is_canary
+    }
+
+    pub fn is_debug(&self) -> bool {
+        self.session.is_debug
+    }
+
+    pub fn set_debug(&mut self, is_debug: bool) {
+        self.session.set_debug(is_debug);
+        if let Err(err) = self.session.save() {
+            logging::error(&format!("Failed to persist debug session state: {}", err));
+        }
+    }
+}
+
+impl Agent {
+    /// Check whether memory features are enabled for this session.
+    pub fn memory_enabled(&self) -> bool {
+        self.memory_enabled
+    }
+
+    /// Enable or disable memory features for this session.
+    pub fn set_memory_enabled(&mut self, enabled: bool) {
+        self.memory_enabled = enabled;
+        if !enabled {
+            crate::memory::clear_pending_memory(&self.session.id);
+        }
+    }
+}
+
+impl Agent {
+    /// Whether this session was created as a swarm worker. Persisted with the
+    /// session, so a resumed or pre-existing worker is still recognized.
+    pub(crate) fn is_swarm_worker(&self) -> bool {
+        self.session.is_swarm_worker
+    }
+}

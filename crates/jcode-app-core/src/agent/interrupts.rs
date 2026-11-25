@@ -3,7 +3,6 @@ use crate::logging;
 use crate::message::{ContentBlock, Role};
 use crate::protocol::ServerEvent;
 use crate::session::StoredDisplayRole;
-use anyhow::Result;
 use jcode_agent_runtime::{
     InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
 };
@@ -714,28 +713,6 @@ impl Agent {
         injected
     }
 
-    pub(super) fn handle_streaming_no_tool_calls(
-        &mut self,
-        stop_reason: Option<&str>,
-        incomplete_continuations: &mut u32,
-    ) -> Result<NoToolCallOutcome> {
-        if self.maybe_continue_incomplete_response(stop_reason, incomplete_continuations)? {
-            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
-        }
-        if self.maybe_continue_stranded_tool_use(stop_reason, incomplete_continuations)? {
-            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
-        }
-        logging::info("Turn complete - no tool calls");
-        let injected = self.inject_soft_interrupts();
-        if !injected.is_empty() {
-            return Ok(NoToolCallOutcome::ContinueWithSoftInterrupt {
-                injected,
-                point: "B",
-            });
-        }
-        Ok(NoToolCallOutcome::Break)
-    }
-
     pub(super) fn take_post_tool_soft_interrupt(&mut self) -> PostToolInterruptOutcome {
         let injected = self.inject_soft_interrupts();
         if !injected.is_empty() {
@@ -833,5 +810,49 @@ mod frozen_snapshot_memory_tests {
         );
         assert_eq!(profile["prompt_skills_snapshot_count"], 1);
         assert!(!profile.to_string().contains("private-"));
+    }
+}
+
+impl Agent {
+    pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
+        if let Some(message) = self.session.messages.get(index) {
+            let count = message
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .count();
+            if count > 0 {
+                let (image_ids, image_ordinals): (Vec<_>, Vec<_>) = self
+                    .session
+                    .session_image_references_for_message(&message.id, 0..count)
+                    .map(|(id, reference)| (id, reference.map_or(0, |image| image.ordinal)))
+                    .unzip();
+                let mut content = original.to_string();
+                let mut missing = Vec::new();
+                for (index, id) in image_ids.iter().enumerate() {
+                    let hash = format!("[#image {}]", index + 1);
+                    let plain = format!("[image {}]", index + 1);
+                    let marker = format!("[#{id}]");
+                    if content.contains(&hash) || content.contains(&plain) {
+                        content = content.replace(&hash, &marker).replace(&plain, &marker);
+                    } else {
+                        missing.push(marker);
+                    }
+                }
+                if !missing.is_empty() {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(&missing.join(" "));
+                }
+                return Some(ServerEvent::UserImageIds {
+                    original_content: original.to_string(),
+                    content,
+                    image_ids,
+                    image_ordinals,
+                });
+            }
+        }
+        None
     }
 }

@@ -146,17 +146,6 @@ impl Agent {
         }
     }
 
-    /// Stable opening of the continuation injected by
-    /// [`Self::maybe_continue_empty_post_tool_response`].
-    ///
-    /// `messages_end_with_tool_result` treats any User-role text opening with
-    /// `<system-reminder>` as evidence that tool results are in play. Without
-    /// excluding this one specifically, the injected continuation keeps that
-    /// signal true on the following turn by itself, so each whitespace-only
-    /// response appends another one and spends another API call.
-    pub(crate) const EMPTY_POST_TOOL_CONTINUATION_PREFIX: &str =
-        "<system-reminder>The previous provider response was empty after tool results.";
-
     /// At a no-tool streaming boundary, let Point B drain real user input
     /// before spending another provider round trip requesting a final answer.
     pub(super) fn maybe_retry_streaming_empty_post_tool_response(
@@ -1280,5 +1269,29 @@ mod malformed_tool_call_recovery_tests {
         // tool results preserved in history.
         assert_eq!(null_tool_use_count(&agent), 4);
         assert_eq!(error_tool_result_count(&agent), 4);
+    }
+}
+
+impl Agent {
+    pub(super) fn handle_streaming_no_tool_calls(
+        &mut self,
+        stop_reason: Option<&str>,
+        incomplete_continuations: &mut u32,
+    ) -> Result<NoToolCallOutcome> {
+        if self.maybe_continue_incomplete_response(stop_reason, incomplete_continuations)? {
+            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
+        }
+        if self.maybe_continue_stranded_tool_use(stop_reason, incomplete_continuations)? {
+            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
+        }
+        logging::info("Turn complete - no tool calls");
+        let injected = self.inject_soft_interrupts();
+        if !injected.is_empty() {
+            return Ok(NoToolCallOutcome::ContinueWithSoftInterrupt {
+                injected,
+                point: "B",
+            });
+        }
+        Ok(NoToolCallOutcome::Break)
     }
 }

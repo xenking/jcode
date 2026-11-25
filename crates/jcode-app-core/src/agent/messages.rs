@@ -463,3 +463,17 @@ mod durable_error_tests {
         );
     }
 }
+
+/// A resumed request can end on the assistant's own interrupted text. Some
+/// providers reject a trailing assistant message and others treat it as a
+/// prefill; an unsaved "Continue." user turn works on all of them and keeps the
+/// cached prefix. A turn paused mid server-tool use is resent as-is.
+pub(crate) fn trailing_assistant_nudge(messages: &[Message]) -> Option<Message> {
+    let last = messages.last()?;
+    (last.role == Role::Assistant
+        && !matches!(
+            last.content.iter().last(),
+            Some(ContentBlock::ProviderNative { .. })
+        ))
+    .then(|| Message::user("Continue."))
+}

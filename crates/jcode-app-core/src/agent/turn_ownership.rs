@@ -1,5 +1,7 @@
 //! Runtime-local ownership protects acceptance, execution and publication.
+use super::Agent;
 use crate::protocol::{MAX_COMM_SUMMARY_TOOL_CALLS, ToolCallSummary, TurnIdentity};
+use anyhow::Result;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -310,5 +312,43 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(runtime.claim("turn-ownership-tests").is_ok());
+    }
+}
+
+impl Agent {
+    /// Refuse to run a model turn when this session moved to another machine
+    /// or this in-memory copy is older than the transcript on disk.
+    pub(crate) fn ensure_session_lease(&self) -> Result<()> {
+        self.enforce_worker_request()?;
+        let account_route = self
+            .session
+            .route_api_method
+            .as_deref()
+            .or(self.session.provider_key.as_deref());
+        if let Some(expected) = account_route.and_then(jcode_provider_core::oauth_account_label)
+            && self.provider.oauth_account_label().as_deref() != Some(expected)
+        {
+            anyhow::bail!(
+                "Saved account '{}' could not be restored for this session. Select an available account using /model or /login before sending a request.",
+                expected
+            );
+        }
+        match self.session.migration_lease_block() {
+            Some(block) => Err(anyhow::anyhow!("Session is not runnable here: {block}")),
+            None => Ok(()),
+        }
+    }
+
+    /// True when a newer migrated transcript replaced this copy on disk.
+    pub(crate) fn session_copy_is_stale(&self) -> bool {
+        matches!(
+            self.session.migration_lease_block(),
+            Some(crate::storage::SessionLeaseBlock::StaleCopy { .. })
+        )
+    }
+
+    /// True when this copy may not run turns on this machine.
+    pub(crate) fn session_lease_blocked(&self) -> bool {
+        self.session.migration_lease_block().is_some()
     }
 }

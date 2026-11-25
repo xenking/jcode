@@ -3,6 +3,16 @@
 use super::*;
 
 impl Agent {
+    /// Stable opening of the continuation injected by
+    /// [`Self::maybe_continue_empty_post_tool_response`].
+    ///
+    /// `messages_end_with_tool_result` treats any User-role text opening with
+    /// `<system-reminder>` as evidence that tool results are in play. Without
+    /// excluding this one specifically, the injected continuation keeps that
+    /// signal true on the following turn by itself, so each whitespace-only
+    /// response appends another one and spends another API call.
+    pub(crate) const EMPTY_POST_TOOL_CONTINUATION_PREFIX: &str =
+        "<system-reminder>The previous provider response was empty after tool results.";
     /// Maximum number of context-limit compaction retries before giving up.
     pub(in crate::agent) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
     pub(in crate::agent) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;

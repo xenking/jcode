@@ -386,15 +386,6 @@ impl Agent {
         self.record_prompt_inputs()
     }
 
-    pub(super) fn is_jarvis_root(&self, config: &crate::protocol::SessionToolConfig) -> bool {
-        self.session.parent_id.is_none()
-            && config.custom.iter().any(|tool| tool.name == "speak")
-            && config
-                .system_prompt_append
-                .as_deref()
-                .is_some_and(|p| p.lines().any(|line| line == "## Jarvis voice interaction"))
-    }
-
     fn append_session_system_prompt(&self, mut prompt: String) -> String {
         if let Some(config) = crate::tool::sdk::config(self.session_id())
             && let Some(append) = &config.system_prompt_append

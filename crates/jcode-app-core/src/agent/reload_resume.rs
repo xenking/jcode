@@ -108,20 +108,6 @@ pub(crate) fn ends_with_reload_marker(session: &crate::session::Session) -> bool
         })
 }
 
-/// A resumed request can end on the assistant's own interrupted text. Some
-/// providers reject a trailing assistant message and others treat it as a
-/// prefill; an unsaved "Continue." user turn works on all of them and keeps the
-/// cached prefix. A turn paused mid server-tool use is resent as-is.
-pub(crate) fn trailing_assistant_nudge(messages: &[Message]) -> Option<Message> {
-    let last = messages.last()?;
-    (last.role == Role::Assistant
-        && !matches!(
-            last.content.iter().last(),
-            Some(ContentBlock::ProviderNative { .. })
-        ))
-    .then(|| Message::user("Continue."))
-}
-
 fn interrupted_tool_result_text(name: &str, background_note: &str) -> String {
     let mut text = format!(
         "Tool '{name}' was interrupted by a server restart before it returned, so it produced no result. \
@@ -229,7 +215,7 @@ impl Agent {
     }
 
     /// Drop the display-only reload marker from the truncated assistant text.
-    fn strip_reload_interruption_marker(&mut self) -> Result<bool> {
+    pub(super) fn strip_reload_interruption_marker(&mut self) -> Result<bool> {
         let Some(message) = self
             .session
             .messages
@@ -254,7 +240,7 @@ impl Agent {
         Ok(changed)
     }
 
-    async fn replay_pending_wait(
+    pub(super) async fn replay_pending_wait(
         &mut self,
         tool: &PendingToolUse,
         message_id: String,
@@ -325,96 +311,5 @@ impl Agent {
             error,
         });
         Ok(true)
-    }
-
-    /// Continue the interrupted turn inside the assistant turn.
-    ///
-    /// Never appends a user text message. The only transcript mutation is the
-    /// interrupted tool result (or the removed display marker), so a resumed
-    /// request differs from the pre-restart one by exactly that tool result.
-    pub(crate) async fn resume_interrupted_turn_mpsc(
-        &mut self,
-        lease: &TurnLease,
-        event_tx: mpsc::UnboundedSender<ServerEvent>,
-        durable_intent: bool,
-    ) -> Result<ResumeOutcome> {
-        self.validate_server_turn(lease)?;
-        if self.is_graceful_shutdown() {
-            return Ok(ResumeOutcome::NothingToResume);
-        }
-        let plan = self.reload_resume_plan(durable_intent);
-        match &plan {
-            ResumePlan::Nothing => return Ok(ResumeOutcome::NothingToResume),
-            ResumePlan::ToolResults(pending) => {
-                let mut interrupted = Vec::new();
-                for tool in pending {
-                    let message = &self.session.messages[tool.message_index];
-                    let wait = message.content.iter().find_map(|block| match block {
-                        ContentBlock::ToolUse { id, input, .. }
-                            if *id == tool.id
-                                && super::turn_streaming_mpsc::tool_handoff::is_reload_replayable_wait(
-                                    &tool.name, input,
-                                ) =>
-                        {
-                            Some(input.clone())
-                        }
-                        _ => None,
-                    });
-                    if let Some(input) = wait {
-                        let input = if tool.name == "bg" {
-                            crate::tool::replay_bg_wait_input(input, message.timestamp)
-                        } else {
-                            input
-                        };
-                        if !self
-                            .replay_pending_wait(tool, message.id.clone(), input, &event_tx)
-                            .await?
-                        {
-                            return Ok(ResumeOutcome::Continued);
-                        }
-                    } else {
-                        interrupted.push(tool.clone());
-                    }
-                }
-                for (id, name, content) in self.append_interrupted_tool_results(&interrupted)? {
-                    let _ = event_tx.send(ServerEvent::ToolDone {
-                        codemode: None,
-                        id,
-                        name,
-                        output: content.clone(),
-                        error: Some(content),
-                    });
-                }
-            }
-            ResumePlan::AwaitingAsk | ResumePlan::AssistantText | ResumePlan::UserPrompt => {}
-        }
-        self.strip_reload_interruption_marker()?;
-        if self.is_graceful_shutdown() {
-            return Ok(ResumeOutcome::NothingToResume);
-        }
-
-        let turn_started_at = Instant::now();
-        let start_message_index = self.message_count();
-        self.fire_turn_start_hook("reload_resume");
-        let title_event_tx = event_tx.clone();
-        let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.session.migration_lease_block().is_none()
-            && crate::turn_activity::global()
-                .snapshot()
-                .session(&self.session.id)
-                .is_some_and(|activity| activity.checkpoint_pending)
-        {
-            self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(&self.session.id);
-        }
-        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
-        if result.is_ok() {
-            self.refresh_session_title(Some(&title_event_tx)).await;
-        }
-        result?;
-        Ok(match plan {
-            ResumePlan::AwaitingAsk => ResumeOutcome::AwaitingAsk,
-            _ => ResumeOutcome::Continued,
-        })
     }
 }

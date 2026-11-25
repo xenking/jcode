@@ -32,8 +32,11 @@ mod status;
 mod streaming;
 #[cfg(test)]
 mod swarm_reminder_tests;
+mod tool_handoff;
+mod tool_surface;
 mod tools;
 mod turn_execution;
+mod turn_loop_policy;
 mod turn_loops;
 mod turn_ownership;
 mod user_asks;

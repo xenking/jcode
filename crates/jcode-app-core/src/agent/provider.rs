@@ -310,12 +310,6 @@ impl Agent {
         self.session.worker_speed.clone()
     }
 
-    /// Whether this session was created as a swarm worker. Persisted with the
-    /// session, so a resumed or pre-existing worker is still recognized.
-    pub(crate) fn is_swarm_worker(&self) -> bool {
-        self.session.is_swarm_worker
-    }
-
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
         self.session.is_swarm_worker
             && Self::worker_effort_is_constrained(
@@ -1337,11 +1331,6 @@ impl Agent {
         self.log_env_snapshot("working_dir");
     }
 
-    /// Get the working directory for this session
-    pub fn working_dir(&self) -> Option<&str> {
-        self.session.working_dir.as_deref()
-    }
-
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
         &self.session.messages
@@ -1492,5 +1481,16 @@ mod worker_effort_cap_tests {
         );
         assert_eq!(resolve("openrouter", "gpt-6.1-sol", "max", &levels), "max");
         assert_eq!(resolve("openai", "other", "max", &levels), "max");
+    }
+}
+
+impl Agent {
+    pub(super) fn is_jarvis_root(&self, config: &crate::protocol::SessionToolConfig) -> bool {
+        self.session.parent_id.is_none()
+            && config.custom.iter().any(|tool| tool.name == "speak")
+            && config
+                .system_prompt_append
+                .as_deref()
+                .is_some_and(|p| p.lines().any(|line| line == "## Jarvis voice interaction"))
     }
 }
