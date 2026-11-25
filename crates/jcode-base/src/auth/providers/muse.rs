@@ -982,5 +982,5 @@ fn sanitize_tier(tier: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "muse_tests.rs"]
+#[path = "tests/muse_tests.rs"]
 mod tests;

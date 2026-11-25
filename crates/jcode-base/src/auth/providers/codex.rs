@@ -661,5 +661,5 @@ fn resolve_expires_at(explicit: Option<i64>, access_token: &str) -> Option<i64> 
 }
 
 #[cfg(test)]
-#[path = "codex_tests.rs"]
+#[path = "tests/codex_tests.rs"]
 mod tests;

@@ -374,7 +374,7 @@ impl Config {
     /// Auto-import calls this once with the per-repo chord -> directory layout it
     /// inferred. `imported` is set so the bake never runs twice and later manual
     /// edits are not clobbered.
-    pub(crate) fn set_launch_hotkeys(
+    pub fn set_launch_hotkeys(
         entries: Vec<jcode_config_types::LaunchHotkeyEntry>,
         enabled: bool,
     ) -> anyhow::Result<()> {
@@ -410,7 +410,7 @@ impl Config {
     /// hotkey reinstall), `false` otherwise. Best-effort: errors are logged and
     /// swallowed.
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    pub(crate) fn bake_launch_hotkeys_once() -> bool {
+    pub fn bake_launch_hotkeys_once() -> bool {
         use jcode_import_core::repo_ranking;
 
         let cfg = Self::load();
@@ -495,7 +495,7 @@ impl Config {
 
     /// No-op bake on platforms without global launch hotkeys.
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    pub(crate) fn bake_launch_hotkeys_once() -> bool {
+    pub fn bake_launch_hotkeys_once() -> bool {
         false
     }
 

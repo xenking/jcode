@@ -851,77 +851,77 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/account_pool.rs": {
+    "crates/jcode-base/src/auth/accounts/account_pool.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/account_store.rs": {
+    "crates/jcode-base/src/auth/accounts/account_store.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/antigravity.rs": {
+    "crates/jcode-base/src/auth/providers/antigravity.rs": {
       "dot_ok": 8,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/api_key_login.rs": {
+    "crates/jcode-base/src/auth/status/api_key_login.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/claude.rs": {
+    "crates/jcode-base/src/auth/providers/claude.rs": {
       "dot_ok": 9,
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/codex.rs": {
+    "crates/jcode-base/src/auth/providers/codex.rs": {
       "dot_ok": 6,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/copilot.rs": {
+    "crates/jcode-base/src/auth/providers/copilot.rs": {
       "dot_ok": 5,
       "let_underscore": 1,
       "unwrap_or_default": 8
     },
-    "crates/jcode-base/src/auth/cursor.rs": {
+    "crates/jcode-base/src/auth/providers/cursor.rs": {
       "dot_ok": 11,
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/env_facts.rs": {
+    "crates/jcode-base/src/auth/status/env_facts.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/external.rs": {
+    "crates/jcode-base/src/auth/providers/external.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-base/src/auth/gemini.rs": {
+    "crates/jcode-base/src/auth/providers/gemini.rs": {
       "dot_ok": 4,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/google.rs": {
+    "crates/jcode-base/src/auth/providers/google.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/google/setup.rs": {
+    "crates/jcode-base/src/auth/providers/google/setup.rs": {
       "dot_ok": 6,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/grok_build.rs": {
+    "crates/jcode-base/src/auth/providers/grok_build.rs": {
       "dot_ok": 12,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-base/src/auth/lifecycle.rs": {
+    "crates/jcode-base/src/auth/lifecycle/lifecycle.rs": {
       "dot_ok": 3,
       "let_underscore": 0,
       "unwrap_or_default": 0
@@ -931,52 +931,52 @@
       "let_underscore": 2,
       "unwrap_or_default": 2
     },
-    "crates/jcode-base/src/auth/muse.rs": {
+    "crates/jcode-base/src/auth/providers/muse.rs": {
       "dot_ok": 1,
       "let_underscore": 2,
       "unwrap_or_default": 4
     },
-    "crates/jcode-base/src/auth/oauth.rs": {
+    "crates/jcode-base/src/auth/flow/oauth.rs": {
       "dot_ok": 1,
       "let_underscore": 2,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/oauth/openai_login_helpers.rs": {
+    "crates/jcode-base/src/auth/flow/oauth/openai_login_helpers.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/oauth_callback_io.rs": {
+    "crates/jcode-base/src/auth/flow/oauth_callback_io.rs": {
       "dot_ok": 0,
       "let_underscore": 12,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/refresh_state.rs": {
+    "crates/jcode-base/src/auth/flow/refresh_state.rs": {
       "dot_ok": 0,
       "let_underscore": 3,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/router_transfer.rs": {
+    "crates/jcode-base/src/auth/accounts/router_transfer.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/auth/status_detail.rs": {
+    "crates/jcode-base/src/auth/status/status_detail.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-base/src/auth/test_sandbox.rs": {
+    "crates/jcode-base/src/auth/status/test_sandbox.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/transfer.rs": {
+    "crates/jcode-base/src/auth/accounts/transfer.rs": {
       "dot_ok": 0,
       "let_underscore": 4,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/auth/validation.rs": {
+    "crates/jcode-base/src/auth/status/validation.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1

@@ -1052,5 +1052,5 @@ pub async fn fetch_github_username(client: &reqwest::Client, token: &str) -> Res
 }
 
 #[cfg(test)]
-#[path = "copilot_auth_tests.rs"]
+#[path = "tests/copilot_auth_tests.rs"]
 mod tests;

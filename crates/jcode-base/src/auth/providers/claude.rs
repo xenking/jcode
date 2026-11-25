@@ -1038,5 +1038,5 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
 }
 
 #[cfg(test)]
-#[path = "claude_tests.rs"]
+#[path = "tests/claude_tests.rs"]
 mod tests;

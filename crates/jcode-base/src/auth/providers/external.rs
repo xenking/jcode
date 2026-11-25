@@ -713,5 +713,5 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
 }
 
 #[cfg(test)]
-#[path = "external_tests.rs"]
+#[path = "tests/external_tests.rs"]
 mod external_tests;

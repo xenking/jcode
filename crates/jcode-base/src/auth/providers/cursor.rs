@@ -702,5 +702,5 @@ fn timestamp_header_now() -> String {
 }
 
 #[cfg(test)]
-#[path = "cursor_tests.rs"]
+#[path = "tests/cursor_tests.rs"]
 mod tests;

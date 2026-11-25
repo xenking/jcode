@@ -700,7 +700,7 @@ fn parse_command_spec(raw: &str) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
-#[path = "gemini_tests.rs"]
+#[path = "tests/gemini_tests.rs"]
 mod tests;
 
 #[cfg(test)]

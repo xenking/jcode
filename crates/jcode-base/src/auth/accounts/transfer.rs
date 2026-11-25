@@ -1206,4 +1206,5 @@ fn read_in(directory: &std::fs::File, name: &str, private: bool) -> Result<Vec<u
 }
 
 #[cfg(all(test, unix))]
+#[path = "transfer/tests.rs"]
 mod tests;

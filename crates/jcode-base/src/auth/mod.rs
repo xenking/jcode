@@ -1,37 +1,71 @@
+#[path = "accounts/account_identity.rs"]
 pub mod account_identity;
+#[path = "accounts/account_names.rs"]
 pub mod account_names;
+#[path = "accounts/account_pool.rs"]
 pub mod account_pool;
+#[path = "accounts/account_store.rs"]
 pub mod account_store;
+#[path = "status/active_method.rs"]
 pub mod active_method;
+#[path = "providers/antigravity.rs"]
 pub mod antigravity;
+#[path = "status/api_key_login.rs"]
 pub mod api_key_login;
+#[path = "providers/azure.rs"]
 pub mod azure;
+#[path = "providers/claude.rs"]
 pub mod claude;
+#[path = "providers/codex.rs"]
 pub mod codex;
+#[path = "status/commands.rs"]
 mod commands;
+#[path = "providers/copilot.rs"]
 pub mod copilot;
+#[path = "providers/cursor.rs"]
 pub mod cursor;
+#[path = "status/doctor.rs"]
 pub mod doctor;
+#[path = "status/env_facts.rs"]
 pub mod env_facts;
+#[path = "providers/external.rs"]
 pub mod external;
+#[path = "providers/gemini.rs"]
 pub mod gemini;
+#[path = "providers/google.rs"]
 pub mod google;
+#[path = "providers/google_oauth.rs"]
 pub(crate) mod google_oauth;
+#[path = "providers/grok_build.rs"]
 pub mod grok_build;
+#[path = "status/integration.rs"]
 pub mod integration;
+#[path = "lifecycle/lifecycle.rs"]
 pub mod lifecycle;
+#[path = "status/login_diagnostics.rs"]
 pub mod login_diagnostics;
+#[path = "status/login_ui.rs"]
 pub mod login_ui;
+#[path = "providers/muse.rs"]
 pub mod muse;
+#[path = "flow/oauth.rs"]
 pub mod oauth;
+#[path = "flow/refresh_coordinator.rs"]
 pub(crate) mod refresh_coordinator;
+#[path = "flow/refresh_state.rs"]
 pub mod refresh_state;
+#[path = "accounts/router_transfer.rs"]
 pub mod router_transfer;
+#[path = "status/status_detail.rs"]
 mod status_detail;
+#[path = "status/status_types.rs"]
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
+#[path = "status/test_sandbox.rs"]
 pub mod test_sandbox;
+#[path = "accounts/transfer.rs"]
 pub mod transfer;
+#[path = "status/validation.rs"]
 pub mod validation;
 
 pub(crate) use commands::command_exists;
@@ -168,6 +202,7 @@ pub fn running_in_test_harness() -> bool {
     })
 }
 
+#[path = "status/test_harness.rs"]
 mod test_harness;
 use test_harness::is_test_harness_path;
 
