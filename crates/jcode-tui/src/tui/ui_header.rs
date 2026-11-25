@@ -214,24 +214,36 @@ pub(crate) fn build_preview_header(
     }
     fit_header_lines(lines, width)
 }
+/// Per-test changelog fixture. Thread-local, not process-wide: every test that
+/// draws a header reads it, and a fixture visible to tests that never asked for
+/// it injected an "Updates" box into their frames.
 #[cfg(test)]
-use std::sync::OnceLock;
+thread_local! {
+    static UNSEEN_CHANGELOG_OVERRIDE: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
-fn unseen_changelog_entries_override() -> &'static std::sync::Mutex<Option<Vec<String>>> {
-    static OVERRIDE: OnceLock<std::sync::Mutex<Option<Vec<String>>>> = OnceLock::new();
-    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+fn unseen_changelog_entries_override_is_set() -> bool {
+    UNSEEN_CHANGELOG_OVERRIDE.with(|entries| entries.borrow().is_some())
 }
 
 fn with_unseen_changelog_entries<R>(render: impl FnOnce(&[String]) -> R) -> R {
     #[cfg(test)]
-    {
-        if let Ok(guard) = unseen_changelog_entries_override().lock()
-            && let Some(entries) = guard.as_ref()
-        {
-            return render(entries);
+    let render = {
+        // Borrow the fixture in place: production rendering never copies the
+        // entries, and the zero-copy test asserts pointer identity.
+        let mut pending = Some(render);
+        let rendered = UNSEEN_CHANGELOG_OVERRIDE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|entries| (pending.take().expect("render runs once"))(entries))
+        });
+        if let Some(rendered) = rendered {
+            return rendered;
         }
-    }
+        pending.take().expect("render runs once")
+    };
     render(get_unseen_changelog_entries())
 }
 
@@ -244,14 +256,10 @@ fn unseen_changelog_entries() -> Vec<String> {
 
 #[cfg(test)]
 pub(crate) fn set_unseen_changelog_entries_override_for_tests(entries: Option<Vec<String>>) {
-    let mut guard = unseen_changelog_entries_override()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = entries;
+    UNSEEN_CHANGELOG_OVERRIDE.with(|slot| *slot.borrow_mut() = entries);
 }
 
 /// Keep an override in place only while its owning render test is in scope.
-/// Callers must hold the shared render-state test lock before creating this guard.
 #[cfg(test)]
 pub(crate) struct ChangelogEntriesOverrideGuard;
 

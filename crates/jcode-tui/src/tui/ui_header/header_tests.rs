@@ -66,10 +66,7 @@ fn changelog_override_is_cleared_after_a_render_test_panics() {
     });
     assert!(panic.is_err());
     assert!(
-        unseen_changelog_entries_override()
-            .lock()
-            .unwrap()
-            .is_none(),
+        !unseen_changelog_entries_override_is_set(),
         "a failed render test must not leak its changelog fixture"
     );
 }
