@@ -286,6 +286,9 @@ impl Agent {
                 nudge.timestamp = None;
                 messages_with_memory.push(nudge.into_request_only());
             }
+            let prompt_has_recent_tool_result =
+                Self::messages_end_with_tool_result(&messages_with_memory);
+            messages_with_memory.extend(self.user_ask_instructions());
 
             logging::debug_lazy(|| {
                 format!(
@@ -301,7 +304,6 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
-            let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.enforce_worker_request()?;
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
@@ -1733,6 +1735,28 @@ impl Agent {
                     &mut incomplete_continuations,
                 )? {
                     NoToolCallOutcome::Break => {
+                        if saw_message_end
+                            && !self.is_graceful_shutdown()
+                            && incomplete_turn_stop(stop_reason.as_deref()).is_none()
+                            && Self::provider_guardrail_notice(
+                                stop_reason.as_deref(),
+                                text_content.trim().is_empty(),
+                                reasoning.has_text(),
+                            )
+                            .is_none()
+                        {
+                            match self.finish_user_asks(&text_content)? {
+                                super::user_asks::AskReport::Accept => {}
+                                super::user_asks::AskReport::Retry => {
+                                    let _ = event_tx.send(ServerEvent::TextDone);
+                                    continue;
+                                }
+                                super::user_asks::AskReport::Unreported(text) => {
+                                    let _ = event_tx.send(ServerEvent::TextDelta { text });
+                                    let _ = event_tx.send(ServerEvent::TextDone);
+                                }
+                            }
+                        }
                         if saw_message_end
                             && !self.is_graceful_shutdown()
                             && matches!(stop_reason.as_deref(), Some("end_turn" | "stop_sequence"))

@@ -3611,3 +3611,5 @@ mod credential_route_tests;
 
 #[path = "agent_tests_additional_tests.rs"]
 mod additional_working_directory_moves_preserve_first_active_session_origin;
+#[path = "agent_tests/user_asks.rs"]
+mod user_asks;

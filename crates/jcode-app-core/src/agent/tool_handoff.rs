@@ -290,7 +290,7 @@ pub(super) fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -
 }
 
 /// Called only after automatic continuations have been exhausted.
-pub(super) fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
+pub(in crate::agent) fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
     let reason = stop_reason?;
     if Agent::should_continue_after_stop_reason(reason)
         || Agent::is_stranded_tool_use_stop(Some(reason))

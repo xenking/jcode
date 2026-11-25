@@ -28,7 +28,9 @@ fn frozen_snapshot_memory_profile(
     })
 }
 
-fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
+pub(super) fn soft_interrupt_session_display_role(
+    source: SoftInterruptSource,
+) -> Option<StoredDisplayRole> {
     match source {
         SoftInterruptSource::User => None,
         SoftInterruptSource::JarvisUser => Some(StoredDisplayRole::JarvisUser),
@@ -465,6 +467,7 @@ impl Agent {
         let initial_message_count = self.session.messages.len();
         let initial_active_skill = self.active_skill.clone();
         let initial_pinned_skills = self.session.pinned_skill_names().to_vec();
+        let initial_asks = self.session.user_asks.clone();
         let messages: Vec<SoftInterruptMessage> = {
             if queue.is_empty() {
                 return Vec::new();
@@ -590,6 +593,11 @@ impl Agent {
                     }
                 };
                 let display_content = message.content.clone();
+                self.record_user_ask(
+                    soft_interrupt_session_display_role(message.source),
+                    &display_content,
+                    true,
+                );
                 let mut content = message.content;
                 content.push_str(&prepared.text);
                 current_parts.push(content);
@@ -639,6 +647,11 @@ impl Agent {
                 None => current_source = Some(message.source),
                 _ => {}
             }
+            self.record_user_ask(
+                soft_interrupt_session_display_role(message.source),
+                &message.content,
+                !message.images.is_empty(),
+            );
             current_parts.push(message.content);
             current_images.extend(message.images);
             current_ids.extend(message.client_id);
@@ -670,6 +683,7 @@ impl Agent {
             self.session.truncate_messages(initial_message_count);
             self.active_skill = initial_active_skill;
             self.session.set_pinned_skill_names(initial_pinned_skills);
+            self.session.user_asks = initial_asks;
             *queue = previous_queue;
             logging::warn(&format!(
                 "Failed to persist soft interrupt injection for {}: {}",

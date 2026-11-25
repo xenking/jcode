@@ -110,6 +110,26 @@ pub struct StoredSpeedSelection {
     pub route: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserAskLedger {
+    pub last_id: u64,
+    pub open: Vec<OpenUserAsk>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reminder_sent: bool,
+}
+
+impl UserAskLedger {
+    fn is_default(&self) -> bool {
+        self.last_id == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenUserAsk {
+    pub id: u64,
+    pub preview: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -139,6 +159,8 @@ pub struct Session {
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "UserAskLedger::is_default")]
+    pub user_asks: UserAskLedger,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +770,7 @@ impl Session {
             compaction_unchanged: false,
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
+            user_asks: self.user_asks.clone(),
             provider_key: self.provider_key.clone(),
             route_api_method: self.route_api_method.clone(),
             route_api_method_present: true,
@@ -967,6 +990,7 @@ impl Session {
         }
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
+        self.user_asks = meta.user_asks;
         self.provider_key = meta.provider_key;
         if meta.route_api_method_present {
             self.route_api_method = meta.route_api_method;
@@ -1032,6 +1056,7 @@ impl Session {
             pinned_skills: Vec::new(),
             pinned_skill_arguments: Default::default(),
             model_usage_turn_id: None,
+            user_asks: UserAskLedger::default(),
             compaction: None,
             provider_session_id: None,
             provider_key: None,
@@ -1107,6 +1132,7 @@ impl Session {
             pinned_skills: Vec::new(),
             pinned_skill_arguments: Default::default(),
             model_usage_turn_id: None,
+            user_asks: UserAskLedger::default(),
             compaction: None,
             provider_session_id: None,
             provider_key: None,
