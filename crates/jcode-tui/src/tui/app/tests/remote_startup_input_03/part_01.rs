@@ -1042,49 +1042,54 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_queued_messages() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-{}", std::process::id());
 
-    app.input = "draft".to_string();
-    app.cursor_pos = 3;
-    app.queued_messages.push("queued one".to_string());
-    app.queued_messages.push("queued two".to_string());
-    app.hidden_queued_system_messages
-        .push("continue silently".to_string());
-    app.save_input_for_reload(&session_id);
+        app.input = "draft".to_string();
+        app.cursor_pos = 3;
+        app.queued_messages.push("queued one".to_string());
+        app.queued_messages.push("queued two".to_string());
+        app.hidden_queued_system_messages
+            .push("continue silently".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.input, "draft");
-    assert_eq!(restored.cursor, 3);
-    assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["continue silently"]
-    );
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(restored.input, "draft");
+        assert_eq!(restored.cursor, 3);
+        assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["continue silently"]
+        );
 
-    assert!(App::restore_input_for_reload(&session_id).is_none());
+        assert!(App::restore_input_for_reload(&session_id).is_none());
+    });
 }
 
 #[test]
 fn test_new_for_remote_restored_queued_messages_stay_queued_until_remote_idle() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-queued-restore-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-remote-queued-restore-{}", std::process::id());
 
-    app.queued_messages.push("queued one".to_string());
-    app.queued_messages.push("queued two".to_string());
-    app.hidden_queued_system_messages
-        .push("continue silently".to_string());
-    app.save_input_for_reload(&session_id);
+        app.queued_messages.push("queued one".to_string());
+        app.queued_messages.push("queued two".to_string());
+        app.hidden_queued_system_messages
+            .push("continue silently".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.queued_messages(), &["queued one", "queued two"]);
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["continue silently"]
-    );
-    assert!(!restored.pending_queued_dispatch);
-    assert!(!restored.is_processing);
-    assert!(matches!(restored.status, ProcessingStatus::Idle));
+        let restored = App::new_for_remote(Some(session_id));
+        assert_eq!(restored.queued_messages(), &["queued one", "queued two"]);
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["continue silently"]
+        );
+        assert!(!restored.pending_queued_dispatch);
+        assert!(!restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Idle));
+    });
 }
 
 #[test]
@@ -1111,65 +1116,74 @@ include!("reload_pending_retry.rs");
 
 #[test]
 fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submission() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        jarvis_voice: false,
-        content: "finish the refactor".to_string(),
-        images: vec![("image/png".to_string(), "abc123".to_string())],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
+            content: "finish the refactor".to_string(),
+            images: vec![("image/png".to_string(), "abc123".to_string())],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        app.save_input_for_reload(&session_id);
+
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(restored.input, "finish the refactor");
+        assert_eq!(restored.cursor, "finish the refactor".len());
+        assert!(
+            restored.submit_on_restore,
+            "in-flight prompt should resume automatically"
+        );
+        assert_eq!(restored.pending_images.len(), 1);
+        assert!(
+            restored.rate_limit_pending_message.is_none(),
+            "promoted startup submission should not linger as a passive pending retry"
+        );
     });
-    app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-    app.save_input_for_reload(&session_id);
-
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.input, "finish the refactor");
-    assert_eq!(restored.cursor, "finish the refactor".len());
-    assert!(
-        restored.submit_on_restore,
-        "in-flight prompt should resume automatically"
-    );
-    assert_eq!(restored.pending_images.len(), 1);
-    assert!(
-        restored.rate_limit_pending_message.is_none(),
-        "promoted startup submission should not linger as a passive pending retry"
-    );
 }
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_observe_mode() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-observe-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-observe-{}", std::process::id());
 
-    app.set_observe_mode_enabled(true, true);
-    app.observe_page_markdown = "# Observe\n\nPersist me through reload.".to_string();
-    app.observe_page_updated_at_ms = 42;
-    app.save_input_for_reload(&session_id);
+        app.set_observe_mode_enabled(true, true);
+        app.observe_page_markdown = "# Observe\n\nPersist me through reload.".to_string();
+        app.observe_page_updated_at_ms = 42;
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert!(restored.observe_mode_enabled);
-    assert_eq!(
-        restored.observe_page_markdown,
-        "# Observe\n\nPersist me through reload."
-    );
-    assert_eq!(restored.observe_page_updated_at_ms, 42);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert!(restored.observe_mode_enabled);
+        assert_eq!(
+            restored.observe_page_markdown,
+            "# Observe\n\nPersist me through reload."
+        );
+        assert_eq!(restored.observe_page_updated_at_ms, 42);
+    });
 }
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_split_view_mode() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-splitview-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-splitview-{}", std::process::id());
 
-    app.set_split_view_enabled(true, true);
-    app.save_input_for_reload(&session_id);
+        app.set_split_view_enabled(true, true);
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert!(restored.split_view_enabled);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert!(restored.split_view_enabled);
+    });
 }
 
 #[test]
@@ -1238,16 +1252,18 @@ fn corrupt_reload_queued_state_is_preserved_instead_of_consumed() {
 
 #[test]
 fn test_restore_reload_state_supports_legacy_input_format() {
-    let session_id = format!("test-reload-legacy-{}", std::process::id());
-    let jcode_dir = crate::storage::jcode_dir().unwrap();
-    let path = jcode_dir.join(format!("client-input-{}", session_id));
-    std::fs::write(&path, "2\nhello").unwrap();
+    with_temp_jcode_home(|| {
+        let session_id = format!("test-reload-legacy-{}", std::process::id());
+        let jcode_dir = crate::storage::jcode_dir().unwrap();
+        let path = jcode_dir.join(format!("client-input-{}", session_id));
+        std::fs::write(&path, "2\nhello").unwrap();
 
-    let restored =
-        App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
-    assert_eq!(restored.input, "hello");
-    assert_eq!(restored.cursor, 2);
-    assert!(restored.queued_messages.is_empty());
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
+        assert_eq!(restored.input, "hello");
+        assert_eq!(restored.cursor, 2);
+        assert!(restored.queued_messages.is_empty());
+    });
 }
 
 #[test]

@@ -106,7 +106,7 @@ fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
     let _env_guard = crate::storage::lock_test_env();
     let session_id = format!("send-modes-reload-{}", crate::id::new_id("test"));
     let prompt = crate::protocol::QueuedPrompt {
-            attachments: Vec::new(),
+        attachments: Vec::new(),
         client_id: "persisted-id".into(),
         content: "only once".into(),
         images: vec![],
@@ -249,7 +249,7 @@ fn send_modes_snapshot_does_not_duplicate_legacy_pending_rows() {
         crate::protocol::ServerEvent::QueuedPrompts {
             id: 1,
             prompts: vec![crate::protocol::QueuedPrompt {
-            attachments: Vec::new(),
+                attachments: Vec::new(),
                 client_id: crate::tui::backend::soft_interrupt_client_id(41),
                 content: "legacy".into(),
                 images: vec![],
@@ -362,14 +362,16 @@ fn test_ctrl_up_recalls_queued_command_for_editing() {
 
 #[test]
 fn test_reload_round_trip_preserves_queued_commands() {
-    let mut app = create_test_app();
-    let session_id = format!("test-queued-commands-reload-{}", std::process::id());
-    app.queued_commands.push("/compact".to_string());
-    app.save_input_for_reload(&session_id);
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-queued-commands-reload-{}", std::process::id());
+        app.queued_commands.push("/compact".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.queued_commands, vec!["/compact"]);
-    assert!(!restored.is_processing);
+        let restored = App::new_for_remote(Some(session_id));
+        assert_eq!(restored.queued_commands, vec!["/compact"]);
+        assert!(!restored.is_processing);
+    });
 }
 
 #[test]
@@ -543,10 +545,7 @@ fn queued_edit_up_loads_newest_then_older_and_saves_in_place() {
     let mut app = create_test_app();
     queue_prompts(
         &mut app,
-        &[
-            ("p1", "first queued", false),
-            ("p2", "second queued", true),
-        ],
+        &[("p1", "first queued", false), ("p2", "second queued", true)],
     );
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -559,12 +558,22 @@ fn queued_edit_up_loads_newest_then_older_and_saves_in_place() {
             .await
             .unwrap();
         assert_eq!(app.input, "second queued");
-        assert_eq!(app.queued_prompt_edit.as_ref().map(|edit| edit.prompt_id.as_str()), Some("p2"));
+        assert_eq!(
+            app.queued_prompt_edit
+                .as_ref()
+                .map(|edit| edit.prompt_id.as_str()),
+            Some("p2")
+        );
         app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote)
             .await
             .unwrap();
         assert_eq!(app.input, "first queued");
-        assert_eq!(app.queued_prompt_edit.as_ref().map(|edit| edit.prompt_id.as_str()), Some("p1"));
+        assert_eq!(
+            app.queued_prompt_edit
+                .as_ref()
+                .map(|edit| edit.prompt_id.as_str()),
+            Some("p1")
+        );
         app.input = "first queued, edited".into();
         app.cursor_pos = app.input.len();
         app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)

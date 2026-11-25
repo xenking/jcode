@@ -43,6 +43,40 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_INLINE_DIFF_LINES: usize = 12;
 
+#[cfg(test)]
+thread_local! {
+    /// Per-test answer for [`prefer_width_stable_system_glyphs`]. Tests must not
+    /// rewrite `TERM`/`TERM_PROGRAM`: every concurrently rendering test reads
+    /// them, and a kitty answer changes the glyphs of unrelated rows.
+    static TEST_WIDTH_STABLE_GLYPHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the calling test thread render as if it ran inside kitty, until dropped.
+#[cfg(test)]
+struct WidthStableGlyphsGuard;
+
+#[cfg(test)]
+impl WidthStableGlyphsGuard {
+    fn kitty() -> Self {
+        TEST_WIDTH_STABLE_GLYPHS.with(|mode| mode.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for WidthStableGlyphsGuard {
+    fn drop(&mut self) {
+        TEST_WIDTH_STABLE_GLYPHS.with(|mode| mode.set(false));
+    }
+}
+
+/// Tests answer per thread and never inherit the developer's terminal.
+#[cfg(test)]
+fn prefer_width_stable_system_glyphs() -> bool {
+    TEST_WIDTH_STABLE_GLYPHS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
 fn prefer_width_stable_system_glyphs() -> bool {
     std::env::var("TERM_PROGRAM")
         .ok()

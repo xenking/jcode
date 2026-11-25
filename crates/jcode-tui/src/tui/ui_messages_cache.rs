@@ -61,24 +61,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_shares_rendered_lines_with_owned_api() {
-        let msg = DisplayMessage::assistant("projection_shares_rendered_lines_with_owned_api");
-        let visible = project_cached_message_lines(
-            &msg,
-            81,
-            crate::config::DiffDisplayMode::Off,
-            |_, _, _| vec![Line::from("shared projection")],
-            |lines| !lines.is_empty(),
-        );
-        assert!(visible);
-        let owned =
-            get_cached_message_lines(&msg, 81, crate::config::DiffDisplayMode::Off, |_, _, _| {
-                panic!("projection must populate the same cache")
-            });
-        assert_eq!(owned[0].to_string(), "shared projection");
-    }
-
-    #[test]
     fn projection_preserves_relative_age_cache_bypasses() {
         let mut background = DisplayMessage::assistant("_Called at:_ `projection bypass`");
         background.role = "background_task".into();

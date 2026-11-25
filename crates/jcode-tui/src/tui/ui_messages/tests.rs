@@ -378,15 +378,6 @@ fn leading_spaces(text: &str) -> usize {
     text.chars().take_while(|c| *c == ' ').count()
 }
 
-fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[test]
 fn successful_reload_notice_hides_internal_directive() {
     for content in [
@@ -824,48 +815,9 @@ fn render_system_message_centered_mode_left_aligns_with_padding() {
     crate::tui::markdown::set_center_code_blocks(saved);
 }
 
-/// Sets process env vars and restores them on drop, even when an assertion
-/// panics. Field order matters: restore the vars before releasing the locks.
-struct TermEnv {
-    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    _env: std::sync::MutexGuard<'static, ()>,
-    _glyph: std::sync::MutexGuard<'static, ()>,
-}
-
-impl TermEnv {
-    fn set(vars: &[(&'static str, &str)]) -> Self {
-        // Same order everywhere: glyph lock, then the process-wide env lock.
-        let glyph = system_glyph_env_lock();
-        let env = crate::storage::lock_test_env();
-        let saved = vars
-            .iter()
-            .map(|(key, _)| (*key, std::env::var_os(key)))
-            .collect();
-        for (key, value) in vars {
-            crate::env::set_var(key, value);
-        }
-        Self {
-            saved,
-            _env: env,
-            _glyph: glyph,
-        }
-    }
-}
-
-impl Drop for TermEnv {
-    fn drop(&mut self) {
-        for (key, value) in self.saved.drain(..) {
-            match value {
-                Some(value) => crate::env::set_var(key, value),
-                None => crate::env::remove_var(key),
-            }
-        }
-    }
-}
-
 #[test]
 fn render_system_message_uses_width_stable_titles_on_kitty() {
-    let _term = TermEnv::set(&[("TERM_PROGRAM", "kitty"), ("TERM", "xterm-kitty")]);
+    let _kitty = WidthStableGlyphsGuard::kitty();
 
     let msg = DisplayMessage::system(
         "⚡ Connection lost - retrying (attempt 2, 7s) - connection reset by server",
@@ -2671,7 +2623,6 @@ fn render_background_task_messages_prefer_display_name() {
 
 #[test]
 fn render_system_message_uses_scheduled_task_card() {
-    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage::system(
         "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: Follow up on the scheduler test\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nBranch: master\n\nBackground: Verify the scheduled task card styling\nSuccess criteria: The due task renders clearly\nScheduled by session: session_test",
     );
@@ -2696,7 +2647,6 @@ fn render_system_message_uses_scheduled_task_card() {
 
 #[test]
 fn render_tool_message_uses_scheduled_card() {
-    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
