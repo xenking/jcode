@@ -1278,8 +1278,53 @@ async fn handle_agent_task(
     events.finish().await;
 }
 
-impl ClientConnection {
-    pub(super) async fn action_requests(&mut self, request: Request) -> Result<Outcome> {
+/// What the session actions need of their connection, borrowed for one
+/// request. The handlers in this module are reached only through `dispatch`.
+pub(super) struct ActionCx<'a> {
+    env: &'a ClientEnv,
+    client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    agent: &'a Arc<Mutex<Agent>>,
+    client_session_id: &'a str,
+    client_is_processing: bool,
+    stdin_responses: &'a Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+    local_jcode_peer: bool,
+    connection_client_name: Option<&'a str>,
+    friendly_name: &'a Option<String>,
+    swarm_enabled: &'a mut bool,
+}
+
+impl<'a> ActionCx<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one borrow per piece of connection state an action may touch"
+    )]
+    pub(super) fn new(
+        env: &'a ClientEnv,
+        client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+        agent: &'a Arc<Mutex<Agent>>,
+        client_session_id: &'a str,
+        client_is_processing: bool,
+        stdin_responses: &'a Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+        local_jcode_peer: bool,
+        connection_client_name: Option<&'a str>,
+        friendly_name: &'a Option<String>,
+        swarm_enabled: &'a mut bool,
+    ) -> Self {
+        Self {
+            env,
+            client_event_tx,
+            agent,
+            client_session_id,
+            client_is_processing,
+            stdin_responses,
+            local_jcode_peer,
+            connection_client_name,
+            friendly_name,
+            swarm_enabled,
+        }
+    }
+
+    pub(super) async fn dispatch(&mut self, request: Request) -> Result<Outcome> {
         match request {
             Request::Split { id } => {
                 handle_split(
@@ -1397,8 +1442,7 @@ impl ClientConnection {
                 response,
             } => {
                 if crate::tool::interactive::is_owner_approval(&request_id)
-                    && !(self.local_jcode_peer
-                        && self.connection_client_name.as_deref() == Some("jcode-tui"))
+                    && !(self.local_jcode_peer && self.connection_client_name == Some("jcode-tui"))
                 {
                     send_client_event_best_effort(
                         &self.client_event_tx,
@@ -1706,7 +1750,7 @@ impl ClientConnection {
                 let event = match result {
                     Ok(overrides) => ServerEvent::AgentModelsChanged {
                         id,
-                        session_id: self.client_session_id.clone(),
+                        session_id: self.client_session_id.to_string(),
                         overrides,
                     },
                     Err(error) => ServerEvent::Error {
@@ -1816,7 +1860,7 @@ impl ClientConnection {
                     &self.agent,
                     &self.client_session_id,
                     &self.friendly_name,
-                    &mut self.swarm_enabled,
+                    self.swarm_enabled,
                     &self.env.swarm_members,
                     &self.env.swarms_by_id,
                     &self.env.swarm_coordinators,

@@ -162,7 +162,21 @@ impl ClientConnection {
             Route::Attach => self.attach_requests(request, ctx).await,
             Route::Settings => self.settings_requests(request).await,
             Route::RuntimeCommand => self.runtime_command_requests(request).await,
-            Route::Actions => self.action_requests(request).await,
+            Route::Actions => {
+                let mut cx = actions::ActionCx::new(
+                    &self.env,
+                    &self.client_event_tx,
+                    &self.agent,
+                    &self.client_session_id,
+                    self.client_is_processing,
+                    &self.stdin_responses,
+                    self.local_jcode_peer,
+                    self.connection_client_name.as_deref(),
+                    &self.friendly_name,
+                    &mut self.swarm_enabled,
+                );
+                cx.dispatch(request).await
+            }
         }
     }
 }
