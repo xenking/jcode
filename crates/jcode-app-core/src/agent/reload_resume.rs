@@ -352,7 +352,7 @@ impl Agent {
                     let wait = message.content.iter().find_map(|block| match block {
                         ContentBlock::ToolUse { id, input, .. }
                             if *id == tool.id
-                                && super::tool_handoff::is_reload_replayable_wait(
+                                && super::turn_streaming_mpsc::tool_handoff::is_reload_replayable_wait(
                                     &tool.name, input,
                                 ) =>
                         {

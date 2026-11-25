@@ -951,7 +951,7 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = super::tool_handoff::execute_with_background(
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
                             self.registry.clone(),
                             tool_name.clone(),
                             ToolCall::normalize_input_to_object(input),
@@ -1502,7 +1502,7 @@ impl Agent {
                 }));
 
                 let result = if let Some((handle, started)) = parallel_reads.take(&tc.id) {
-                    super::tool_handoff::wait_for_started_read(
+                    super::turn_streaming_mpsc::tool_handoff::wait_for_started_read(
                         tc.name.clone(),
                         tc.input.clone(),
                         ctx,
@@ -1511,7 +1511,7 @@ impl Agent {
                     )
                     .await
                 } else {
-                    super::tool_handoff::execute_with_background(
+                    super::turn_streaming_mpsc::execute_with_background(
                         self.registry.clone(),
                         tc.name.clone(),
                         tc.input.clone(),
