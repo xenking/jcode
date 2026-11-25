@@ -434,9 +434,10 @@ use super::transcript_search::source::{BucketSink, Source, Walk, message_role_so
 #[cfg(test)]
 use search_text::raw_value_search_excerpt;
 pub(super) use search_text::{
-    build_search_index, classified_search_excerpt, classify_json_into, push_sampled_search_text,
-    raw_value_display_text,
+    build_search_index, classified_search_excerpt, classify_json_into, raw_value_display_text,
 };
+#[cfg(test)]
+use super::search_terms::{push_sampled_search_text, search_query_tokens};
 
 #[cfg(test)]
 pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool {
@@ -471,15 +472,6 @@ pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -
         || tokens
             .iter()
             .all(|token| session.search_index.contains(token))
-}
-
-/// Split a raw query into normalized (lowercased, whitespace-trimmed) search
-/// tokens. Empty/whitespace-only queries yield no tokens (match everything).
-pub(super) fn search_query_tokens(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(|token| token.to_lowercase())
-        .collect()
 }
 
 #[cfg(test)]

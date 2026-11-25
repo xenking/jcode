@@ -75,12 +75,12 @@ fn resume_identity_search_does_not_promote_partial_identity_or_fake_cloud_mentio
     let mut local = make_session("local", "swan", false, SessionStatus::Closed);
     local.title = "cloud migration notes".into();
     let cloud = cloud_swan();
-    let tokens = loading::search_query_tokens("swan cloud");
+    let tokens = search_terms::search_query_tokens("swan cloud");
     assert!(
         super::super::identity_search::rank(&cloud, &tokens)
             > super::super::identity_search::rank(&local, &tokens)
     );
-    let unrelated = loading::search_query_tokens("swan battery");
+    let unrelated = search_terms::search_query_tokens("swan battery");
     assert_eq!(
         super::super::identity_search::rank(&cloud, &unrelated),
         (false, false, false)
@@ -91,7 +91,7 @@ fn resume_identity_search_does_not_promote_partial_identity_or_fake_cloud_mentio
 fn resume_identity_search_does_not_treat_topic_title_as_identity() {
     let mut session = make_session("bug", "elephant", false, SessionStatus::Closed);
     session.title = "Desktop rendering bug".into();
-    let tokens = loading::search_query_tokens("render");
+    let tokens = search_terms::search_query_tokens("render");
     assert_eq!(
         super::super::identity_search::rank(&session, &tokens),
         (false, false, false),

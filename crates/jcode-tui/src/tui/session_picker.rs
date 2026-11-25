@@ -59,6 +59,7 @@ mod preview_refresh;
 mod progressive_preview;
 mod render;
 mod saved_placement;
+mod search_terms;
 mod session_view;
 use session_view::highlight_buffer_matches;
 mod transcript_search;
@@ -1906,7 +1907,7 @@ impl SessionPicker {
                 .enumerate()
                 .map(|(idx, (&line, text))| (line, idx + 1, text.clone()))
                 .collect();
-            let tokens = loading::search_query_tokens(&cache.key.search_query);
+            let tokens = search_terms::search_query_tokens(&cache.key.search_query);
             cache.first_match_line = cache.wrapped_lines.iter().position(|line| {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let lower = text.to_lowercase();

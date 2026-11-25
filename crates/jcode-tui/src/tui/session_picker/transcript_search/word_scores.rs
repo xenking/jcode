@@ -16,7 +16,7 @@ mod tests {
             "config config",
             "foo-bar",
         ] {
-            let tokens = super::super::super::loading::search_query_tokens(query);
+            let tokens = super::super::super::search_terms::search_query_tokens(query);
             for text in [
                 "config worker config deployment",
                 "café config 東京 worker",

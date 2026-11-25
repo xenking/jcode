@@ -1,7 +1,7 @@
 //! Incremental fuzzy and full-transcript search without typing delays.
 //! All matching, including literal metadata and identity fields, runs on
 //! cancellable workers. The UI only consumes bounded batches of rank evidence.
-use super::loading::search_query_tokens;
+use super::search_terms::{lowercase_field, search_query_tokens};
 #[path = "transcript_search_shard_search.rs"]
 mod shard_search;
 
@@ -98,14 +98,6 @@ fn normalized_equals(field: &str, query: &str) -> bool {
         field.eq_ignore_ascii_case(query)
     } else {
         field.to_lowercase() == query
-    }
-}
-
-pub(super) fn lowercase_field(field: &str) -> std::borrow::Cow<'_, str> {
-    if field.is_ascii() && !field.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        std::borrow::Cow::Borrowed(field)
-    } else {
-        std::borrow::Cow::Owned(field.to_lowercase())
     }
 }
 

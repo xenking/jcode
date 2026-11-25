@@ -1,7 +1,7 @@
 //! Names and locations describe the session itself, unlike transcript mentions.
 #[cfg(test)]
 use super::SessionInfo;
-use super::transcript_search::lowercase_field;
+use super::search_terms::lowercase_field;
 
 /// Complete structured matches lead. An exact animal/name and actual cloud
 /// ownership break ties, so `swan cloud` finds the cloud swan even if renamed.

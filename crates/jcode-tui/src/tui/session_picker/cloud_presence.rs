@@ -163,9 +163,6 @@ impl SessionPicker {
         }
         if changed {
             self.merge_cloud_presence();
-            if self.filter_mode == SessionFilterMode::Active {
-                self.rebuild_items();
-            }
         }
         changed
     }

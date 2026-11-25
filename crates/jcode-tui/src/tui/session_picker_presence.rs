@@ -30,33 +30,6 @@ impl SessionPicker {
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
     }
 
-    /// Periodically re-snapshot live presence while the picker is on screen so
-    /// working/ready badges track reality. Rebuilds the list when the Active
-    /// view is showing and membership or streaming state changed (a session
-    /// finished its turn, went idle, or exited). Returns true when anything
-    /// changed so callers can redraw.
-    pub fn maybe_refresh_live_presence(&mut self) -> bool {
-        if self.loading_message.is_some() {
-            return false;
-        }
-        let cloud_changed = self.maybe_refresh_cloud_presence();
-        let due = self
-            .live_presence_refreshed_at
-            .is_none_or(|at| at.elapsed() >= LIVE_PRESENCE_REFRESH_INTERVAL);
-        if !due {
-            return cloud_changed;
-        }
-        let before = std::mem::take(&mut self.live_presence);
-        let closures_before = std::mem::take(&mut self.recent_window_closures);
-        self.refresh_live_presence();
-        let closures_changed = closures_before != self.recent_window_closures;
-        let changed = before != self.live_presence || closures_changed;
-        if closures_changed || (changed && self.filter_mode == SessionFilterMode::Active) {
-            self.rebuild_items();
-        }
-        changed || cloud_changed
-    }
-
     /// A recent final-client EOF, not recent messages or a daemon-owned Agent.
     pub(in crate::tui) fn session_recently_closed(&self, session: &SessionInfo) -> bool {
         if self.session_is_current(session) {

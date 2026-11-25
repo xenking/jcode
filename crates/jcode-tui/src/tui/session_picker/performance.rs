@@ -111,7 +111,7 @@ impl SessionPicker {
             return;
         }
         cache.key.search_query = query.to_string();
-        let tokens = loading::search_query_tokens(query);
+        let tokens = search_terms::search_query_tokens(query);
         cache.first_match_line = cache.wrapped_lines.iter().position(|line| {
             let text: String = line
                 .spans
