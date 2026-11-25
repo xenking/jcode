@@ -951,7 +951,22 @@ class Harness:
                 result.update(self.reload_selfdev(token, label))
             elif feature in {"resume", "restart", "mode-set"}:
                 if feature == "mode-set":
+                    sid = self.observe("state")["remote_session_id"]
+                    session_path = self.root / "data/sessions" / f"{sid}.json"
+
+                    def pinned_modes():
+                        try:
+                            saved = load_persisted(session_path)
+                        except (FileNotFoundError, json.JSONDecodeError):
+                            return []
+                        return (saved or {}).get("pinned_skills") or []
+
+                    # The slash journey can leave verify-probe pinned in this session.
+                    if pinned_modes():
+                        self.send("/mode off")
+                        wait_for(lambda: not pinned_modes(), "previous session modes cleared")
                     self.send("/mode toggle verify-probe")
+                    wait_for(lambda: pinned_modes() == ["verify-probe"], "first session mode enabled")
                     self.send("/mode toggle verify-review")
                     self.send("/mode")
                     wait_for(lambda: "Session mode: verify-probe, verify-review" in self.pane(),
