@@ -137,6 +137,9 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[path = "ui_frame_metrics_key_latency.rs"]
+mod key_latency;
+pub(crate) use key_latency::{key_to_paint_debug_json, note_frame_painted, note_key_event_read};
 #[cfg(test)]
 pub(crate) use frame_metrics::body_last_path_for_tests;
 #[path = "ui_header.rs"]
@@ -1631,8 +1634,7 @@ use frame_metrics::{
 };
 pub(crate) use frame_metrics::{
     DrawCallAttribution, FrameInputAttribution, frame_input_attribution_snapshot,
-    key_to_paint_debug_json, note_frame_painted, note_key_event_read, record_draw_call_attribution,
-    set_frame_input_attribution, wall_clock_ms,
+    record_draw_call_attribution, set_frame_input_attribution, wall_clock_ms,
 };
 pub(crate) use frame_metrics::{
     changed_cells_wanted, debug_draw_call_history, debug_flicker_frame_history,
