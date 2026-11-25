@@ -1181,6 +1181,10 @@ pub struct DictationConfig {
     /// Optional WebSocket URL override for the selected streaming backend
     /// (Nari or Soniox). Empty uses the provider's public endpoint.
     pub base_url: String,
+    /// Speech model requested from the selected streaming backend (for
+    /// example `stt-rt-v6` for Soniox). Empty uses that backend's default.
+    /// It belongs to `backend`, so changing the backend clears it.
+    pub model: String,
 }
 
 /// Built-in voice transcription backend selected by `[dictation] backend`.
@@ -1203,13 +1207,14 @@ impl Default for DictationConfig {
             command: String::new(),
             mode: crate::protocol::TranscriptMode::Insert,
             key: "off".to_string(),
-            timeout_secs: 90,
+            timeout_secs: 300,
             vocabulary: Vec::new(),
             recorder: String::new(),
             global_devices: Vec::new(),
             composer_preview: true,
             backend: DictationBackend::Auto,
             base_url: String::new(),
+            model: String::new(),
         }
     }
 }

@@ -5125,6 +5125,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "webpki-roots",
  "zbus",
 ]

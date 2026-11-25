@@ -186,7 +186,7 @@ impl Chunker {
         let mut energy = 0.0f64;
         let mut frames = 0usize;
         for frame in data.chunks_exact(channels) {
-            if self.samples >= 16000 * MAX_RECORDING_DURATION.as_secs() as usize {
+            if self.samples >= 16000 * MAX_STREAMING_DURATION.as_secs() as usize {
                 break;
             }
             let mono = frame
@@ -207,7 +207,7 @@ impl Chunker {
             self.resampler.push(mono, &mut self.chunk);
             // Upsampling can emit two output samples for one native frame.
             // Clamp this final frame as well as the filter tail.
-            let remaining = 16000 * MAX_RECORDING_DURATION.as_secs() as usize - self.samples;
+            let remaining = 16000 * MAX_STREAMING_DURATION.as_secs() as usize - self.samples;
             self.chunk.truncate(before + remaining);
             self.samples += self.chunk.len() - before;
             if self.chunk.len() >= 1600 {
@@ -364,7 +364,7 @@ fn capture(
     }
     super::timing::mark("capture signalled ready");
     ready.send(Ok(())).map_err(|_| VoiceError::Cancelled)?;
-    let deadline = std::time::Instant::now() + MAX_RECORDING_DURATION;
+    let deadline = std::time::Instant::now() + MAX_STREAMING_DURATION;
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
@@ -377,7 +377,7 @@ fn capture(
             if state.failed {
                 return Err(VoiceError::CaptureFailed);
             }
-            if state.samples >= 16000 * MAX_RECORDING_DURATION.as_secs() as usize {
+            if state.samples >= 16000 * MAX_STREAMING_DURATION.as_secs() as usize {
                 break;
             }
         }
@@ -388,7 +388,7 @@ fn capture(
     drop(stream);
     super::timing::mark("input stream dropped");
     let mut state = state.lock().map_err(|_| VoiceError::CaptureFailed)?;
-    state.finish(16000 * MAX_RECORDING_DURATION.as_secs() as usize);
+    state.finish(16000 * MAX_STREAMING_DURATION.as_secs() as usize);
     super::timing::mark("capture flushed tail");
     if state.failed {
         Err(VoiceError::CaptureFailed)
@@ -401,6 +401,182 @@ enum Session {
     Nari(NariSession),
     Soniox(super::SonioxSession),
     ElevenLabs(ElevenLabsSession),
+}
+
+/// Everything needed to open one more provider session.
+#[derive(Clone)]
+struct Target {
+    backend: super::StreamingBackend,
+    url: String,
+    key: String,
+    model: Option<String>,
+}
+impl Target {
+    async fn connect(&self, cancel: &Arc<AtomicBool>) -> Result<Session, VoiceError> {
+        let (url, key, model, c) = (&self.url, &self.key, self.model.as_deref(), cancel.clone());
+        Ok(match self.backend {
+            super::StreamingBackend::Nari => {
+                Session::Nari(NariSession::connect_with_model(url, key, model, c).await?)
+            }
+            super::StreamingBackend::Soniox => Session::Soniox(
+                super::SonioxSession::connect_with_model(url, key, model, c).await?,
+            ),
+            super::StreamingBackend::ElevenLabs => {
+                Session::ElevenLabs(ElevenLabsSession::connect_with_model(key, model, c).await?)
+            }
+        })
+    }
+    async fn run_segment(
+        session: Session,
+        pcm: &mut tokio::sync::mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
+        event: impl FnMut(NariEvent),
+    ) -> Result<super::soniox::Segment, VoiceError> {
+        match session {
+            Session::Nari(s) => s.run_segment(pcm, limit_samples, event).await,
+            Session::Soniox(s) => s.run_segment(pcm, limit_samples, event).await,
+            Session::ElevenLabs(s) => s.run_segment(pcm, limit_samples, event).await,
+        }
+    }
+}
+
+/// How live dictation keeps a provider session alive for as long as the user
+/// talks. Providers end sessions after a limit the client cannot see, so the
+/// session is renewed on a schedule well inside any plausible limit, and also
+/// reopened when it drops on its own.
+#[derive(Clone, Copy)]
+pub(super) struct StreamTuning {
+    /// Audio sent on one session before it is closed cleanly and replaced.
+    pub renew_after_samples: usize,
+    /// Consecutive sessions that fail before producing any text. Reaching it
+    /// ends the dictation with the text captured so far.
+    pub max_failed_sessions: u32,
+    /// Wait before reopening after a failure, multiplied by the failure count.
+    pub backoff: Duration,
+}
+impl Default for StreamTuning {
+    fn default() -> Self {
+        Self {
+            renew_after_samples: 16000 * 60,
+            max_failed_sessions: 3,
+            backoff: Duration::from_millis(400),
+        }
+    }
+}
+
+/// What a dictation produced. `error` is why the stream stopped early; the
+/// text is everything transcribed before that.
+struct Streamed {
+    text: String,
+    error: Option<VoiceError>,
+}
+
+fn join_text(head: &str, tail: &str) -> String {
+    let (head, tail) = (head.trim(), tail.trim());
+    match (head.is_empty(), tail.is_empty()) {
+        (true, _) => tail.to_owned(),
+        (_, true) => head.to_owned(),
+        _ => format!("{head} {tail}"),
+    }
+}
+
+/// Drive provider sessions over one PCM source until the source ends.
+///
+/// Each session takes at most `renew_after_samples` of audio, then finalizes
+/// cleanly, so its text is complete before the next session opens and the
+/// transcripts concatenate without gaps or repeats. Audio that arrives while
+/// the next session connects stays queued in `pcm`. A session that dies on its
+/// own keeps whatever text it had, and the stream continues on a new one. The
+/// only error returned is `Cancelled`: every other failure comes back inside
+/// [`Streamed`] together with all the text captured so far.
+async fn stream_resilient(
+    first: Session,
+    target: &Target,
+    cancel: &Arc<AtomicBool>,
+    mut pcm: tokio::sync::mpsc::Receiver<Vec<i16>>,
+    tuning: StreamTuning,
+    sink: &mut impl FnMut(NariEvent),
+) -> Result<Streamed, VoiceError> {
+    let mut committed = String::new();
+    let mut next = Some(first);
+    let mut failed_in_a_row = 0u32;
+    loop {
+        let session = match next.take() {
+            Some(session) => session,
+            None => match target.connect(cancel).await {
+                Ok(session) => session,
+                Err(VoiceError::Cancelled) => return Err(VoiceError::Cancelled),
+                Err(error) => {
+                    failed_in_a_row += 1;
+                    if !retryable(&error, false)
+                        || failed_in_a_row >= tuning.max_failed_sessions
+                        || audio_finished(&pcm)
+                    {
+                        return Ok(Streamed { text: committed, error: Some(error) });
+                    }
+                    tokio::time::sleep(tuning.backoff * failed_in_a_row).await;
+                    continue;
+                }
+            },
+        };
+        let mut live = String::new();
+        let segment = Target::run_segment(session, &mut pcm, tuning.renew_after_samples, |event| {
+            if let NariEvent::Transcript(text) = event {
+                sink(NariEvent::Transcript(join_text(&committed, &text)));
+                live = text;
+            }
+        })
+        .await;
+        match segment {
+            Ok(segment) => {
+                failed_in_a_row = 0;
+                committed = join_text(&committed, &segment.text);
+                sink(NariEvent::Transcript(committed.clone()));
+                if !segment.more {
+                    return Ok(Streamed { text: committed, error: None });
+                }
+            }
+            Err(VoiceError::Cancelled) => return Err(VoiceError::Cancelled),
+            Err(error) => {
+                // The session died. Its latest revision is the best text there is.
+                if !live.trim().is_empty() {
+                    committed = join_text(&committed, &live);
+                    sink(NariEvent::Transcript(committed.clone()));
+                    failed_in_a_row = 0;
+                } else {
+                    failed_in_a_row += 1;
+                }
+                if !retryable(&error, !live.trim().is_empty() || !committed.is_empty())
+                    || failed_in_a_row >= tuning.max_failed_sessions
+                    || audio_finished(&pcm)
+                {
+                    return Ok(Streamed { text: committed, error: Some(error) });
+                }
+                tokio::time::sleep(tuning.backoff).await;
+            }
+        }
+    }
+}
+
+/// Whether opening another session can help. Network trouble and server-side
+/// limits can pass. A bad key, exhausted credits, a refused configuration or
+/// invalid audio will fail the same way again. A provider "rejected" reply
+/// after the stream already produced text is a mid-session limit, which a new
+/// session gets past, but a rejection at the very start is final.
+fn retryable(error: &VoiceError, produced_text: bool) -> bool {
+    match error {
+        VoiceError::Network | VoiceError::Timeout | VoiceError::InvalidResponse => true,
+        VoiceError::Http(status) => matches!(status, 408 | 425 | 429 | 500..=599),
+        VoiceError::NariRejected
+        | VoiceError::SonioxRejected
+        | VoiceError::ElevenLabsRejected => produced_text,
+        _ => false,
+    }
+}
+
+/// The microphone is released and every queued chunk was consumed.
+fn audio_finished(pcm: &tokio::sync::mpsc::Receiver<Vec<i16>>) -> bool {
+    pcm.is_closed() && pcm.is_empty()
 }
 
 #[derive(Default)]
@@ -496,36 +672,24 @@ impl NariRecording {
     /// its own API key. `Subscription`/`Command` are not streaming
     /// backends here and return `Unavailable`.
     pub fn start_configured(cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
-        use jcode_base::config::DictationBackend as B;
-        let (backend, url) = super::configured_backend();
-        let recorder = jcode_base::config::config().dictation.recorder.clone();
-        let (backend, key) = match backend {
-            B::Nari => (
-                super::StreamingBackend::Nari,
-                super::nari_api_key().ok_or(VoiceError::NariNotConfigured)?,
-            ),
-            B::Soniox => (
-                super::StreamingBackend::Soniox,
-                super::soniox_api_key().ok_or(VoiceError::SonioxNotConfigured)?,
-            ),
-            B::ElevenLabs => (
-                super::StreamingBackend::ElevenLabs,
-                super::StreamingBackend::ElevenLabs
-                    .api_key()
-                    .ok_or(VoiceError::ElevenLabsNotConfigured)?,
-            ),
-            B::Auto => {
-                if let Some(key) = super::nari_api_key() {
-                    (super::StreamingBackend::Nari, key)
-                } else if let Some(key) = super::soniox_api_key() {
-                    (super::StreamingBackend::Soniox, key)
-                } else {
-                    return Err(VoiceError::NariNotConfigured);
-                }
-            }
-            B::Subscription | B::Command => return Err(VoiceError::Unavailable),
-        };
-        Self::start_streaming(cancel, backend, &key, url.as_deref(), &recorder)
+        Self::start_configured_plan(cancel).map(|(recording, _)| recording)
+    }
+    /// [`Self::start_configured`], also returning the provider and model that
+    /// were started so the UI can show them.
+    pub fn start_configured_plan(
+        cancel: Arc<AtomicBool>,
+    ) -> Result<(Self, super::StreamingPlan), VoiceError> {
+        let dictation = jcode_base::config::config().dictation.clone();
+        let plan = super::plan_streaming(&dictation, super::StreamingBackend::api_key)?;
+        let recording = Self::start_streaming(
+            cancel,
+            plan.backend,
+            &plan.key,
+            plan.url.as_deref(),
+            plan.model.as_deref(),
+            &dictation.recorder,
+        )?;
+        Ok((recording, plan))
     }
     /// Backend-selectable push-to-talk. Same handle, events and semantics as
     /// `start_auto`; `url` overrides the backend's public endpoint when set.
@@ -535,6 +699,7 @@ impl NariRecording {
         backend: super::StreamingBackend,
         key: &str,
         url: Option<&str>,
+        model: Option<&str>,
         recorder: &str,
     ) -> Result<Self, VoiceError> {
         let url = url
@@ -545,11 +710,13 @@ impl NariRecording {
         let custom = recorder.trim().to_owned();
         #[cfg(feature = "voice-capture")]
         if custom.is_empty() {
-            return Self::start_backend(
+            return Self::start_backend_with(
                 cancel,
                 backend,
                 key,
                 &url,
+                model,
+                StreamTuning::default(),
                 MicrophoneRecording::start_pcm_cancellable,
             );
         }
@@ -557,9 +724,15 @@ impl NariRecording {
         if recorders.is_empty() {
             return Err(VoiceError::MicrophoneUnavailable);
         }
-        Self::start_backend(cancel, backend, key, &url, move |c| {
-            super::command_capture::start_pcm(c, recorders)
-        })
+        Self::start_backend_with(
+            cancel,
+            backend,
+            key,
+            &url,
+            model,
+            StreamTuning::default(),
+            move |c| super::command_capture::start_pcm(c, recorders),
+        )
     }
     fn start_with(
         cancel: Arc<AtomicBool>,
@@ -588,11 +761,40 @@ impl NariRecording {
         > + Send
         + 'static,
     ) -> Result<Self, VoiceError> {
+        Self::start_backend_with(
+            cancel,
+            backend,
+            key,
+            url,
+            None,
+            StreamTuning::default(),
+            factory,
+        )
+    }
+    pub(super) fn start_backend_with(
+        cancel: Arc<AtomicBool>,
+        backend: super::StreamingBackend,
+        key: &str,
+        url: &str,
+        model: Option<&str>,
+        tuning: StreamTuning,
+        factory: impl FnOnce(
+            Arc<AtomicBool>,
+        ) -> Result<
+            (PcmRecording, tokio::sync::mpsc::Receiver<Vec<i16>>),
+            VoiceError,
+        > + Send
+        + 'static,
+    ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
-        let url = url.to_owned();
-        let key = key.to_owned();
+        let target = Target {
+            backend,
+            url: url.to_owned(),
+            key: key.to_owned(),
+            model: model.map(str::to_owned),
+        };
         let events = Arc::new(Mutex::new(Events::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let level = Arc::new(std::sync::OnceLock::new());
@@ -617,20 +819,8 @@ impl NariRecording {
                         // while the provider handshake is in flight and buffer PCM
                         // until it is configured, so the first words are never lost.
                         let connect = tokio::spawn({
-                            let c = c.clone();
-                            async move {
-                                Ok::<_, VoiceError>(match backend {
-                                    super::StreamingBackend::Nari => Session::Nari(
-                                        NariSession::connect_to(&url, &key, c).await?,
-                                    ),
-                                    super::StreamingBackend::Soniox => Session::Soniox(
-                                        super::SonioxSession::connect_to(&url, &key, c).await?,
-                                    ),
-                                    super::StreamingBackend::ElevenLabs => Session::ElevenLabs(
-                                        ElevenLabsSession::connect(&key, c).await?,
-                                    ),
-                                })
-                            }
+                            let (c, target) = (c.clone(), target.clone());
+                            async move { target.connect(&c).await }
                         });
                         let setup_cancel = Arc::new(AtomicBool::new(false));
                         let factory_cancel = setup_cancel.clone();
@@ -654,15 +844,25 @@ impl NariRecording {
                         }
                         // Dropping `mic` on failure cancels the unfinished capture.
                         let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
-                        let sink = |event: NariEvent| {
+                        let mut sink = |event: NariEvent| {
                             if !matches!(event, NariEvent::Finished(_)) {
                                 Events::lock(&e).push(event);
                             }
                         };
-                        let result = match session {
-                            Session::Nari(s) => s.run(pcm, sink).await,
-                            Session::Soniox(s) => s.run_nari_events(pcm, sink).await,
-                            Session::ElevenLabs(s) => s.run(pcm, sink).await,
+                        sink(NariEvent::Started);
+                        let streamed =
+                            stream_resilient(session, &target, &c, pcm, tuning, &mut sink).await;
+                        // Words already captured outlive any provider failure.
+                        let result = match streamed {
+                            Err(error) => Err(error),
+                            Ok(Streamed { text, error: None }) => Ok(text),
+                            Ok(Streamed { text, error: Some(error) }) if text.trim().is_empty() => {
+                                Err(error)
+                            }
+                            Ok(Streamed { text, error: Some(error) }) => {
+                                sink(NariEvent::Interrupted(error));
+                                Ok(text)
+                            }
                         };
                         super::timing::mark("nari stream finished");
                         mic.stop();
@@ -671,6 +871,11 @@ impl NariRecording {
                         super::timing::mark("capture joined");
                         match (result, capture) {
                             (Err(err), _) => Err(err),
+                            // A microphone fault after speech must not discard the words.
+                            (Ok(text), Err(err)) if !text.trim().is_empty() => {
+                                sink(NariEvent::Interrupted(err));
+                                Ok(text)
+                            }
                             (Ok(_), Err(err)) => Err(err),
                             (Ok(text), Ok(())) => Ok(text),
                         }
@@ -748,3 +953,5 @@ impl Drop for NariRecording {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod long_dictation_tests;

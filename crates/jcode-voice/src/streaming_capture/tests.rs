@@ -409,7 +409,7 @@ fn filter_tail_never_exceeds_duration_cap() {
 #[test]
 fn upsampling_final_frame_cannot_exceed_cap() {
     let (tx, _rx) = nari_pcm_channel();
-    let cap = 16000 * MAX_RECORDING_DURATION.as_secs() as usize;
+    let cap = 16000 * MAX_STREAMING_DURATION.as_secs() as usize;
     let mut c = Chunker {
         level: Arc::new(AtomicU32::new(0)),
         resampler: Resampler::new(11025).unwrap(),

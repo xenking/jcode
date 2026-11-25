@@ -519,6 +519,17 @@ impl AlwaysListening {
                 && (0.5..=1.0).contains(&cfg.action_probability),
             "Invalid Jarvis listening limits: agent turns 0 (unlimited) or 1..120/hour, probability 0.5..1"
         );
+        // Always-on listening streams to Nari only. Another selected backend
+        // is an error, not a silent switch to Nari.
+        anyhow::ensure!(
+            matches!(
+                crate::config::config().dictation.backend,
+                jcode_voice::DictationBackend::Auto | jcode_voice::DictationBackend::Nari
+            ),
+            "Always-on listening needs the Nari backend, but `[dictation] backend` is {}. \
+             Select Nari (or auto) to use it.",
+            jcode_voice::configured_label()
+        );
         let key = jcode_voice::nari_api_key().ok_or(jcode_voice::VoiceError::NariNotConfigured)?;
         // Resolve before opening the microphone. A missing gate must not turn
         // continuous speech into unchecked agent requests.

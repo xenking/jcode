@@ -26,6 +26,8 @@ const END: &str = "jcode_end";
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const FINAL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const NARI_PCM_CHUNK_SAMPLES: usize = 6400;
+/// Realtime model requested when `[dictation] model` is empty.
+pub const NARI_MODEL: &str = "qwen3-asr-fast";
 /// Published `qwen3-asr-fast` list price per input audio hour.
 /// Source: <https://docs.narilabs.com/models-and-pricing> (checked 2026-09-22).
 pub const NARI_USD_PER_AUDIO_HOUR: f64 = 0.12;
@@ -40,6 +42,10 @@ pub fn estimated_transcription_usd(audio: Duration) -> f64 {
 pub enum NariEvent {
     Started,
     Transcript(String),
+    /// The provider ended the stream early for this reason and the words
+    /// captured so far are kept: they arrive in the following `Finished(Ok)`.
+    /// Sent at most once, before `Finished`.
+    Interrupted(VoiceError),
     Finished(Result<String, VoiceError>),
 }
 
@@ -284,7 +290,9 @@ pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) 
 /// timeout so audio captured during the handshake is buffered, never dropped.
 #[cfg(feature = "desktop-config")]
 pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
-    mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
+    // A minute of audio: enough to ride out a provider session renewal or a
+    // reconnect after the network drops, without ever failing the capture.
+    mpsc::channel(600)
 }
 
 pub(super) async fn cancelled(cancel: &AtomicBool) {
@@ -335,7 +343,7 @@ impl NariSession {
             return Err(VoiceError::Cancelled);
         }
         validate_relay_url(url)?;
-        Self::connect_socket(url, bearer, 4096, &recognition_prompt(), cancel).await
+        Self::connect_socket(url, bearer, 4096, &recognition_prompt(), NARI_MODEL, cancel).await
     }
 
     /// Resolves only after the server acknowledges session.configure. No microphone access.
@@ -347,15 +355,20 @@ impl NariSession {
         key: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
-        Self::connect_with_prompt(url, key, &recognition_prompt(), cancel).await
+        Self::connect_with_model(url, key, None, cancel).await
     }
-    pub(super) async fn connect_with_prompt(
+    /// Like `connect_to`, requesting `model` (default `NARI_MODEL`).
+    pub(super) async fn connect_with_model(
         url: &str,
         key: &str,
-        prompt: &str,
+        model: Option<&str>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
-        Self::connect_socket(url, key, 1024, prompt, cancel).await
+        let model = model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(NARI_MODEL);
+        Self::connect_socket(url, key, 1024, &recognition_prompt(), model, cancel).await
     }
 
     async fn connect_socket(
@@ -363,6 +376,7 @@ impl NariSession {
         key: &str,
         max_bearer_bytes: usize,
         prompt: &str,
+        model: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
@@ -405,7 +419,7 @@ impl NariSession {
             .await
             .map_err(handshake_error)?;
             super::timing::mark("nari websocket connected");
-            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
+            send(&mut socket, json!({"type":"session.configure", "session":{"model":model, "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
                 let event = receive(&mut socket).await?;
                 match event["type"].as_str() {
@@ -437,25 +451,51 @@ impl NariSession {
     ) -> Result<String, VoiceError> {
         let cancel = self.cancel.clone();
         event(NariEvent::Started);
+        let mut pcm = pcm;
         let result = tokio::select! {
             biased;
             _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
-            result = self.run_inner(pcm, &mut event) => result,
+            result = self.run_inner(&mut pcm, usize::MAX, &mut event) => result.map(|s| s.text),
         };
         event(NariEvent::Finished(result.clone()));
         result
     }
+
+    /// One renewable session over a borrowed PCM source: stops cleanly after
+    /// `limit_samples` of audio (flagging `more`) so the caller can open the
+    /// next session on the same source. Emits transcript revisions only.
+    pub(super) async fn run_segment(
+        self,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
+        mut event: impl FnMut(NariEvent),
+    ) -> Result<super::soniox::Segment, VoiceError> {
+        let cancel = self.cancel.clone();
+        tokio::select! {
+            biased;
+            _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
+            result = self.run_inner(pcm, limit_samples, &mut event) => result,
+        }
+    }
     async fn run_inner(
         self,
-        mut pcm: mpsc::Receiver<Vec<i16>>,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
         event: &mut impl FnMut(NariEvent),
-    ) -> Result<String, VoiceError> {
+    ) -> Result<super::soniox::Segment, VoiceError> {
         let (mut sink, mut source) = self.socket.split();
         let stopping = Arc::new(AtomicBool::new(false));
         let sender_stopping = stopping.clone();
         let sender = async move {
             let mut samples = 0usize;
-            while let Some(chunk) = pcm.recv().await {
+            let mut more = false;
+            loop {
+                if samples >= limit_samples {
+                    // Segment is full: leave the rest queued for the next session.
+                    more = true;
+                    break;
+                }
+                let Some(chunk) = pcm.recv().await else { break };
                 if samples == 0 {
                     super::timing::mark("first audio chunk sent to nari");
                 }
@@ -479,10 +519,12 @@ impl NariSession {
                 &mut sink,
                 json!({"type":"input_audio_buffer.commit", "event_id":END}),
             )
-            .await
+            .await?;
+            Ok(more)
         };
         tokio::pin!(sender);
         let mut sent = false;
+        let mut more = false;
         let mut first_text = false;
         let mut state = TranscriptState::default();
         // Capture owns its normal five-minute stop. Allow queued PCM and filter
@@ -492,7 +534,7 @@ impl NariSession {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => return Err(VoiceError::Timeout),
                 result = &mut sender, if !sent => {
-                    result?;
+                    more = result?;
                     sent = true;
                     deadline = Instant::now() + FINAL_TIMEOUT;
                 }
@@ -505,7 +547,9 @@ impl NariSession {
                         if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
                     }
-                    if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() { return Ok(state.text()); }
+                    if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() {
+                        return Ok(super::soniox::Segment { text: state.text(), more });
+                    }
                 }
             }
         }

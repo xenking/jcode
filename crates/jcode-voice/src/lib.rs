@@ -28,14 +28,17 @@ mod nari;
 mod soniox;
 pub use backend::StreamingBackend;
 #[cfg(feature = "desktop-config")]
-pub use backend::configured_backend;
+pub use backend::{
+    StreamingPlan, TriggerRoute, configured_backend, configured_label, plan_streaming,
+    trigger_route,
+};
 pub use elevenlabs::ElevenLabsSession;
 #[cfg(feature = "desktop-config")]
 pub use jcode_base::config::DictationBackend;
 pub mod speech;
 pub mod timing;
 pub use nari::{
-    NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
+    NARI_MODEL, NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
 };
 pub use soniox::{
@@ -58,6 +61,9 @@ pub use streaming_capture::{NariRecording, PcmRecording};
 pub const NATIVE_CAPTURE: bool = cfg!(feature = "voice-capture");
 pub const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_RECORDING_DURATION: Duration = Duration::from_secs(5 * 60);
+/// Longest live (streaming) dictation. Provider sessions are renewed under the
+/// hood, so this is only a runaway guard, not a provider limit.
+pub const MAX_STREAMING_DURATION: Duration = Duration::from_secs(60 * 60);
 pub const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
@@ -83,6 +89,10 @@ pub enum VoiceError {
     SonioxRejected,
     ElevenLabsNotConfigured,
     ElevenLabsRejected,
+    /// `[dictation] model` is not a usable model name for the backend.
+    InvalidModel,
+    /// The selected `[dictation] backend` (named here) has no live capture.
+    NotStreaming(&'static str),
 }
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -127,6 +137,13 @@ impl fmt::Display for VoiceError {
             ),
             Self::ElevenLabsRejected => f.write_str(
                 "ElevenLabs rejected the voice session. Check your Scribe access and balance",
+            ),
+            Self::InvalidModel => f.write_str(
+                "The configured speech model name is not valid for this backend. Check [dictation] model",
+            ),
+            Self::NotStreaming(backend) => write!(
+                f,
+                "The {backend} dictation backend has no live microphone capture. Pick Nari, Soniox or ElevenLabs in Settings",
             ),
         }
     }

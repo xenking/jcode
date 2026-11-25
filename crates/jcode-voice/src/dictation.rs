@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use tokio::time::{Duration, timeout};
 
@@ -15,6 +16,13 @@ pub struct DictationRun {
 
 pub async fn run_configured() -> Result<DictationRun> {
     let cfg = jcode_base::config::config().dictation.clone();
+    if crate::trigger_route(&cfg) == crate::TriggerRoute::Streaming {
+        anyhow::bail!(
+            "Dictation backend is `{}`, which records live inside Jcode. \
+             `[dictation] command` only runs when `backend = \"command\"`.",
+            format!("{:?}", cfg.backend).to_lowercase()
+        );
+    }
     let command = cfg.command.trim();
     if command.is_empty() {
         anyhow::bail!(
@@ -29,43 +37,136 @@ pub async fn run_configured() -> Result<DictationRun> {
     })
 }
 
+/// How long an interrupted command gets to print what it already has.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(3);
+
+/// Run a dictation command and return its transcript.
+///
+/// `timeout_secs` bounds how long the command may run (0 = no bound). When it
+/// is reached the command is interrupted instead of abandoned, and whatever it
+/// already printed is still the transcript, so a long dictation is never lost
+/// to the limit. Only an interrupted command with no output is an error.
 pub async fn run_command(command: &str, timeout_secs: u64) -> Result<String> {
     let mut child = shell_command(command);
-    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+    child
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    child.process_group(0);
 
-    let child = child
+    let mut child = child
         .spawn()
         .with_context(|| format!("failed to start `{}`", command))?;
+    let pid = child.id();
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let readers = [
+        tokio::spawn(drain(child.stdout.take(), stdout.clone())),
+        tokio::spawn(drain(child.stderr.take(), stderr.clone())),
+    ];
 
-    let output = if timeout_secs == 0 {
+    let mut timed_out = false;
+    let status = if timeout_secs == 0 {
         child
-            .wait_with_output()
+            .wait()
             .await
             .context("failed to wait for dictation command")?
     } else {
-        timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-            .await
-            .with_context(|| format!("dictation command timed out after {}s", timeout_secs))?
-            .context("failed to wait for dictation command")?
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            anyhow::bail!("dictation command exited with {}", output.status);
+        match timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+            Ok(status) => status.context("failed to wait for dictation command")?,
+            Err(_) => {
+                timed_out = true;
+                interrupt(&mut child, pid).await
+            }
         }
-        anyhow::bail!(stderr);
+    };
+    for reader in readers {
+        let _ = reader.await;
     }
-
-    let transcript = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap_or_else(|e| e.into_inner()))
         .trim_end_matches(['\r', '\n'])
         .trim()
         .to_string();
-    if transcript.is_empty() {
-        anyhow::bail!("dictation command returned an empty transcript");
-    }
+    let stderr = String::from_utf8_lossy(&stderr.lock().unwrap_or_else(|e| e.into_inner()))
+        .trim()
+        .to_string();
 
-    Ok(transcript)
+    if !stdout.is_empty() && (status.success() || timed_out) {
+        return Ok(stdout);
+    }
+    if timed_out {
+        anyhow::bail!(
+            "dictation command was stopped after {timeout_secs}s and had printed no transcript"
+        );
+    }
+    if !status.success() {
+        if stderr.is_empty() {
+            anyhow::bail!("dictation command exited with {}", status);
+        }
+        anyhow::bail!(stderr);
+    }
+    anyhow::bail!("dictation command returned an empty transcript")
+}
+
+async fn drain<R: tokio::io::AsyncRead + Unpin>(reader: Option<R>, into: Arc<Mutex<Vec<u8>>>) {
+    use tokio::io::AsyncReadExt;
+    let Some(mut reader) = reader else { return };
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = reader.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        into.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Ask the command (and its process group) to finish, then force it. Whatever
+/// it left running in the group is killed too, so nothing keeps the output
+/// pipes open after the transcript was taken.
+async fn interrupt(child: &mut tokio::process::Child, pid: Option<u32>) -> std::process::ExitStatus {
+    signal_group(pid, Signal::Interrupt);
+    let status = match timeout(INTERRUPT_GRACE, child.wait()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            let _ = child.start_kill();
+            child.wait().await.unwrap_or_else(|_| failed_status())
+        }
+    };
+    signal_group(pid, Signal::Kill);
+    status
+}
+
+enum Signal {
+    Interrupt,
+    Kill,
+}
+
+fn signal_group(pid: Option<u32>, signal: Signal) {
+    #[cfg(unix)]
+    if let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+        let signal = match signal {
+            Signal::Interrupt => libc::SIGINT,
+            Signal::Kill => libc::SIGKILL,
+        };
+        // SAFETY: signals only the group this module's own child leads.
+        unsafe { libc::kill(-pid, signal) };
+    }
+    #[cfg(not(unix))]
+    let _ = (pid, signal);
+}
+
+#[cfg(unix)]
+fn failed_status() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(1)
+}
+#[cfg(not(unix))]
+fn failed_status() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    std::process::ExitStatus::from_raw(1)
 }
 
 pub fn type_text(text: &str) -> Result<()> {

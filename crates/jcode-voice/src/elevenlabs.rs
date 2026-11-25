@@ -23,7 +23,28 @@ use tokio_tungstenite::{
     },
 };
 
+/// Realtime model requested when `[dictation] model` is empty.
+pub(super) const MODEL: &str = "scribe_v2_realtime";
 pub(super) const URL: &str = "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_16000&commit_strategy=manual";
+/// The realtime URL for `model`. The name goes into a query string, so only
+/// plain identifier characters are accepted.
+fn url_for_model(model: Option<&str>) -> Result<String, VoiceError> {
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(MODEL);
+    if model.len() > 64
+        || !model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(VoiceError::InvalidModel);
+    }
+    Ok(URL.replace(
+        &format!("model_id={MODEL}"),
+        &format!("model_id={model}"),
+    ))
+}
 const RATE: usize = 16_000;
 const SEGMENT_SAMPLES: usize = 20 * RATE;
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,6 +62,15 @@ pub struct ElevenLabsSession {
 impl ElevenLabsSession {
     pub async fn connect(key: &str, cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
         Self::connect_to(URL, key, cancel).await
+    }
+
+    /// Like [`Self::connect`], requesting `model` (default `MODEL`).
+    pub(super) async fn connect_with_model(
+        key: &str,
+        model: Option<&str>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
+        Self::connect_to(&url_for_model(model)?, key, cancel).await
     }
 
     async fn connect_to(url: &str, key: &str, cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
@@ -102,35 +132,63 @@ impl ElevenLabsSession {
     ) -> Result<String, VoiceError> {
         let cancel = self.cancel.clone();
         event(NariEvent::Started);
+        let mut pcm = pcm;
         let result = tokio::select! {
             biased;
             _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
-            result = self.run_inner(pcm, &mut event) => result,
+            result = self.run_inner(&mut pcm, usize::MAX, &mut event) => result.map(|s| s.text),
         };
         event(NariEvent::Finished(result.clone()));
         result
     }
 
+    /// One renewable session over a borrowed PCM source: stops cleanly after
+    /// `limit_samples` of audio (flagging `more`) so the caller can open the
+    /// next session on the same source. Emits transcript revisions only.
+    pub(super) async fn run_segment(
+        self,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
+        mut event: impl FnMut(NariEvent),
+    ) -> Result<super::soniox::Segment, VoiceError> {
+        let cancel = self.cancel.clone();
+        tokio::select! {
+            biased;
+            _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
+            result = self.run_inner(pcm, limit_samples, &mut event) => result,
+        }
+    }
+
     async fn run_inner(
         self,
-        mut pcm: mpsc::Receiver<Vec<i16>>,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
         event: &mut impl FnMut(NariEvent),
-    ) -> Result<String, VoiceError> {
+    ) -> Result<super::soniox::Segment, VoiceError> {
         let (mut sink, mut source) = self.socket.split();
         let mut transcript = Transcript::default();
         let mut samples = 0;
         let mut uncommitted = 0;
         let mut pending_commits = 0usize;
         let mut stopping = false;
+        let mut more = false;
         let mut deadline = Instant::now() + MAX_RECORDING_DURATION + TIMEOUT;
         loop {
             if stopping && pending_commits == 0 {
                 let _ = timeout(TIMEOUT, sink.close()).await;
-                return Ok(transcript.committed);
+                return Ok(super::soniox::Segment { text: transcript.committed, more });
             }
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => return Err(VoiceError::Timeout),
-                chunk = pcm.recv(), if !stopping => match chunk {
+                chunk = async {
+                    if samples >= limit_samples {
+                        // Segment is full: leave the rest queued for the next session.
+                        more = true;
+                        None
+                    } else {
+                        pcm.recv().await
+                    }
+                }, if !stopping => match chunk {
                     Some(chunk) => {
                         if chunk.is_empty() || chunk.len() > NARI_PCM_CHUNK_SAMPLES {
                             return Err(VoiceError::InvalidAudio);

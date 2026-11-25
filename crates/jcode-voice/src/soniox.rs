@@ -73,6 +73,14 @@ pub struct SonioxSession {
     cancel: Arc<AtomicBool>,
 }
 
+/// One provider session's result. `more` means the session stopped at its
+/// sample limit while audio was still arriving, so the caller renews it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Segment {
+    pub text: String,
+    pub more: bool,
+}
+
 impl SonioxSession {
     /// Connect to the public endpoint. Resolves once the socket is open and
     /// configured. A server-side key rejection arrives during `run`.
@@ -86,6 +94,16 @@ impl SonioxSession {
     pub async fn connect_to(
         url: &str,
         key: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
+        Self::connect_with_model(url, key, None, cancel).await
+    }
+
+    /// Like [`Self::connect_to`], requesting `model` (default `SONIOX_MODEL`).
+    pub async fn connect_with_model(
+        url: &str,
+        key: &str,
+        model: Option<&str>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
@@ -129,7 +147,7 @@ impl SonioxSession {
             .await
             .map_err(handshake_error)?;
             super::timing::mark("soniox websocket connected");
-            send(&mut socket, session_config()).await?;
+            send(&mut socket, session_config(model)).await?;
             Ok(socket)
         };
         let socket = tokio::select! {
@@ -149,13 +167,37 @@ impl SonioxSession {
     ) -> Result<String, VoiceError> {
         let cancel = self.cancel.clone();
         event(SonioxEvent::Started);
+        let mut pcm = pcm;
         let result = tokio::select! {
             biased;
             _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
-            result = self.run_inner(pcm, &mut event) => result,
+            result = self.run_inner(&mut pcm, usize::MAX, &mut event) => result.map(|s| s.text),
         };
         event(SonioxEvent::Finished(result.clone()));
         result
+    }
+
+    /// One renewable session over a borrowed PCM source. Stops cleanly after
+    /// `limit_samples` of audio (flagging `more`) so the caller can open the
+    /// next session and keep reading the same source with no audio lost.
+    /// Emits only transcript revisions, never `Started`/`Finished`.
+    pub(super) async fn run_segment(
+        self,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
+        mut event: impl FnMut(NariEvent),
+    ) -> Result<Segment, VoiceError> {
+        let cancel = self.cancel.clone();
+        let mut adapt = |e: SonioxEvent| {
+            if let SonioxEvent::Partial(text) = e {
+                event(NariEvent::Transcript(text));
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = cancelled(&cancel) => Err(VoiceError::Cancelled),
+            result = self.run_inner(pcm, limit_samples, &mut adapt) => result,
+        }
     }
 
     /// Like `run`, but reports `NariEvent`s so callers built for Nari can swap
@@ -176,14 +218,16 @@ impl SonioxSession {
 
     async fn run_inner(
         self,
-        mut pcm: mpsc::Receiver<Vec<i16>>,
+        pcm: &mut mpsc::Receiver<Vec<i16>>,
+        limit_samples: usize,
         event: &mut impl FnMut(SonioxEvent),
-    ) -> Result<String, VoiceError> {
+    ) -> Result<Segment, VoiceError> {
         let (mut sink, mut source) = self.socket.split();
         let mut state = TranscriptState::default();
         let mut samples = 0usize;
         let mut sent_audio = false;
         let mut stopping = false;
+        let mut more = false;
         let mut keepalive =
             tokio::time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
         let mut deadline = Instant::now() + MAX_RECORDING_DURATION + IO_TIMEOUT;
@@ -193,7 +237,15 @@ impl SonioxSession {
                 _ = keepalive.tick(), if !stopping => {
                     send(&mut sink, json!({"type":"keepalive"})).await?;
                 }
-                chunk = pcm.recv(), if !stopping => match chunk {
+                chunk = async {
+                    if samples >= limit_samples {
+                        // Segment is full: leave the rest queued for the next session.
+                        more = true;
+                        None
+                    } else {
+                        pcm.recv().await
+                    }
+                }, if !stopping => match chunk {
                     Some(chunk) => {
                         if chunk.is_empty() || chunk.len() > SONIOX_PCM_CHUNK_SAMPLES {
                             return Err(VoiceError::InvalidAudio);
@@ -213,7 +265,7 @@ impl SonioxSession {
                         stopping = true;
                         if !sent_audio {
                             let _ = sink.close().await;
-                            return Ok(String::new());
+                            return Ok(Segment { text: String::new(), more });
                         }
                         // An empty text frame ends the stream; an empty binary frame does not.
                         send_message(&mut sink, Message::Text(String::new())).await?;
@@ -233,7 +285,7 @@ impl SonioxSession {
                             return Err(VoiceError::InvalidResponse);
                         }
                         let _ = sink.close().await;
-                        return Ok(state.text());
+                        return Ok(Segment { text: state.text(), more });
                     }
                 }
             }
@@ -241,8 +293,13 @@ impl SonioxSession {
     }
 }
 
-fn session_config() -> Value {
-    session_config_with(SONIOX_LANGUAGE_HINTS, &super::nari::recognition_terms())
+fn session_config(model: Option<&str>) -> Value {
+    let mut config =
+        session_config_with(SONIOX_LANGUAGE_HINTS, &super::nari::recognition_terms());
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        config["model"] = json!(model);
+    }
+    config
 }
 
 /// The start message for a realtime session. `language_hints` steers mixed
@@ -424,7 +481,7 @@ mod tests {
             .await
             .unwrap();
             let config = receive(&mut ws).await.unwrap();
-            assert_eq!(config, session_config());
+            assert_eq!(config, session_config(None));
             assert!(config.get("api_key").is_none());
             let mut audio = Vec::new();
             let mut scripted = false;
@@ -704,7 +761,9 @@ mod tests {
     /// names every install recognizes.
     #[test]
     fn live_session_config_sends_builtin_terms_and_hints() {
-        let config = session_config();
+        let config = session_config(None);
+        assert_eq!(session_config(Some("stt-rt-chosen"))["model"], "stt-rt-chosen");
+        assert_eq!(session_config(Some("  "))["model"], SONIOX_MODEL);
         let terms = config["context"]["terms"]
             .as_array()
             .expect("recognition terms");

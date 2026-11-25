@@ -1728,9 +1728,14 @@ fn dictation_backend_defaults_to_auto_and_parses() {
     let config = Config::default();
     assert_eq!(config.dictation.backend, DictationBackend::Auto);
     assert!(config.dictation.base_url.is_empty());
-    let parsed: Config =
-        toml::from_str("[dictation]\nbackend = \"soniox\"\nbase_url = \"ws://127.0.0.1:9/x\"\n")
-            .unwrap();
+    assert!(config.dictation.model.is_empty(), "empty means the backend default");
+    // A command may run as long as a dictation can, not just 90 seconds.
+    assert_eq!(config.dictation.timeout_secs, 300);
+    let parsed: Config = toml::from_str(
+        "[dictation]\nbackend = \"soniox\"\nmodel = \"stt-rt-v6\"\nbase_url = \"ws://127.0.0.1:9/x\"\n",
+    )
+    .unwrap();
+    assert_eq!(parsed.dictation.model, "stt-rt-v6");
     assert_eq!(parsed.dictation.backend, DictationBackend::Soniox);
     assert_eq!(parsed.dictation.base_url, "ws://127.0.0.1:9/x");
     for (name, want) in [

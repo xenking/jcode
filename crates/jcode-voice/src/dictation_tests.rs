@@ -99,6 +99,40 @@ async fn run_command_trims_trailing_newlines() {
     assert_eq!(text, "hello from test");
 }
 
+/// The command hits `timeout_secs` mid-dictation. Words it already printed
+/// are the transcript, not an error, and the command is stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_keeps_what_was_already_printed() {
+    let started = std::time::Instant::now();
+    let text = run_command("echo words said so far; sleep 30", 1)
+        .await
+        .expect("output printed before the limit must survive it");
+    assert_eq!(text, "words said so far");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// A bridge that prints its transcript only when interrupted (like one that
+/// asks an app to stop recording) still delivers it at the limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_lets_the_command_print_on_interrupt() {
+    let text = run_command(
+        "trap 'echo words from the stop; exit 0' INT; sleep 30 & wait",
+        1,
+    )
+    .await
+    .expect("interrupt handler output is the transcript");
+    assert_eq!(text, "words from the stop");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_without_output_is_a_named_error() {
+    let error = run_command("sleep 30", 1).await.unwrap_err().to_string();
+    assert!(error.contains("stopped after 1s"), "{error}");
+}
+
 #[test]
 fn select_candidate_prefers_title_match() {
     let candidates = vec![

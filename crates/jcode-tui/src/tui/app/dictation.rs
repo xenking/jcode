@@ -52,6 +52,13 @@ enum DictationExit {
 impl App {
     pub(crate) fn handle_dictation_trigger(&mut self) -> bool {
         let cfg = crate::config::config().dictation.clone();
+        // One setting decides how every dictation trigger starts. A selected
+        // streaming backend records live. Only `command` (or `auto` with a
+        // command set) runs the external command.
+        if jcode_voice::trigger_route(&cfg) == jcode_voice::TriggerRoute::Streaming {
+            self.toggle_voice_input();
+            return true;
+        }
         let command = cfg.command.trim().to_string();
         let target_session_id = self.active_client_session_id().map(str::to_string);
 

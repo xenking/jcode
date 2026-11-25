@@ -301,9 +301,19 @@ fn start(source: Source, session: Option<String>, indicators: VoiceIndicators) -
         eprintln!("jcode companion: voice denied by session check");
         return None;
     }
-    let Some(key) = jcode_voice::nari_api_key() else {
-        Indicator::new(true).show("Voice not configured (NARI_API_KEY)");
-        return None;
+    // The backend and model chosen in Settings, never a hard-wired Nari.
+    let dictation = jcode_base::config::config().dictation.clone();
+    let plan = match jcode_voice::plan_streaming(&dictation, jcode_voice::StreamingBackend::api_key)
+    {
+        Ok(plan) => plan,
+        Err(error) => {
+            Indicator::new(true).show(&format!(
+                "Voice ({}): {}",
+                jcode_voice::configured_label(),
+                failure_label(&error)
+            ));
+            return None;
+        }
     };
     // Prove a visible indicator exists before opening the microphone: the
     // focused TUI's waveform, or a desktop notification. A Jarvis that is
@@ -332,8 +342,15 @@ fn start(source: Source, session: Option<String>, indicators: VoiceIndicators) -
     }
     let cancel = Arc::new(AtomicBool::new(false));
     let suppress = crate::jarvis_target::acquire_dictation_suppress();
-    let recorder = jcode_base::config::config().dictation.recorder.clone();
-    match NariRecording::start_auto(cancel.clone(), &key, &recorder) {
+    let recorder = dictation.recorder.clone();
+    match NariRecording::start_streaming(
+        cancel.clone(),
+        plan.backend,
+        &plan.key,
+        plan.url.as_deref(),
+        plan.model.as_deref(),
+        &recorder,
+    ) {
         Ok(recording) => Some(Capture {
             source,
             session,
@@ -460,6 +477,9 @@ impl Capture {
             match event {
                 NariEvent::Transcript(text) => self.live = text,
                 NariEvent::Started => {}
+                NariEvent::Interrupted(error) => {
+                    eprintln!("jcode companion: voice stream stopped early, text kept: {error}")
+                }
                 NariEvent::Finished(result) => {
                     self.pending_final = Some(result);
                     break;
@@ -552,7 +572,7 @@ fn wait_final(capture: &mut Capture) -> Result<String, VoiceError> {
         return result;
     }
     let recording = &capture.recording;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         while let Some(event) = recording.try_event() {
             if let NariEvent::Finished(result) = event {
@@ -576,7 +596,9 @@ fn wait_final(capture: &mut Capture) -> Result<String, VoiceError> {
 
 fn failure_label(error: &VoiceError) -> String {
     match error {
-        VoiceError::NariNotConfigured => "Voice not configured".into(),
+        VoiceError::NariNotConfigured
+        | VoiceError::SonioxNotConfigured
+        | VoiceError::ElevenLabsNotConfigured => "no API key configured".into(),
         VoiceError::Timeout => "Transcription timed out".into(),
         VoiceError::MicrophoneUnavailable => "No microphone recorder found".into(),
         other => format!("Voice failed: {other}"),

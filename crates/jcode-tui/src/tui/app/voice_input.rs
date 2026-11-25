@@ -42,6 +42,10 @@ pub(crate) struct VoiceInput {
     pressed_at: Instant,
     live: String,
     levels: VecDeque<f32>,
+    /// Provider and model that were started, for messages.
+    label: String,
+    /// Why the provider stream ended early. The text so far is still delivered.
+    interrupted: Option<VoiceError>,
 }
 
 impl Drop for VoiceInput {
@@ -167,13 +171,19 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         // Nonblocking: the microphone opens and the provider handshake runs in
         // the background while audio buffers, so the first words are kept.
-        let recording = match NariRecording::start_configured(cancel) {
-            Ok(recording) => recording,
+        let (recording, plan) = match NariRecording::start_configured_plan(cancel) {
+            Ok(started) => started,
             Err(error) => {
-                self.report_voice_error(&error);
+                self.report_voice_error(&voice::configured_label(), &error);
                 return;
             }
         };
+        let label = if plan.auto {
+            format!("auto: {}", plan.label())
+        } else {
+            plan.label()
+        };
+        self.set_status_notice(format!("Listening: {label}"));
         let waker_done = Arc::new(AtomicBool::new(false));
         spawn_voice_waker(recording.event_notify(), waker_done.clone());
         let now = Instant::now();
@@ -186,6 +196,8 @@ impl App {
             pressed_at: now,
             live: String::new(),
             levels: VecDeque::with_capacity(LEVEL_HISTORY),
+            label,
+            interrupted: None,
         });
     }
 
@@ -207,7 +219,7 @@ impl App {
         }
     }
 
-    fn report_voice_error(&mut self, error: &VoiceError) {
+    fn report_voice_error(&mut self, label: &str, error: &VoiceError) {
         let hint = match error {
             VoiceError::MicrophoneUnavailable if !voice::NATIVE_CAPTURE => {
                 " Check that a microphone is connected, or set `[dictation] recorder`."
@@ -219,7 +231,7 @@ impl App {
             _ => "",
         };
         self.push_display_message(DisplayMessage::error(format!(
-            "Voice input failed: {error}.{hint}"
+            "Voice input failed ({label}): {error}.{hint}"
         )));
         self.set_status_notice("Voice input failed");
     }
@@ -251,16 +263,28 @@ impl App {
                 VoicePoll::Idle
             };
         };
-        self.voice_input = None;
+        let (label, interrupted) = self
+            .voice_input
+            .take()
+            .map(|voice| (voice.label.clone(), voice.interrupted.clone()))
+            .unwrap_or_default();
         match result {
-            Ok(text) if !text.trim().is_empty() => VoicePoll::Transcript(text),
+            Ok(text) if !text.trim().is_empty() => {
+                if let Some(error) = interrupted {
+                    // The words are kept. Say why the stream stopped early.
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "Voice input ({label}) stopped early: {error}. The words captured before that were kept."
+                    )));
+                }
+                VoicePoll::Transcript(text)
+            }
             Ok(_) => {
                 self.set_status_notice("No speech detected");
                 VoicePoll::Changed
             }
             Err(VoiceError::Cancelled) => VoicePoll::Changed,
             Err(error) => {
-                self.report_voice_error(&error);
+                self.report_voice_error(&label, &error);
                 VoicePoll::Changed
             }
         }
@@ -480,6 +504,7 @@ fn drain_voice_events(
                 voice.live = text;
                 *changed = true;
             }
+            NariEvent::Interrupted(error) => voice.interrupted = Some(error),
             NariEvent::Finished(result) => return Some(result),
         }
     }

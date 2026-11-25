@@ -159,8 +159,10 @@ mode = "insert"
 # Example: "alt+;"
 key = "off"
 
-# Max seconds to wait for the dictation command to finish (0 = no timeout)
-timeout_secs = 90
+# Max seconds a dictation command may run (0 = no timeout). When the limit is
+# reached the command is interrupted and any transcript it already printed is
+# still used.
+timeout_secs = 300
 
 # Built-in voice backend: auto|nari|soniox|elevenlabs|subscription|command.
 # soniox reads SONIOX_API_KEY or <jcode config dir>/soniox.env.
@@ -169,6 +171,10 @@ timeout_secs = 90
 # backend = "auto"
 # Optional streaming WebSocket URL override for nari/soniox.
 # base_url = ""
+# Speech model for the selected backend, for example "stt-rt-v6" for soniox.
+# Empty uses the backend's default. Long dictation renews the provider session
+# automatically, so there is no recording time limit to configure.
+# model = ""
 
 # Extra names or terms to help built-in voice transcription recognize them.
 # Jcode's own product names are always included.
