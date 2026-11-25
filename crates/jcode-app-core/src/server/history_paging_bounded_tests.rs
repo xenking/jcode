@@ -490,7 +490,7 @@ fn generate_large_runtime_fixture() {
             );
         }
     }
-    session.set_compaction(Some(std::sync::Arc::new(StoredCompactionState {
+    session.adopt_compaction(Some(StoredCompactionState {
         summary_text: "synthetic summary".into(),
         plan_context: None,
         openai_encrypted_content: None,
@@ -498,7 +498,7 @@ fn generate_large_runtime_fixture() {
         covers_up_to_turn: 80,
         original_turn_count: 100,
         compacted_count: 160,
-    })));
+    }));
     let dir = std::path::Path::new(&home).join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session_bounded_fixture.json");

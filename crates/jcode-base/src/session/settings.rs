@@ -6,13 +6,14 @@
 //! this module.
 
 use super::{
-    AgentModelOverrides, AuthorizedWorkerModel, Session, SessionImproveMode, StoredSpeedSelection,
-    WorkerModelApproval,
+    AgentModelOverrides, AuthorizedWorkerModel, Session, SessionImproveMode, StoredCompactionState,
+    StoredSpeedSelection, WorkerModelApproval,
 };
 use crate::kv_cache_monitor::RequestCacheDomain;
 use crate::message::Role;
 use chrono::{DateTime, Utc};
 use jcode_message_types::WorkerSpeedStatus;
+use std::sync::Arc;
 
 /// What the user has asked the session to do on its own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -325,6 +326,12 @@ impl Session {
         }
         self.title = Some(title.to_string());
         true
+    }
+
+    /// Replace the compacted view of the conversation. The session shares it
+    /// between its snapshots, so callers hand over the state itself.
+    pub fn adopt_compaction(&mut self, state: Option<StoredCompactionState>) {
+        self.compaction = state.map(Arc::new);
     }
 
     /// Note that the session's transcript changed through a user command, so

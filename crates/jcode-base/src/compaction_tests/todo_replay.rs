@@ -147,7 +147,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
         original_turn_count: 0,
         compacted_count: 0,
     };
-    session.set_compaction(Some(Arc::new(checkpoint.clone())));
+    session.adopt_compaction(Some(checkpoint.clone()));
     manager.restore_persisted_state(&checkpoint, 0);
     let mut todo = crate::todo::TodoItem {
         id: "audit".into(),

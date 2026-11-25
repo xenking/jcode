@@ -867,8 +867,8 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
         }],
     );
     let compacted_count = turns * 2;
-    app.session.set_compaction(Some(
-        crate::session::StoredCompactionState {
+    app.session
+        .adopt_compaction(Some(crate::session::StoredCompactionState {
             summary_text: "older turns".to_string(),
             plan_context: None,
             openai_encrypted_content: None,
@@ -876,9 +876,7 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
             covers_up_to_turn: turns,
             original_turn_count: turns,
             compacted_count,
-        }
-        .into(),
-    ));
+        }));
 
     let (rendered_messages, _images, _info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);

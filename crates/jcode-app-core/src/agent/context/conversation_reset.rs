@@ -129,7 +129,7 @@ impl Agent {
                 .as_ref()
                 .is_some_and(|state| state.compacted_count > stored_len)
             {
-                self.session.set_compaction(None);
+                self.session.adopt_compaction(None);
             }
             // A later compaction can display a discarded summary or occupancy.
             let removed = self.session.drain_compaction_replay_events_since(cutoff);
@@ -163,7 +163,8 @@ impl Agent {
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        self.session.set_compaction(snapshot.compaction);
+        self.session
+            .adopt_compaction(snapshot.compaction.map(|state| (*state).clone()));
         self.session
             .restore_replay_events(snapshot.removed_compaction_events);
         self.session.replace_messages(snapshot.messages);

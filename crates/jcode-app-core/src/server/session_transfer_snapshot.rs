@@ -119,7 +119,7 @@ pub(super) fn create_transfer_child_session(
             | Inherit::AUTONOMY
             | Inherit::BUILD_UNDER_TEST,
     );
-    child.set_compaction(compaction);
+    child.adopt_compaction(compaction.map(|state| (*state).clone()));
     child.forget_provider_session();
     child.mark_closed_unregistered();
     child.save()?;

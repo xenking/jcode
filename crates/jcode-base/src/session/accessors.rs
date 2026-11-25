@@ -174,12 +174,12 @@ impl Session {
         self.compaction.clone()
     }
 
-    pub fn replay_events(&self) -> &[StoredReplayEvent] {
-        &self.replay_events
+    pub fn replay_events(&self) -> Vec<StoredReplayEvent> {
+        self.replay_events.clone()
     }
 
-    pub fn memory_injections(&self) -> &[super::StoredMemoryInjection] {
-        &self.memory_injections
+    pub fn memory_injections(&self) -> Vec<super::StoredMemoryInjection> {
+        self.memory_injections.clone()
     }
 
     pub fn env_snapshots(&self) -> &[super::EnvSnapshot] {
@@ -200,10 +200,6 @@ impl Session {
 
 /// Setters for fields that are plain data with no invariant to maintain.
 impl Session {
-    pub fn set_compaction(&mut self, compaction: Option<Arc<StoredCompactionState>>) {
-        self.compaction = compaction;
-    }
-
     pub fn set_subagent_model(&mut self, model: Option<String>) {
         self.subagent_model = model;
     }

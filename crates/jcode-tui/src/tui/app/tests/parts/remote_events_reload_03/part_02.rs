@@ -6,7 +6,7 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
     app.is_remote = true;
     app.remote_session_id = Some("session_compacted_prompt_offset".into());
     app.session.messages_mut_for_tests().clear();
-    app.session.set_compaction(None);
+    app.session.adopt_compaction(None);
     for (marker, hidden) in [
         (
             "Earlier conversation compacted - 900 older historical messages hidden. Showing 64 of 964 compacted messages. Scroll to the top to load more. Hidden user prompts: 12.",
@@ -324,8 +324,8 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             cache_control: None,
         }],
     );
-    app.session.set_compaction(Some(
-        crate::session::StoredCompactionState {
+    app.session
+        .adopt_compaction(Some(crate::session::StoredCompactionState {
             summary_text: "old prompts and responses".to_string(),
             plan_context: None,
             openai_encrypted_content: None,
@@ -333,9 +333,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             covers_up_to_turn: TURNS,
             original_turn_count: TURNS,
             compacted_count,
-        }
-        .into(),
-    ));
+        }));
 
     let (rendered_messages, _images, _compacted_info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);

@@ -349,7 +349,7 @@ mod durable_error_tests {
         let folded_count = agent.session.messages().len();
         agent
             .session
-            .set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
+            .adopt_compaction(Some(crate::session::StoredCompactionState {
                 summary_text: summary_text.into(),
                 plan_context: None,
                 openai_encrypted_content: None,
@@ -357,7 +357,7 @@ mod durable_error_tests {
                 covers_up_to_turn: 1,
                 original_turn_count: 1,
                 compacted_count: folded_count,
-            })));
+            }));
         agent.seed_compaction_from_session();
         agent.session.record_compaction_event(
             &CompactionEvent {

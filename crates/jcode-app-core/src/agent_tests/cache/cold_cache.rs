@@ -816,7 +816,7 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         original_turn_count: cutoff,
         compacted_count: cutoff,
     };
-    agent.session.set_compaction(Some(Arc::new(state.clone())));
+    agent.session.adopt_compaction(Some(state.clone()));
     agent
         .registry
         .compaction()
@@ -906,7 +906,7 @@ async fn compaction_missing_native_summary_warns_once_without_dropping_live_cont
         original_turn_count: 500,
         compacted_count: 0,
     };
-    agent.session.set_compaction(Some(Arc::new(state.clone())));
+    agent.session.adopt_compaction(Some(state.clone()));
     agent
         .registry
         .compaction()

@@ -405,7 +405,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             Message::assistant_text("Archived answer").content.to_vec(),
         );
         let cutoff = session.messages().len();
-        session.set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
+        session.adopt_compaction(Some(crate::session::StoredCompactionState {
             summary_text: "Retain the archived summary".into(),
             plan_context: None,
             openai_encrypted_content: None,
@@ -413,7 +413,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             covers_up_to_turn: cutoff,
             original_turn_count: cutoff,
             compacted_count: cutoff,
-        })));
+        }));
     }
     session.add_message(
         Role::User,

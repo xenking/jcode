@@ -161,7 +161,7 @@ async fn restore_wire(dialect: Dialect, case: &str) {
     if matches!(case, "summary" | "legacy_plan" | "snapcompact" | "native") {
         agent
             .session
-            .set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
+            .adopt_compaction(Some(crate::session::StoredCompactionState {
                 summary_text: "Saved summary.".into(),
                 plan_context: Some(if case == "legacy_plan" {
                     "[>] Retain the plan".into()
@@ -183,7 +183,7 @@ async fn restore_wire(dialect: Dialect, case: &str) {
                 covers_up_to_turn: cutoff,
                 original_turn_count: cutoff,
                 compacted_count: cutoff,
-            })));
+            }));
         agent.seed_compaction_from_session();
     }
     let before = request(&mut agent, dialect).await;

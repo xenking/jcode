@@ -683,7 +683,7 @@ impl Agent {
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.set_compaction(state.map(Arc::new));
+            self.session.adopt_compaction(state);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
@@ -843,8 +843,7 @@ impl Agent {
         manager: &crate::compaction::CompactionManager,
     ) -> Result<()> {
         if !manager.persisted_state_matches(self.session.compaction().as_deref()) {
-            self.session
-                .set_compaction(manager.persisted_state().map(Arc::new));
+            self.session.adopt_compaction(manager.persisted_state());
             self.compaction_persist_pending = true;
         }
         if self.compaction_persist_pending {
@@ -921,7 +920,7 @@ impl Agent {
             compacted_count,
         };
 
-        self.session.set_compaction(Some(Arc::new(state.clone())));
+        self.session.adopt_compaction(Some(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
