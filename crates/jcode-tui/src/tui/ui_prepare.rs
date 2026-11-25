@@ -509,7 +509,7 @@ pub(super) fn prepare_messages(
     // exact frame-cache hit can bypass the normal anchored-image resolver.
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
-    super::note_prep_restage(restage_start.elapsed());
+    super::record_prep_phase(super::PrepPhase::Restage, restage_start.elapsed());
     if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
@@ -1108,7 +1108,6 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     );
     prepared
 }
-
 
 #[path = "ui_prepare/body_prep.rs"]
 mod body_prep;

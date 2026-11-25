@@ -285,7 +285,6 @@ shallow-module jcode_tui::tui::app::model_context
 shallow-module jcode_tui::tui::app::todos_view
 shallow-module jcode_tui::tui::app::tui_state
 shallow-module jcode_tui::tui::backend
-shallow-module jcode_tui::tui::ui::frame_metrics
 shallow-module jcode_tui_core
 shallow-module jcode_tui_messages
 shallow-module jcode_tui_visual_debug

@@ -333,14 +333,14 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         wide_prepare_width,
         chat_area.height,
     );
-    note_prep_aspect(aspect_start.elapsed());
+    record_prep_phase(PrepPhase::Aspect, aspect_start.elapsed());
     let prepare_at = |width: u16| {
         let started = Instant::now();
         let prepared =
             mermaid::with_preferred_aspect_ratio(transcript_mermaid_aspect_ratio, || {
                 prepare::prepare_messages(app, width, chat_area.height)
             });
-        note_prep_prepare_at(started.elapsed());
+        record_prep_phase(PrepPhase::PrepareAt, started.elapsed());
         prepared
     };
 
@@ -390,7 +390,7 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         let started = Instant::now();
         let result =
             (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height;
-        note_prep_overflow(started.elapsed());
+        record_prep_phase(PrepPhase::Overflow, started.elapsed());
         result
     };
 

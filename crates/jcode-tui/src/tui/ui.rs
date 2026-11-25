@@ -139,9 +139,9 @@ mod file_diff_ui;
 mod frame_metrics;
 #[path = "ui_frame_metrics_key_latency.rs"]
 mod key_latency;
-pub(crate) use key_latency::{key_to_paint_debug_json, note_frame_painted, note_key_event_read};
 #[cfg(test)]
 pub(crate) use frame_metrics::body_last_path_for_tests;
+pub(crate) use key_latency::{key_to_paint_debug_json, note_frame_painted, note_key_event_read};
 #[path = "ui_header.rs"]
 pub(crate) mod header;
 #[path = "ui_inline_image.rs"]
@@ -1624,13 +1624,12 @@ pub(crate) fn last_status_area() -> Option<Rect> {
 }
 
 use frame_metrics::{
-    ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, FullPrepPhaseMetrics, ViewportMetrics,
+    ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, FullPrepPhaseMetrics, PrepPhase, ViewportMetrics,
     begin_frame_resource_sample, finalize_frame_metrics, note_body_built, note_body_cache_hit,
     note_body_cache_lookup, note_body_cache_miss, note_body_incremental_reuse, note_body_request,
     note_chat_layout, note_full_prep_built, note_full_prep_cache_hit, note_full_prep_cache_lookup,
     note_full_prep_cache_miss, note_full_prep_phase_metrics, note_full_prep_request,
-    note_prep_aspect, note_prep_overflow, note_prep_prepare_at, note_prep_restage,
-    note_viewport_metrics, reset_frame_perf_stats, viewport_stability_hash,
+    note_viewport_metrics, record_prep_phase, reset_frame_perf_stats, viewport_stability_hash,
 };
 pub(crate) use frame_metrics::{
     DrawCallAttribution, FrameInputAttribution, frame_input_attribution_snapshot,

@@ -461,23 +461,24 @@ pub(super) fn note_full_prep_cache_lookup(elapsed: Duration) {
     with_frame_perf_stats_mut(|stats| stats.full_prep_cache_lookup_ms += duration_ms(elapsed));
 }
 
-pub(super) fn note_prep_restage(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_restage_ms += duration_ms(elapsed));
+pub(super) enum PrepPhase {
+    Restage,
+    Aspect,
+    PrepareAt,
+    Overflow,
 }
 
-pub(super) fn note_prep_aspect(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_aspect_ms += duration_ms(elapsed));
-}
-
-pub(super) fn note_prep_prepare_at(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| {
-        stats.prep_prepare_at_ms += duration_ms(elapsed);
-        stats.prep_prepare_at_calls += 1;
+pub(super) fn record_prep_phase(phase: PrepPhase, elapsed: Duration) {
+    let elapsed_ms = duration_ms(elapsed);
+    with_frame_perf_stats_mut(|stats| match phase {
+        PrepPhase::Restage => stats.prep_restage_ms += elapsed_ms,
+        PrepPhase::Aspect => stats.prep_aspect_ms += elapsed_ms,
+        PrepPhase::PrepareAt => {
+            stats.prep_prepare_at_ms += elapsed_ms;
+            stats.prep_prepare_at_calls += 1;
+        }
+        PrepPhase::Overflow => stats.prep_overflow_ms += elapsed_ms,
     });
-}
-
-pub(super) fn note_prep_overflow(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_overflow_ms += duration_ms(elapsed));
 }
 
 pub(super) fn note_full_prep_cache_hit(
