@@ -246,7 +246,7 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert_eq!(tokens(&inactive, Unattributed), None);
         assert!(inactive.residual_tokens.is_some_and(|tokens| tokens > 0));
         assert!(calls.lock().unwrap().is_empty());
-        assert_eq!(Session::load(saved.id())?.messages().len(), 1);
+        assert_eq!(Session::load(saved.id())?.message_count(), 1);
 
         let legacy = observer.inspect(12, Some(long_saved.id()), None).await?;
         assert_eq!(legacy.total_tokens, Some(224_142));

@@ -906,11 +906,11 @@ pub(crate) fn run_move(
     if verify.session_id != session_id || verify.epoch != epoch {
         bail!("cloud host staged the wrong session/epoch: {verify:?}");
     }
-    if verify.messages != sess.messages().len() {
+    if verify.messages != sess.message_count() {
         bail!(
             "cloud transcript has {} messages, expected {}",
             verify.messages,
-            sess.messages().len()
+            sess.message_count()
         );
     }
     if let Some(repo) = &repo
@@ -1233,7 +1233,7 @@ pub(crate) fn run_return(
         session_id: session_id.clone(),
         host,
         epoch,
-        messages: sess.messages().len(),
+        messages: sess.message_count(),
         merge,
         members: Vec::new(),
     };
@@ -1422,7 +1422,7 @@ pub(crate) fn run_receive() -> Result<()> {
     let report = ReceiveReport {
         session_id: manifest.session_id,
         epoch: manifest.epoch,
-        messages: sess.messages().len(),
+        messages: sess.message_count(),
         snapshot,
         repo_root: mapped.map(|r| r.root),
     };

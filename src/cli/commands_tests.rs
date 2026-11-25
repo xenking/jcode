@@ -1420,8 +1420,7 @@ async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
             .unwrap();
             let session = crate::session::Session::load(agent.session_id()).unwrap();
             let followups = session
-                .messages()
-                .iter()
+                .iter_messages()
                 .filter(|message| {
                     message.role == crate::message::Role::User
                         && message.content.iter().any(|block| {
@@ -1506,8 +1505,7 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
         }
         let session = crate::session::Session::load(&session_id).unwrap();
         let inputs: Vec<_> = session
-            .messages()
-            .iter()
+            .iter_messages()
             .filter(|message| message.role == crate::message::Role::User)
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {

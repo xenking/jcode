@@ -300,9 +300,8 @@ fn read_report(id: &str, directory: &Path, messages: usize, log_lines: usize) ->
         "idle"
     };
     let recent = sess
-        .messages()
-        .iter()
-        .skip(sess.messages().len().saturating_sub(messages))
+        .iter_messages()
+        .skip(sess.message_count().saturating_sub(messages))
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Report {

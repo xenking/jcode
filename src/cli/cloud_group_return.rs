@@ -637,7 +637,7 @@ fn install_returned_group(
         } else {
             remove_return_file(&dest)?;
         }
-        messages += sess.messages().len();
+        messages += sess.message_count();
     }
     Ok(messages)
 }
