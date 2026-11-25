@@ -119,8 +119,7 @@ pub(crate) mod sdk;
 pub mod selfdev;
 #[path = "registry/serde_coerce.rs"]
 pub(crate) mod serde_coerce;
-#[path = "web/session_http.rs"]
-pub(crate) mod session_http;
+pub(crate) use crate::session_http;
 #[path = "search/session_search.rs"]
 mod session_search;
 #[path = "search/session_search_index.rs"]

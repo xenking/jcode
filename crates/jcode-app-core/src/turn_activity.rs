@@ -10,6 +10,9 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::Notify;
 
+/// The tool whose pending call stands for a whole rollout wait.
+pub(crate) const ROLLOUT_WAIT_TOOL: &str = "rollout_wait";
+
 static GLOBAL: LazyLock<ActivityRegistry> = LazyLock::new(ActivityRegistry::default);
 
 pub fn global() -> &'static ActivityRegistry {
@@ -177,7 +180,7 @@ impl SessionState {
                     name,
                     call: owned,
                     foreground: outer,
-                } if name == crate::tool::rollout_wait::NAME && call == owned => {
+                } if name == ROLLOUT_WAIT_TOOL && call == owned => {
                     let seen = if *outer {
                         &mut foreground
                     } else {

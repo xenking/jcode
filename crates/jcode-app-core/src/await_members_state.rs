@@ -1,7 +1,7 @@
-use crate::protocol::{AwaitedMemberStatus, ServerEvent};
-use crate::server::durable_state::{
+use crate::durable_state::{
     hashed_request_key, load_json_state, now_unix_ms, save_json_state, state_dir,
 };
+use crate::protocol::{AwaitedMemberStatus, ServerEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -422,7 +422,7 @@ pub(super) fn persist_final_response(
     // The terminal result is the durable delivery marker. Never publish the
     // completion if that marker could not be committed, otherwise a restart
     // can publish the same result again from the still-pending primary.
-    let path = super::durable_state::state_path(AWAIT_MEMBERS_DIR, &next.key);
+    let path = crate::durable_state::state_path(AWAIT_MEMBERS_DIR, &next.key);
     if let Err(error) = crate::storage::write_json(&path, &next) {
         crate::logging::warn(&format!("Failed to persist await completion: {error}"));
         return (next, false);

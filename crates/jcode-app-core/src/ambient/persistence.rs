@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::paths::{lock_path, state_path};
 use super::{
     AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, Priority, ScheduledItem,
 };
+use crate::ambient_paths::{lock_path, state_path};
 use crate::storage;
 
 #[cfg(test)]

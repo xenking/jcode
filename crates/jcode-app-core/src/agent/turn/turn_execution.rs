@@ -271,7 +271,7 @@ impl Agent {
                                     let dir = crate::session::session_path(&session_id)?
                                         .with_extension("attachments");
                                     let prepared =
-                                        crate::server::attachment::prepare(&dir, item.attachments)?;
+                                        crate::attachment::prepare(&dir, item.attachments)?;
                                     item.content.push_str(&prepared.text);
                                     item.images.extend(prepared.images);
                                     (!prepared.items.is_empty()).then_some(

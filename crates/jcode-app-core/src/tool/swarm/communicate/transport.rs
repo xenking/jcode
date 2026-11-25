@@ -27,7 +27,7 @@ fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
 }
 
 async fn connect_swarm_socket(path: &std::path::Path) -> Result<crate::transport::Stream> {
-    let first_error = match crate::server::connect_socket(path).await {
+    let first_error = match crate::server_endpoint::connect_socket(path).await {
         Ok(stream) => return Ok(stream),
         Err(err) if server_is_unavailable(&err) => err,
         Err(err) => return Err(err),
@@ -52,7 +52,7 @@ async fn connect_swarm_socket(path: &std::path::Path) -> Result<crate::transport
         return Err(map_socket_connection_error(first_error));
     }
 
-    crate::server::connect_socket(path)
+    crate::server_endpoint::connect_socket(path)
         .await
         .map_err(map_socket_connection_error)
 }
@@ -82,9 +82,9 @@ pub(super) async fn send_request_with_timeout(
     request: Request,
     timeout: Option<std::time::Duration>,
 ) -> Result<ServerEvent> {
-    let path = crate::server::socket_path();
+    let path = crate::server_endpoint::socket_path();
     let stream = if matches!(&request, Request::CommSummary { .. }) {
-        crate::server::connect_socket(&path)
+        crate::server_endpoint::connect_socket(&path)
             .await
             .map_err(map_socket_connection_error)?
     } else {

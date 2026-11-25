@@ -303,7 +303,7 @@ impl Agent {
             let credential_at_request_start = provider.active_resolved_credential();
             let oauth_account_label_at_request_start = provider.serving_oauth_account_label();
             let oauth_email_at_request_start =
-                crate::server::provider_oauth_email(provider.as_ref());
+                crate::provider_identity::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
             let dynamic_is_tail = matches!(
@@ -1549,7 +1549,7 @@ impl Agent {
             // Refresh authoritative credential identity after every upstream
             // request, including auto credential resolution and OAuth failover.
             let oauth_email_after_stream =
-                crate::server::provider_oauth_email(self.provider.as_ref());
+                crate::provider_identity::provider_oauth_email(self.provider.as_ref());
             let credential_after_stream = self.provider.active_resolved_credential();
             let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
             let prompt_tokens = self.effective_context_tokens_from_usage(

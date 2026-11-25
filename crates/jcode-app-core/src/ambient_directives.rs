@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::paths::ambient_dir;
+use crate::ambient_paths::ambient_dir;
 use crate::storage;
 
 // ---------------------------------------------------------------------------

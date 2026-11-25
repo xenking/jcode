@@ -31,7 +31,7 @@ pub fn set_session_env(session_id: &str, env: HashMap<String, String>) -> Result
     } else {
         entries.insert(session_id.to_owned(), env);
     }
-    crate::tool::session_http::prune(&entries);
+    crate::session_http::prune(&entries);
     Ok(())
 }
 
@@ -62,14 +62,14 @@ pub fn inherit_session_env(parent: &str, child: &str) {
     } else {
         entries.remove(child);
     }
-    crate::tool::session_http::prune(&entries);
+    crate::session_http::prune(&entries);
 }
 
 /// Forget a destroyed session. Already-launched jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
-    crate::tool::session_http::prune(&entries);
+    crate::session_http::prune(&entries);
 }
 
 #[cfg(test)]

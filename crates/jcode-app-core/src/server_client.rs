@@ -1,7 +1,8 @@
-use super::{connect_socket, debug_socket_path, socket_path};
+use crate::server_endpoint::{connect_socket, debug_socket_path, socket_path};
 use crate::protocol::{HistoryMessage, Request, ServerEvent, TranscriptMode};
 use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::Result;
+use std::time::{Duration, Instant};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -360,6 +361,46 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
     }
+}
+
+
+/// Wait until a server socket is connectable and responds to a ping.
+pub async fn wait_for_server_ready(path: &std::path::Path, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Ok(mut client)) = tokio::time::timeout(
+            Duration::from_millis(250),
+            Client::connect_with_path(path.to_path_buf()),
+        )
+        .await
+            && let Ok(Ok(true)) =
+                tokio::time::timeout(Duration::from_millis(250), client.ping()).await
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!(
+        "Timed out waiting for responsive server socket {}",
+        path.display()
+    );
+}
+
+async fn probe_server_ready(path: &std::path::Path, ping_timeout: Duration) -> bool {
+    let Ok(Ok(mut client)) =
+        tokio::time::timeout(ping_timeout, Client::connect_with_path(path.to_path_buf())).await
+    else {
+        return false;
+    };
+
+    matches!(
+        tokio::time::timeout(ping_timeout, client.ping()).await,
+        Ok(Ok(true))
+    )
+}
+
+pub async fn is_server_ready(path: &std::path::Path) -> bool {
+    probe_server_ready(path, Duration::from_millis(50)).await
 }
 
 #[cfg(test)]

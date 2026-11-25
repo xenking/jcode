@@ -7,7 +7,7 @@ pub(super) async fn wait_on_await_dependency(
 ) -> Result<ToolOutput> {
     let deadline = Instant::now() + wait_duration;
     let incoming = crate::incoming_message::watch(&ctx.session_id);
-    let mut completions = crate::server::await_members_state::subscribe_await_completion();
+    let mut completions = crate::await_members_state::subscribe_await_completion();
     let _wait_guard = crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members");
     let metadata = |reason: &str| {
         json!({

@@ -238,7 +238,7 @@ impl Tool for EndAmbientCycleTool {
         if let Ok(mut state) = AmbientState::load() {
             let next_desc = if let Some(ref sched) = next_schedule {
                 let mins = sched.wake_in_minutes.unwrap_or(30);
-                format!("~{}", crate::ambient::format_minutes_human(mins))
+                format!("~{}", crate::human_duration::format_minutes_human(mins))
             } else {
                 "system default".to_string()
             };
@@ -367,7 +367,7 @@ impl Tool for ScheduleAmbientTool {
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
         } else if let Some(mins) = params.wake_in_minutes {
-            format!("in {}", crate::ambient::format_minutes_human(mins))
+            format!("in {}", crate::human_duration::format_minutes_human(mins))
         } else {
             "in 30m (default)".to_string()
         };
@@ -902,7 +902,7 @@ impl ScheduleTool {
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
         } else if let Some(mins) = params.wake_in_minutes {
-            format!("in {}", crate::ambient::format_minutes_human(mins))
+            format!("in {}", crate::human_duration::format_minutes_human(mins))
         } else {
             "unspecified".to_string()
         };

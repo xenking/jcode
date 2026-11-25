@@ -618,7 +618,7 @@ async fn wait_many(
     let mut last_progress = std::collections::HashMap::new();
     let mut wait_guard = None;
     let mut task_changes = manager.subscribe_status_changes();
-    let mut await_completions = crate::server::await_members_state::subscribe_await_completion();
+    let mut await_completions = crate::await_members_state::subscribe_await_completion();
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
             last_progress.insert(task_id.clone(), task.progress.clone());

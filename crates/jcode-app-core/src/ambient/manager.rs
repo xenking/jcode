@@ -2,11 +2,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 
-use super::paths::{queue_path, state_path};
 use super::persistence::FileRevision;
 use super::{
     AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem, ScheduledQueue,
 };
+use crate::ambient_paths::{queue_path, state_path};
 use crate::config::config;
 
 // ---------------------------------------------------------------------------

@@ -481,12 +481,12 @@ impl Registry {
                     // proxies and re-reconciling the whole schema cache on each
                     // of ~13 connections per session made a reload storm spend
                     // most of its CPU here.
-                    let handler_cpu = crate::server::thread_cpu_ms();
+                    let handler_cpu = crate::cpu_time::thread_cpu_ms();
                     let handler_start = std::time::Instant::now();
                     let Some(defs) = mcp_manager.read().await.server_tools(&name).await else {
                         continue;
                     };
-                    let defs_cpu = crate::server::thread_cpu_ms() - handler_cpu;
+                    let defs_cpu = crate::cpu_time::thread_cpu_ms() - handler_cpu;
                     let tools = crate::mcp::create_mcp_tools_from_cached(
                         &name,
                         &defs,
@@ -499,9 +499,9 @@ impl Registry {
                     } else {
                         server_counts.insert(name.clone(), tools.len());
                     }
-                    let build_cpu = crate::server::thread_cpu_ms() - handler_cpu;
+                    let build_cpu = crate::cpu_time::thread_cpu_ms() - handler_cpu;
                     registry.refresh_connected_mcp_server(tools, &name).await;
-                    let refresh_cpu = crate::server::thread_cpu_ms() - handler_cpu;
+                    let refresh_cpu = crate::cpu_time::thread_cpu_ms() - handler_cpu;
 
                     let refresh_ms = handler_start.elapsed().as_millis();
                     // Keep the on-disk schema cache in sync so the next spawn can
@@ -529,7 +529,7 @@ impl Registry {
                         server_counts.get(&name).copied().unwrap_or(0),
                         refresh_ms,
                         handler_start.elapsed().as_millis(),
-                        crate::server::thread_cpu_ms() - handler_cpu,
+                        crate::cpu_time::thread_cpu_ms() - handler_cpu,
                         defs_cpu,
                         build_cpu,
                         refresh_cpu,

@@ -578,7 +578,7 @@ impl Agent {
                     );
                 }
                 let prepared = crate::session::session_path(self.session_id()).and_then(|path| {
-                    crate::server::attachment::prepare(
+                    crate::attachment::prepare(
                         &path.with_extension("attachments"),
                         message.attachments.clone(),
                     )

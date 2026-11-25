@@ -210,7 +210,7 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
             .map(|session| session_status_is_finished(&session.status))
             .unwrap_or(true)
     };
-    let pending_awaits: Vec<_> = crate::server::pending_await_members_for_session(session_id)
+    let pending_awaits: Vec<_> = crate::await_members_state::pending_await_members_for_session(session_id)
         .into_iter()
         .filter(|state| !state.background)
         .filter(|state| {

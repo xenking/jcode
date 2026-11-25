@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub(crate) const NAME: &str = "rollout_wait";
+pub(crate) const NAME: &str = crate::turn_activity::ROLLOUT_WAIT_TOOL;
 
 tokio::task_local! {
     // Only the foreground Agent path can prove that this call is the whole

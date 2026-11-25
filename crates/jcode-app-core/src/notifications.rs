@@ -963,9 +963,10 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
                             }
                         }
                         ReplyAction::DirectiveReply { cycle_id, text } => {
-                            if let Err(e) =
-                                crate::ambient::add_directive(text.clone(), cycle_id.clone())
-                            {
+                            if let Err(e) = crate::ambient_directives::add_directive(
+                                text.clone(),
+                                cycle_id.clone(),
+                            ) {
                                 logging::error(&format!("Failed to save directive: {}", e));
                             }
                         }

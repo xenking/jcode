@@ -179,7 +179,7 @@ async fn prepare_background_dependencies(
         }
     }
     for id in awaits {
-        crate::server::subscribe_await_dependency(id, session_id)?;
+        crate::await_members_state::subscribe_dependency(id, session_id)?;
     }
     for id in running {
         // The task may finish between validation and subscription. Terminal

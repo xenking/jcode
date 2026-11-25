@@ -51,7 +51,7 @@ impl Agent {
         persist: bool,
     ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
-        let restore_cpu_start = crate::server::thread_cpu_ms();
+        let restore_cpu_start = crate::cpu_time::thread_cpu_ms();
         let load_start = Instant::now();
         let mut session = Session::load_for_resume(session_id)?;
         if let Some(working_dir) = working_dir {
@@ -154,7 +154,7 @@ impl Agent {
             env_snapshot_ms,
             save_ms,
             restore_start.elapsed().as_millis(),
-            crate::server::thread_cpu_ms() - restore_cpu_start,
+            crate::cpu_time::thread_cpu_ms() - restore_cpu_start,
         ));
         logging::info(&format!(
             "Session restored: {} messages in session",

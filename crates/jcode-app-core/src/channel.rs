@@ -229,9 +229,9 @@ impl MessageChannel for TelegramChannel {
                             continue;
                         }
 
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
@@ -438,9 +438,9 @@ impl MessageChannel for DiscordChannel {
                             continue;
                         }
 
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
@@ -699,9 +699,9 @@ impl MessageChannel for JadeRelayChannel {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
