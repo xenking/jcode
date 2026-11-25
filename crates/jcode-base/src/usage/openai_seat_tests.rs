@@ -228,6 +228,33 @@ async fn a_monthly_read_that_fails_is_unknown_and_sends_nothing_without_an_accou
 }
 
 #[tokio::test]
+async fn a_redirected_monthly_read_is_unknown() {
+    // The target answers with a valid seat body, so only the redirect guard
+    // can turn this into `None`.
+    let target = Upstream::start(SEAT_BODY).await;
+    let hop = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hop_url = format!("http://{}", hop.local_addr().unwrap());
+    let location = format!("{}/elsewhere", target.url);
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut stream, _)) = hop.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    let creds = credentials("tok", Some("acct"));
+    assert_eq!(
+        read_monthly(&reqwest::Client::new(), &hop_url, &creds).await,
+        None
+    );
+    assert_eq!(target.count(), 1, "the redirect was followed, then refused");
+}
+
+#[tokio::test]
 async fn an_unreachable_endpoint_is_unknown_not_an_error() {
     let dead = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
