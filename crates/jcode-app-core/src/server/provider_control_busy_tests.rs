@@ -843,7 +843,7 @@ async fn set_service_tier_configures_busy_session_immediately_with_one_confirmat
     let _runtime = IsolatedRuntimeDir::new();
     let (provider, agent, tx, mut rx) = test_agent("session_busy_ultrafast_control").await;
     let locked = agent.lock().await;
-    let control = super::super::state::SessionControlHandle::new(
+    let control = super::super::session_control::SessionControlHandle::new(
         "session_busy_ultrafast_control",
         locked.soft_interrupt_queue(),
         locked.background_tool_signal(),
@@ -852,7 +852,7 @@ async fn set_service_tier_configures_busy_session_immediately_with_one_confirmat
     .with_provider(locked.provider_handle());
     // Busy reattachment uses the same session's registered provider, never the
     // creator connection's provisional provider or a different session's tier.
-    let reattached = super::super::state::SessionControlHandle::cancel_only(
+    let reattached = super::super::session_control::SessionControlHandle::cancel_only(
         "session_busy_ultrafast_control",
         locked.soft_interrupt_queue(),
         locked.graceful_shutdown_signal(),
@@ -890,14 +890,14 @@ async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecy
     let _runtime = IsolatedRuntimeDir::new();
     let (original, agent, _, _) = test_agent("tier_registry_original").await;
     let locked = agent.lock().await;
-    let control = super::super::state::SessionControlHandle::new(
+    let control = super::super::session_control::SessionControlHandle::new(
         "tier_registry_original",
         locked.soft_interrupt_queue(),
         locked.background_tool_signal(),
         locked.graceful_shutdown_signal(),
     )
     .with_provider(locked.provider_handle());
-    let other = super::super::state::SessionControlHandle::cancel_only(
+    let other = super::super::session_control::SessionControlHandle::cancel_only(
         "tier_registry_other",
         locked.soft_interrupt_queue(),
         locked.graceful_shutdown_signal(),

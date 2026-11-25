@@ -250,7 +250,7 @@ pub(crate) async fn deliver_file_activity_notice(
         merge_file_activity_entry(&mut entries, entry.clone());
         if entries.len() <= FILE_ACTIVITY_NOTICE_MAX_ENTRIES {
             let content = format_file_activity_notice(&entries);
-            if super::state::replace_pending_soft_interrupt(
+            if super::session_control::replace_pending_soft_interrupt(
                 recipient,
                 &notice.content,
                 content.clone(),
@@ -266,7 +266,7 @@ pub(crate) async fn deliver_file_activity_notice(
     }
     let entries = vec![entry];
     let content = format_file_activity_notice(&entries);
-    if super::state::queue_soft_interrupt_for_session(
+    if super::session_control::queue_soft_interrupt_for_session(
         recipient,
         content.clone(),
         false,

@@ -1,8 +1,6 @@
 use super::client_lifecycle::process_reserved_message_streaming_mpsc;
-use super::state::{
-    SessionControlHandle, SessionInterruptQueues, TurnEventChannel,
-    queue_soft_interrupt_for_session,
-};
+use super::session_control::{SessionControlHandle, queue_soft_interrupt_for_session};
+use super::state::{SessionInterruptQueues, TurnEventChannel};
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
 use crate::session::Session;

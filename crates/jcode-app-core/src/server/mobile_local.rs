@@ -9,7 +9,8 @@
 use super::live_turn::{
     LiveTurnInput, LiveTurnSwarmContext, idle_live_agent, spawn_tracked_live_turn_with_images,
 };
-use super::state::{fanout_live_client_event, queue_soft_interrupt_with_images_for_session};
+use super::session_control::queue_soft_interrupt_with_images_for_session;
+use super::state::fanout_live_client_event;
 use super::{SessionAgents, SessionInterruptQueues};
 use crate::mobile_runner::{LiveSession, LocalSessionHost};
 use crate::protocol::ServerEvent;

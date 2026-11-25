@@ -547,20 +547,23 @@ use runtime_memory_sampling::{
     capture_runtime_memory_attribution_sample, capture_runtime_memory_process_sample,
 };
 
+mod session_control;
 mod state;
 mod subscribe_working_dir;
 
+pub use self::session_control::SessionControlHandle;
+use self::session_control::{
+    queue_soft_interrupt_for_session, register_session_interrupt_queue,
+    remove_session_interrupt_queue, rename_session_interrupt_queue,
+};
 use self::state::latest_peer_touches;
 pub use self::state::{
-    FileAccess, SessionControlHandle, SharedContext, SwarmEvent, SwarmEventType, SwarmMember,
-    SwarmState,
+    FileAccess, SharedContext, SwarmEvent, SwarmEventType, SwarmMember, SwarmState,
 };
 use self::state::{
     SessionInterruptQueues, fanout_live_client_event, fanout_session_event,
-    queue_soft_interrupt_for_session, register_background_tool_signal,
-    register_session_event_sender, register_session_interrupt_queue, remove_background_tool_signal,
-    remove_session_interrupt_queue, rename_background_tool_signal, rename_session_interrupt_queue,
-    unregister_session_event_sender,
+    register_background_tool_signal, register_session_event_sender, remove_background_tool_signal,
+    rename_background_tool_signal, unregister_session_event_sender,
 };
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
