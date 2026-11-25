@@ -789,6 +789,15 @@ pub struct FrameDiagnostics {
     pub theme: Option<Value>,
 }
 
+/// Read-only projection of the inputs to a normal frame.
+pub trait FrameProbe {
+    fn state(&self) -> StateSnapshot;
+    fn rendered(&self) -> RenderedText;
+}
+
+#[cfg(test)]
+mod frame_capture_tests;
+
 impl FrameCaptureBuilder {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
@@ -797,19 +806,45 @@ impl FrameCaptureBuilder {
         }
     }
 
-    /// Layout geometry recorded so far.
-    pub fn layout_mut(&mut self) -> &mut LayoutCapture {
-        &mut self.layout
+    pub fn record_frame(&mut self, probe: &impl FrameProbe, layout: LayoutCapture) {
+        self.layout = layout;
+        self.state = probe.state();
+        self.rendered_text = probe.rendered();
     }
 
-    /// App state snapshot recorded so far.
-    pub fn state_mut(&mut self) -> &mut StateSnapshot {
-        &mut self.state
+    pub fn record_hibernation(
+        &mut self,
+        input: &str,
+        cursor: usize,
+        scroll: usize,
+        messages: usize,
+        notice: &str,
+    ) {
+        self.state = StateSnapshot {
+            status: "hibernated".into(),
+            input_len: input.len(),
+            input_preview: input.chars().take(200).collect(),
+            cursor_pos: cursor,
+            scroll_offset: scroll,
+            message_count: messages,
+            ..Default::default()
+        };
+        self.rendered_text.status_line = notice.into();
+        self.step("frozen_hibernation_frame");
     }
 
-    /// Text that was rendered into the frame.
-    pub fn rendered_text_mut(&mut self) -> &mut RenderedText {
-        &mut self.rendered_text
+    pub fn record_pane_geometry(&mut self, messages: Rect, diagram: Option<Rect>) {
+        self.layout.messages_area = Some(messages.into());
+        self.layout.diagram_area = diagram.map(Into::into);
+    }
+
+    pub fn record_margins(&mut self, margins: MarginsCapture) {
+        self.layout.margins = Some(margins);
+    }
+
+    pub fn record_input(&mut self, display_text: &str, hint: Option<&str>) {
+        self.rendered_text.input_area = display_text.into();
+        self.rendered_text.input_hint = hint.map(str::to_owned);
     }
 
     /// Note that a render stage ran, in order.
@@ -822,6 +857,9 @@ impl FrameCaptureBuilder {
     }
 
     pub fn set_info_widgets(&mut self, info_widgets: InfoWidgetCapture) {
+        self.layout
+            .widget_placements
+            .clone_from(&info_widgets.placements);
         self.info_widgets = Some(info_widgets);
     }
 

@@ -35,15 +35,13 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         if visual_debug::is_enabled() {
             let area = frame.area();
             let mut capture = FrameCaptureBuilder::new(area.width, area.height);
-            capture.state_mut().status = "hibernated".to_string();
-            capture.state_mut().input_len = app.input().len();
-            capture.state_mut().input_preview = app.input().chars().take(200).collect();
-            capture.state_mut().cursor_pos = app.cursor_pos();
-            capture.state_mut().scroll_offset = app.scroll_offset();
-            capture.state_mut().message_count = app.display_messages().len();
-            capture.rendered_text_mut().status_line =
-                app.hibernation_notice().unwrap_or("").to_string();
-            capture.step("frozen_hibernation_frame");
+            capture.record_hibernation(
+                app.input(),
+                app.cursor_pos(),
+                app.scroll_offset(),
+                app.display_messages().len(),
+                app.hibernation_notice().unwrap_or(""),
+            );
             if !secondary_render_active() {
                 visual_debug::record_frame(capture.build());
             }

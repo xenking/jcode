@@ -102,7 +102,7 @@ use super::ui_diff::{
 };
 use super::visual_debug::{
     self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, MarginsCapture,
-    MessageCapture, RenderTimingCapture,
+    RenderTimingCapture,
 };
 use super::{DisplayMessage, DisplayMessageRoleExt, ProcessingStatus, TuiState};
 use crate::message::ToolCall;

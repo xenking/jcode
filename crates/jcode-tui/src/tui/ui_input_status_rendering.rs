@@ -444,10 +444,7 @@ pub(in super::super) fn draw_input(
     }
 
     if let Some(capture) = debug_capture {
-        capture.rendered_text_mut().input_area = display_input_text.to_string();
-        if let Some(hint) = &hint_line {
-            capture.rendered_text_mut().input_hint = Some(hint.clone());
-        }
+        capture.record_input(display_input_text, hint_line.as_deref());
         visual_debug::check_shift_enter_anomaly(
             capture,
             app.is_processing(),
