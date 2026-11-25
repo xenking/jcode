@@ -782,9 +782,9 @@ fn command_cell_at(
         }
         if let Some(x) = line.find(command) {
             let after = &line[x + command.len()..];
-            let is_suggestion_row = after
-                .strip_prefix("  ")
-                .is_some_and(|desc| desc.starts_with(|c: char| !c.is_whitespace()));
+            // Suggestion rows pad the command to one shared name column, so
+            // the description follows after two or more spaces.
+            let is_suggestion_row = after.starts_with("  ") && !after.trim().is_empty();
             if is_suggestion_row {
                 return Some(buf[(x as u16 + offset, y)].clone());
             }
