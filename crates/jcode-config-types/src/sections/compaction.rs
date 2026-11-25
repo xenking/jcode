@@ -270,6 +270,16 @@ impl CompactionConfig {
         self.reactive_threshold_tokens.unwrap_or(400_000)
     }
 
+    /// Switch the compaction mode.
+    pub fn set_mode(&mut self, mode: CompactionMode) {
+        self.mode = mode;
+    }
+
+    /// Take the context ceiling from `other`, keeping every other setting.
+    pub fn adopt_context_cap(&mut self, other: &CompactionConfig) {
+        self.max_context_tokens = other.max_context_tokens;
+    }
+
     /// Effective settings for a session: model beats provider beats global.
     /// The returned config carries no nested overrides.
     pub fn resolve(&self, provider: Option<&str>, model: Option<&str>) -> CompactionConfig {

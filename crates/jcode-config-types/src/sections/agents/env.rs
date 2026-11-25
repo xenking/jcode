@@ -190,9 +190,14 @@ impl AgentsConfig {
             })
     }
 
-    /// Per-name agent profile overrides.
-    pub fn profiles(&self) -> &std::collections::BTreeMap<String, crate::AgentProfileConfig> {
-        &self.profiles
+    /// The configured override for agent profile `name`, if any.
+    pub fn profile(&self, name: &str) -> Option<&crate::AgentProfileConfig> {
+        self.profiles.get(name)
+    }
+
+    /// Names of every configured agent profile, sorted.
+    pub fn profile_names(&self) -> impl Iterator<Item = &String> {
+        self.profiles.keys()
     }
 
     /// What the `/config` summary prints for the agent models block.

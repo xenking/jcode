@@ -151,7 +151,7 @@ pub fn available_profile_names(agents: &AgentsConfig) -> Vec<String> {
     let mut all: Vec<String> = BUILTIN_PROFILE_NAMES
         .iter()
         .map(|name| (*name).to_string())
-        .chain(agents.profiles().keys().cloned())
+        .chain(agents.profile_names().cloned())
         .collect();
     all.sort();
     all.dedup();
@@ -164,7 +164,7 @@ pub fn available_profile_names(agents: &AgentsConfig) -> Vec<String> {
 pub fn resolve_profile(name: &str, agents: &AgentsConfig) -> Result<ResolvedAgentProfile, String> {
     let name = name.trim();
     let builtin = builtin_profile(name);
-    let merged = match (agents.profiles().get(name), builtin.as_ref()) {
+    let merged = match (agents.profile(name), builtin.as_ref()) {
         (Some(user), Some(builtin)) => user.merged_over(builtin),
         (Some(user), None) => user.clone(),
         (None, Some(builtin)) => builtin.clone(),

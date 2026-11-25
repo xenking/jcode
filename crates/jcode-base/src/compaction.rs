@@ -507,17 +507,24 @@ fn threshold_tokens_for_budget(
 #[cfg(test)]
 #[test]
 fn threshold_tokens_takes_the_earlier_trigger() {
-    let mut cfg = crate::config::CompactionConfig {
+    let cfg = crate::config::CompactionConfig {
         reactive_threshold: 1.0,
         reactive_threshold_tokens: Some(500_000),
         max_context_tokens: 1_000_000,
         ..Default::default()
     };
     assert_eq!(threshold_tokens_for(&cfg, 1_000_000), Some(500_000));
-    cfg.max_context_tokens = 0;
-    cfg.reactive_threshold = 0.8;
+    let cfg = crate::config::CompactionConfig {
+        reactive_threshold: 0.8,
+        reactive_threshold_tokens: Some(500_000),
+        max_context_tokens: 0,
+        ..Default::default()
+    };
     assert_eq!(threshold_tokens_for(&cfg, 200_000), Some(160_000));
-    cfg.mode = crate::config::CompactionMode::Semantic;
+    let cfg = crate::config::CompactionConfig {
+        mode: crate::config::CompactionMode::Semantic,
+        ..cfg
+    };
     assert_eq!(threshold_tokens_for(&cfg, 200_000), None);
 }
 
@@ -659,10 +666,10 @@ impl CompactionManager {
                 resolved.mode.clone()
             };
             self.compaction_config = resolved;
-            self.compaction_config.mode = mode.clone();
+            self.compaction_config.set_mode(mode.clone());
             self.mode = mode;
         } else {
-            self.compaction_config.max_context_tokens = resolved.max_context_tokens;
+            self.compaction_config.adopt_context_cap(&resolved);
         }
         let cap = self
             .context_cap_override
@@ -2757,7 +2764,7 @@ impl CompactionManager {
     /// Change the active compaction mode for this session at runtime.
     pub fn set_mode(&mut self, mode: crate::config::CompactionMode) {
         self.mode = mode.clone();
-        self.compaction_config.mode = mode;
+        self.compaction_config.set_mode(mode);
         self.mode_overridden = true;
     }
 
