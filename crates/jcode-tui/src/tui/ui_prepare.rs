@@ -58,8 +58,9 @@ pub(super) fn diagnostic_aux_profile<'a>(
     for (pointer, inline_bytes, lines) in values {
         entries_count += 1;
         if seen.insert(pointer) {
-            bytes +=
-                2 * std::mem::size_of::<usize>() + inline_bytes + (lines.iter().map(|value| value.capacity()).sum::<usize>()
+            bytes += 2 * std::mem::size_of::<usize>()
+                + inline_bytes
+                + (lines.iter().map(|value| value.capacity()).sum::<usize>()
                     + lines.capacity() * std::mem::size_of::<String>());
         }
     }

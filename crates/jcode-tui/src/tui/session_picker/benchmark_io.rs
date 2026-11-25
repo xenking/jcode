@@ -98,12 +98,10 @@ fn fixtures(home: &Path, count: usize) -> Vec<SessionInfo> {
         .filter(|s| s.id == id)
         .collect();
     sessions.extend(
-        loading::load_external_cli_sessions_grouped(
-            crate::tui::session_picker::ExternalCli::Codex,
-        )
-        .1
-        .into_iter()
-        .filter(|s| s.id == "codex:benchmark-codex"),
+        loading::load_external_cli_sessions_grouped(crate::tui::session_picker::ExternalCli::Codex)
+            .1
+            .into_iter()
+            .filter(|s| s.id == "codex:benchmark-codex"),
     );
     sessions
 }

@@ -302,70 +302,70 @@ impl ImportReview {
 
     /// Apply one key to the walkthrough.
     pub(crate) fn handle_key(&mut self, code: KeyCode) -> ReviewKey {
-    if self.telemetry.is_some() {
-        // Telemetry sub-page: informational only (telemetry is removed
-        // in this build). Esc/Enter/Space return to the summary.
-        match code {
-            KeyCode::Esc => self.close_telemetry(),
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.close_telemetry();
-                self.summary_pill = SummaryPill::Continue;
-                self.continue_focused = true;
+        if self.telemetry.is_some() {
+            // Telemetry sub-page: informational only (telemetry is removed
+            // in this build). Esc/Enter/Space return to the summary.
+            match code {
+                KeyCode::Esc => self.close_telemetry(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.close_telemetry();
+                    self.summary_pill = SummaryPill::Continue;
+                    self.continue_focused = true;
+                }
+                _ => return ReviewKey::Ignored,
             }
-            _ => return ReviewKey::Ignored,
+        } else if !self.choosing {
+            // Summary: Continue, Import less, and Telemetry pills.
+            // Arrows/Tab move; Enter/Space commits the focused one.
+            match code {
+                KeyCode::Left
+                | KeyCode::Up
+                | KeyCode::BackTab
+                | KeyCode::Char('h')
+                | KeyCode::Char('k') => self.summary_step(false),
+                KeyCode::Right
+                | KeyCode::Down
+                | KeyCode::Tab
+                | KeyCode::Char('j')
+                | KeyCode::Char('l') => self.summary_step(true),
+                // c is a direct shortcut into choose mode.
+                KeyCode::Char('c') | KeyCode::Char('C') => self.enter_choose_mode(),
+                // t jumps straight to the telemetry page.
+                KeyCode::Char('t') | KeyCode::Char('T') => self.open_telemetry(),
+                // y = "yes, import everything" regardless of pill focus, so
+                // the timeout is never a forced wait.
+                KeyCode::Char('y') | KeyCode::Char('Y') => return ReviewKey::Commit,
+                KeyCode::Enter | KeyCode::Char(' ') => match self.summary_pill {
+                    SummaryPill::Continue => return ReviewKey::Commit,
+                    SummaryPill::ImportLess => self.enter_choose_mode(),
+                    SummaryPill::Telemetry => self.open_telemetry(),
+                },
+                _ => return ReviewKey::Ignored,
+            }
+        } else {
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => self.cursor_up(),
+                KeyCode::Down | KeyCode::Char('j') => self.cursor_down(),
+                // Left = Yes (import), Right = No (skip), for the highlighted row.
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.set_current(true)
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.set_current(false)
+                }
+                // Space toggles the highlighted row between Yes and No.
+                KeyCode::Char(' ') => self.toggle_current(),
+                // Enter on a login row selects/deselects that row, so
+                // "picking an option" never commits the whole import out
+                // from under the user. Only Enter on the Continue pill
+                // (or `c`) commits.
+                KeyCode::Enter if !self.continue_focused => self.toggle_current(),
+                KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => {
+                    return ReviewKey::Commit;
+                }
+                _ => return ReviewKey::Ignored,
+            }
         }
-    } else if !self.choosing {
-        // Summary: Continue, Import less, and Telemetry pills.
-        // Arrows/Tab move; Enter/Space commits the focused one.
-        match code {
-            KeyCode::Left
-            | KeyCode::Up
-            | KeyCode::BackTab
-            | KeyCode::Char('h')
-            | KeyCode::Char('k') => self.summary_step(false),
-            KeyCode::Right
-            | KeyCode::Down
-            | KeyCode::Tab
-            | KeyCode::Char('j')
-            | KeyCode::Char('l') => self.summary_step(true),
-            // c is a direct shortcut into choose mode.
-            KeyCode::Char('c') | KeyCode::Char('C') => self.enter_choose_mode(),
-            // t jumps straight to the telemetry page.
-            KeyCode::Char('t') | KeyCode::Char('T') => self.open_telemetry(),
-            // y = "yes, import everything" regardless of pill focus, so
-            // the timeout is never a forced wait.
-            KeyCode::Char('y') | KeyCode::Char('Y') => return ReviewKey::Commit,
-            KeyCode::Enter | KeyCode::Char(' ') => match self.summary_pill {
-                SummaryPill::Continue => return ReviewKey::Commit,
-                SummaryPill::ImportLess => self.enter_choose_mode(),
-                SummaryPill::Telemetry => self.open_telemetry(),
-            },
-            _ => return ReviewKey::Ignored,
-        }
-    } else {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => self.cursor_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.cursor_down(),
-            // Left = Yes (import), Right = No (skip), for the highlighted row.
-            KeyCode::Left
-            | KeyCode::Char('h')
-            | KeyCode::Char('y')
-            | KeyCode::Char('Y') => self.set_current(true),
-            KeyCode::Right
-            | KeyCode::Char('l')
-            | KeyCode::Char('n')
-            | KeyCode::Char('N') => self.set_current(false),
-            // Space toggles the highlighted row between Yes and No.
-            KeyCode::Char(' ') => self.toggle_current(),
-            // Enter on a login row selects/deselects that row, so
-            // "picking an option" never commits the whole import out
-            // from under the user. Only Enter on the Continue pill
-            // (or `c`) commits.
-            KeyCode::Enter if !self.continue_focused => self.toggle_current(),
-            KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => return ReviewKey::Commit,
-            _ => return ReviewKey::Ignored,
-        }
-    }
         ReviewKey::Handled
     }
 

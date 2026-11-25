@@ -303,7 +303,9 @@ mod tests {
     /// lease lifetime they assert on.
     fn lease_spawn_fence() -> std::sync::MutexGuard<'static, ()> {
         static FENCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        FENCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        FENCE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]

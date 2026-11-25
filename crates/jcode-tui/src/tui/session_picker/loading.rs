@@ -429,6 +429,8 @@ fn send_session_list_updates_with_discovery(
 
 #[path = "loading_search_text.rs"]
 mod search_text;
+#[cfg(test)]
+use super::search_terms::{push_sampled_search_text, search_query_tokens};
 pub(super) use super::transcript_search::source::SourceBuckets;
 use super::transcript_search::source::{BucketSink, Source, Walk, message_role_source, push_mark};
 #[cfg(test)]
@@ -436,8 +438,6 @@ use search_text::raw_value_search_excerpt;
 pub(super) use search_text::{
     build_search_index, classified_search_excerpt, classify_json_into, raw_value_display_text,
 };
-#[cfg(test)]
-use super::search_terms::{push_sampled_search_text, search_query_tokens};
 
 #[cfg(test)]
 pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool {

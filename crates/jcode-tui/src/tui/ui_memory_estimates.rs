@@ -383,8 +383,8 @@ pub(crate) fn debug_side_panel_memory_profile() -> serde_json::Value {
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::*;
     use super::super::prepare::diagnostic_aux_profile;
+    use super::*;
     use std::mem::size_of;
 
     #[test]

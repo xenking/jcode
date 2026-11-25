@@ -94,4 +94,3 @@ pub(super) fn push_sampled_search_text(dst: &mut String, src: &str, limit: usize
     dst.push_str(&head);
     dst.push_str(&tail);
 }
-

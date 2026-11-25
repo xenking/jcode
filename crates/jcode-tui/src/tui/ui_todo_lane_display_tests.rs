@@ -102,7 +102,10 @@ fn requests_lead_the_card_and_never_become_a_phase() {
         assert!(at("requests") < at("Ask #1"), "{joined}");
         assert!(at("Ask #2") < at("Ask #3"), "{joined}");
         assert!(at("Ask #3") < at("Parse the config"), "{joined}");
-        assert!(!joined.contains("Phase 3") && !joined.contains("phase 3"), "{joined}");
+        assert!(
+            !joined.contains("Phase 3") && !joined.contains("phase 3"),
+            "{joined}"
+        );
         for width in 0..120 {
             assert_fits(&render(&todos, &[], width), width);
         }

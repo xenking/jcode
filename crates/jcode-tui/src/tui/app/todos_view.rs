@@ -1,13 +1,13 @@
 use super::App;
-use crate::tui::todo_card_payload::{
-    load_current_session_goals, load_current_session_plan, load_current_session_todos,
-    todo_card_payload_json, todo_card_payload_value, visible_todos,
-};
 use crate::config::{Config, TodoHeaderMode, config};
 use crate::side_panel::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };
 use crate::todo::TodoItem;
+use crate::tui::todo_card_payload::{
+    load_current_session_goals, load_current_session_plan, load_current_session_todos,
+    todo_card_payload_json, todo_card_payload_value, visible_todos,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;

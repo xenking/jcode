@@ -57,4 +57,3 @@ pub(crate) fn side_panel_dismiss_area(area: Rect) -> Option<Rect> {
     (area.width >= 10 && area.height >= 3)
         .then(|| Rect::new(area.right().saturating_sub(8), area.y, 8, 1))
 }
-

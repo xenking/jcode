@@ -1106,7 +1106,9 @@ impl SessionPicker {
                 search: None,
                 extras: PreviewExtras {
                     hidden_prompts,
-                    todos_payload: crate::tui::todo_card_payload::pinned_todos_payload_for_session(session_id),
+                    todos_payload: crate::tui::todo_card_payload::pinned_todos_payload_for_session(
+                        session_id,
+                    ),
                     info_data: Some(info_data),
                     loaded_at: None,
                 },

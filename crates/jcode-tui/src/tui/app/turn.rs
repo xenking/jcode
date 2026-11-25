@@ -1312,8 +1312,8 @@ impl App {
                 // Had tool calls - only display text that came AFTER the last tool
                 // (text before each tool was already committed in ToolUseEnd handler)
                 if !self.streaming.streaming_text.is_empty() {
-                    let content =
-                        self.collapse_reasoning_for_commit(self.streaming.streaming_text.to_string());
+                    let content = self
+                        .collapse_reasoning_for_commit(self.streaming.streaming_text.to_string());
                     if !content.trim().is_empty() {
                         self.push_display_message(DisplayMessage {
                             role: "assistant".to_string(),

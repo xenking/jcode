@@ -550,12 +550,12 @@ mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;
+#[path = "command_palette.rs"]
+mod command_palette;
 #[path = "diagrams.rs"]
 mod diagrams;
 #[path = "expanded_diff.rs"]
 mod expanded_diff;
-#[path = "command_palette.rs"]
-mod command_palette;
 #[path = "inline_picker.rs"]
 mod inline_picker;
 #[path = "onboarding.rs"]

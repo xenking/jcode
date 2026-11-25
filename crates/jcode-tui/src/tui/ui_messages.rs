@@ -132,9 +132,7 @@ fn render_single_line_system_notice(
         Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
-        || msg
-            .content
-            .starts_with(GIT_DIFF_HEADING)
+        || msg.content.starts_with(GIT_DIFF_HEADING)
         || msg.content.starts_with("/git\n")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
@@ -592,10 +590,7 @@ pub(crate) fn render_system_message(
 
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
-    if msg
-        .content
-        .starts_with(GIT_DIFF_HEADING)
-    {
+    if msg.content.starts_with(GIT_DIFF_HEADING) {
         let mut lines = render_git_diff_lines(&msg.content, wrap_width);
         if centered {
             left_pad_lines_for_centered_mode(&mut lines, width);

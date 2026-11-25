@@ -47,4 +47,3 @@ impl super::App {
         self.routing_owns_failover = true;
     }
 }
-

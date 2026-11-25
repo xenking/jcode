@@ -8,9 +8,9 @@ use crate::protocol::{RoutingGateChoice, RoutingGateOption};
 use crossterm::event::KeyCode;
 use jcode_session_types::routing_gate::{GateKey, RoutingGateModel};
 
-pub(crate) use jcode_session_types::routing_gate::GateOutcome as GateKeyOutcome;
 #[cfg(test)]
 pub(crate) use jcode_session_types::routing_gate::GATE_ACK_MINUTES;
+pub(crate) use jcode_session_types::routing_gate::GateOutcome as GateKeyOutcome;
 
 /// The gate's state machine is shared with every other client. This module
 /// maps terminal keys onto it and renders it as an inline view.

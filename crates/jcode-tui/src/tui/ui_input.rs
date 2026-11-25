@@ -74,7 +74,10 @@ fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> 
         selected
             .saturating_add(1)
             .saturating_sub(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .min(suggestion_count.saturating_sub(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT))
+            .min(
+                suggestion_count
+                    .saturating_sub(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT),
+            )
     }
 }
 
@@ -814,8 +817,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
