@@ -38,7 +38,7 @@ pub(super) fn render_kv_cache_widget(data: &InfoWidgetData, inner: Rect) -> Fram
             compact_token_count(sample.missed_tokens)
         );
         let reason_w = max_w.saturating_sub(UnicodeWidthStr::width(head.as_str()) + 2);
-        framed.lines.push(Line::from(vec![
+        framed.push_line(Line::from(vec![
             Span::styled(
                 format_cache_turn_label(sample.turn_number, sample.call_index),
                 Style::default().fg(rgb(140, 180, 255)).bold(),

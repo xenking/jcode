@@ -52,6 +52,16 @@ pub(super) struct SessionMessageSummaryData {
 }
 
 impl SessionMessageSummaryData {
+    pub(super) fn rendered_search_text(&self) -> String {
+        let mut text = String::new();
+        self.search_text.render(&mut text);
+        text
+    }
+
+    pub(super) fn newest_message_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_message_at
+    }
+
     pub(super) fn add_message(&mut self, message: &SessionMessageSummary) {
         if let Some(ts) = message.timestamp {
             self.last_message_at = Some(self.last_message_at.map_or(ts, |cur| cur.max(ts)));

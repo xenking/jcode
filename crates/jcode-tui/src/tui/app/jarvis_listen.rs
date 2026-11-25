@@ -576,25 +576,451 @@ impl AlwaysListening {
     }
 }
 
+/// What the always-on listener needs from the app that hosts it.
+pub(super) trait ListenerHost {
+    fn notice(&mut self, text: String);
+    fn system_message(&mut self, text: String);
+    fn error_message(&mut self, text: String);
+    fn speech_player(&self) -> Option<&jcode_voice::speech::SpeechPlayer>;
+    fn external_voice(&self) -> Option<&(crate::protocol::VoiceActivity, Instant)>;
+    fn voice_input_active(&self) -> bool;
+    fn chat_version(&self) -> u64;
+    fn recent_chat(&self) -> Vec<(String, String)>;
+}
+
+impl ListenerHost for App {
+    fn notice(&mut self, text: String) {
+        self.set_status_notice(text);
+    }
+
+    fn system_message(&mut self, text: String) {
+        self.push_display_message(DisplayMessage::system(text));
+    }
+
+    fn error_message(&mut self, text: String) {
+        self.push_display_message(DisplayMessage::error(text));
+    }
+
+    fn speech_player(&self) -> Option<&jcode_voice::speech::SpeechPlayer> {
+        self.jarvis_speech.as_ref()
+    }
+
+    fn external_voice(&self) -> Option<&(crate::protocol::VoiceActivity, Instant)> {
+        self.external_voice.as_ref()
+    }
+
+    fn voice_input_active(&self) -> bool {
+        self.voice_input.is_some()
+    }
+
+    fn chat_version(&self) -> u64 {
+        self.display_messages_version
+    }
+
+    fn recent_chat(&self) -> Vec<(String, String)> {
+        recent_chat(&self.display_messages)
+    }
+}
+
+/// What one capture pass learned that the rest of the tick depends on.
+struct Tick {
+    changed: bool,
+    paused: bool,
+    speech_busy: bool,
+    external_capture: bool,
+}
+
+impl AlwaysListening {
+    /// Flip the microphone pause, or ask a failed capture to retry. Returns the
+    /// status notice, or the error to show when the toggle failed.
+    fn toggle_pause(&mut self) -> Result<&'static str, String> {
+        if self.failed {
+            return Ok(self.request_retry());
+        }
+        let Some(status) = &self.status else {
+            return Ok("Always-on voice is not ready. Check the startup error.");
+        };
+        let paused = !status.paused();
+        match status.set_paused(paused) {
+            Ok(()) => Ok(if paused {
+                "Jarvis microphone paused"
+            } else {
+                "Jarvis microphone resuming"
+            }),
+            Err(error) => Err(format!("Could not toggle Jarvis microphone: {error}")),
+        }
+    }
+
+    /// Retry a failed start, follow the session, drain capture events and
+    /// publish the indicator.
+    fn pump_capture(&mut self, host: &mut impl ListenerHost, session: Option<String>) -> Tick {
+        let mut changed = false;
+        if self.failed && self.status.as_ref().is_some_and(CaptureStatus::take_retry) {
+            host.notice(self.request_retry().into());
+            changed = true;
+        }
+        if !self.initialized {
+            match self.initialize() {
+                Ok(()) => host.system_message(
+                    "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Recent speech and visible chat are sent to Jev. Only accepted requests and their preceding speech are sent to the agent. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.".into()),
+                Err(error) => {
+                    self.failed = true;
+                    if let Some(status) = &mut self.status {
+                        status.set_failure(error.downcast_ref::<jcode_voice::VoiceError>());
+                    }
+                    host.error_message(format!("Always-on Jarvis did not start: {error}. After resolving the issue, use /voice to retry."));
+                }
+            }
+            changed = true;
+        }
+        if self.session != session {
+            self.detach();
+            self.session = session;
+            #[cfg(unix)]
+            if let Some(status) = &self.status {
+                self.history.attach(status.private_directory());
+            }
+        }
+        let paused = self.status.as_ref().is_some_and(CaptureStatus::paused);
+        let cue_busy = self.playback.cue_player.as_mut().is_some_and(|(child, at)| {
+            if at.elapsed() > Duration::from_secs(3) {
+                stop_cue(child);
+            }
+            matches!(child.try_wait(), Ok(None))
+        });
+        if !cue_busy {
+            self.playback.cue_player = None;
+        }
+        let mut speech_busy = cue_busy
+            || host
+                .speech_player()
+                .is_some_and(|player| player.owns_audio_output());
+        let external_capture = host.external_voice().is_some_and(|(activity, at)| {
+            matches!(activity, crate::protocol::VoiceActivity::Recording { .. })
+                && at.elapsed() <= Duration::from_secs(3)
+        }) || self
+            .status
+            .as_ref()
+            .is_some_and(CaptureStatus::external_dictation_active);
+        let mut indicator_failed = false;
+        let recording = self.recording.take();
+        if self.failed
+            && recording.is_none()
+            && let Some(status) = &mut self.status
+        {
+            // Setup can fail before a worker exists. Still heartbeat the error indicator
+            // so its owner can explicitly retry without opening a microphone on its own.
+            if status.publish(false, "error", 0.0, json!({})).is_err() {
+                indicator_failed = true;
+            }
+        }
+        if let Some(recording) = &recording {
+            if let Some(cmd) = self
+                .history_command
+                .take()
+                .or_else(|| self.history.incoming())
+            {
+                let blocked = speech_busy
+                    || external_capture
+                    || self.failed
+                    || self.playback.partial.is_some()
+                    || host.voice_input_active();
+                let notice = self
+                    .history
+                    .run(recording, &cmd, self.history_request, blocked);
+                host.notice(notice);
+            }
+            speech_busy |= self.history.busy();
+            recording.set_paused(paused || self.failed);
+            // Fn tap (companion): act on what was just heard.
+            if self.status.as_ref().is_some_and(CaptureStatus::take_wake) {
+                if paused || self.failed {
+                    // Say why the tap did nothing instead of dropping it.
+                    host.notice("Jarvis is paused; Fn tap ignored".into());
+                } else if recording.manual_trigger() {
+                    host.notice("Jarvis: sending what it just heard".into());
+                } else {
+                    host.notice("Jarvis hasn't heard anything recently".into());
+                }
+                changed = true;
+            }
+            if !paused && !self.failed && self.chat_version != Some(host.chat_version()) {
+                recording.set_chat_context(host.recent_chat());
+                self.chat_version = Some(host.chat_version());
+            }
+            recording.set_suppressed(speech_busy || external_capture || paused || self.failed);
+            for _ in 0..32 {
+                let Some(event) = recording.try_event() else {
+                    break;
+                };
+                match event {
+                    ContinuousEvent::State(state) => {
+                        self.state = Some(state);
+                    }
+                    ContinuousEvent::Level(_) => {}
+                    ContinuousEvent::Caption { id, text } => {
+                        if !paused && !self.failed && !speech_busy && !external_capture {
+                            self.update_caption(id, &text);
+                            changed = true;
+                        }
+                    }
+                    ContinuousEvent::CaptionScore {
+                        id,
+                        probability,
+                        accepted,
+                    } => {
+                        changed |= self.score_caption(id, probability, accepted);
+                    }
+                    ContinuousEvent::Recovering { error, delay } => {
+                        self.clear_dispatch("capture_recovering");
+                        if self.playback.latest.is_some() {
+                            self.clear_playback();
+                            if let Some(player) = host.speech_player() {
+                                player.cancel();
+                            }
+                        }
+                        host.notice(format!("{error}. Microphone released for {}s. Repeat the request when listening resumes.", delay.as_secs()));
+                        changed = true;
+                    }
+                    ContinuousEvent::Rejected(_) => {} // Never save ambient speech in chat or logs.
+                    ContinuousEvent::Transcript { id, text }
+                        if !paused && !self.failed && !speech_busy && !external_capture =>
+                    {
+                        self.triggered_at = Some(Instant::now());
+                        let outcome = self.dispatch.enqueue(id, text.clone());
+                        if outcome == "queued" {
+                            if let Some(player) = host.speech_player() {
+                                player.cancel();
+                            }
+                            self.history_request = Some(id);
+                            self.playback.trigger(id, &text);
+                        }
+                        self.trace(id, outcome);
+                        changed = true;
+                    }
+                    ContinuousEvent::Transcript { id, .. } => self.trace(id, "suppressed"),
+                    ContinuousEvent::Continuation { id, text }
+                        if !paused && !self.failed && !external_capture =>
+                    {
+                        self.finalize_caption(id, &text);
+                        self.playback.finalize(id, &text);
+                        let outcome = self.dispatch.finalize(id, text);
+                        self.trace(id, outcome);
+                        changed = true;
+                    }
+                    ContinuousEvent::Continuation { id, .. } => self.trace(id, "final_suppressed"),
+                    ContinuousEvent::Error(error) => {
+                        let voice_reply = self.playback.latest.is_some();
+                        if let Some(notice) = self.capture_failure(Some(&error)) {
+                            if voice_reply && let Some(player) = host.speech_player() {
+                                player.cancel();
+                            }
+                            host.error_message(notice);
+                        }
+                        changed = true;
+                    }
+                    ContinuousEvent::Stopped => {
+                        let voice_reply = self.playback.latest.is_some();
+                        if let Some(notice) = self.capture_failure(None) {
+                            if voice_reply && let Some(player) = host.speech_player() {
+                                player.cancel();
+                            }
+                            host.error_message(notice);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            let state = self.indicator_state(paused, speech_busy, Instant::now());
+            // Companion push-to-talk (Fn or Copilot) owns the microphone for
+            // this session while Jarvis's own capture is suppressed. Show its
+            // live level so the Waybar waveform keeps tracking the voice.
+            let push_to_talk_level = external_capture
+                .then(|| match host.external_voice() {
+                    Some((crate::protocol::VoiceActivity::Recording { levels, .. }, _)) => {
+                        Some(levels.last().copied().unwrap_or(0.0))
+                    }
+                    _ => None,
+                })
+                .flatten();
+            let state = if push_to_talk_level.is_some() && !self.failed {
+                "push to talk"
+            } else {
+                state
+            };
+            if let Some(status) = &mut self.status {
+                let capturing = recording.is_capturing() || push_to_talk_level.is_some();
+                if let Err(error) = status.publish(
+                    capturing,
+                    state,
+                    recording
+                        .audio_level()
+                        .max(push_to_talk_level.unwrap_or(0.0)),
+                    json!({"agent_turns_last_hour":self.turns.len(),"audio_history":self.history.info(recording)}),
+                ) {
+                    recording.stop();
+                    self.failed = true;
+                    indicator_failed = true;
+                    host.error_message(format!(
+                        "Capture indicator failed; microphone paused: {error}. Use /voice to retry."
+                    ));
+                    changed = true;
+                }
+            }
+        }
+        if paused || self.failed {
+            changed |= !self.captions.is_empty();
+            self.captions.clear();
+            self.clear_dispatch("paused_or_failed");
+            self.chat_version = None;
+        }
+        self.recording = recording;
+        if indicator_failed {
+            self.status = None;
+        }
+        let sid = self.session.as_deref();
+        self.dispatch
+            .expire(|id| dispatch::trace(sid, id, "expired"));
+        while self
+            .turns
+            .front()
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(3600))
+        {
+            self.turns.pop_front();
+        }
+        Tick {
+            changed,
+            paused,
+            speech_busy,
+            external_capture,
+        }
+    }
+
+    /// The next gated voice request, unless speech, a pause or a failed capture
+    /// holds it back.
+    fn next_request(&mut self, tick: &Tick) -> Option<dispatch::Request> {
+        if tick.speech_busy || tick.paused || self.failed {
+            return None;
+        }
+        self.dispatch.pop()
+    }
+
+    /// The hourly agent-turn cap and the seconds until a turn frees up, when
+    /// `request` would exceed it.
+    fn hourly_cap_wait(&self, request: &dispatch::Request) -> Option<(u32, u64)> {
+        let limit = crate::config::config()
+            .jarvis
+            .listening
+            .max_agent_turns_per_hour;
+        let delay = turn_retry_after(&self.turns, limit, request.continuation)?;
+        self.trace(request.id, "hourly_limit");
+        Some((limit, delay.as_secs_f64().ceil() as u64))
+    }
+
+    /// Record how sending `request` went (`sent_as` is the wire request id).
+    fn finish_dispatch(&mut self, request: &dispatch::Request, sent_as: Option<u64>, interleave: bool) {
+        let stage = if sent_as.is_none() {
+            "send_failed"
+        } else {
+            if !request.continuation {
+                self.turns.push_back(Instant::now());
+            }
+            self.dispatch.sent(request);
+            if interleave {
+                "interleave_sent"
+            } else {
+                "sent"
+            }
+        };
+        crate::logging::info(&format!(
+            "JARVIS_DISPATCH session={} utterance={} stage={} monotonic_ms={} request_id={sent_as:?} queue_ms={} provisional={} final_update={}",
+            self.session.as_deref().unwrap_or("none"),
+            request.id,
+            stage,
+            jcode_voice::timing::monotonic_ms(),
+            request.at.elapsed().as_millis(),
+            request.provisional,
+            request.continuation
+        ));
+    }
+
+    /// Release or start spoken replies and the trigger cue once the microphone
+    /// is quiet. Returns whether the screen changed.
+    fn drive_playback(&mut self, host: &mut impl ListenerHost, tick: &Tick) -> bool {
+        let mut changed = false;
+        let orphaned_partial = self
+            .playback
+            .partial
+            .as_ref()
+            .is_some_and(|(_, _, at)| at.elapsed() >= Duration::from_secs(180));
+        let disabled = tick.paused || self.failed;
+        if (disabled && self.playback.latest.is_some())
+            || tick.external_capture
+            || host.voice_input_active()
+            || orphaned_partial
+        {
+            if let Some(player) = host.speech_player() {
+                player.cancel();
+            }
+            self.clear_playback();
+        } else if !tick.speech_busy && self.playback.partial.is_none() {
+            if self.playback.ding && crate::tui::jarvis::handterm_spoken_cue() {
+                self.playback.prepare_spoken_cue();
+            }
+            let claim = || {
+                if disabled {
+                    return !self
+                        .recording
+                        .as_ref()
+                        .is_some_and(ContinuousRecording::is_capturing);
+                }
+                self.state == Some(VoiceState::Listening)
+                    && self
+                        .recording
+                        .as_ref()
+                        .is_some_and(ContinuousRecording::suppress_if_quiet)
+            };
+            if let Some((text, at)) = self
+                .playback
+                .speech
+                .take()
+                .filter(|(_, at)| at.elapsed() < Duration::from_secs(30))
+            {
+                if let Some(player) = host.speech_player() {
+                    player.cancel(); // replace any synthesized but not yet authorized reply
+                    self.playback.ding = false;
+                    let trace = self.playback_trace();
+                    trace.mark("enqueue", at.elapsed().as_millis());
+                    if let Err(error) = player.enqueue_gated(&text, trace) {
+                        host.error_message(error.to_string());
+                        changed = true;
+                    }
+                }
+            } else if host
+                .speech_player()
+                .is_some_and(|p| p.authorize_ready(claim))
+            {
+                self.playback_trace().mark("quiet_authorized", 0);
+            } else if self.playback.ding
+                && host.speech_player().is_none_or(|p| p.is_idle())
+                && claim()
+            {
+                self.playback.ding = false;
+                self.playback.cue_player = play_trigger_sound().map(|c| {
+                    self.playback_trace().mark("ding_started", 0);
+                    (c, Instant::now())
+                });
+            }
+        }
+        changed
+    }
+}
+
 impl App {
     pub(super) fn toggle_always_listening(&mut self) {
-        if self.jarvis_listener.failed {
-            let notice = self.jarvis_listener.request_retry();
-            self.set_status_notice(notice);
-        } else if let Some(status) = &self.jarvis_listener.status {
-            let paused = !status.paused();
-            match status.set_paused(paused) {
-                Ok(()) => self.set_status_notice(if paused {
-                    "Jarvis microphone paused"
-                } else {
-                    "Jarvis microphone resuming"
-                }),
-                Err(error) => self.push_display_message(DisplayMessage::error(format!(
-                    "Could not toggle Jarvis microphone: {error}"
-                ))),
-            }
-        } else {
-            self.set_status_notice("Always-on voice is not ready. Check the startup error.");
+        match self.jarvis_listener.toggle_pause() {
+            Ok(notice) => self.set_status_notice(notice),
+            Err(message) => self.push_display_message(DisplayMessage::error(message)),
         }
     }
 
@@ -610,280 +1036,16 @@ impl App {
             return false;
         }
         let mut listener = std::mem::take(&mut self.jarvis_listener);
-        let mut changed = false;
-        if listener.failed
-            && listener
-                .status
-                .as_ref()
-                .is_some_and(CaptureStatus::take_retry)
-        {
-            self.set_status_notice(listener.request_retry());
-            changed = true;
-        }
-        if !listener.initialized {
-            match listener.initialize() {
-                Ok(()) => self.push_display_message(DisplayMessage::system(
-                    "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Recent speech and visible chat are sent to Jev. Only accepted requests and their preceding speech are sent to the agent. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.")),
-                Err(error) => {
-                    listener.failed = true;
-                    if let Some(status) = &mut listener.status { status.set_failure(error.downcast_ref::<jcode_voice::VoiceError>()); }
-                    self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis did not start: {error}. After resolving the issue, use /voice to retry.")));
-                }
-            }
-            changed = true;
-        }
         let session = self.remote_session_id.clone();
-        if listener.session != session {
-            listener.detach();
-            listener.session = session;
-            #[cfg(unix)]
-            if let Some(status) = &listener.status {
-                listener.history.attach(status.private_directory());
-            }
-        }
-        let paused = listener.status.as_ref().is_some_and(CaptureStatus::paused);
-        let cue_busy = listener
-            .playback
-            .cue_player
-            .as_mut()
-            .is_some_and(|(child, at)| {
-                if at.elapsed() > Duration::from_secs(3) {
-                    stop_cue(child);
-                }
-                matches!(child.try_wait(), Ok(None))
-            });
-        if !cue_busy {
-            listener.playback.cue_player = None;
-        }
-        let mut speech_busy = cue_busy
-            || self
-                .jarvis_speech
-                .as_ref()
-                .is_some_and(|player| player.owns_audio_output());
-        let external_capture = self.external_voice.as_ref().is_some_and(|(activity, at)| {
-            matches!(activity, crate::protocol::VoiceActivity::Recording { .. })
-                && at.elapsed() <= Duration::from_secs(3)
-        }) || listener
-            .status
-            .as_ref()
-            .is_some_and(CaptureStatus::external_dictation_active);
-        let mut indicator_failed = false;
-        let recording = listener.recording.take();
-        if listener.failed
-            && recording.is_none()
-            && let Some(status) = &mut listener.status
-        {
-            // Setup can fail before a worker exists. Still heartbeat the error indicator
-            // so its owner can explicitly retry without opening a microphone on its own.
-            if status.publish(false, "error", 0.0, json!({})).is_err() {
-                indicator_failed = true;
-            }
-        }
-        if let Some(recording) = &recording {
-            if let Some(cmd) = listener
-                .history_command
-                .take()
-                .or_else(|| listener.history.incoming())
-            {
-                let blocked = speech_busy
-                    || external_capture
-                    || listener.failed
-                    || listener.playback.partial.is_some()
-                    || self.voice_input.is_some();
-                let notice =
-                    listener
-                        .history
-                        .command(recording, &cmd, listener.history_request, blocked);
-                if let Some(caption) = listener.history.take_caption() {
-                    self.set_status_notice(format!("Replaying local audio: {caption}"));
-                } else {
-                    self.set_status_notice(notice);
-                }
-            }
-            speech_busy |= listener.history.busy();
-            recording.set_paused(paused || listener.failed);
-            // Fn tap (companion): act on what was just heard.
-            if listener
-                .status
-                .as_ref()
-                .is_some_and(CaptureStatus::take_wake)
-            {
-                if paused || listener.failed {
-                    // Say why the tap did nothing instead of dropping it.
-                    self.set_status_notice("Jarvis is paused; Fn tap ignored");
-                } else if recording.manual_trigger() {
-                    self.set_status_notice("Jarvis: sending what it just heard");
-                } else {
-                    self.set_status_notice("Jarvis hasn't heard anything recently");
-                }
-                changed = true;
-            }
-            if !paused
-                && !listener.failed
-                && listener.chat_version != Some(self.display_messages_version)
-            {
-                recording.set_chat_context(recent_chat(&self.display_messages));
-                listener.chat_version = Some(self.display_messages_version);
-            }
-            recording.set_suppressed(speech_busy || external_capture || paused || listener.failed);
-            for _ in 0..32 {
-                let Some(event) = recording.try_event() else {
-                    break;
-                };
-                match event {
-                    ContinuousEvent::State(state) => {
-                        listener.state = Some(state);
-                    }
-                    ContinuousEvent::Level(_) => {}
-                    ContinuousEvent::Caption { id, text } => {
-                        if !paused && !listener.failed && !speech_busy && !external_capture {
-                            listener.update_caption(id, &text);
-                            changed = true;
-                        }
-                    }
-                    ContinuousEvent::CaptionScore {
-                        id,
-                        probability,
-                        accepted,
-                    } => {
-                        changed |= listener.score_caption(id, probability, accepted);
-                    }
-                    ContinuousEvent::Recovering { error, delay } => {
-                        listener.clear_dispatch("capture_recovering");
-                        if listener.playback.latest.is_some() {
-                            listener.clear_playback();
-                            if let Some(player) = &self.jarvis_speech {
-                                player.cancel();
-                            }
-                        }
-                        self.set_status_notice(format!("{error}. Microphone released for {}s. Repeat the request when listening resumes.", delay.as_secs()));
-                        changed = true;
-                    }
-                    ContinuousEvent::Rejected(_) => {} // Never save ambient speech in chat or logs.
-                    ContinuousEvent::Transcript { id, text }
-                        if !paused && !listener.failed && !speech_busy && !external_capture =>
-                    {
-                        listener.triggered_at = Some(Instant::now());
-                        let outcome = listener.dispatch.enqueue(id, text.clone());
-                        if outcome == "queued" {
-                            if let Some(player) = &self.jarvis_speech {
-                                player.cancel();
-                            }
-                            listener.history_request = Some(id);
-                            listener.playback.trigger(id, &text);
-                        }
-                        listener.trace(id, outcome);
-                        changed = true;
-                    }
-                    ContinuousEvent::Transcript { id, .. } => listener.trace(id, "suppressed"),
-                    ContinuousEvent::Continuation { id, text }
-                        if !paused && !listener.failed && !external_capture =>
-                    {
-                        listener.finalize_caption(id, &text);
-                        listener.playback.finalize(id, &text);
-                        let outcome = listener.dispatch.finalize(id, text);
-                        listener.trace(id, outcome);
-                        changed = true;
-                    }
-                    ContinuousEvent::Continuation { id, .. } => {
-                        listener.trace(id, "final_suppressed")
-                    }
-                    ContinuousEvent::Error(error) => {
-                        let voice_reply = listener.playback.latest.is_some();
-                        if let Some(notice) = listener.capture_failure(Some(&error)) {
-                            if voice_reply && let Some(player) = &self.jarvis_speech {
-                                player.cancel();
-                            }
-                            self.push_display_message(DisplayMessage::error(notice));
-                        }
-                        changed = true;
-                    }
-                    ContinuousEvent::Stopped => {
-                        let voice_reply = listener.playback.latest.is_some();
-                        if let Some(notice) = listener.capture_failure(None) {
-                            if voice_reply && let Some(player) = &self.jarvis_speech {
-                                player.cancel();
-                            }
-                            self.push_display_message(DisplayMessage::error(notice));
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            let state = listener.indicator_state(paused, speech_busy, Instant::now());
-            // Companion push-to-talk (Fn or Copilot) owns the microphone for
-            // this session while Jarvis's own capture is suppressed. Show its
-            // live level so the Waybar waveform keeps tracking the voice.
-            let push_to_talk_level = external_capture
-                .then(|| match self.external_voice.as_ref() {
-                    Some((crate::protocol::VoiceActivity::Recording { levels, .. }, _)) => {
-                        Some(levels.last().copied().unwrap_or(0.0))
-                    }
-                    _ => None,
-                })
-                .flatten();
-            let state = if push_to_talk_level.is_some() && !listener.failed {
-                "push to talk"
-            } else {
-                state
-            };
-            if let Some(status) = &mut listener.status {
-                let capturing = recording.is_capturing() || push_to_talk_level.is_some();
-                if let Err(error) = status.publish(
-                    capturing,
-                    state,
-                    recording
-                        .audio_level()
-                        .max(push_to_talk_level.unwrap_or(0.0)),
-                    json!({"agent_turns_last_hour":listener.turns.len(),"audio_history":listener.history.info(recording)}),
-                ) {
-                    recording.stop();
-                    listener.failed = true;
-                    indicator_failed = true;
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Capture indicator failed; microphone paused: {error}. Use /voice to retry."
-                    )));
-                    changed = true;
-                }
-            }
-        }
-        if paused || listener.failed {
-            changed |= !listener.captions.is_empty();
-            listener.captions.clear();
-            listener.clear_dispatch("paused_or_failed");
-            listener.chat_version = None;
-        }
-        listener.recording = recording;
-        if indicator_failed {
-            listener.status = None;
-        }
-        let sid = listener.session.as_deref();
-        listener
-            .dispatch
-            .expire(|id| dispatch::trace(sid, id, "expired"));
-        while listener
-            .turns
-            .front()
-            .is_some_and(|at| at.elapsed() >= Duration::from_secs(3600))
-        {
-            listener.turns.pop_front();
-        }
+        let tick = listener.pump_capture(self, session);
+        let mut changed = tick.changed;
         if self.pending_login.is_none()
             && !self.cloud_handoff_blocks_work()
-            && !speech_busy
-            && !paused
-            && !listener.failed
-            && let Some(req) = listener.dispatch.pop()
+            && let Some(req) = listener.next_request(&tick)
         {
-            let limit = crate::config::config()
-                .jarvis
-                .listening
-                .max_agent_turns_per_hour;
-            if let Some(delay) = turn_retry_after(&listener.turns, limit, req.continuation) {
-                listener.trace(req.id, "hourly_limit");
+            if let Some((limit, wait_secs)) = listener.hourly_cap_wait(&req) {
                 self.set_status_notice(format!(
-                    "Jarvis voice request not sent: {limit}-turn hourly cap reached. Try again in {}s.",
-                    delay.as_secs_f64().ceil() as u64
+                    "Jarvis voice request not sent: {limit}-turn hourly cap reached. Try again in {wait_secs}s."
                 ));
             } else {
                 let interleave = self.is_processing;
@@ -902,106 +1064,20 @@ impl App {
                         }),
                     other => other,
                 };
-                let (request_id, stage) = match result {
+                let sent_as = match result {
                     Err(error) => {
                         self.push_display_message(DisplayMessage::error(format!(
                             "Voice request was not sent: {error}"
                         )));
-                        (None, "send_failed")
+                        None
                     }
-                    Ok(id) => {
-                        if !req.continuation {
-                            listener.turns.push_back(Instant::now());
-                        }
-                        listener.dispatch.sent(&req);
-                        (
-                            Some(id),
-                            if interleave {
-                                "interleave_sent"
-                            } else {
-                                "sent"
-                            },
-                        )
-                    }
+                    Ok(id) => Some(id),
                 };
-                crate::logging::info(&format!(
-                    "JARVIS_DISPATCH session={} utterance={} stage={} monotonic_ms={} request_id={request_id:?} queue_ms={} provisional={} final_update={}",
-                    listener.session.as_deref().unwrap_or("none"),
-                    req.id,
-                    stage,
-                    jcode_voice::timing::monotonic_ms(),
-                    req.at.elapsed().as_millis(),
-                    req.provisional,
-                    req.continuation
-                ));
+                listener.finish_dispatch(&req, sent_as, interleave);
             }
             changed = true;
         }
-        let orphaned_partial = listener
-            .playback
-            .partial
-            .as_ref()
-            .is_some_and(|(_, _, at)| at.elapsed() >= Duration::from_secs(180));
-        let disabled = paused || listener.failed;
-        if (disabled && listener.playback.latest.is_some())
-            || external_capture
-            || self.voice_input.is_some()
-            || orphaned_partial
-        {
-            if let Some(player) = &self.jarvis_speech {
-                player.cancel();
-            }
-            listener.clear_playback();
-        } else if !speech_busy && listener.playback.partial.is_none() {
-            if listener.playback.ding && crate::tui::jarvis::handterm_spoken_cue() {
-                listener.playback.prepare_spoken_cue();
-            }
-            let claim = || {
-                if disabled {
-                    return !listener
-                        .recording
-                        .as_ref()
-                        .is_some_and(ContinuousRecording::is_capturing);
-                }
-                listener.state == Some(VoiceState::Listening)
-                    && listener
-                        .recording
-                        .as_ref()
-                        .is_some_and(ContinuousRecording::suppress_if_quiet)
-            };
-            if let Some((text, at)) = listener
-                .playback
-                .speech
-                .take()
-                .filter(|(_, at)| at.elapsed() < Duration::from_secs(30))
-            {
-                if let Some(player) = &self.jarvis_speech {
-                    player.cancel(); // replace any synthesized but not yet authorized reply
-                    listener.playback.ding = false;
-                    let trace = listener.playback_trace();
-                    trace.mark("enqueue", at.elapsed().as_millis());
-                    if let Err(error) = player.enqueue_gated(&text, trace) {
-                        self.push_display_message(DisplayMessage::error(error.to_string()));
-                        changed = true;
-                    }
-                }
-            } else if self
-                .jarvis_speech
-                .as_ref()
-                .is_some_and(|p| p.authorize_ready(claim))
-            {
-                listener.playback_trace().mark("quiet_authorized", 0);
-            } else if listener.playback.ding
-                && self.jarvis_speech.as_ref().is_none_or(|p| p.is_idle())
-                && claim()
-            {
-                listener.playback.ding = false;
-                listener.playback.cue_player = play_trigger_sound().map(|c| {
-                    listener.playback_trace().mark("ding_started", 0);
-                    (c, Instant::now())
-                });
-            }
-        }
+        changed |= listener.drive_playback(self, &tick);
         self.jarvis_listener = listener;
         changed
     }

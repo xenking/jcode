@@ -141,12 +141,11 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
 /// Masked account email on the bottom-right border. The top border already
 /// holds the provider title, and the usual ~29-column widget cannot fit both;
 /// the lone footer slot truncates with an ellipsis instead of wrapping.
-fn with_account_hint(mut framed: Framed, info: &UsageInfo) -> Framed {
+fn with_account_hint(framed: Framed, info: &UsageInfo) -> Framed {
     match info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
-        Some(hint) => {
-            framed.footer = None;
-            framed.footer_right(frame::dim(hint.to_string()))
-        }
+        Some(hint) => framed
+            .without_footer()
+            .footer_right(frame::dim(hint.to_string())),
         None => framed,
     }
 }

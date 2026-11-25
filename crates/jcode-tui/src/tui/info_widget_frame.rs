@@ -40,11 +40,11 @@ pub(crate) fn more(hidden: usize) -> Span<'static> {
 /// A widget's rendered body plus the text it wants on its border.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Framed {
-    pub title: Option<Line<'static>>,
-    pub title_right: Option<Line<'static>>,
-    pub footer: Option<Line<'static>>,
-    pub footer_right: Option<Line<'static>>,
-    pub lines: Vec<Line<'static>>,
+    pub(super) title: Option<Line<'static>>,
+    pub(super) title_right: Option<Line<'static>>,
+    pub(super) footer: Option<Line<'static>>,
+    pub(super) footer_right: Option<Line<'static>>,
+    pub(super) lines: Vec<Line<'static>>,
 }
 
 impl Framed {
@@ -53,6 +53,24 @@ impl Framed {
             lines,
             ..Default::default()
         }
+    }
+
+    /// Body rows, without the border text.
+    pub(crate) fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    pub(crate) fn into_lines(self) -> Vec<Line<'static>> {
+        self.lines
+    }
+
+    pub(crate) fn push_line(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    pub(crate) fn without_footer(mut self) -> Self {
+        self.footer = None;
+        self
     }
 
     pub(crate) fn title(mut self, line: impl Into<Line<'static>>) -> Self {

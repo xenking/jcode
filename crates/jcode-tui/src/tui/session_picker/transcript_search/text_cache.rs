@@ -83,6 +83,15 @@ struct Cache {
     clock: u64,
 }
 impl Cache {
+    fn contains(&self, path: &Path) -> bool {
+        self.entries.contains_key(path)
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     fn remove(&mut self, path: &Path) {
         if let Some(entry) = self.entries.remove(path) {
             self.bytes -= entry.bytes;
@@ -155,7 +164,7 @@ fn cache() -> &'static Mutex<Cache> {
 pub(super) fn is_cached_hint(path: &Path) -> bool {
     cache()
         .try_lock()
-        .is_ok_and(|cache| cache.entries.contains_key(path))
+        .is_ok_and(|cache| cache.contains(path))
 }
 
 /// Exact residency for tests. [`is_cached_hint`] answers `false` whenever any
@@ -164,7 +173,7 @@ pub(super) fn is_cached_hint(path: &Path) -> bool {
 #[cfg(test)]
 pub(super) fn is_resident(path: &Path) -> bool {
     preview_result(cache().lock(), "text cache lock")
-        .is_some_and(|cache| cache.entries.contains_key(path))
+        .is_some_and(|cache| cache.contains(path))
 }
 
 /// Validate a resident entry on the search worker without opening a transcript.
@@ -611,8 +620,8 @@ mod tests {
             1,
             Boundary::default(),
         );
-        assert!(cache.entries.contains_key(Path::new("0")));
-        assert!(!cache.entries.contains_key(Path::new("1")));
+        assert!(cache.contains(Path::new("0")));
+        assert!(!cache.contains(Path::new("1")));
         cache.insert(
             Path::new("new"),
             fp.clone(),
@@ -620,7 +629,7 @@ mod tests {
             MAX_TOTAL,
             Boundary::default(),
         );
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entry_count(), 1);
         assert_eq!(cache.bytes, MAX_TOTAL);
         let cancel = AtomicBool::new(false);
         let input = format!(

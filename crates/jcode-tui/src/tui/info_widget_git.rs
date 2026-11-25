@@ -200,7 +200,7 @@ pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Frame
     }
     if let Some(legend) = changes_legend(data, inner.height) {
         if hidden == 0 {
-            framed.footer = None;
+            framed = framed.without_footer();
         }
         framed = framed.footer_right(legend);
     }

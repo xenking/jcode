@@ -155,6 +155,14 @@ pub(super) struct Entry {
 const INDEX_PROBE_BYTES: usize = 64;
 
 impl Entry {
+    pub(super) fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    pub(super) fn search_index(&self) -> &str {
+        &self.search_index
+    }
+
     fn new(session: &SessionInfo) -> Self {
         Self {
             id: session.id.clone(),
@@ -264,7 +272,7 @@ fn build_candidates(
     for entry in corpus {
         let missing_tokens: Vec<_> = tokens
             .iter()
-            .filter(|token| defer_metadata || !entry.search_index.contains(token.as_str()))
+            .filter(|token| defer_metadata || !entry.search_index().contains(token.as_str()))
             .cloned()
             .collect();
         // Literal metadata matches still go to the worker, which upgrades
@@ -309,7 +317,7 @@ fn prioritize_candidates(
         if cancel.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
+        let mut rank = literal_metadata_rank(candidate.search_index(), tokens)
             .with_exact_field(candidate.exact_field);
         rank.opening_prompt = phrase.map_or(0, |phrase| {
             phrase
@@ -322,7 +330,7 @@ fn prioritize_candidates(
             .iter()
             .filter(|token| intent.contains(token.as_str()))
             .count();
-        let prior = source::metadata_sources(&[&intent], &candidate.search_index, tokens);
+        let prior = source::metadata_sources(&[&intent], candidate.search_index(), tokens);
         drop(intent);
         let mut candidate = candidate;
         candidate.prior = prior;
@@ -357,6 +365,10 @@ struct PhraseQuery {
 }
 
 impl PhraseQuery {
+    fn word_count(&self) -> usize {
+        self.words.len()
+    }
+
     fn new(query: &str) -> Option<Self> {
         let words = phrase_words(query, 256);
         if !(2..=64).contains(&words.len()) {
@@ -440,7 +452,7 @@ fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &Ato
         cancel,
     };
     for path in paths {
-        if cancel.load(Ordering::Relaxed) || sink.best == phrase.words.len() {
+        if cancel.load(Ordering::Relaxed) || sink.best == phrase.word_count() {
             break;
         }
         if let Some(segments) = text_cache::segments(path, cancel) {
@@ -450,7 +462,7 @@ fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &Ato
                 }
                 if source == Source::User {
                     sink.best = sink.best.max(phrase.rank(text));
-                    if sink.best == phrase.words.len() {
+                    if sink.best == phrase.word_count() {
                         return sink.best;
                     }
                 }
@@ -475,7 +487,7 @@ impl source::Sink for PhraseSink<'_> {
         }
         if source == Source::User {
             self.best = self.best.max(self.phrase.rank(text));
-            if self.best == self.phrase.words.len() {
+            if self.best == self.phrase.word_count() {
                 return Err("search complete");
             }
         }
@@ -734,6 +746,38 @@ impl<'a> Scan<'a> {
         self.found.iter().all(|found| *found)
     }
 
+    /// Origin of the first token, the only one a single-token scan tracks.
+    fn first_source(&self) -> Option<Source> {
+        self.sources[0]
+    }
+
+    fn score(&self) -> i64 {
+        self.score
+    }
+
+    #[cfg(test)]
+    fn found(&self) -> &[bool] {
+        &self.found
+    }
+
+    /// Fold cached per-token matches into the scan, keeping the first score
+    /// and the strongest origin seen for each token.
+    fn apply_token_matches(&mut self, matches: Vec<Option<token_cache::Hit>>) {
+        for ((found, best), hit) in self
+            .found
+            .iter_mut()
+            .zip(self.sources.iter_mut())
+            .zip(matches)
+        {
+            let Some(hit) = hit else { continue };
+            if !*found {
+                *found = true;
+                self.score += hit.score;
+            }
+            *best = source::stronger(*best, Some(hit.source));
+        }
+    }
+
     fn evidence(&self) -> Option<Evidence> {
         self.all_found().then(|| Evidence {
             score: self.score,
@@ -918,22 +962,6 @@ fn scan_paths_with_scores(
     scan.evidence()
 }
 
-fn apply_token_matches(scan: &mut Scan<'_>, matches: Vec<Option<token_cache::Hit>>) {
-    for ((found, best), hit) in scan
-        .found
-        .iter_mut()
-        .zip(scan.sources.iter_mut())
-        .zip(matches)
-    {
-        let Some(hit) = hit else { continue };
-        if !*found {
-            *found = true;
-            scan.score += hit.score;
-        }
-        *best = source::stronger(*best, Some(hit.source));
-    }
-}
-
 /// Outer None means at least one file needs cold work. Inner None is a
 /// definitive resident nonmatch. Literal evidence can succeed on a subset,
 /// but fuzzy scores require all earlier paths to preserve first-match scoring.
@@ -977,7 +1005,7 @@ fn cached_paths_scan_with_scores(
         if let Some(matches) =
             token_cache::matches_cached_with_scores(path, tokens, cancel, fuzzy, scan.scores)
         {
-            apply_token_matches(&mut scan, matches);
+            scan.apply_token_matches(matches);
             if scan.complete() && (!fuzzy || all_resident) {
                 return Some(scan.evidence());
             }
@@ -1000,7 +1028,7 @@ fn scan_file(path: &Path, scan: &mut Scan<'_>) {
     if let Some(matches) =
         token_cache::matches_with_scores(path, scan.tokens, scan.cancel, scan.fuzzy, scan.scores)
     {
-        apply_token_matches(scan, matches);
+        scan.apply_token_matches(matches);
         return;
     }
     scan_file_streaming(path, scan);

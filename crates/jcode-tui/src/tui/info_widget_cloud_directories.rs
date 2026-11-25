@@ -37,7 +37,7 @@ pub(super) fn render_cloud_directories(data: &InfoWidgetData, inner: Rect) -> Fr
             CloudProbeState::Loading => "Loading directories…",
             _ => "Directories unavailable",
         };
-        card.lines.push(Line::from(frame::dim(fit(message, width))));
+        card.push_line(Line::from(frame::dim(fit(message, width))));
         return card.footer(frame::dim("no snapshot"));
     };
     let current_path = snapshot.current_path.as_deref().unwrap_or(&info.remote_dir);
@@ -84,22 +84,21 @@ pub(super) fn render_cloud_directories(data: &InfoWidgetData, inner: Rect) -> Fr
             Style::default().fg(crate::tui::color_support::rgb(170, 170, 185)),
         ))
     };
-    card.lines.push(if path_width > 0 {
+    card.push_line(if path_width > 0 {
         table_row("Directory", "Agents", "Busy")
     } else {
         Line::from(frame::dim(fit("Agents/Busy", width)))
     });
     for entry in entries.iter().take(MAX_ENTRIES) {
         let marker = if entry.path == current_path { ">" } else { " " };
-        card.lines.push(table_row(
+        card.push_line(table_row(
             &format!("{marker} {}", entry.path),
             &entry.agents.to_string(),
             &entry.busy.to_string(),
         ));
     }
     if entries.is_empty() {
-        card.lines
-            .push(Line::from(frame::dim(fit("No directories", width))));
+        card.push_line(Line::from(frame::dim(fit("No directories", width))));
     }
     let hidden = entries.len().saturating_sub(shown);
     let overflow = match (hidden, snapshot.truncated) {

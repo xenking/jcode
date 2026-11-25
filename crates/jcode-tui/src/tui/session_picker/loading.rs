@@ -825,9 +825,7 @@ fn parse_jcode_session_info(
         session.working_dir.as_deref(),
         session.save_label.as_deref(),
         &{
-            let mut text = String::new();
-            session.messages.search_text.render(&mut text);
-            text
+            session.messages.rendered_search_text()
         },
     );
     if let Some(intention) = todo_summary.user_intention.as_deref() {
@@ -849,7 +847,7 @@ fn parse_jcode_session_info(
         // whose messages predate per-message timestamps (or empty sessions).
         last_message_time: session
             .messages
-            .last_message_at
+            .newest_message_at()
             .unwrap_or(session.updated_at),
         last_active_at: session.last_active_at,
         working_dir: session.working_dir,

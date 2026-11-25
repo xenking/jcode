@@ -436,7 +436,7 @@ fn scan_token_with_scores(
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        if scan.sources[0] == Some(Source::User) {
+        if scan.first_source() == Some(Source::User) {
             break;
         }
         let scanned = scan.normalized_text::<serde_json::Error>(segment, source);
@@ -454,8 +454,8 @@ fn scan_token_with_scores(
     if cancel.load(Ordering::Relaxed) {
         None
     } else {
-        Some(scan.sources[0].map(|source| Hit {
-            score: scan.score,
+        Some(scan.first_source().map(|source| Hit {
+            score: scan.score(),
             source,
         }))
     }
@@ -555,11 +555,11 @@ mod tests {
         );
         assert_eq!(
             result.iter().flatten().map(|hit| hit.score).sum::<i64>(),
-            scan.score
+            scan.score()
         );
         assert_eq!(
             result.iter().map(Option::is_some).collect::<Vec<_>>(),
-            scan.found
+            scan.found()
         );
         let literal = resolve(&cache, &text, &query, &cancel, false, scan_token).unwrap();
         assert!(literal.iter().flatten().all(|hit| hit.score == 0));

@@ -74,7 +74,7 @@ pub(crate) fn calculate_widget_height(
             if framed.is_empty() {
                 return 0;
             }
-            framed.lines.len() as u16
+            framed.lines().len() as u16
         }
     };
 

@@ -696,7 +696,7 @@ fn contextual_subgraph_prefers_memory_hub() {
         ..Default::default()
     };
 
-    let subgraph = super::select_contextual_subgraph(&info, 3, 6).expect("subgraph");
+    let subgraph = super::subgraph_tests::select_contextual_subgraph(&info, 3, 6).expect("subgraph");
     assert_eq!(subgraph.nodes.len(), 3);
     assert!(
         subgraph

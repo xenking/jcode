@@ -169,7 +169,7 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
         let mut height = 1u16;
         if info.should_show_activity() {
             height += 1 + 4;
-            if let Some(activity) = &info.activity
+            if let Some(activity) = info.activity()
                 && activity
                     .recent_events
                     .iter()

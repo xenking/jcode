@@ -22,7 +22,7 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
     let memory_total = data.memory_info.as_ref().map(|m| m.total_count);
     let memory_project = data.memory_info.as_ref().map(|m| m.project_count);
     let memory_global = data.memory_info.as_ref().map(|m| m.global_count);
-    let memory_activity = data.memory_info.as_ref().map(|m| m.activity.is_some());
+    let memory_activity = data.memory_info.as_ref().map(|m| m.activity().is_some());
 
     let swarm_session_count = data.swarm_info.as_ref().map(|s| s.session_count);
     let swarm_member_count = data.swarm_info.as_ref().map(|s| s.members.len());

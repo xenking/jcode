@@ -24,7 +24,7 @@ impl StageTimer {
         }
     }
 
-    pub(super) fn outcome(&mut self, outcome: &'static str) {
+    pub(super) fn resolve(&mut self, outcome: &'static str) {
         self.outcome = outcome;
     }
 }
@@ -51,7 +51,7 @@ fn stage_result<T, E>(operation: impl FnOnce() -> Result<T, E>, stage: &'static 
     let mut timer = StageTimer::new(stage);
     match operation() {
         Ok(value) => {
-            timer.outcome("success");
+            timer.resolve("success");
             Some(value)
         }
         Err(_) => None,
@@ -74,7 +74,7 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
         || host.is_empty()
         || host.starts_with('-')
     {
-        timer.outcome("skipped_invalid_target");
+        timer.resolve("skipped_invalid_target");
         return None;
     }
     let epoch = crate::storage::read_session_lease(session_id)
@@ -85,7 +85,7 @@ pub(super) fn load(session_id: &str, host: &str) -> Option<CloudSnapshot> {
     let host = host.to_owned();
     let result = load_cached_or_fetch(session_id, path, move || fetch_bytes(&id, &host));
     if result.is_some() {
-        timer.outcome("success");
+        timer.resolve("success");
     }
     result
 }
@@ -103,9 +103,9 @@ fn load_cached_or_fetch(
         && let Some(bytes) = cache::read(path)
         && let Some(snapshot) = parse_for_session(&bytes, session_id)
     {
-        timer.outcome("hit");
+        timer.resolve("hit");
         let mut refresh_timer = StageTimer::new("refresh_schedule");
-        refresh_timer.outcome("skipped_fresh_or_in_flight");
+        refresh_timer.resolve("skipped_fresh_or_in_flight");
         if !cache::fresh(path)
             && let Some(guard) = cache::begin_refresh(path)
         {
@@ -117,11 +117,11 @@ fn load_cached_or_fetch(
                     let _guard = guard;
                     fetch_and_cache(&id, Some(&path), fetch);
                 });
-            refresh_timer.outcome(if refresh.is_ok() { "success" } else { "error" });
+            refresh_timer.resolve(if refresh.is_ok() { "success" } else { "error" });
         }
         return Some(snapshot);
     }
-    timer.outcome("miss");
+    timer.resolve("miss");
     drop(timer);
     fetch_and_cache(session_id, path.as_deref(), fetch)
 }
@@ -134,20 +134,20 @@ fn fetch_and_cache(
     let mut timer = StageTimer::new("refresh");
     let mut network = StageTimer::new("fetch");
     let bytes = fetch()?;
-    network.outcome("success");
+    network.resolve("success");
     drop(network);
     // Validate the full snapshot + journal before replacing the last good copy.
     let snapshot = parse_for_session(&bytes, session_id)?;
     if let Some(path) = path {
         if cache::write(path, &bytes).is_err() {
-            timer.outcome("success_cache_unavailable");
+            timer.resolve("success_cache_unavailable");
             return Some(snapshot);
         }
     } else {
         let mut skipped = StageTimer::new("cache_write");
-        skipped.outcome("skipped_unavailable");
+        skipped.resolve("skipped_unavailable");
     }
-    timer.outcome("success");
+    timer.resolve("success");
     Some(snapshot)
 }
 
@@ -155,10 +155,10 @@ fn parse_for_session(bytes: &[u8], session_id: &str) -> Option<CloudSnapshot> {
     let mut timer = StageTimer::new("parse");
     let snapshot = parse_preview(bytes)?;
     if snapshot.0.id != session_id {
-        timer.outcome("identity_mismatch");
+        timer.resolve("identity_mismatch");
         return None;
     }
-    timer.outcome("success");
+    timer.resolve("success");
     Some(snapshot)
 }
 
@@ -186,10 +186,10 @@ fn fetch_bytes(session_id: &str, host: &str) -> Option<Vec<u8>> {
         crate::tui::cloud_git::WorkspaceOperation::Preview,
     ))?;
     if !status.success() {
-        timer.outcome("exit_failure");
+        timer.resolve("exit_failure");
         return None;
     }
-    timer.outcome("success");
+    timer.resolve("success");
     Some(bytes)
 }
 
@@ -208,12 +208,12 @@ fn parse_preview(
         let mut timer = StageTimer::new("telemetry_parse");
         let bytes = &bytes[split + 1..];
         if bytes.is_empty() {
-            timer.outcome("skipped_absent");
+            timer.resolve("skipped_absent");
             None
         } else {
             let result = stage_result(|| serde_json::from_slice(bytes), "telemetry_decode");
             if result.is_some() {
-                timer.outcome("success");
+                timer.resolve("success");
             }
             result
         }

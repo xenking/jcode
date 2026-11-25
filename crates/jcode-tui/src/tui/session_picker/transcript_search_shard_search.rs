@@ -22,18 +22,18 @@ fn search_shard(
     let phrase = PhraseQuery::new(query);
     // Sessions whose later user prompts may contain the query
     // as a retyped phrase, checked after cheaper evidence.
-    let short = phrase.as_ref().is_some_and(|q| q.words.len() < 4);
+    let short = phrase.as_ref().is_some_and(|q| q.word_count() < 4);
     let mut phrase_jobs = Vec::new();
     for (mut candidate, priority) in candidates {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        if !short && phrase.is_some() && !candidate.paths.is_empty() {
-            phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), priority));
+        if !short && phrase.is_some() && !candidate.paths().is_empty() {
+            phrase_jobs.push((candidate.id.clone(), candidate.paths().to_vec(), priority));
         }
         if priority.opening_prompt > 0 {
             let mut rank =
-                fuzzy_metadata_rank_with_scores(&candidate.search_index, tokens, &mut scores);
+                fuzzy_metadata_rank_with_scores(candidate.search_index(), tokens, &mut scores);
             rank.opening_prompt = priority.opening_prompt;
             rank.intent_terms = priority.intent_terms;
             rank.source_weight = priority.source_weight;
@@ -43,9 +43,9 @@ fn search_shard(
         }
         candidate
             .missing_tokens
-            .retain(|token| !candidate.entry.search_index.contains(token.as_str()));
+            .retain(|token| !candidate.entry.search_index().contains(token.as_str()));
         if candidate.missing_tokens.is_empty() {
-            let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
+            let mut rank = literal_metadata_rank(candidate.search_index(), tokens)
                 .with_exact_field(candidate.exact_field)
                 .with_source_weight(priority.source_weight);
             rank.opening_prompt = priority.opening_prompt;
@@ -53,10 +53,10 @@ fn search_shard(
             if sender.send((candidate.id.clone(), rank)).is_err() {
                 return;
             }
-            if short && priority.opening_prompt == 0 && !candidate.paths.is_empty() {
-                phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
+            if short && priority.opening_prompt == 0 && !candidate.paths().is_empty() {
+                phrase_jobs.push((candidate.id.clone(), candidate.paths().to_vec(), rank));
             }
-            if !candidate.paths.is_empty()
+            if !candidate.paths().is_empty()
                 && candidate
                     .prior
                     .iter()
@@ -75,16 +75,16 @@ fn search_shard(
         }
         let mut fuzzy_missing = candidate.missing_tokens.clone();
         let mut rank =
-            fuzzy_metadata_rank_with_scores(&candidate.search_index, tokens, &mut scores)
+            fuzzy_metadata_rank_with_scores(candidate.search_index(), tokens, &mut scores)
                 .with_exact_field(candidate.exact_field);
         rank.opening_prompt = priority.opening_prompt;
         rank.intent_terms = priority.intent_terms;
         rank.source_weight = priority.source_weight;
-        fuzzy_missing.retain(|token| !scores.matches_text(token, &candidate.search_index));
+        fuzzy_missing.retain(|token| !scores.matches_text(token, candidate.search_index()));
         if fuzzy_missing.is_empty() && sender.send((candidate.id.clone(), rank)).is_err() {
             return;
         }
-        if !candidate.paths.is_empty() {
+        if !candidate.paths().is_empty() {
             transcripts.push((candidate, fuzzy_missing, rank));
         }
     }
@@ -100,7 +100,7 @@ fn search_shard(
             return;
         }
         match cached_paths_scan_with_scores(
-            &candidate.paths,
+            candidate.paths(),
             tokens,
             &candidate.prior,
             cancel,
@@ -109,7 +109,7 @@ fn search_shard(
         ) {
             Some(Some(evidence)) => {
                 if short && rank.opening_prompt == 0 {
-                    phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
+                    phrase_jobs.push((candidate.id.clone(), candidate.paths().to_vec(), rank));
                 }
                 if sender
                     .send((
@@ -133,7 +133,7 @@ fn search_shard(
     for (candidate, missing, rank) in warm_fuzzy {
         let prior = fuzzy_prior(tokens, &candidate.prior, &missing);
         match cached_paths_scan_with_scores(
-            &candidate.paths,
+            candidate.paths(),
             tokens,
             &prior,
             cancel,
@@ -165,7 +165,7 @@ fn search_shard(
             return;
         }
         if let Some(evidence) = scan_paths_with_scores(
-            &candidate.paths,
+            candidate.paths(),
             tokens,
             &candidate.prior,
             cancel,
@@ -173,7 +173,7 @@ fn search_shard(
             &mut scores,
         ) {
             if short && rank.opening_prompt == 0 {
-                phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
+                phrase_jobs.push((candidate.id.clone(), candidate.paths().to_vec(), rank));
             }
             if sender
                 .send((
@@ -200,7 +200,7 @@ fn search_shard(
             return;
         }
         if let Some(evidence) = scan_paths_with_scores(
-            &candidate.paths,
+            candidate.paths(),
             tokens,
             &candidate.prior,
             cancel,
@@ -225,7 +225,7 @@ fn search_shard(
         }
         let prior = fuzzy_prior(tokens, &candidate.prior, &missing);
         if let Some(evidence) = scan_paths_with_scores(
-            &candidate.paths,
+            candidate.paths(),
             tokens,
             &prior,
             cancel,
@@ -295,7 +295,7 @@ impl TranscriptSearch {
                             warmup::schedule(
                                 candidates
                                     .iter()
-                                    .flat_map(|candidate| candidate.paths.iter()),
+                                    .flat_map(|candidate| candidate.paths().iter()),
                             );
                             candidates
                         }
@@ -326,7 +326,7 @@ impl TranscriptSearch {
                         &tokens,
                         candidates
                             .iter()
-                            .map(|candidate| candidate.search_index.as_str()),
+                            .map(|candidate| candidate.search_index()),
                     );
                     if shared_idf.set(idf.clone()).is_err() {
                         crate::logging::debug("Transcript search weights already initialized");
@@ -343,7 +343,7 @@ impl TranscriptSearch {
                     for (candidate, priority) in &ranked {
                         if priority.opening_prompt > 0 {
                             let mut rank = fuzzy_metadata_rank_with_scores(
-                                &candidate.search_index,
+                                candidate.search_index(),
                                 &tokens,
                                 &mut scores,
                             );

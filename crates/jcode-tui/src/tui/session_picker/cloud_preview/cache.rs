@@ -18,7 +18,7 @@ pub(super) fn path(session_id: &str, host: &str, epoch: u64) -> Option<PathBuf> 
     let owner = crate::subscription_catalog::configured_api_key().unwrap_or_default();
     let endpoint = crate::subscription_api::configured_api_base();
     let path = scoped_key_path(&root, session_id, host, epoch, &owner, &endpoint);
-    timer.outcome("success");
+    timer.resolve("success");
     Some(path)
 }
 
@@ -62,13 +62,13 @@ pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            timer.outcome("miss");
+            timer.resolve("miss");
             return None;
         }
         Err(_) => return None,
     };
     if super::stage_result(|| file.metadata(), "cache_metadata")?.len() > MAX_BYTES as u64 {
-        timer.outcome("oversized");
+        timer.resolve("oversized");
         return None;
     }
     // Do not trust metadata for allocation or bounds: the file can grow concurrently.
@@ -77,7 +77,7 @@ pub(super) fn read(path: &Path) -> Option<Vec<u8>> {
         || file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes),
         "cache_read_io",
     )?;
-    timer.outcome(if bytes.len() <= MAX_BYTES {
+    timer.resolve(if bytes.len() <= MAX_BYTES {
         "hit"
     } else {
         "oversized"
@@ -93,7 +93,7 @@ pub(super) fn fresh(path: &Path) -> bool {
     )
     .and_then(|modified| super::stage_result(|| modified.elapsed(), "cache_age"))
     .is_some_and(|age| age < TTL);
-    timer.outcome(if fresh {
+    timer.resolve(if fresh {
         "fresh"
     } else {
         "stale_or_unavailable"
@@ -127,7 +127,7 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
     prune(parent, path, CACHE_BUDGET);
-    timer.outcome("success");
+    timer.resolve("success");
     Ok(())
 }
 

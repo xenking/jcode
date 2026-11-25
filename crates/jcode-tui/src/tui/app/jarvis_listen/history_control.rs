@@ -29,9 +29,20 @@ impl Drop for HistoryControl {
     }
 }
 impl HistoryControl {
-    /// Caption of the clip the last replay started, once.
-    pub(super) fn take_caption(&mut self) -> Option<String> {
-        self.caption.take()
+    /// Run `command` and describe the outcome for the status line: the caption
+    /// of the clip a replay started, otherwise the command's own result.
+    pub(super) fn run(
+        &mut self,
+        rec: &ContinuousRecording,
+        command: &str,
+        last_request: Option<u64>,
+        blocked: bool,
+    ) -> String {
+        let notice = self.command(rec, command, last_request, blocked);
+        match self.caption.take() {
+            Some(caption) => format!("Replaying local audio: {caption}"),
+            None => notice.to_string(),
+        }
     }
 
 

@@ -567,6 +567,20 @@ pub struct MemoryInfo {
 }
 
 impl MemoryInfo {
+    pub(crate) fn activity(&self) -> Option<&MemoryActivity> {
+        self.activity.as_ref()
+    }
+
+    pub(crate) fn category_count(&self) -> usize {
+        self.by_category.len()
+    }
+
+    /// Whether the memory card has anything to say: stored memories or a
+    /// live activity.
+    pub(crate) fn has_content(&self) -> bool {
+        self.total_count > 0 || self.activity.is_some()
+    }
+
     pub(crate) fn should_render(&self) -> bool {
         !self.disabled && (self.total_count > 0 || self.activity.is_some())
     }
@@ -831,7 +845,7 @@ impl InfoWidgetData {
                 if self
                     .memory_info
                     .as_ref()
-                    .and_then(|info| info.activity.as_ref())
+                    .and_then(MemoryInfo::activity)
                     .map(MemoryActivity::is_processing)
                     .unwrap_or(false)
                 {
@@ -956,9 +970,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
-        let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
+        let (rect, inner) = tight_rects(rect, inner, framed.lines().len());
         frame.render_widget(framed.apply(block, rect.width), rect);
-        frame.render_widget(Paragraph::new(framed.lines), inner);
+        frame.render_widget(Paragraph::new(framed.into_lines()), inner);
         return;
     }
     if placement.kind == WidgetKind::WorkspaceMap {
@@ -981,9 +995,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
-    let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
+    let (rect, inner) = tight_rects(rect, inner, framed.lines().len());
     frame.render_widget(framed.apply(block, rect.width), rect);
-    frame.render_widget(Paragraph::new(framed.lines), inner);
+    frame.render_widget(Paragraph::new(framed.into_lines()), inner);
 }
 
 fn diagram_footer(data: &InfoWidgetData) -> String {
@@ -1406,7 +1420,7 @@ fn render_sections(
 
     // Memory info
     if let Some(info) = &data.memory_info
-        && (info.total_count > 0 || info.activity.is_some())
+        && info.has_content()
     {
         if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
             lines.extend(render_memory_expanded(info, inner));
@@ -1445,6 +1459,10 @@ mod cloud_reflow_tests;
 #[cfg(test)]
 #[path = "info_widget_startup_tests.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+#[path = "info_widget_subgraph_tests.rs"]
+mod subgraph_tests;
 
 #[cfg(test)]
 #[path = "info_widget_tests.rs"]

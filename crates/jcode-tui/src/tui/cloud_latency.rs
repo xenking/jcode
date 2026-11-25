@@ -45,7 +45,15 @@ impl Span {
             request_id: None,
         }
     }
-    pub(super) fn operation(&mut self, operation: &'static str) {
+    /// A span for one protocol request being written to the socket.
+    fn for_request(id: u64, operation: &'static str) -> Self {
+        Self {
+            operation,
+            request_id: Some(id),
+            ..Self::new("request_write")
+        }
+    }
+    pub(super) fn during(&mut self, operation: &'static str) {
         self.operation = operation;
     }
     pub(super) fn finish(&mut self, outcome: &'static str) {
@@ -77,12 +85,7 @@ fn request_key(request: &Request) -> Option<(u64, &'static str)> {
 }
 
 pub(super) fn begin_request(request: &Request) -> Option<Span> {
-    request_key(request).map(|(id, kind)| {
-        let mut span = Span::new("request_write");
-        span.operation = kind;
-        span.request_id = Some(id);
-        span
-    })
+    request_key(request).map(|(id, kind)| Span::for_request(id, kind))
 }
 
 impl RequestTimings {

@@ -105,6 +105,10 @@ impl FileDiffViewCacheState {
         self.entries.get(key)
     }
 
+    pub(super) fn get_mut(&mut self, key: &FileDiffCacheKey) -> Option<&mut FileDiffViewCacheEntry> {
+        self.entries.get_mut(key)
+    }
+
     pub(super) fn insert(&mut self, key: FileDiffCacheKey, entry: FileDiffViewCacheEntry) {
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
@@ -614,7 +618,7 @@ pub(super) fn draw_file_diff_view(
             Ok(c) => c,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let Some(cached) = cache.entries.get_mut(&cache_key) else {
+        let Some(cached) = cache.get_mut(&cache_key) else {
             return;
         };
         materialize_visible_file_diff_lines(cached, effective_scroll, inner.height as usize)

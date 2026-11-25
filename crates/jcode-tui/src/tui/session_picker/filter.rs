@@ -51,6 +51,18 @@ impl SearchSelection {
         self.held.is_some()
     }
 
+    /// Drop the held rows unless the caller is still holding the list.
+    pub(super) fn release_unless(&mut self, hold: bool) {
+        if !hold {
+            self.held = None;
+        }
+    }
+
+    /// Ids of the rows shown before the query changed, in display order.
+    pub(super) fn held_rows(&self) -> Option<&[String]> {
+        self.held.as_deref()
+    }
+
     /// Auto-focus was not overridden by manual navigation for this query.
     fn wants_focus(&self) -> bool {
         self.follow_until.is_some()
@@ -177,8 +189,9 @@ impl SessionPicker {
             && self.transcript_search.pending()
             && !self.transcript_search.has_results()
             && (self.transcript_search.defers_metadata() || matches.is_empty());
-        let matches = match self.search_selection.held.take() {
-            Some(held) if hold => {
+        self.search_selection.release_unless(hold);
+        let matches = match self.search_selection.held_rows() {
+            Some(held) => {
                 let by_id: std::collections::HashMap<&str, SessionRef> = self
                     .all_session_refs()
                     .into_iter()
@@ -186,14 +199,11 @@ impl SessionPicker {
                         Some((self.session_by_ref(session_ref)?.id.as_str(), session_ref))
                     })
                     .collect();
-                let refs = held
-                    .iter()
+                held.iter()
                     .filter_map(|id| by_id.get(id.as_str()).copied())
-                    .collect();
-                self.search_selection.held = Some(held);
-                refs
+                    .collect()
             }
-            _ => matches,
+            None => matches,
         };
 
         self.cached_search_query = normalized;

@@ -15,7 +15,7 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
 
     let mut lines: Vec<Line> = Vec::new();
     let max_width = inner.width as usize;
-    let activity = info.activity.as_ref();
+    let activity = info.activity();
     let show_activity = info.should_show_activity();
     let title = render_memory_header_line(info, max_width);
     let footer = activity
@@ -50,8 +50,8 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
     }
 
     if lines.is_empty() {
-        let detail = if !info.by_category.is_empty() {
-            format!("{} categories", info.by_category.len())
+        let detail = if info.category_count() > 0 {
+            format!("{} categories", info.category_count())
         } else if info.sidecar_available {
             "sidecar ready".into()
         } else {
@@ -185,7 +185,7 @@ fn memory_compact_summary(info: &MemoryInfo) -> String {
     if info.disabled {
         return "disabled".to_string();
     }
-    if let Some(activity) = info.activity.as_ref() {
+    if let Some(activity) = info.activity() {
         if activity.is_processing() {
             return memory_active_summary(&activity.state)
                 .or_else(|| {
@@ -632,7 +632,7 @@ pub(super) fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<
 
     let title_width = UnicodeWidthStr::width(title.as_str());
     let summary_width = max_width.saturating_sub(title_width + 5);
-    let accent = if let Some(activity) = info.activity.as_ref() {
+    let accent = if let Some(activity) = info.activity() {
         memory_status_badge(Some(activity)).1
     } else if info.total_count > 0 {
         rgb(160, 160, 170)
@@ -665,7 +665,7 @@ pub(super) fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line
     let show_activity = info.should_show_activity();
 
     lines.push(render_memory_header_line(info, max_width));
-    if show_activity && let Some(activity) = &info.activity {
+    if show_activity && let Some(activity) = info.activity() {
         lines.push(render_memory_status_line(activity, max_width));
         if memory_should_render_pipeline(activity) {
             lines.extend(render_memory_pipeline_display_lines(activity, max_width));
