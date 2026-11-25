@@ -4,7 +4,7 @@
 //! so they can be resumed within jcode.
 
 use crate::message::{ContentBlock, Role};
-use crate::session::{Session, SessionStatus, StoredMessage};
+use crate::session::{Session, StoredMessage};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use jcode_import_core::repo_ranking;
