@@ -255,7 +255,7 @@ impl Element {
 
     pub(super) fn select_row(&self, row: &Self) -> Result<()> {
         let attr = CFString::new("AXSelectedRows");
-        let rows = CFArray::from_CFTypes(&[row.0.clone()]);
+        let rows = CFArray::from_CFTypes(std::slice::from_ref(&row.0));
         success(unsafe {
             AXUIElementSetAttributeValue(
                 self.raw(),
