@@ -81,7 +81,7 @@ fn cell_of(line: &str, needle: &str) -> Option<usize> {
 fn skill_rows_form_one_aligned_grid_at_every_width() {
     // The first word of each row's description, after its mode tag.
     let first_words = ["active mode", "mode", "mode", "Design", "poteto's"];
-    for width in [48u16, 80, 120] {
+    for width in [30u16, 48, 80, 120] {
         for selected in [0, 3] {
             let (state, _) = palette(selected);
             let lines = render_palette(&state, width);

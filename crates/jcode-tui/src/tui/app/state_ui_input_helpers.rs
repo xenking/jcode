@@ -159,7 +159,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/context", "Show the full session context snapshot"),
     RegisteredCommand::public(
         "/mode",
-        "Show, pin or disable a session skill: /mode <skill|off>",
+        "Pick, toggle or clear session modes: /mode <skill|off>",
     ),
     RegisteredCommand::public(
         "/skills",
