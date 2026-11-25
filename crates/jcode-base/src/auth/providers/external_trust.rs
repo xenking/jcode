@@ -6,7 +6,7 @@
 //! module normalizes ids, builds path entries and decides where a check may
 //! read from.
 
-use crate::config::{AuthConfig, Config, config};
+use crate::config::{Config, config};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -20,7 +20,7 @@ type MemoKey = (
     Option<String>,
 );
 
-static MEMO: Mutex<Option<(MemoKey, Arc<AuthConfig>)>> = Mutex::new(None);
+static MEMO: Mutex<Option<(MemoKey, Arc<Config>)>> = Mutex::new(None);
 
 /// Drop the memoized list. Config saves call this because the mtime key can
 /// miss two same-length saves inside one filesystem timestamp tick.
@@ -65,7 +65,7 @@ pub(crate) fn source_allowed_for_path(source_id: &str, path: &Path) -> bool {
 /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
 /// Memoize the lists keyed on everything that can change them: the config
 /// path, the file's mtime and length, and the env override.
-fn fresh_trust() -> Arc<AuthConfig> {
+fn fresh_trust() -> Arc<Config> {
     let path = Config::path();
     let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
     let key: MemoKey = (
@@ -81,7 +81,7 @@ fn fresh_trust() -> Arc<AuthConfig> {
         return trust.clone();
     }
 
-    let trust = Arc::new(Config::load().auth);
+    let trust = Arc::new(Config::load());
     if let Ok(mut guard) = MEMO.lock() {
         *guard = Some((key, trust.clone()));
     }
@@ -96,7 +96,7 @@ pub(crate) fn source_allowed_for_path_cached(source_id: &str, path: &Path) -> bo
         return false;
     };
 
-    if config().auth.trusts_path_entry(&entry) {
+    if config().trusts_path_entry(&entry) {
         return true;
     }
 
@@ -114,10 +114,7 @@ pub(crate) fn allow_source(source_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("External auth source id cannot be empty");
     }
 
-    let mut cfg = Config::load_for_update()?;
-    if cfg.auth.trust_source(&source_id) {
-        cfg.save()?;
-    }
+    Config::update_trust(|trust| trust.trust_source(&source_id))?;
 
     crate::logging::info(&format!(
         "Saved trusted external auth source to config: {}",
@@ -128,10 +125,7 @@ pub(crate) fn allow_source(source_id: &str) -> anyhow::Result<()> {
 
 pub(crate) fn allow_source_for_path(source_id: &str, path: &Path) -> anyhow::Result<()> {
     let entry = path_entry(source_id, path)?;
-    let mut cfg = Config::load_for_update()?;
-    if cfg.auth.trust_path_entry(&entry) {
-        cfg.save()?;
-    }
+    Config::update_trust(|trust| trust.trust_path_entry(&entry))?;
     crate::logging::info(&format!(
         "Saved trusted external auth source path: {}",
         entry
@@ -141,9 +135,7 @@ pub(crate) fn allow_source_for_path(source_id: &str, path: &Path) -> anyhow::Res
 
 pub(crate) fn revoke_source_for_path(source_id: &str, path: &Path) -> anyhow::Result<()> {
     let entry = path_entry(source_id, path)?;
-    let mut cfg = Config::load_for_update()?;
-    if cfg.auth.revoke_path_entry(&entry) {
-        cfg.save()?;
+    if Config::update_trust(|trust| trust.revoke_path_entry(&entry))? {
         crate::logging::info(&format!(
             "Removed trusted external auth source path: {}",
             entry
@@ -159,9 +151,7 @@ pub(crate) fn revoke_source(source_id: &str) -> anyhow::Result<()> {
     if source_id.is_empty() {
         return Ok(());
     }
-    let mut cfg = Config::load_for_update()?;
-    if cfg.auth.revoke_source(&source_id) {
-        cfg.save()?;
+    if Config::update_trust(|trust| trust.revoke_source(&source_id))? {
         crate::logging::info(&format!(
             "Removed trusted external auth source: {}",
             source_id

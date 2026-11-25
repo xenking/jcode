@@ -35,11 +35,17 @@ pub struct AgentsSummary {
 
 impl AgentsConfig {
     /// Apply `JCODE_*` agent environment overrides.
+    pub fn apply_env_overrides(&mut self) {
+        self.apply_swarm_env();
+        self.apply_memory_env();
+        self.apply_embedding_env();
+    }
+
     #[expect(
         clippy::collapsible_if,
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
-    pub fn apply_env_overrides(&mut self) {
+    fn apply_swarm_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_SWARM_MODEL") {
             let trimmed = v.trim();
             self.swarm_model = if trimmed.is_empty() {
@@ -82,6 +88,13 @@ impl AgentsConfig {
                 _ => {}
             }
         }
+    }
+
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_memory_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
@@ -121,6 +134,13 @@ impl AgentsConfig {
                 self.memory_sidecar_enabled = parsed;
             }
         }
+    }
+
+    #[expect(
+        clippy::collapsible_if,
+        reason = "Environment override parsing is intentionally explicit and grouped by config area"
+    )]
+    fn apply_embedding_env(&mut self) {
         if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
@@ -156,11 +176,6 @@ impl AgentsConfig {
             WorkerModelSlot::Swarm => self.swarm_model = model,
             WorkerModelSlot::Memory => self.memory_model = model,
         }
-    }
-
-    /// The model name for spawned swarm sessions, when one is configured.
-    pub fn swarm_model(&self) -> Option<&str> {
-        self.swarm_model.as_deref()
     }
 
     /// Settings for the OpenAI-compatible embeddings backend, or `None` when

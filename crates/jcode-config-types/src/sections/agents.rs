@@ -280,7 +280,9 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
+#[path = "agents/defaults.rs"]
 mod defaults;
+#[path = "agents/env.rs"]
 mod env;
 pub use env::{AgentsSummary, RemoteEmbedding, WorkerModelSlot};
 /// How swarm-created agents should be spawned.

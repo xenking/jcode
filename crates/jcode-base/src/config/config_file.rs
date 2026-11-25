@@ -147,6 +147,29 @@ impl Config {
         Ok(())
     }
 
+    /// Whether `[auth]` trusts this (normalized) source id.
+    pub(crate) fn trusts_source(&self, source_id: &str) -> bool {
+        self.auth.trusts_source(source_id)
+    }
+
+    /// Whether `[auth]` trusts this `source|path` entry.
+    pub(crate) fn trusts_path_entry(&self, entry: &str) -> bool {
+        self.auth.trusts_path_entry(entry)
+    }
+
+    /// Change the saved `[auth]` trust lists. Saves only when `change` reports
+    /// that it altered them, and returns whether it did.
+    pub(crate) fn update_trust(
+        change: impl FnOnce(&mut AuthConfig) -> bool,
+    ) -> anyhow::Result<bool> {
+        let mut cfg = Self::load_for_update()?;
+        let changed = change(&mut cfg.auth);
+        if changed {
+            cfg.save()?;
+        }
+        Ok(changed)
+    }
+
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
         // Also drop the trust-list memo: its mtime key can miss two same-length
@@ -350,80 +373,16 @@ impl Config {
     /// Returns `true` when it rewrote the config. Best-effort: errors are
     /// logged and swallowed.
     pub fn migrate_legacy_swarm_spawn_mode_once() -> bool {
-        let Ok(dir) = jcode_dir() else {
-            return false;
-        };
-        let marker = dir.join("migrations").join("swarm-spawn-mode-inline");
-        if marker.exists() {
-            return false;
-        }
-        let write_marker = || {
-            if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(
-                &marker,
-                "swarm_spawn_mode default migration: visible -> inline\n",
-            );
-        };
-
-        let path = dir.join("config.toml");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            // No config file (fresh install): nothing to migrate.
-            write_marker();
-            return false;
-        };
-
-        let mut changed = false;
-        let migrated: Vec<String> = content
-            .lines()
-            .map(|line| {
-                if changed {
-                    return line.to_string();
-                }
-                let trimmed = line.trim_start();
-                let Some(rest) = trimmed.strip_prefix("swarm_spawn_mode") else {
-                    return line.to_string();
-                };
-                let Some(value) = rest.trim_start().strip_prefix('=') else {
-                    return line.to_string();
-                };
+        migrate_line_once(LineMigration {
+            marker: "swarm-spawn-mode-inline",
+            marker_text: "swarm_spawn_mode default migration: visible -> inline\n",
+            key: "swarm_spawn_mode",
+            rewrite: |value| {
                 let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-                if matches!(value, "visible" | "headed") {
-                    changed = true;
-                    let indent = &line[..line.len() - trimmed.len()];
-                    format!("{indent}swarm_spawn_mode = \"inline\"")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect();
-
-        if !changed {
-            write_marker();
-            return false;
-        }
-
-        let mut new_content = migrated.join("\n");
-        if content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        match std::fs::write(&path, new_content) {
-            Ok(()) => {
-                Self::invalidate_cache();
-                write_marker();
-                crate::logging::info(
-                    "Migrated legacy swarm_spawn_mode \"visible\" to \"inline\" in config.toml",
-                );
-                true
-            }
-            Err(err) => {
-                crate::logging::warn(&format!(
-                    "swarm_spawn_mode migration failed to write config: {err}"
-                ));
-                false
-            }
-        }
+                matches!(value, "visible" | "headed").then(|| "\"inline\"".to_string())
+            },
+            migrated: "Migrated legacy swarm_spawn_mode \"visible\" to \"inline\" in config.toml",
+        })
     }
 
     /// One-time migration: flip a persisted `idle_animation = true` to `false`.
@@ -438,76 +397,104 @@ impl Config {
     /// Returns `true` when it rewrote the config. Best-effort: errors are
     /// logged and swallowed.
     pub fn migrate_idle_animation_off_once() -> bool {
-        let Ok(dir) = jcode_dir() else {
-            return false;
-        };
-        let marker = dir.join("migrations").join("idle-animation-off");
-        if marker.exists() {
-            return false;
-        }
-        let write_marker = || {
-            if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&marker, "idle_animation forced migration: true -> false\n");
-        };
-
-        let path = dir.join("config.toml");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            // No config file (fresh install): nothing to migrate.
-            write_marker();
-            return false;
-        };
-
-        let mut changed = false;
-        let migrated: Vec<String> = content
-            .lines()
-            .map(|line| {
-                if changed {
-                    return line.to_string();
-                }
-                let trimmed = line.trim_start();
-                let Some(rest) = trimmed.strip_prefix("idle_animation") else {
-                    return line.to_string();
-                };
-                let Some(value) = rest.trim_start().strip_prefix('=') else {
-                    return line.to_string();
-                };
+        migrate_line_once(LineMigration {
+            marker: "idle-animation-off",
+            marker_text: "idle_animation forced migration: true -> false\n",
+            key: "idle_animation",
+            rewrite: |value| {
                 let value = value.split('#').next().unwrap_or("");
-                if value.trim() == "true" {
+                (value.trim() == "true").then(|| "false".to_string())
+            },
+            migrated: "Migrated idle_animation \"true\" to \"false\" in config.toml",
+        })
+    }
+}
+
+/// A one-time rewrite of a single top-level `key = value` line in config.toml.
+struct LineMigration<F: Fn(&str) -> Option<String>> {
+    /// File under `~/.jcode/migrations/` recording that the migration ran.
+    marker: &'static str,
+    marker_text: &'static str,
+    key: &'static str,
+    /// Given the text after `=`, the replacement value, or `None` to leave the
+    /// line alone.
+    rewrite: F,
+    migrated: &'static str,
+}
+
+/// Rewrite the first matching `key = value` line, keeping every other byte of
+/// the file, and drop a marker so the migration runs at most once. Returns
+/// whether it rewrote the config. Best-effort: errors are logged and
+/// swallowed.
+fn migrate_line_once<F: Fn(&str) -> Option<String>>(migration: LineMigration<F>) -> bool {
+    let Ok(dir) = jcode_dir() else {
+        return false;
+    };
+    let marker = dir.join("migrations").join(migration.marker);
+    if marker.exists() {
+        return false;
+    }
+    let write_marker = || {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, migration.marker_text);
+    };
+
+    let path = dir.join("config.toml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        // No config file (fresh install): nothing to migrate.
+        write_marker();
+        return false;
+    };
+
+    let mut changed = false;
+    let migrated: Vec<String> = content
+        .lines()
+        .map(|line| {
+            if changed {
+                return line.to_string();
+            }
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix(migration.key) else {
+                return line.to_string();
+            };
+            let Some(value) = rest.trim_start().strip_prefix('=') else {
+                return line.to_string();
+            };
+            match (migration.rewrite)(value) {
+                Some(replacement) => {
                     changed = true;
                     let indent = &line[..line.len() - trimmed.len()];
-                    format!("{indent}idle_animation = false")
-                } else {
-                    line.to_string()
+                    format!("{indent}{} = {replacement}", migration.key)
                 }
-            })
-            .collect();
+                None => line.to_string(),
+            }
+        })
+        .collect();
 
-        if !changed {
+    if !changed {
+        write_marker();
+        return false;
+    }
+
+    let mut new_content = migrated.join("\n");
+    if content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    match std::fs::write(&path, new_content) {
+        Ok(()) => {
+            Config::invalidate_cache();
             write_marker();
-            return false;
+            crate::logging::info(migration.migrated);
+            true
         }
-
-        let mut new_content = migrated.join("\n");
-        if content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        match std::fs::write(&path, new_content) {
-            Ok(()) => {
-                Self::invalidate_cache();
-                write_marker();
-                crate::logging::info(
-                    "Migrated idle_animation \"true\" to \"false\" in config.toml",
-                );
-                true
-            }
-            Err(err) => {
-                crate::logging::warn(&format!(
-                    "idle_animation migration failed to write config: {err}"
-                ));
-                false
-            }
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "{} migration failed to write config: {err}",
+                migration.key
+            ));
+            false
         }
     }
 }

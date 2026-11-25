@@ -7,26 +7,43 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "sections/agents.rs"]
 mod agents;
+#[path = "sections/ambient.rs"]
 mod ambient;
+#[path = "sections/compaction.rs"]
 mod compaction;
+#[path = "sections/display.rs"]
 mod display;
+#[path = "sections/display_env.rs"]
 mod display_env;
 pub mod env;
+#[path = "sections/features.rs"]
 mod features;
+#[path = "sections/gateway.rs"]
 mod gateway;
+#[path = "sections/keybinding_settings.rs"]
 mod keybinding_settings;
 pub mod keybindings;
+#[path = "sections/launch_hotkeys.rs"]
 mod launch_hotkeys;
+#[path = "sections/menubar.rs"]
 mod menubar;
 mod modes;
+#[path = "runtime/named_providers.rs"]
 mod named_providers;
+#[path = "runtime/power.rs"]
 mod power;
+#[path = "runtime/provider.rs"]
 mod provider;
 mod serde_lenient;
+#[path = "runtime/session.rs"]
 mod session;
+#[path = "runtime/terminal.rs"]
 mod terminal;
+#[path = "runtime/update_policy.rs"]
 mod update_policy;
+#[path = "runtime/web_search.rs"]
 mod web_search;
 
 pub use agents::{
@@ -69,11 +86,13 @@ fn default_true() -> bool {
 }
 
 #[cfg(test)]
+#[path = "tests/lib_snapcompact_config_tests.rs"]
 mod lib_snapcompact_config_tests;
 
 #[cfg(test)]
-#[path = "reasoning_display_defaults_tests.rs"]
+#[path = "tests/reasoning_display_defaults_tests.rs"]
 mod reasoning_display_defaults_tests;
 
 #[cfg(test)]
+#[path = "tests/section_serde_tests.rs"]
 mod section_serde_tests;

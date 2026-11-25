@@ -1931,3 +1931,34 @@ voice_jev_model = "typesafe/jev-1.14"
     assert!(defaults.browser_jev_model.is_none());
     assert!(defaults.voice_jev_model.is_none());
 }
+
+#[test]
+fn display_string_lists_every_section_once_in_order() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let text = Config::default().display_string();
+    crate::env::remove_var("JCODE_HOME");
+    let headers = [
+        "**Configuration**",
+        "**Keybindings:**",
+        "**Dictation:**",
+        "**Display:**",
+        "**Features:**",
+        "**Tools:**",
+        "**Provider:**",
+        "**Agent models:**",
+        "**Gateway:**",
+        "**Ambient:**",
+        "**Notifications:**",
+        "*Edit the config file",
+    ];
+    let mut cursor = 0;
+    for header in headers {
+        let found = text[cursor..]
+            .find(header)
+            .unwrap_or_else(|| panic!("{header} missing or out of order"));
+        cursor += found + header.len();
+        assert_eq!(text.matches(header).count(), 1, "{header}");
+    }
+}
