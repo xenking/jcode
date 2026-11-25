@@ -97,6 +97,12 @@ pub fn snapshot(policy: &Policy, now: i64) -> Snapshot {
     })
 }
 
+/// Forget the shared snapshot, so a test that changes a cache sees it at once.
+#[cfg(test)]
+pub(crate) fn invalidate_snapshots() {
+    SNAPSHOTS.invalidate();
+}
+
 /// Refreshes the caches [`snapshot`] reads: saved Claude and OpenAI logins, then
 /// every other provider's usage report. Each fetcher keeps its own freshness
 /// rules, so calling this often is cheap.

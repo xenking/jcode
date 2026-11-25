@@ -897,6 +897,11 @@ pub(super) fn openai_usage_data_from_provider_report(report: &ProviderUsage) -> 
     } else {
         None
     };
+    data.credits = if report.error.is_none() {
+        report.credits.clone()
+    } else {
+        None
+    };
     data.fetched_at = Some(Instant::now());
     data.last_error = report.error.clone();
     data
@@ -949,7 +954,7 @@ pub(super) fn provider_report_from_openai_usage_data(
         error: None,
         last_used_unix_secs: None,
         account: None,
-        credits: None,
+        credits: data.credits.clone(),
     }
 }
 

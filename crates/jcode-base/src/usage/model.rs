@@ -261,6 +261,8 @@ pub struct OpenAIUsageData {
     /// Paid credits keep serving after the plan window is spent.
     pub credit_overage: bool,
     pub openai_reset_credits: Option<jcode_usage_types::OpenAiResetCredits>,
+    /// Credits the account is paid in, such as a workspace seat's monthly cap.
+    pub credits: Option<jcode_usage_types::CreditsReport>,
     pub fetched_at: Option<Instant>,
     pub last_error: Option<String>,
 }

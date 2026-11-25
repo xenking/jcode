@@ -26,6 +26,7 @@ mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_response;
+mod openai_seat;
 pub use openai_response::{openai_response_generation, record_openai_response_limits};
 mod openai_reset;
 pub(crate) use openai_reset::{auto_reset_weekly_usage, auto_reset_weekly_usage_with};
@@ -104,9 +105,6 @@ use tokio::sync::RwLock;
 /// Usage API endpoint
 const USAGE_URL: &str =
     "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1&skip_spend=1";
-
-/// OpenAI ChatGPT usage endpoint
-const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);

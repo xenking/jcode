@@ -12,7 +12,9 @@
 //! Cursor reports a billing cycle, treated the same way.
 
 use jcode_routing_meters::{model_class, parse_rfc3339_unix, percent_reading, window_from_label};
+use jcode_routing_policy::config::Unit;
 use jcode_routing_policy::{Reading, Window};
+use jcode_usage_types::CreditsState;
 
 use super::cache::anthropic_window_ratio_at;
 use super::{
@@ -110,8 +112,9 @@ pub(crate) fn anthropic_readings(usage: &UsageData, now: i64) -> Vec<Reading> {
 /// window whose name states no length is left out instead of guessed. The
 /// Spark window and `Name (5h)` extras are model-scoped.
 ///
-/// The ChatGPT usage payload reports a remaining credit balance without the
-/// grant it came from, so no credits reading is produced.
+/// A workspace seat's monthly credits are a calendar-month credits reading
+/// (`codex-month` budgets read it). The payload's remaining credit balance
+/// names no grant it came from, so it produces no reading.
 pub(crate) fn openai_readings(usage: &OpenAIUsageData, now: i64) -> Vec<Reading> {
     if usage.last_error.is_some() {
         return Vec::new();
@@ -146,7 +149,34 @@ pub(crate) fn openai_readings(usage: &OpenAIUsageData, now: i64) -> Vec<Reading>
             .and_then(|(name, _)| model_class(name));
         readings.extend(window(extra, class));
     }
+    readings.extend(seat_monthly_reading(usage, aged, now));
     readings
+}
+
+/// The seat's credits spent this month. Credits only grow within a month, so a
+/// sample older than the polling interval still speaks for a spent cap that has
+/// not reset, and for nothing else. No cap or no spend figure is no reading.
+fn seat_monthly_reading(usage: &OpenAIUsageData, aged: bool, now: i64) -> Option<Reading> {
+    let credits = usage
+        .credits
+        .as_ref()
+        .filter(|credits| credits.state == CreditsState::Known)?;
+    let used = credits.used?;
+    let resets_at = credits.resets_at.as_deref().and_then(parse_rfc3339_unix);
+    if resets_at.is_some_and(|reset| reset <= now) {
+        return None;
+    }
+    if aged && !(resets_at.is_some() && credits.limit.is_some_and(|limit| used >= limit)) {
+        return None;
+    }
+    Some(Reading {
+        window: Window::CALENDAR_MONTH,
+        unit: Unit::Credits,
+        used,
+        limit: credits.limit,
+        resets_at,
+        model_class: None,
+    })
 }
 
 /// OpenCode (Zen/Go) quota windows.

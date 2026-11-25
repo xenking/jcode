@@ -128,7 +128,7 @@ async fn handle(mut client: TcpStream, log: Arc<Mutex<Vec<String>>>) -> Option<(
     Some(())
 }
 
-/// A loopback upstream that answers every request with `200` and a JSON body.
+/// A loopback upstream that answers with a canned JSON body, `200` unless routed.
 pub struct Upstream {
     pub url: String,
     pub port: u16,
@@ -151,6 +151,32 @@ impl Upstream {
 
     /// As [`Upstream::start`], with another content type (`text/event-stream`).
     pub async fn start_as(content_type: &'static str, body: &'static str) -> Self {
+        Self::serve(content_type, move |_| (200, body.to_owned())).await
+    }
+
+    /// Answer by request path: `routes` is `(path suffix, status, body)`, first
+    /// match wins, and any other path is a `404`.
+    pub async fn start_routes(routes: &[(&str, u16, &str)]) -> Self {
+        let routes: Vec<(String, u16, String)> = routes
+            .iter()
+            .map(|(path, status, body)| ((*path).to_owned(), *status, (*body).to_owned()))
+            .collect();
+        Self::serve(JSON, move |path| {
+            routes
+                .iter()
+                .find(|(suffix, _, _)| path.ends_with(suffix.as_str()))
+                .map_or((404, "{}".to_owned()), |(_, status, body)| {
+                    (*status, body.clone())
+                })
+        })
+        .await
+    }
+
+    async fn serve(
+        content_type: &'static str,
+        respond: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    ) -> Self {
+        let respond = Arc::new(respond);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -161,13 +187,16 @@ impl Upstream {
                     return;
                 };
                 let log = Arc::clone(&log);
+                let respond = Arc::clone(&respond);
                 tokio::spawn(async move {
                     while let Some((head, _)) = read_head(&mut stream).await {
                         let request_line = head.lines().next().unwrap_or_default().to_owned();
                         let close = head.to_ascii_lowercase().contains("connection: close");
+                        let target = request_line.split_whitespace().nth(1).unwrap_or_default();
+                        let (status, body) = respond(target.split('?').next().unwrap_or_default());
                         log.lock().unwrap().push(Request { request_line, head });
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{}Content-Length: {}\r\n\r\n{body}",
+                            "HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\n{}Content-Length: {}\r\n\r\n{body}",
                             if close { "Connection: close\r\n" } else { "" },
                             body.len()
                         );

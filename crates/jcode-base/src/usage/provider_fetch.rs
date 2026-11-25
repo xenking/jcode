@@ -171,6 +171,22 @@ pub(super) async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
 
 pub(super) async fn fetch_openai_usage_for_account(
     display_name: String,
+    creds: auth::codex::CodexCredentials,
+    account_label: Option<&str>,
+) -> ProviderUsage {
+    fetch_openai_usage_at(
+        super::openai_seat::API_BASE,
+        display_name,
+        creds,
+        account_label,
+    )
+    .await
+}
+
+/// [`fetch_openai_usage_for_account`] against another ChatGPT API root.
+pub(super) async fn fetch_openai_usage_at(
+    api_base: &str,
+    display_name: String,
     mut creds: auth::codex::CodexCredentials,
     account_label: Option<&str>,
 ) -> ProviderUsage {
@@ -255,7 +271,7 @@ pub(super) async fn fetch_openai_usage_for_account(
     };
     let request = || {
         let mut builder = client
-            .get(OPENAI_USAGE_URL)
+            .get(format!("{api_base}/wham/usage"))
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {}", creds.access_token));
         if let Some(ref account_id) = creds.account_id {
@@ -381,6 +397,13 @@ pub(super) async fn fetch_openai_usage_for_account(
         Vec::new()
     };
 
+    // A workspace seat's monthly credits come from its own endpoint, which
+    // states them for seats whose `/wham/usage` cap is null.
+    let credits = super::openai_seat::with_seat_monthly(
+        parsed.credits,
+        super::openai_seat::read_monthly(&client, api_base, &creds).await,
+    );
+
     let report = ProviderUsage {
         provider_name: display_name,
         limits: parsed.limits,
@@ -400,7 +423,7 @@ pub(super) async fn fetch_openai_usage_for_account(
         error: None,
         last_used_unix_secs: None,
         account: None,
-        credits: parsed.credits,
+        credits,
     };
     store_openai_usage_for_generation(
         generation,

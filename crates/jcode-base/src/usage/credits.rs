@@ -22,6 +22,22 @@ fn number(value: Option<&Value>) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
+/// A credit amount the seat endpoints state: a non-negative JSON number or a
+/// plain decimal string. Null, booleans and anything else are unknown, never
+/// zero.
+pub(super) fn credit_amount(value: Option<&Value>) -> Option<f64> {
+    let amount = match value? {
+        Value::Number(number) => number.as_f64()?,
+        Value::String(text)
+            if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit() || b == b'.') =>
+        {
+            text.parse::<f64>().ok()?
+        }
+        _ => return None,
+    };
+    (amount.is_finite() && amount >= 0.0).then_some(amount)
+}
+
 fn flag(value: Option<&Value>) -> bool {
     value.and_then(Value::as_bool) == Some(true)
 }
@@ -31,19 +47,32 @@ fn epoch_to_rfc3339(value: Option<&Value>) -> Option<String> {
     chrono::DateTime::from_timestamp(secs as i64, 0).map(|at| at.to_rfc3339())
 }
 
+/// The seat's own monthly cap object. Responses place it under several keys,
+/// so the first one that holds an object is the cap.
+fn individual_cap(json: &Value) -> Option<&Value> {
+    [
+        json.get("individual_limit"),
+        json.get("individualLimit"),
+        json.pointer("/rate_limit/individual_limit"),
+        json.pointer("/spend_control/individual_limit"),
+        json.pointer("/spendControl/individualLimit"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| value.is_object())
+}
+
 /// ChatGPT `/wham/usage`: `credits.balance` for a prepaid balance, and
 /// `spend_control.individual_limit` for a workspace seat's monthly credit cap.
 /// Both can be null while `has_credits` is true, which means credits exist but
-/// the response does not say how many.
+/// the response does not say how many. A cap of zero states no cap.
 pub(super) fn openai_credits(json: &Value) -> Option<CreditsReport> {
     let credits = json.get("credits").filter(|value| value.is_object());
-    let cap = json
-        .pointer("/spend_control/individual_limit")
-        .filter(|value| value.is_object());
+    let cap = individual_cap(json);
     let has_credits = flag(credits.and_then(|c| c.get("has_credits")));
     let unlimited = flag(credits.and_then(|c| c.get("unlimited")));
     let balance = number(credits.and_then(|c| c.get("balance")));
-    let limit = number(cap.and_then(|c| c.get("limit")));
+    let limit = number(cap.and_then(|c| c.get("limit"))).filter(|limit| *limit > 0.0);
     let used = number(cap.and_then(|c| c.get("used")));
     // A plan with ordinary limits and no credits has nothing to report.
     if !has_credits && !unlimited && cap.is_none() && balance.is_none_or(|b| b <= 0.0) {
@@ -223,6 +252,64 @@ mod tests {
             Some("2026-12-01T00:00:00+00:00")
         );
         assert_eq!(credits_line(&credits), "898.39 of 2500 credits used");
+    }
+
+    #[test]
+    fn chatgpt_seat_cap_is_found_under_every_key_the_responses_use() {
+        let row = serde_json::json!({"limit": "2500", "used": "100"});
+        for payload in [
+            serde_json::json!({"individual_limit": row}),
+            serde_json::json!({"individualLimit": row}),
+            serde_json::json!({"rate_limit": {"individual_limit": row}}),
+            serde_json::json!({"spend_control": {"individual_limit": row}}),
+            serde_json::json!({"spendControl": {"individualLimit": row}}),
+        ] {
+            let credits = openai_credits(&payload).expect("credits");
+            assert_eq!(
+                (credits.used, credits.limit),
+                (Some(100.0), Some(2500.0)),
+                "{payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_seat_cap_of_zero_or_null_states_no_cap() {
+        for limit in [
+            serde_json::json!(0),
+            serde_json::json!("0"),
+            serde_json::json!(null),
+        ] {
+            let json = serde_json::json!({
+                "spend_control": {"individual_limit": {"limit": limit, "used": "12"}}
+            });
+            let credits = openai_credits(&json).expect("credits");
+            assert_eq!((credits.used, credits.limit), (Some(12.0), None), "{limit}");
+        }
+    }
+
+    #[test]
+    fn credit_amounts_reject_everything_but_plain_non_negative_numbers() {
+        let read = |value: serde_json::Value| credit_amount(Some(&value));
+        assert_eq!(read(serde_json::json!(5)), Some(5.0));
+        assert_eq!(read(serde_json::json!("5.25")), Some(5.25));
+        assert_eq!(read(serde_json::json!(0)), Some(0.0));
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(-1),
+            serde_json::json!("-1"),
+            serde_json::json!("1e3"),
+            serde_json::json!(" 5"),
+            serde_json::json!("1.2.3"),
+            serde_json::json!("."),
+            serde_json::json!(""),
+            serde_json::json!([5]),
+        ] {
+            assert_eq!(read(bad.clone()), None, "{bad}");
+        }
+        assert_eq!(credit_amount(None), None);
     }
 
     #[test]
