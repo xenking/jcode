@@ -438,7 +438,9 @@ impl App {
                     PickerAction::SubagentModelChoice { inherit } => {
                         self.inline_interactive_state = None;
                         if inherit {
-                            self.session.set_subagent_model(None);
+                            let mut routing = self.session.worker_routing();
+                            routing.subagent_model = None;
+                            self.session.apply_worker_routing(routing);
                             self.set_status_notice("Subagent model: inherit");
                             self.push_display_message(DisplayMessage::system(format!(
                                 "Subagent model reset to inherit the current model ({}).",
@@ -446,7 +448,9 @@ impl App {
                             )));
                         } else {
                             let spec = model_entry_saved_spec(&entry);
-                            self.session.set_subagent_model(Some(spec.clone()));
+                            let mut routing = self.session.worker_routing();
+                            routing.subagent_model = Some(spec.clone());
+                            self.session.apply_worker_routing(routing);
                             self.set_status_notice(format!("Subagent model → {}", spec));
                             self.push_display_message(DisplayMessage::system(format!(
                                 "Subagent model pinned to {} for this session.",

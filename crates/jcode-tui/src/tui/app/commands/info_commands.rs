@@ -86,7 +86,9 @@ pub(super) fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> boo
     }
 
     if matches!(rest, "inherit" | "reset" | "clear") {
-        app.session.set_subagent_model(None);
+        let mut routing = app.session.worker_routing();
+        routing.subagent_model = None;
+        app.session.apply_worker_routing(routing);
         let _ = app.session.save();
         app.push_display_message(DisplayMessage::system(format!(
             "Subagent model reset to inherit the current model ({}).",
@@ -96,7 +98,9 @@ pub(super) fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> boo
         return true;
     }
 
-    app.session.set_subagent_model(Some(rest.to_string()));
+    let mut routing = app.session.worker_routing();
+    routing.subagent_model = Some(rest.to_string());
+    app.session.apply_worker_routing(routing);
     let _ = app.session.save();
     app.push_display_message(DisplayMessage::system(format!(
         "Subagent model pinned to {} for this session.",

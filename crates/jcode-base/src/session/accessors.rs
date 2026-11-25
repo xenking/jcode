@@ -237,10 +237,6 @@ impl Session {
 
 /// Setters for fields that are plain data with no invariant to maintain.
 impl Session {
-    pub fn set_subagent_model(&mut self, model: Option<String>) {
-        self.subagent_model = model;
-    }
-
     pub fn set_agent_model_overrides(&mut self, overrides: AgentModelOverrides) {
         self.agent_model_overrides = overrides;
     }
