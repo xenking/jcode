@@ -5,6 +5,15 @@
 //! Every creation path uses the same gate, including headed and headless work.
 
 use crate::agent::Agent;
+
+/// Server-owned handles for lazy restoration, scoped to the publication authority.
+pub(super) struct WorkerReviveContext {
+    pub provider: Arc<dyn crate::provider::Provider>,
+    pub members: Arc<RwLock<HashMap<String, super::SwarmMember>>>,
+    pub mcp_pool: Arc<tokio::sync::OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
+    pub shutdown_signals: Arc<RwLock<HashMap<String, jcode_agent_runtime::InterruptSignal>>>,
+    pub soft_interrupt_queues: super::SessionInterruptQueues,
+}
 use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +34,7 @@ pub(crate) struct SessionManager {
     observers: StdMutex<HashMap<String, crate::agent::TurnObserver>>,
     unloaded: StdMutex<HashSet<String>>,
     idle_eviction_count: AtomicU64,
-    revive: OnceLock<super::worker_revive::WorkerReviveContext>,
+    revive: OnceLock<WorkerReviveContext>,
 }
 
 #[cfg(test)]
@@ -79,14 +88,11 @@ impl SessionManager {
     }
 
     /// Publish the context idle workers are revived with. The first call wins.
-    pub(super) fn install_revive(
-        &self,
-        init: impl FnOnce() -> super::worker_revive::WorkerReviveContext,
-    ) {
+    pub(super) fn install_revive(&self, init: impl FnOnce() -> WorkerReviveContext) {
         self.revive.get_or_init(init);
     }
 
-    pub(super) fn revive_context(&self) -> Option<&super::worker_revive::WorkerReviveContext> {
+    pub(super) fn revive_context(&self) -> Option<&WorkerReviveContext> {
         self.revive.get()
     }
 

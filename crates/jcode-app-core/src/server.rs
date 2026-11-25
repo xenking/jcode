@@ -887,7 +887,7 @@ impl Server {
         self.spawn_registry_prewarm();
         self.handles
             .sessions
-            .install_revive(|| worker_revive::WorkerReviveContext {
+            .install_revive(|| session_manager::WorkerReviveContext {
                 provider: Arc::clone(&self.handles.provider),
                 members: Arc::clone(&self.handles.swarm_state.members),
                 mcp_pool: Arc::clone(&self.handles.mcp_pool),

@@ -9,20 +9,9 @@ use super::{
     register_session_interrupt_queue,
 };
 use crate::agent::Agent;
-use crate::provider::Provider;
-use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, OnceCell, RwLock};
-
-/// Server-owned handles for lazy restoration, scoped to the publication authority.
-pub(super) struct WorkerReviveContext {
-    pub provider: Arc<dyn Provider>,
-    pub members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    pub mcp_pool: Arc<OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
-    pub shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    pub soft_interrupt_queues: SessionInterruptQueues,
-}
+use tokio::sync::Mutex;
 
 /// Return a live runtime or restore an unloaded session or known headless member.
 pub(super) async fn live_or_revived_agent(

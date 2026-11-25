@@ -1,5 +1,5 @@
 use super::*;
-use crate::server::{Server, idle_unload::IdleUnload, worker_revive::WorkerReviveContext};
+use crate::server::{Server, idle_unload::IdleUnload, session_manager::WorkerReviveContext};
 use serde_json::json;
 
 fn unload(server: &Server) -> IdleUnload {
