@@ -2,6 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A read-only view of the compaction settings in effect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactionSummary {
+    pub mode: &'static str,
+    pub reactive_threshold: f32,
+    pub reactive_threshold_tokens: usize,
+    pub proactive_floor: f32,
+    pub max_context_tokens: usize,
+}
+
 /// Compaction mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -268,6 +278,17 @@ fn compaction_key_matches(key: &str, value: &str) -> bool {
 impl CompactionConfig {
     pub fn jcode_reactive_threshold_tokens(&self) -> usize {
         self.reactive_threshold_tokens.unwrap_or(400_000)
+    }
+
+    /// The settings `/info` and the budget log report for this configuration.
+    pub fn summary(&self) -> CompactionSummary {
+        CompactionSummary {
+            mode: self.mode.as_str(),
+            reactive_threshold: self.reactive_threshold,
+            reactive_threshold_tokens: self.jcode_reactive_threshold_tokens(),
+            proactive_floor: self.proactive_floor,
+            max_context_tokens: self.max_context_tokens,
+        }
     }
 
     /// Switch the compaction mode.

@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 #[path = "sections/agents.rs"]
 mod agents;
+#[path = "sections/worker_policy.rs"]
+mod worker_policy;
+pub use worker_policy::{WorkerModelChoices, glob_match};
 #[path = "sections/ambient.rs"]
 mod ambient;
 #[path = "sections/compaction.rs"]
@@ -51,7 +54,7 @@ pub use agents::{
     ModelPromptMode, RemoteEmbedding, SwarmSpawnMode, WorkerModelSlot,
 };
 pub use ambient::{AmbientConfig, NotificationsConfig, SafetyConfig};
-pub use compaction::{CompactionConfig, CompactionMode, CompactionOverride};
+pub use compaction::{CompactionConfig, CompactionMode, CompactionOverride, CompactionSummary};
 pub use display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode, TodoHeaderMode};
 pub use display_env::DisplayPreference;
 pub use features::{
