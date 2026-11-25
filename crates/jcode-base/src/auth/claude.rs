@@ -305,6 +305,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
     if !path.exists() {
         return Ok(JcodeAuthFile::default());
     }
+    let borrowed = std::fs::symlink_metadata(&path)?.file_type().is_symlink();
 
     crate::storage::harden_secret_file_permissions(&path);
 
@@ -326,14 +327,18 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
             scopes: Vec::new(),
         });
         auth.active_anthropic_account = Some(primary_account_label());
-        let _ = save_auth_file(&auth);
+        if !borrowed {
+            let _ = save_auth_file(&auth);
+        }
     }
 
     if relabel_accounts(&mut auth) {
         crate::logging::info(
             "Renaming Claude accounts to animal labels (claude-otter, claude-fox, ...)",
         );
-        save_auth_file(&auth)?;
+        if !borrowed {
+            save_auth_file(&auth)?;
+        }
     }
 
     Ok(auth)

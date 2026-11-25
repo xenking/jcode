@@ -1087,33 +1087,8 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
-        // A removed explicit account must fail closed, even with a fresh cache.
-        if let Some(label) = self.oauth_account_label() {
-            let mut cached = self.credentials.write().await;
-            let stored = auth::claude::load_credentials_for_account(&label)?;
-            if cached.as_ref().is_some_and(|old| {
-                old.access_token != stored.access_token
-                    || old.refresh_token != stored.refresh_token
-                    || old.expires_at != stored.expires_at
-            }) {
-                // /cloud imports happen in another process. Discard the old
-                // daemon snapshot and validate the newly stored account below.
-                *cached = None;
-            }
-        }
-        // Check cached credentials
-        {
-            let cached = self.credentials.read().await;
-            if let Some(ref creds) = *cached {
-                let now = chrono::Utc::now().timestamp_millis();
-                // Return cached token if not expired (with 5 min buffer)
-                if creds.expires_at > now + 300_000 {
-                    return Ok((creds.access_token.clone(), true));
-                }
-            }
-        }
-
-        // Load fresh credentials or refresh expired ones
+        // The cache is a snapshot for retrying an in-flight turn, not the
+        // authority for a new turn. Login/import and refresh update the store.
         let fresh_creds = self
             .load_oauth_credentials()
             .context("Failed to load Claude credentials")?;
@@ -1128,30 +1103,23 @@ impl AnthropicProvider {
         }
 
         let now = chrono::Utc::now().timestamp_millis();
+        if fresh_creds.expires_at >= now + 300_000
+            && self
+                .credentials
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|cached| {
+                    cached.access_token == fresh_creds.access_token
+                        && cached.refresh_token == fresh_creds.refresh_token
+                        && cached.expires_at == fresh_creds.expires_at
+                })
+        {
+            return Ok((fresh_creds.access_token, true));
+        }
 
         // Check if token needs refresh (expired or expiring within 5 minutes)
         if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
-            // A refresh token the provider already rejected as unrecoverable
-            // cannot start working again. Retrying it added a doomed network
-            // round-trip to the critical path of every single turn, so fail
-            // straight through to the caller's API-key fallback instead.
-            if auth::refresh_state::refresh_token_is_known_rejected(
-                "claude",
-                &fresh_creds.refresh_token,
-            ) {
-                if fresh_creds.expires_at <= now {
-                    anyhow::bail!(
-                        "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-                    );
-                }
-                // Rejection blocks refresh, not a still-live access token.
-                return Ok((fresh_creds.access_token, true));
-            }
-
-            jcode_base::logging::info(
-                "OAuth token expired or expiring soon, attempting refresh...",
-            );
-
             let active_label = self.oauth_refresh_label();
             let refreshed = match active_label.as_deref() {
                 Some(label) => {
@@ -1162,8 +1130,6 @@ impl AnthropicProvider {
             };
             match refreshed {
                 Ok(refreshed) => {
-                    jcode_base::logging::info("OAuth token refreshed successfully");
-
                     // Cache the refreshed credentials
                     let mut cached = self.credentials.write().await;
                     *cached = Some(CachedCredentials {
@@ -1175,12 +1141,11 @@ impl AnthropicProvider {
                     return Ok((refreshed.access_token, true));
                 }
                 Err(e) => {
-                    jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
                     // A still-unexpired token may remain usable until its
                     // actual expiry even when a proactive refresh fails. Once
                     // expired, however, returning it only guarantees a 401 and
                     // prevents Auto mode from trying its API-key fallback.
-                    if fresh_creds.expires_at <= now {
+                    if fresh_creds.expires_at <= chrono::Utc::now().timestamp_millis() {
                         anyhow::bail!("Claude OAuth token is expired and refresh failed: {e:#}");
                     }
                 }

@@ -601,7 +601,7 @@ async fn populate_auth_test_target_report(
     mut report: AuthTestProviderReport,
 ) -> AuthTestProviderReport {
     match target {
-        AuthTestTarget::Claude => probe_claude_auth(&mut report).await,
+        AuthTestTarget::Claude => probe_claude_auth(&mut report),
         AuthTestTarget::Openai => probe_openai_auth(&mut report).await,
         AuthTestTarget::Gemini => probe_gemini_auth(&mut report).await,
         AuthTestTarget::Antigravity => probe_antigravity_auth(&mut report).await,

@@ -249,10 +249,9 @@ async fn claude_cached_rejection_does_not_reject_the_callers_unsubmitted_token()
         .await
         .unwrap_err();
     assert!(error.to_string().contains("previously rejected"));
-    assert!(!crate::auth::refresh_state::refresh_token_is_known_rejected(
-        "claude",
-        "not-submitted"
-    ));
+    assert!(
+        !crate::auth::refresh_state::refresh_token_is_known_rejected("claude", "not-submitted")
+    );
     assert_eq!(std::fs::read(state)?, before);
     Ok(())
 }
