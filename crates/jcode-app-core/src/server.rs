@@ -659,8 +659,6 @@ pub(super) struct ServerHandles {
     pub(in crate::server) provider: Arc<dyn Provider>,
     /// Server identity for multi-server support.
     pub(in crate::server) identity: ServerIdentity,
-    /// Broadcast channel for streaming events to all subscribers.
-    pub(in crate::server) event_tx: broadcast::Sender<ServerEvent>,
     /// Active sessions (session_id -> Agent).
     pub(in crate::server) sessions: SessionAgents,
     /// Current processing state.
@@ -741,7 +739,6 @@ impl Server {
         // Copilot, Antigravity, Gemini, Cursor, Bedrock, and OpenRouter.
         crate::provider::set_active_provider(Arc::clone(&provider));
 
-        let (event_tx, _) = broadcast::channel(1024);
         let (client_debug_response_tx, _) = broadcast::channel(64);
 
         // Generate a memorable server name unless the operator configured a
@@ -786,7 +783,6 @@ impl Server {
             handles: ServerHandles {
                 provider,
                 identity,
-                event_tx,
                 sessions: Arc::new(SessionManager::new()),
                 is_processing: Arc::new(RwLock::new(false)),
                 session_id: Arc::new(RwLock::new(String::new())),

@@ -1,5 +1,5 @@
 use super::ServerHandles;
-use super::client_lifecycle::handle_client;
+use super::client_lifecycle::{ClientEnv, handle_client};
 use super::debug::handle_debug_client;
 use super::util::get_shared_mcp_pool;
 use crate::gateway::GatewayClient;
@@ -306,33 +306,7 @@ impl ServerRuntime {
                 let mcp_pool = get_shared_mcp_pool(&self.handles.mcp_pool).await;
                 handle_client(
                     stream,
-                    Arc::clone(&self.handles.sessions),
-                    self.handles.event_tx.clone(),
-                    Arc::clone(&self.handles.provider),
-                    Arc::clone(&self.handles.is_processing),
-                    Arc::clone(&self.handles.session_id),
-                    Arc::clone(&self.handles.client_count),
-                    Arc::clone(&self.handles.client_connections),
-                    Arc::clone(&self.handles.swarm_state.members),
-                    Arc::clone(&self.handles.swarm_state.swarms_by_id),
-                    Arc::clone(&self.handles.shared_context),
-                    Arc::clone(&self.handles.swarm_state.plans),
-                    Arc::clone(&self.handles.swarm_state.coordinators),
-                    self.handles.file_touch.clone(),
-                    Arc::clone(&self.handles.channel_subscriptions),
-                    Arc::clone(&self.handles.channel_subscriptions_by_session),
-                    Arc::clone(&self.handles.client_debug_state),
-                    self.handles.client_debug_response_tx.clone(),
-                    Arc::clone(&self.handles.event_history),
-                    Arc::clone(&self.handles.event_counter),
-                    self.handles.swarm_event_tx.clone(),
-                    self.handles.identity.name.clone(),
-                    self.handles.identity.icon.clone(),
-                    mcp_pool,
-                    Arc::clone(&self.handles.shutdown_signals),
-                    Arc::clone(&self.handles.soft_interrupt_queues),
-                    self.handles.await_members_runtime.clone(),
-                    self.handles.swarm_mutation_runtime.clone(),
+                    ClientEnv::from_handles(&self.handles, mcp_pool),
                     nudge_ambient.then_some(&mut session_bound),
                 )
                 .await

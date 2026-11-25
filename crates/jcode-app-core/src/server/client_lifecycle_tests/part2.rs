@@ -370,41 +370,39 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _) = broadcast::channel(8);
-    let (_global_event_tx, _) = broadcast::channel(8);
-    let global_is_processing = Arc::new(RwLock::new(false));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
 
     let server_task = tokio::spawn(handle_client(
         server_stream,
-        Arc::clone(&sessions),
-        _global_event_tx,
-        provider_template,
-        global_is_processing,
-        global_session_id,
-        client_count,
-        Arc::clone(&client_connections),
-        swarm_members,
-        swarms_by_id,
-        shared_context,
-        swarm_plans,
-        swarm_coordinators,
-        file_touch,
-        channel_subscriptions,
-        channel_subscriptions_by_session,
-        client_debug_state,
-        _debug_response_tx,
-        event_history,
-        event_counter,
-        swarm_event_tx,
-        "jcode-test".to_string(),
-        "🧪".to_string(),
-        mcp_pool,
-        shutdown_signals,
-        soft_interrupt_queues,
-        AwaitMembersRuntime::default(),
-        SwarmMutationRuntime::default(),
+        ClientEnv {
+            sessions: Arc::clone(&sessions),
+            provider_template,
+            global_session_id,
+            client_count,
+            client_connections: Arc::clone(&client_connections),
+            swarm_members,
+            swarms_by_id,
+            shared_context,
+            swarm_plans,
+            swarm_coordinators,
+            file_touch,
+            channel_subscriptions,
+            channel_subscriptions_by_session,
+            client_debug_state,
+            client_debug_response_tx: _debug_response_tx,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+            server_name: "jcode-test".to_string(),
+            server_icon: "🧪".to_string(),
+            mcp_pool,
+            shutdown_signals,
+            soft_interrupt_queues,
+            await_members_runtime: AwaitMembersRuntime::default(),
+            swarm_mutation_runtime: SwarmMutationRuntime::default(),
+        },
         None,
     ));
 

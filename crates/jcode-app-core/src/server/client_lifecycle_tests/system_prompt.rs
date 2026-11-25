@@ -68,8 +68,6 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _) = broadcast::channel(8);
-    let (_global_event_tx, _) = broadcast::channel(8);
-    let global_is_processing = Arc::new(RwLock::new(false));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
@@ -78,33 +76,33 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
         let server_task = tokio::spawn(handle_client(
             server_stream,
-            Arc::clone(&sessions),
-            _global_event_tx.clone(),
-            provider_template.clone(),
-            global_is_processing.clone(),
-            global_session_id.clone(),
-            client_count.clone(),
-            Arc::clone(&client_connections),
-            swarm_members.clone(),
-            swarms_by_id.clone(),
-            shared_context.clone(),
-            swarm_plans.clone(),
-            swarm_coordinators.clone(),
-            file_touch.clone(),
-            channel_subscriptions.clone(),
-            channel_subscriptions_by_session.clone(),
-            client_debug_state.clone(),
-            _debug_response_tx.clone(),
-            event_history.clone(),
-            event_counter.clone(),
-            swarm_event_tx.clone(),
-            "jcode-test".to_string(),
-            "🧪".to_string(),
-            mcp_pool.clone(),
-            shutdown_signals.clone(),
-            soft_interrupt_queues.clone(),
-            AwaitMembersRuntime::default(),
-            SwarmMutationRuntime::default(),
+            ClientEnv {
+                sessions: Arc::clone(&sessions),
+                provider_template: provider_template.clone(),
+                global_session_id: global_session_id.clone(),
+                client_count: client_count.clone(),
+                client_connections: Arc::clone(&client_connections),
+                swarm_members: swarm_members.clone(),
+                swarms_by_id: swarms_by_id.clone(),
+                shared_context: shared_context.clone(),
+                swarm_plans: swarm_plans.clone(),
+                swarm_coordinators: swarm_coordinators.clone(),
+                file_touch: file_touch.clone(),
+                channel_subscriptions: channel_subscriptions.clone(),
+                channel_subscriptions_by_session: channel_subscriptions_by_session.clone(),
+                client_debug_state: client_debug_state.clone(),
+                client_debug_response_tx: _debug_response_tx.clone(),
+                event_history: event_history.clone(),
+                event_counter: event_counter.clone(),
+                swarm_event_tx: swarm_event_tx.clone(),
+                server_name: "jcode-test".to_string(),
+                server_icon: "🧪".to_string(),
+                mcp_pool: mcp_pool.clone(),
+                shutdown_signals: shutdown_signals.clone(),
+                soft_interrupt_queues: soft_interrupt_queues.clone(),
+                await_members_runtime: AwaitMembersRuntime::default(),
+                swarm_mutation_runtime: SwarmMutationRuntime::default(),
+            },
             None,
         ));
         (server_task, client_stream)
