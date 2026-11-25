@@ -10,7 +10,7 @@ const PRESENCE_TTL: Duration = Duration::from_secs(2);
 const PING_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
-pub(super) struct DaemonControl {
+pub(crate) struct DaemonControl {
     stream: Option<BufReader<Stream>>,
     persistent: bool,
     presence: Option<(Instant, HashSet<String>)>,
@@ -95,7 +95,7 @@ impl DaemonControl {
     }
 
     /// Refresh only when demanded. A missing or failed reply never claims presence.
-    pub(super) async fn user_connections(&mut self, socket: &Path) -> HashSet<String> {
+    pub(crate) async fn user_connections(&mut self, socket: &Path) -> HashSet<String> {
         if let Some((until, ids)) = &self.presence
             && Instant::now() < *until
         {

@@ -31,18 +31,26 @@ impl PublishedCatalog {
     }
 
     pub fn covers(&self, catalog: &Catalog) -> bool {
-        self.0.as_ref().is_some_and(|previous| {
-            Arc::ptr_eq(previous, &catalog.dedup_key)
-                || previous.as_ref() == catalog.dedup_key.as_ref()
-        })
+        catalog.is_last(&self.0)
     }
 
     pub fn record(&mut self, catalog: &Catalog) {
-        self.0 = Some(Arc::clone(&catalog.dedup_key));
+        catalog.remember_as_last(&mut self.0);
     }
 }
 
 impl Catalog {
+    /// Whether `last` is this catalog's content, as far as a client could tell.
+    fn is_last(&self, last: &Option<Arc<str>>) -> bool {
+        last.as_ref().is_some_and(|previous| {
+            Arc::ptr_eq(previous, &self.dedup_key) || previous.as_ref() == self.dedup_key.as_ref()
+        })
+    }
+
+    fn remember_as_last(&self, last: &mut Option<Arc<str>>) {
+        *last = Some(Arc::clone(&self.dedup_key));
+    }
+
     fn new(snapshot: ModelCatalogSnapshot) -> Self {
         let event = ServerEvent::AvailableModelsUpdated {
             provider_name: snapshot.provider_name,

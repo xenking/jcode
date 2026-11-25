@@ -310,8 +310,13 @@ impl BridgeState {
         self.runtime_commands_supported = advertised.iter().any(|cap| cap == "runtime_commands");
     }
 
-    pub fn set_user_connected_sessions(&mut self, sessions: std::collections::HashSet<String>) {
-        self.user_connected_sessions = sessions;
+    /// Ask the daemon which sessions have a user attached, for the next list.
+    pub(crate) async fn refresh_user_connections(
+        &mut self,
+        control: &mut crate::session_controls::DaemonControl,
+        socket: &std::path::Path,
+    ) {
+        self.user_connected_sessions = control.user_connections(socket).await;
     }
 }
 

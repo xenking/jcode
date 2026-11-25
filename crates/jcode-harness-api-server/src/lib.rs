@@ -676,7 +676,7 @@ where
                 if request["req"] == "list_sessions" && daemon.user_connections()
                     && let Ok(mut control) = control.try_lock()
                 {
-                    state.set_user_connected_sessions(control.user_connections(&legacy_socket).await);
+                    state.refresh_user_connections(&mut control, &legacy_socket).await;
                 }
                 if request["req"] == "list_draft_models" {
                     let id = request["id"].as_u64().unwrap_or(0);
