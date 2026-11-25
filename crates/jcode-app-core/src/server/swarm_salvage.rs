@@ -4,6 +4,7 @@ use super::persist_swarm_state_for;
 use super::state::fanout_session_event;
 use super::swarm_event_history::*;
 use super::swarm_plan::*;
+
 use super::swarm_policy::*;
 use super::swarm_status::*;
 use super::{SwarmMember, SwarmState, VersionedPlan};
@@ -11,6 +12,67 @@ use crate::protocol::{NotificationType, ServerEvent};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+pub(super) async fn refresh_swarm_task_staleness(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) {
+    refresh_task_heartbeats(swarm_members, swarms_by_id, swarm_plans, swarm_coordinators).await;
+
+    // Second phase: salvage in-flight items whose assignee is dead. Staleness
+    // marking above only reflects missing heartbeats; when the assigned member
+    // is gone from the swarm or sits in a terminal lifecycle status, no
+    // heartbeat or turn-end will ever arrive, so the item must be requeued
+    // (or failed at the reclaim cap) instead of pulsing running_stale forever.
+    // A terminal-status member gets a grace period before salvage: reload
+    // recovery briefly marks resumable members `crashed` before restoring
+    // them, and salvaging inside that window would double-assign their work.
+    let salvage_grace = swarm_task_stale_after();
+    let salvage_candidates: Vec<(String, String)> = {
+        let members = swarm_members.read().await;
+        let plans = swarm_plans.read().await;
+        let mut pairs = std::collections::BTreeSet::new();
+        for (swarm_id, plan) in plans.iter() {
+            for item in &plan.items {
+                if !matches!(item.status.as_str(), "running" | "running_stale" | "queued") {
+                    continue;
+                }
+                let assignee = item.assigned_to.as_deref().or_else(|| {
+                    plan.task_progress
+                        .get(&item.id)
+                        .and_then(|progress| progress.assigned_session_id.as_deref())
+                });
+                let Some(assignee) = assignee else {
+                    continue;
+                };
+                let assignee_is_dead = match members.get(assignee) {
+                    None => true,
+                    Some(member) => {
+                        member_status_is_dead(&member.status)
+                            && member.last_status_change.elapsed() >= salvage_grace
+                    }
+                };
+                if assignee_is_dead {
+                    pairs.insert((swarm_id.clone(), assignee.to_string()));
+                }
+            }
+        }
+        pairs.into_iter().collect()
+    };
+    for (swarm_id, session_id) in salvage_candidates {
+        salvage_assignments_of_dead_member(
+            &session_id,
+            &swarm_id,
+            swarm_members,
+            swarms_by_id,
+            swarm_plans,
+            swarm_coordinators,
+        )
+        .await;
+    }
+}
 
 /// Outcome of salvaging one dead member's plan assignments.
 #[derive(Debug, Default, PartialEq, Eq)]

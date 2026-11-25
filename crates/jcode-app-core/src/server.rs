@@ -130,10 +130,11 @@ use self::swarm_persistence::{
     swarm_operation_lock,
 };
 use self::swarm_plan::{
-    broadcast_swarm_plan, broadcast_swarm_plan_with_previous, refresh_swarm_task_staleness,
+    broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
     remove_plan_participant, rename_plan_participant, send_swarm_plan_to_session,
 };
 use self::swarm_policy::{expired_terminal_member_ids, member_consumes_swarm_capacity};
+use self::swarm_salvage::refresh_swarm_task_staleness;
 use self::swarm_status::{
     broadcast_swarm_status, set_member_task_label, truncate_detail, update_member_status,
     update_member_status_with_report, update_member_status_with_report_tldr,
