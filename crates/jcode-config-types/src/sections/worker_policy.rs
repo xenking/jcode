@@ -16,6 +16,16 @@ pub struct WorkerModelChoices {
     pub hard_boundary: bool,
 }
 
+/// The worker model allowlist and failover list a worker turn runs under.
+/// Plain data built once by [`AgentsConfig::failover_policy`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailoverPolicy {
+    /// `agents.spawn_allowed_models`: a hard boundary when non-empty.
+    pub allowed_models: Vec<String>,
+    /// `agents.swarm_model_fallbacks`, in order.
+    pub fallbacks: Vec<String>,
+}
+
 impl WorkerModelChoices {
     fn new(models: &[String], hard_boundary: bool) -> Self {
         Self {
@@ -31,6 +41,15 @@ impl AgentsConfig {
         match slot {
             WorkerModelSlot::Swarm => self.swarm_model.as_deref(),
             WorkerModelSlot::Memory => self.memory_model.as_deref(),
+        }
+    }
+
+    /// The allowlist and fallbacks that bound where a worker may run and fail
+    /// over to.
+    pub fn failover_policy(&self) -> FailoverPolicy {
+        FailoverPolicy {
+            allowed_models: self.spawn_allowed_models.clone(),
+            fallbacks: self.swarm_model_fallbacks.clone(),
         }
     }
 

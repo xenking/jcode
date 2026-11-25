@@ -486,6 +486,7 @@ pub(super) async fn spawn_swarm_agent(
         return existing_spawn_worker(worker, swarm_members).await;
     }
     let agents_config = &crate::config::config().agents;
+    let failover = agents_config.failover_policy();
     // Agent profile: the explicit spawn choice, then the lane's. Resolved
     // before any model or effort default so an unknown name fails fast.
     let profile_name = match (requested_profile, lane_id.as_deref()) {
@@ -529,7 +530,7 @@ pub(super) async fn spawn_swarm_agent(
     )
     .await;
     let configured_swarm_model =
-        if requested_model.is_none() && !agents_config.swarm_model_fallbacks.is_empty() {
+        if requested_model.is_none() && !failover.fallbacks.is_empty() {
             let routes = match sessions.read().await.get(req_session_id).cloned() {
                 Some(agent) => agent
                     .try_lock()
@@ -539,7 +540,7 @@ pub(super) async fn spawn_swarm_agent(
             };
             let picked = pick_available_swarm_model(
                 preferred_swarm_model.clone(),
-                &agents_config.swarm_model_fallbacks,
+                &failover.fallbacks,
                 &routes,
             );
             if picked != preferred_swarm_model {
@@ -560,8 +561,8 @@ pub(super) async fn spawn_swarm_agent(
     // so a failing worker can never be moved to a model outside the allowlist.
     let worker_fallbacks: Vec<String> = if requested_model.is_none() {
         spawn_model_selection::worker_allowed_fallbacks(
-            &agents_config.spawn_allowed_models,
-            &agents_config.swarm_model_fallbacks,
+            &failover.allowed_models,
+            &failover.fallbacks,
         )
     } else {
         Vec::new()
@@ -820,7 +821,7 @@ pub(super) async fn spawn_swarm_agent(
         if let Some(agent_arc) = agent_arc {
             let sid_clone = new_session_id.clone();
             let worker_fallbacks = worker_fallbacks.clone();
-            let worker_allowed_models = agents_config.spawn_allowed_models.clone();
+            let worker_allowed_models = failover.allowed_models.clone();
             let swarm_members2 = Arc::clone(swarm_members);
             let swarms_by_id2 = Arc::clone(swarms_by_id);
             let event_history2 = Arc::clone(event_history);

@@ -172,7 +172,7 @@ pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
     if !agent.is_swarm_worker() {
         return Vec::new();
     }
-    crate::config::config().agents.spawn_allowed_models.clone()
+    crate::config::config().agents.failover_policy().allowed_models
 }
 
 /// Configured model fallbacks for a swarm worker turn, inside its allowlist.
@@ -182,10 +182,10 @@ pub(super) fn effective_worker_fallbacks(agent: &Agent) -> Vec<String> {
     if !agent.is_swarm_worker() {
         return Vec::new();
     }
-    let config = crate::config::config();
+    let policy = crate::config::config().agents.failover_policy();
     super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
-        &config.agents.spawn_allowed_models,
-        &config.agents.swarm_model_fallbacks,
+        &policy.allowed_models,
+        &policy.fallbacks,
     )
 }
 

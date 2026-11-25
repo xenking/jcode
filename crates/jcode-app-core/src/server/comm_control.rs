@@ -547,11 +547,11 @@ fn spawn_assigned_task_run(
         let start_message_index = agent.message_count();
         // A planned task runs on a spawned worker: keep its failover inside the
         // worker model allowlist exactly like the spawn path does.
-        let agents_config = crate::config::config().agents.clone();
-        let worker_allowed_models = agents_config.spawn_allowed_models.clone();
+        let failover = crate::config::config().agents.failover_policy();
+        let worker_allowed_models = failover.allowed_models.clone();
         let worker_fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
             &worker_allowed_models,
-            &agents_config.swarm_model_fallbacks,
+            &failover.fallbacks,
         );
         let result = match agent.mark_swarm_worker() {
             Ok(()) => {
