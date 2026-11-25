@@ -1,8 +1,8 @@
 //! Snapcompact — bitmap-frame context compression for vision-capable LLMs.
 //!
-//! Ported from [omp](https://github.com/can1357/oh-my-pi) (MIT) —
-//! `packages/snapcompact/src/snapcompact.ts`. See
-//! `docs/ref-porter/xai-org-grok-build.md` section E2 for design rationale.
+//! Adapted from oxicode (https://github.com/project-oxi/oxicode, MIT). See
+//! `NOTICE` at the repository root and `docs/ref-porter/xai-org-grok-build.md`
+//! section E2 for design rationale.
 //!
 //! ## How it works
 //!
@@ -14,8 +14,7 @@
 //! ## Scope of this crate
 //!
 //! Shape system, conversation serialization, shape selection, and
-//! the full text→PNG rasterizer (ported from omp's
-//! `pi-natives/src/snapcompact.rs` — see the [`renderer`] submodule).
+//! the full text→PNG rasterizer (see the [`renderer`] submodule).
 //! The renderer uses bundled BDF/HEX bitmap fonts plus the bundled
 //! Silver TrueType font for non-Latin glyphs, all under permissive
 //! licenses (see `NOTICE.md`).
@@ -29,10 +28,10 @@ pub mod serialize;
 
 /// One eval-validated frame shape.
 ///
-/// `name` is a stable identifier matching omp's `SHAPE_VARIANTS` table.
+/// `name` is a stable identifier from the eval-validated shape table.
 /// The MVP carries a hard-coded name on each shape entry; future
 /// extension can compute names from fields, but the table is the source
-/// of truth for now (matches omp SHAPE_VARIANTS exactly).
+/// of truth for now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     /// Stable name (e.g. "11on16-bw"). Used as lookup key.
@@ -60,7 +59,7 @@ pub enum Font {
 }
 
 impl Font {
-    /// String identifier matching omp's shape table.
+    /// String identifier of the font in the shape table.
     pub fn as_str(&self) -> &'static str {
         match self {
             Font::FiveByEight => "5x8",
@@ -90,8 +89,7 @@ impl Variant {
     }
 }
 
-/// Eval-validated shape table. Names match omp's `SHAPE_VARIANTS` keys
-/// exactly so the Rust and TS registries stay in sync.
+/// Eval-validated shape table. Names are stable identifiers.
 pub const SHAPES: &[Shape] = &[
     // Redundancy-coded double-print (line_repeat=2).
     Shape {
@@ -311,7 +309,7 @@ pub const SHAPES: &[Shape] = &[
 ];
 
 impl Shape {
-    /// The stable name (matches omp SHAPE_VARIANTS key).
+    /// The stable shape name.
     pub fn name(&self) -> &'static str {
         self.name
     }
@@ -327,15 +325,15 @@ impl Shape {
     }
 }
 
-/// Per-provider default frame shape when the model line is unmeasured
-/// (omp `FAMILY_VARIANT`). Unknown readers get the OpenAI/Google winner.
+/// Per-provider default frame shape when the model line is unmeasured.
+/// Unknown readers get the OpenAI/Google winner.
 const FAMILY_VARIANT_UNKNOWN: &str = "8on22-bw";
 
 /// Eval-winning variant and frame size for a model line, or `None` when the
-/// line is unmeasured (omp `idealShapeVariant`).
+/// line is unmeasured.
 ///
 /// `11on16-bw` is 8x13 glyphs on an 11px advance (extra tracking): letter
-/// spacing the readable cell won omp's tool-result legibility bench. Opus 4.7+
+/// spacing the readable cell won the tool-result legibility bench. Opus 4.7+
 /// and the Fable/Mythos lines read 1932px frames natively (largest square that
 /// is not downscaled under Anthropic's 4,784 visual-token cap); Gemini bills a
 /// fixed per-image budget, so 2048px packs more chars for the same price.
@@ -399,15 +397,15 @@ fn model_revision(id: &str) -> Option<(u32, u32)> {
 
 /// Pick the eval-validated shape for `model_id`, including its frame size.
 ///
-/// Mirrors omp `resolveShape`: the model id selects the eval-winning shape and
+/// The model id selects the eval-winning shape and
 /// frame size for its line, and an unmeasured model falls back to the family
 /// winner at the standard 1568px frame.
 pub fn resolve_shape(model_id: &str) -> Shape {
     resolve_shape_for(model_id, "")
 }
 
-/// Pick the shape for a reader, using `provider` for the fallback family the
-/// way omp keys `FAMILY_VARIANT` on the wire API.
+/// Pick the shape for a reader, using `provider` for the fallback family
+/// keyed on the wire API.
 pub fn resolve_shape_for(model_id: &str, provider: &str) -> Shape {
     let variant = match ideal_shape(model_id) {
         Some((variant, frame_size)) => {
@@ -422,7 +420,7 @@ pub fn resolve_shape_for(model_id: &str, provider: &str) -> Shape {
     lookup_owned(variant).unwrap_or_else(|| SHAPES[0].clone())
 }
 
-/// omp `FAMILY_VARIANT`: the eval winner for the reader's wire family.
+/// The eval winner for the reader's wire family.
 fn family_variant(provider: &str) -> &'static str {
     let provider = provider.to_ascii_lowercase();
     if provider.contains("anthropic")
@@ -436,9 +434,9 @@ fn family_variant(provider: &str) -> &'static str {
     }
 }
 
-/// Images one archive may carry for `provider`, mirroring omp's
-/// `providerFrameBudget` (its catalog `image-count-budget`, capped at
-/// `MAX_FRAMES_DEFAULT`). Providers with no tighter rule keep the default.
+/// Images one archive may carry for `provider` (its catalog image-count
+/// budget, capped at `MAX_FRAMES_DEFAULT`). Providers with no tighter rule
+/// keep the default.
 pub fn frame_budget(provider: &str) -> u32 {
     let provider = provider.to_ascii_lowercase();
     let budget =
@@ -454,7 +452,7 @@ pub fn frame_budget(provider: &str) -> u32 {
     budget.clamp(1, MAX_FRAMES_DEFAULT)
 }
 
-/// Look up a shape by its stable name (omp `SHAPE_VARIANTS` key).
+/// Look up a shape by its stable name.
 pub fn shape_by_name(name: &str) -> Option<Shape> {
     lookup_owned(name.trim())
 }
@@ -508,8 +506,7 @@ pub fn normalize(input: &str) -> String {
 /// Newline glyph used inside normalized archive text.
 pub const NEWLINE_GLYPH: char = '\u{2588}';
 
-/// Head of a folded-in text summary, matching omp
-/// `PREVIOUS_SUMMARY_HEAD`.
+/// Head of a folded-in text summary.
 pub const PREVIOUS_SUMMARY_HEAD: &str = "[Summary of earlier history]";
 
 /// Inputs to a compaction pass.
@@ -518,8 +515,7 @@ pub struct CompactPreparation {
     pub text: String,
     pub bounded_text: String,
     pub remaining_text: String,
-    /// The archive opens with a condensed digest of still-older context
-    /// (omp `includedPreviousSummary`).
+    /// The archive opens with a condensed digest of still-older context.
     pub included_previous_summary: bool,
 }
 
@@ -658,11 +654,10 @@ fn bounded_slice(s: &str, max_chars: usize) -> String {
 pub struct CompactOptions {
     /// Reading model id; selects the eval-winning frame shape.
     pub model_id: String,
-    /// Reading provider; caps the archive frame count like omp
-    /// `providerFrameBudget`.
+    /// Reading provider; caps the archive frame count.
     pub provider: String,
     pub max_frames: u32,
-    /// Forced shape (omp `snapcompact.shape` setting); `None` = auto.
+    /// Forced shape; `None` = auto.
     pub shape: Option<Shape>,
     /// Forced frame edge in pixels.
     pub frame_size: Option<u32>,
@@ -684,7 +679,7 @@ impl Default for CompactOptions {
 #[derive(Debug, Clone)]
 pub struct CompactResult {
     /// Reading guide for the frames plus the `HISTORY` section head. This is
-    /// the compaction summary: omp makes no LLM call for a snapcompact pass.
+    /// the compaction summary: a snapcompact pass makes no LLM call.
     pub summary: String,
     pub source_text: String,
     pub frames: Vec<FrameRef>,
@@ -777,8 +772,8 @@ pub struct FrameRange {
     pub source_end: usize,
 }
 
-/// Upper bound on archive frames carried per compaction (omp
-/// `MAX_FRAMES_DEFAULT`): ~400k tokens of high-res Anthropic frames while
+/// Upper bound on archive frames carried per compaction: ~400k tokens of
+/// high-res Anthropic frames while
 /// staying under the ~100-image per-request wire cap.
 pub const MAX_FRAMES_DEFAULT: u32 = 80;
 
@@ -792,7 +787,7 @@ struct FramePlan {
 }
 
 /// Plan frames for `text`, keeping both chronological ends when the source does
-/// not fit `max_frames` (omp `planArchive` foveation: the least-important
+/// not fit `max_frames` (foveation: the least-important
 /// middle of a long archive is dropped rather than failing the pass).
 fn plan_frames(
     text: &str,
@@ -861,11 +856,11 @@ fn plan_frames(
     }
 }
 
-/// Run a compaction pass — render each frame slice through the
-/// pi-natives ported renderer (`render_snapcompact_png`) so the
+/// Run a compaction pass: render each frame slice through the
+/// renderer (`render_snapcompact_png`) so the
 /// returned bytes are real PNG-encoded image data.
 ///
-/// Never fails for a long history: like omp it drops the archive middle and
+/// Never fails for a long history: it drops the archive middle and
 /// reports `truncated_chars` instead of falling back to an LLM summary.
 pub fn compact(
     prep: &CompactPreparation,
@@ -1091,8 +1086,7 @@ fn render_kept_source(
     (out, ranges)
 }
 
-/// Reading guide rendered as the compaction summary (omp
-/// `prompts/snapcompact-summary.md`).
+/// Reading guide rendered as the compaction summary.
 fn render_summary(
     shape: &Shape,
     frame_count: usize,
@@ -1460,7 +1454,7 @@ mod tests {
         assert_eq!(ranges[1].source_end, 16);
     }
 
-    /// omp `planArchive` drops the archive middle instead of failing the pass:
+    /// A long archive drops the middle instead of failing the pass:
     /// a history too long for the frame budget still compacts, keeping both
     /// chronological ends.
     #[test]
@@ -1504,7 +1498,7 @@ mod tests {
     }
 
     /// The summary is a reading guide for the frames, not a copy of the
-    /// archive text (omp `snapcompact-summary.md`).
+    /// archive text.
     #[test]
     fn summary_is_a_reading_guide() {
         let prep = super::prepare(
@@ -1532,10 +1526,10 @@ Assistant: noted",
         assert_eq!(result.frames.len(), 1);
     }
 
-    /// omp `resolveShape` / `idealShapeVariant` model rules, including the
+    /// Model rules for shape selection, including the
     /// high-res frame sizes.
     #[test]
-    fn shape_resolution_matches_omp_model_rules() {
+    fn shape_resolution_matches_model_rules() {
         let case = |model: &str| {
             let shape = super::resolve_shape(model);
             (shape.name, shape.frame_size)
@@ -1553,7 +1547,7 @@ Assistant: noted",
         assert_eq!(case("mystery-model-9"), ("8on22-bw", 1568));
     }
 
-    /// omp `providerFrameBudget`: the archive never exceeds the provider's
+    /// The archive never exceeds the provider's
     /// per-request image budget.
     #[test]
     fn frame_budget_matches_provider_image_limits() {
@@ -1567,7 +1561,7 @@ Assistant: noted",
         assert_eq!(super::frame_budget("unknown-gateway"), 80);
     }
 
-    /// omp caps a caller's `maxFrames` at the provider budget, never above it.
+    /// A caller's `max_frames` is capped at the provider budget, never above it.
     #[test]
     fn compact_never_exceeds_the_provider_frame_budget() {
         let prep = super::prepare(&"z".repeat(400_000), 10_000, 500_000);
@@ -1586,8 +1580,7 @@ Assistant: noted",
         assert_eq!(result.frames.len(), 10);
     }
 
-    /// A folded-in text summary is labelled and reported (omp
-    /// `PREVIOUS_SUMMARY_HEAD` / `includedPreviousSummary`).
+    /// A folded-in text summary is labelled and reported.
     #[test]
     fn previous_summary_is_labelled_and_reported() {
         let messages = [jcode_message_types::Message::user("fresh turn")];
@@ -1623,7 +1616,7 @@ Assistant: noted",
     use super::*;
 
     #[test]
-    fn shape_table_includes_all_omp_variants() {
+    fn shape_table_includes_all_variants() {
         for name in &[
             "8x8r-bw",
             "8x8r-sent",
@@ -1677,7 +1670,7 @@ Assistant: noted",
 
     #[test]
     fn resolve_shape_unknown_model_uses_the_wire_family_winner() {
-        // omp `FAMILY_VARIANT`: an unmeasured model id takes the family winner,
+        // An unmeasured model id takes the family winner,
         // which is the OpenAI/Google shape for an unknown API.
         assert_eq!(resolve_shape("unknown-provider-model-xyz").name, "8on22-bw");
         assert_eq!(

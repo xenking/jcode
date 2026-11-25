@@ -1,4 +1,4 @@
-//! Renderer submodule — pi-natives ported text→PNG rasterizer.
+//! Renderer submodule: text→PNG rasterizer.
 
 pub mod snapcompact_render;
 

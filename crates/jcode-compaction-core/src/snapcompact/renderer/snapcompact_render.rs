@@ -10,7 +10,7 @@
 //! - `6x12` / `8x13` — X.org misc BDF fonts (higher-density eval winners).
 //! - `silver` — bundled TrueType font for CJK and other non-Latin text.
 //!
-//! Shape controls, all eval-validated in `packages/snapcompact`:
+//! Shape controls, all eval-validated:
 //!
 //! - **variant** — `sent` cycles glyph ink through six hues at sentence
 //!   boundaries; `bw` prints plain black ink (best for Anthropic readers).
@@ -26,17 +26,17 @@
 //!   pitch, the "8on16" shapes). `true`/unset keeps the auto rule above.
 //! - **columns** — `2` flows pre-wrapped `\n`-separated lines down two
 //!   newspaper columns (the "doc" shapes); word wrap and pagination happen in
-//!   the TypeScript caller.
+//!   the caller.
 //! - **dim spans** — `U+000E`/`U+000F` in the text toggle dim gray ink on/off
-//!   without occupying a cell; the TypeScript serializer wraps tool output in
+//!   without occupying a cell; the serializer wraps tool output in
 //!   them so archived conversation reads louder than archived tool noise.
 //! - **line breaks** — `U+2588` (FULL BLOCK) fills its entire cell with pitch
-//!   black ink regardless of variant or dim state; the TypeScript normalizer
+//!   black ink regardless of variant or dim state; the normalizer
 //!   folds newline runs to it so line structure survives whitespace collapse at
 //!   a one-cell cost.
 //!
 //! Text normalization, frame chunking, provider shape selection, and archive
-//! management live in `packages/snapcompact/src/snapcompact.ts`; this module
+//! management live in `snapcompact/mod.rs`; this module
 //! is only the hot `text -> PNG bytes` path.
 
 use std::{
@@ -99,7 +99,7 @@ const INK_DIM: u8 = 9;
 const DIM_ON: u32 = 0x0e;
 const DIM_OFF: u32 = 0x0f;
 /// FULL BLOCK: fills its entire cell box with pitch-black ink (`INK_BLACK`,
-/// ignoring sentence hue and dim state). The TypeScript normalizer folds
+/// ignoring sentence hue and dim state). The normalizer folds
 /// newline runs to it.
 const FULL_BLOCK: u32 = 0x2588;
 
@@ -305,7 +305,7 @@ fn resolve_font(name: &str) -> Result<RenderFont<'static>, SnapcompactError> {
     }
 }
 
-/// Frame grid geometry shared with the TypeScript caller. The cell box
+/// Frame grid geometry shared with the caller. The cell box
 /// (`cell_w` x `cell_h`) is the advance/pitch glyphs are laid out on; it may
 /// differ from the font's natural cell (e.g. 8x13 glyphs on an 8x16 pitch).
 struct Grid {
@@ -319,9 +319,8 @@ struct Grid {
 }
 
 /// East Asian Wide / Fullwidth code points that occupy two grid cells when
-/// drawn through the Silver fallback in a narrow bitmap shape. The same ranges
-/// are mirrored in `packages/snapcompact/src/snapcompact.ts` so the TypeScript
-/// capacity/pagination math and this layout never disagree on cell counts.
+/// drawn through the Silver fallback in a narrow bitmap shape. The
+/// capacity/pagination math and this layout must agree on cell counts.
 const fn is_wide(cp: u32) -> bool {
     matches!(cp,
         0x1100..=0x115F
@@ -833,7 +832,7 @@ const GUTTER: usize = 3;
 /// `li` lands at column `li / rows`, row `li % rows`; each column is
 /// `(cols - GUTTER) / 2` cells wide, the second starts `col_w + GUTTER` cells
 /// in, and no rule is drawn between them. Lines longer than the column width
-/// are clipped (the TypeScript caller pre-wraps; clipping is the overflow
+/// are clipped (the caller pre-wraps; clipping is the overflow
 /// guard) and lines past the second column are ignored. Sentence hues advance
 /// on a terminator in `.!?` followed by a space, newline, *or* full block;
 /// dim toggles, repeat bands, and the `U+2588` black cell fill behave exactly
@@ -1251,7 +1250,7 @@ pub struct SnapcompactRenderOptions {
 
 /// Return the subset of `chars` that the named snapcompact font can render.
 ///
-/// The TypeScript normalizer uses this to keep Unicode text intact only when
+/// The normalizer uses this to keep Unicode text intact only when
 /// considered renderable because they are interpreted outside font lookup.
 pub fn snapcompact_supported_chars(
     font: String,

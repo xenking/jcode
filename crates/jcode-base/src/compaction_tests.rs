@@ -1925,7 +1925,7 @@ fn shake_manager_with_budget(budget: usize) -> CompactionManager {
     m
 }
 
-/// omp orders `snapcompact` before `shake`: when the bitmap archive can handle
+/// `snapcompact` is ordered before `shake`: when the bitmap archive can handle
 /// this compaction, no pre-compaction shake is planned.
 #[test]
 fn snapcompact_preference_suppresses_pre_compaction_shake() {
@@ -2381,7 +2381,8 @@ async fn snapcompact_fallback_shake_obeys_the_configured_settings() {
     );
 }
 
-/// omp advances to the next method when snapcompact fails; jcode must still
+/// The compaction advances to the next method when snapcompact fails; jcode
+/// must still
 /// produce a usable text summary, shaken first, and never an empty one.
 #[tokio::test]
 async fn snapcompact_failure_still_produces_a_text_summary() {

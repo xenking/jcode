@@ -172,7 +172,7 @@ pub fn openai_reasoning_efforts(
 
 /// Rungs of the canonical effort ladder, weakest first, as `(level, glyph)`.
 ///
-/// The glyph is a filling circle (omp's status-line ladder): the UI shows the
+/// The glyph is a filling circle (the status-line ladder): the UI shows the
 /// symbol alone where hover text is available and prefixes list rows with it.
 /// Swarm modes are orchestration sentinels, not rungs, so they have no glyph.
 const EFFORT_GLYPHS: &[(&str, &str)] = &[
@@ -324,7 +324,7 @@ mod tests {
     }
 
     /// The compact glyph is the whole effort display now: one filling circle
-    /// per rung, exactly the ladder omp draws (○ ◔ ◑ ◒ ◕ ◉), so the status
+    /// per rung, exactly the ladder (○ ◔ ◑ ◒ ◕ ◉), so the status
     /// line, the composer pill and the pickers cannot drift apart.
     #[test]
     fn effort_glyphs_fill_with_the_ladder() {

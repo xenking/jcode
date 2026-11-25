@@ -715,7 +715,7 @@ swarm_effort_caps = {}
 # swarm_speed_caps = { "openai:gpt-5.5" = "standard" }
 # swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
 #
-# Worker pool, like omp's task pool: the models workers may use and, per
+# Worker pool: the models workers may use and, per
 # model, the reasoning efforts allowed on it. Keys are exact provider:model
 # routes. A non-empty pool becomes the worker allowlist (spawn_allowed_models
 # and swarm_model_allowlist). An empty list allows every effort. Any other

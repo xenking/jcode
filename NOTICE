@@ -1,13 +1,13 @@
 
 Shake compaction (crates/jcode-compaction-core/src/shake.rs) is adapted from
 oxicode (https://github.com/project-oxi/oxicode), Copyright (c) oxicode
-contributors, MIT License, itself ported from oh-my-pi
-(https://github.com/can1357/oh-my-pi), Copyright (c) Can Bölük, MIT License.
+contributors, MIT License, itself a port of an earlier MIT-licensed agent
+harness, Copyright (c) Can Bölük, MIT License.
 
 Snapcompact (crates/jcode-compaction-core/src/snapcompact) is adapted from
 oxicode (https://github.com/project-oxi/oxicode), copyright oxicode contributors,
-MIT License, itself ported from oh-my-pi (https://github.com/can1357/oh-my-pi),
-copyright Can Bölük, MIT License.
+MIT License, itself a port of an earlier MIT-licensed agent harness, copyright
+Can Bölük, MIT License.
 
 The bundled Silver.ttf font is by Poppy Works, licensed under CC BY 4.0:
 https://poppyworks.itch.io/silver. Its license is included as Silver.LICENSE.

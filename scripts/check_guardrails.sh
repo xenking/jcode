@@ -97,6 +97,8 @@ run_gate "usage bar owner gate contracts" python3 scripts/test_check_usage_bar_o
 run_gate "usage bars have one owner" python3 scripts/check_usage_bar_owner.py
 run_gate "catalog fanout gate contracts" python3 scripts/test_check_catalog_fanout.py
 run_gate "all runtime catalogs refresh" python3 scripts/check_catalog_fanout.py
+run_gate "private reference gate contracts" python3 scripts/test_check_private_refs.py
+run_gate "no private references in tracked files" python3 scripts/check_private_refs.py
 
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery

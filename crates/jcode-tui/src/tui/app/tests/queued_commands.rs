@@ -491,7 +491,7 @@ fn test_remote_queued_commands_run_before_queued_prompts() {
 }
 
 // Up on an empty composer recalls daemon-queued prompts for in-place editing,
-// matching the omp/ChatGPT queue gesture. Enter saves into the same slot; Esc
+// matching the ChatGPT queue gesture. Enter saves into the same slot; Esc
 // restores the original untouched.
 
 fn queue_prompts(app: &mut App, entries: &[(&str, &str, bool)]) {

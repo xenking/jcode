@@ -1182,7 +1182,7 @@ impl Agent {
         fold_planned: bool,
     ) -> Option<(String, Option<CompactionEvent>)> {
         let ttl = self.cache_expiry_ttl_secs(manager);
-        // omp `methodOrder` is remote, snapcompact, handoff, shake, soft: when
+        // Method order is remote, snapcompact, handoff, shake, soft: when
         // snapcompact can archive this compaction the bitmap archive wins, and
         // no pre-compaction shake runs.
         let snapcompact_preferred =

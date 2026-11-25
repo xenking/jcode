@@ -1,13 +1,13 @@
-//! Serialize structured jcode messages into omp's transcript format.
+//! Serialize structured jcode messages into the snapcompact transcript format.
 //!
-//! Mirrors omp `packages/snapcompact/src/snapcompact.ts` `serializeConversation`:
+//! Serialization rules:
 //!
 //! - Every message keeps its `¶user:` / `¶ai:` / `¶think:` / `¶call:` scope.
 //! - A tool result merges into the `¶call:` scope of its originating call; only
 //!   orphans render standalone.
 //! - Non-text blocks (images, provider-native items, native compaction payloads)
-//!   are skipped instead of failing the whole pass: omp archives the text a
-//!   vision reader can still use and drops what it cannot render.
+//!   are skipped instead of failing the whole pass: the archive keeps the text
+//!   a vision reader can still use and drops what it cannot render.
 //! - Inline base64 data URLs collapse to `[data URL omitted: <mime>, N base64
 //!   chars]` so a character cap can never slice a payload into broken image
 //!   input that every later request re-fails on.
@@ -60,7 +60,7 @@ impl Default for SerializeOptions {
     }
 }
 
-/// Serialize with omp's default budgets.
+/// Serialize with the default budgets.
 pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
     serialize_messages_with(messages, &SerializeOptions::default())
 }
@@ -296,7 +296,7 @@ fn push(parts: &mut Vec<(String, String)>, prefix: &str, content: &str) {
     parts.push((prefix.to_string(), content.to_string()));
 }
 
-// ── Inline data URL elision (omp `elideDataUrls`) ─────────────────────
+// ── Inline data URL elision ───────────────────────────────────────────
 
 /// A non-canonical payload at least this long is a damaged fragment of a real
 /// data URL, not a prose mention like `data:image/png;base64,abc`.
@@ -721,8 +721,8 @@ mod tests {
         assert!(serialized.contains(";base64,"), "{serialized}");
     }
 
-    /// omp ignores blocks it cannot archive instead of failing the pass
-    /// (`serializeConversation` filters text blocks only).
+    /// Blocks that cannot be archived are ignored instead of failing the pass
+    /// (only text blocks are serialized).
     #[test]
     fn image_blocks_are_skipped_instead_of_failing_the_pass() {
         let message =

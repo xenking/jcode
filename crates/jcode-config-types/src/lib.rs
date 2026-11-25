@@ -351,8 +351,8 @@ pub struct CompactionConfig {
     /// Use bitmap snapcompact for vision-capable models at compaction time.
     /// Models without vision fall back to normal compaction.
     pub snapcompact: bool,
-    /// Frame shape snapcompact prints the archive with (omp `snapcompact.shape`).
-    /// `auto` picks the shape tuned for the active model; any `SHAPE_VARIANTS`
+    /// Frame shape snapcompact prints the archive with.
+    /// `auto` picks the shape tuned for the active model; any shape-table
     /// name (`11on16-bw`, `8on22-bw`, `6x6u-sent`, ...) forces that geometry.
     pub snapcompact_shape: String,
     /// Post-apply decisions extraction route. `auto` selects an available cheap
@@ -377,12 +377,12 @@ pub struct CompactionConfig {
     /// i.e. persistent or unknown caches.
     pub shake_cache_expiry: bool,
     /// Start snapcompact on the first request after the provider prompt-cache
-    /// TTL expired, mirroring omp's idle compaction: the prefix is cold, so
+    /// TTL expired, like idle compaction: the prefix is cold, so
     /// folding it costs no cache. Requires `snapcompact`, a known TTL, and
     /// context at or above `cache_expiry_threshold_tokens`. Never while warm.
     pub snapcompact_cache_expiry: bool,
-    /// Minimum context tokens for cache-expiry snapcompact (omp
-    /// `idleThresholdTokens`). 0 disables the trigger.
+    /// Minimum context tokens for cache-expiry snapcompact.
+    /// 0 disables the trigger.
     pub cache_expiry_threshold_tokens: usize,
     /// Override the estimated provider prompt-cache TTL (seconds) used by the
     /// cache-expiry shake/snapcompact triggers. 0 = provider estimate. Useful
@@ -569,7 +569,7 @@ impl Default for CompactionConfig {
             snapcompact_shape: "auto".to_string(),
             snapcompact_decisions_model: "auto".to_string(),
             shake: false,
-            // omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000.
+            // Standard shake profile: protect 16000 tokens, minimum savings 4000.
             shake_protect_tokens: 16_000,
             shake_min_region_tokens: 400,
             shake_min_savings_tokens: 4_000,
@@ -845,7 +845,7 @@ pub struct AgentsConfig {
     pub swarm_speed: jcode_message_types::SpeedMode,
     /// Maximum worker speed per model or provider:model route.
     pub swarm_speed_caps: std::collections::BTreeMap<String, jcode_message_types::SpeedMode>,
-    /// Worker model pool, like omp's task pool: each exact `provider:model`
+    /// Worker model pool: each exact `provider:model`
     /// route lists the reasoning efforts a worker may use on it. A non-empty
     /// pool is the worker allowlist (merged into `spawn_allowed_models` and
     /// `swarm_model_allowlist`); an empty effort list allows every level.
@@ -2026,11 +2026,10 @@ mod compaction_override_tests {
         assert!(!disabled.resolve(None, None).snapcompact);
     }
 
-    /// omp `DEFAULT_SHAKE_CONFIG` / `snapcompact.shape`: the migrated defaults
-    /// and the shape override have to survive TOML parsing as written in
-    /// `~/.jcode/config.toml`.
+    /// The shake defaults and the shape override have to survive TOML parsing
+    /// as written in `~/.jcode/config.toml`.
     #[test]
-    fn omp_compaction_defaults_parse_from_toml() {
+    fn compaction_defaults_parse_from_toml() {
         #[derive(serde::Deserialize)]
         struct Wrapper {
             compaction: CompactionConfig,
@@ -2053,7 +2052,7 @@ reactive_threshold_tokens = 280000
 reactive_threshold_tokens = 500000
 "#,
         )
-        .expect("migrated compaction section parses");
+        .expect("compaction section parses");
         let resolved = parsed
             .compaction
             .resolve(Some("gemini"), Some("gemini-3.5-flash"));

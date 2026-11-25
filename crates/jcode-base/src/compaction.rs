@@ -1340,9 +1340,9 @@ impl CompactionManager {
         self.plan_shake_with(all_messages, now, cache_ttl_secs, false)
     }
 
-    /// [`Self::plan_shake`] with omp's `methodOrder` preference: when
+    /// [`Self::plan_shake`] with the method-order preference: when
     /// snapcompact can archive this compaction, the archive wins over shake
-    /// (omp orders `snapcompact` before `shake`), so no pre-compaction shake is
+    /// (`snapcompact` is ordered before `shake`), so no pre-compaction shake is
     /// planned.
     ///
     /// `PreCompact` is valid while the cache is warm because it is only a
@@ -1627,7 +1627,7 @@ impl CompactionManager {
 
     /// Decide whether the cold-cache snapcompact trigger fires for this request.
     ///
-    /// Mirrors omp idle compaction: only after the provider prompt cache TTL
+    /// Idle compaction: only after the provider prompt cache TTL
     /// elapsed since the last response (never while warm), only for a known TTL,
     /// only when context is at or above `cache_expiry_threshold_tokens`, and at
     /// most once per cold stretch.
@@ -1663,8 +1663,8 @@ impl CompactionManager {
     /// local shake reaches the target, the fold is not needed. When it cannot,
     /// the fold runs instead of after it: shaking first rewrote the prefix,
     /// posted its own notice, and then the fold rewrote it again (2026-11-19:
-    /// `shake 423k→283k` followed by `snapcompact 284k→78k`). omp likewise
-    /// picks a single method per pass from `methodOrder`.
+    /// `shake 423k→283k` followed by `snapcompact 284k→78k`). Compaction
+    /// likewise picks a single method per pass from the method order.
     pub fn cold_shake_reaches_request_target(
         &self,
         all_messages: &[Message],

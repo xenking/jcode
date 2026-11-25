@@ -1531,15 +1531,15 @@
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
+    "crates/jcode-base/src/usage/imported_banked.rs": {
+      "dot_ok": 4,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
     "crates/jcode-base/src/usage/model.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
-    },
-    "crates/jcode-base/src/usage/omp_banked.rs": {
-      "dot_ok": 4,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/usage/openai_helpers.rs": {
       "dot_ok": 1,

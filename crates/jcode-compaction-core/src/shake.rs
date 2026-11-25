@@ -1,9 +1,8 @@
 //! Shake compaction: mechanical (LLM-free) context compression.
 //!
 //! Ported from oxicode `oxicode-agent/src/agent_loop/compaction/shake.rs`
-//! (https://github.com/project-oxi/oxicode, MIT), itself a port of omp
-//! `packages/agent/src/compaction/shake.ts` (https://github.com/can1357/oh-my-pi,
-//! MIT). See `NOTICE` at the repository root.
+//! (https://github.com/project-oxi/oxicode, MIT). See `NOTICE` at the
+//! repository root.
 //!
 //! Algorithm:
 //! 1. Walk messages backwards and protect the newest `protect_window_tokens`
@@ -20,8 +19,8 @@
 //!   string changes, `tool_use_id`, `is_error`, and block order stay intact.
 //! - Images, reasoning, provider-native, and compaction blocks are never
 //!   touched.
-//! - Skill results and skill-file reads are never elided (omp
-//!   `isProtectedToolResult` / `isSkillReadToolResult`).
+//! - Skill results and skill-file reads are never elided, even
+//!   when old.
 //! - Placeholders are deterministic (tool name + token count + content hash),
 //!   and already-elided regions are never re-elided, so shaking is idempotent:
 //!   a second call on a shaken log returns `NoChange` and leaves bytes equal.
@@ -35,16 +34,15 @@ use std::collections::HashMap;
 /// regions so repeated shakes never rewrite them again.
 pub const SHAKE_PLACEHOLDER_PREFIX: &str = "[elided ";
 
-/// Tools whose results an agent re-reads to do its job. omp never elides them
-/// (`isProtectedToolResult` / `isSkillReadToolResult`); jcode's skill tool is
-/// `skill_manage`, and a `read` of a skill file is covered by
-/// [`is_protected`]. omp's third matcher (artifact recovery) has no jcode tool.
+/// Tools whose results an agent re-reads to do its job. They are never elided.
+/// Jcode's skill tool is `skill_manage`, and a `read` of a skill file is
+/// covered by [`is_protected`].
 pub const PROTECTED_TOOLS_DEFAULT: &[&str] = &["skill", "skill_manage"];
 
 /// Rough token cost of a placeholder line; used only for the savings gate.
 pub const PLACEHOLDER_TOKEN_ESTIMATE: usize = 16;
 
-/// Tunable thresholds for [`shake`]. Defaults mirror omp `DEFAULT_SHAKE_CONFIG`.
+/// Tunable thresholds for [`shake`]. Defaults are the standard shake profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShakeConfig {
     /// Most-recent tokens that must remain untouched.
@@ -61,8 +59,8 @@ pub struct ShakeConfig {
 
 impl Default for ShakeConfig {
     fn default() -> Self {
-        // omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000,
-        // fenceMinTokens 400.
+        // Standard profile: protect 16000 tokens, minimum savings 4000,
+        // minimum fence size 400 tokens.
         Self {
             protect_window_tokens: 16_000,
             min_elidable_tokens: 400,
@@ -74,7 +72,7 @@ impl Default for ShakeConfig {
 }
 
 impl ShakeConfig {
-    /// omp `AGGRESSIVE_SHAKE_CONFIG`: manual `/shake`, no savings threshold and
+    /// Aggressive profile for manual `/shake`: no savings threshold and
     /// a shallow protected tail, so the agent keeps working from recent output.
     pub fn aggressive() -> Self {
         Self {
@@ -86,7 +84,7 @@ impl ShakeConfig {
         }
     }
 
-    /// omp `RESCUE_SHAKE_CONFIG`: compaction dead-end rescue. Aggressive reach
+    /// Rescue profile for a compaction dead end. Aggressive reach
     /// with no protected tail, so the newest oversized result can be dropped.
     pub fn rescue() -> Self {
         Self {
@@ -233,7 +231,7 @@ fn tag_name(line: &str, closing: bool) -> Option<&str> {
     {
         return None;
     }
-    // omp only opens an element on a bare tag or a tag followed by whitespace.
+    // An element only opens on a bare tag or a tag followed by whitespace.
     if !closing && rest.len() > name.len() && !rest[name.len()..].starts_with(char::is_whitespace) {
         return None;
     }
@@ -243,7 +241,7 @@ fn tag_name(line: &str, closing: bool) -> Option<&str> {
 /// Locate fenced code blocks and top-level XML element spans in `text`.
 ///
 /// Returns byte ranges `[start, end)` covering the whole block including its
-/// fence/tag lines but excluding the trailing newline. Conservative like omp:
+/// fence/tag lines but excluding the trailing newline. Conservative:
 /// unterminated fences and tags yield no range, XML detection is suppressed
 /// inside fences, and overlapping ranges keep the earliest start.
 fn scan_block_ranges(text: &str) -> Vec<(usize, usize, BlockKind)> {
@@ -319,7 +317,7 @@ fn is_protected(tool: Option<&(&str, &serde_json::Value)>, protected: &[&str]) -
     if protected.iter().any(|candidate| candidate == name) {
         return true;
     }
-    // omp `isSkillReadToolResult`: a read of a skill file is the skill itself.
+    // A read of a skill file is the skill itself.
     let path = input
         .get("path")
         .or_else(|| input.get("file_path"))

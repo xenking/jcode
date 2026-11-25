@@ -207,12 +207,12 @@ fn whole_log_inside_window_is_no_change() {
     assert_eq!(shake_savings(&m, &c), 0);
 }
 
-// ── omp parity (packages/agent/src/compaction/shake.ts) ───────────────
+// ── shake behaviour ───────────────────────────────────────────────────
 
-/// omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000,
-/// fenceMinTokens 400.
+/// Standard profile: protect 16000 tokens, minimum savings 4000, minimum
+/// fence size 400 tokens.
 #[test]
-fn defaults_match_omp_auto_shake() {
+fn defaults_match_standard_shake_profile() {
     let config = ShakeConfig::default();
     assert_eq!(config.protect_window_tokens, 16_000);
     assert_eq!(config.min_savings_tokens, 4_000);
@@ -221,7 +221,7 @@ fn defaults_match_omp_auto_shake() {
     assert_eq!(config.protected_tools, PROTECTED_TOOLS_DEFAULT);
 }
 
-/// omp `isProtectedToolResult`: a skill result is never elided, even when old
+/// A skill result is never elided, even when old
 /// and large, because the agent re-reads it to follow the skill.
 #[test]
 fn skill_results_are_never_elided() {
@@ -251,7 +251,7 @@ fn skill_results_are_never_elided() {
     }
 }
 
-/// omp `isSkillReadToolResult`: reading a skill file is protected too.
+/// Reading a skill file is protected too.
 #[test]
 fn skill_file_reads_are_protected() {
     let mut messages = vec![text(Role::User, "start")];
@@ -284,7 +284,7 @@ fn skill_file_reads_are_protected() {
     assert_eq!(shake(&mut messages, &cfg()), ShakeOutcome::NoChange);
 }
 
-/// omp `scanTextForBlockRanges`: top-level XML blocks are elided like fences.
+/// Top-level XML blocks are elided like fences.
 #[test]
 fn xml_blocks_in_old_text_are_elided() {
     let body = "tool output line\n".repeat(2_000);
@@ -317,7 +317,7 @@ fn xml_blocks_in_old_text_are_elided() {
     assert!(shaken.ends_with("after"), "{shaken}");
 }
 
-/// omp suppresses XML detection inside fences: one region, not two.
+/// XML detection is suppressed inside fences: one region, not two.
 #[test]
 fn xml_inside_a_fence_is_one_region() {
     let body = "fn x() {}\n".repeat(2_000);
@@ -341,7 +341,7 @@ fn xml_inside_a_fence_is_one_region() {
     ));
 }
 
-/// An unterminated fence yields no region (omp is conservative).
+/// An unterminated fence yields no region (detection is conservative).
 #[test]
 fn unterminated_fence_is_never_elided() {
     let body = "fn x() {}\n".repeat(2000);
@@ -356,7 +356,7 @@ fn unterminated_fence_is_never_elided() {
     assert_eq!(shake(&mut messages, &cfg), ShakeOutcome::NoChange);
 }
 
-/// omp `AGGRESSIVE_SHAKE_CONFIG` (manual `/shake`): no savings gate, shallow
+/// Aggressive profile (manual `/shake`): no savings gate, shallow
 /// protect window.
 #[test]
 fn aggressive_preset_elides_below_the_default_savings_gate() {
@@ -387,7 +387,7 @@ fn aggressive_preset_elides_below_the_default_savings_gate() {
     ));
 }
 
-/// omp `RESCUE_SHAKE_CONFIG` (compaction dead-end): reaches into the tail so an
+/// Rescue profile (compaction dead end): reaches into the tail so an
 /// oversized newest result can still be dropped.
 #[test]
 fn rescue_preset_reaches_into_the_tail() {

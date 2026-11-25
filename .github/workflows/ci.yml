@@ -160,6 +160,13 @@ jobs:
           python3 scripts/test_check_catalog_fanout.py
           python3 scripts/check_catalog_fanout.py
 
+      - name: Enforce no private references in tracked files
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          (cd scripts && python3 test_check_private_refs.py)
+          python3 scripts/check_private_refs.py
+
       - name: Test idle-load measurement and budget accounting
         if: ${{ !cancelled() }}
         run: python3 scripts/test_check_idle_load.py
