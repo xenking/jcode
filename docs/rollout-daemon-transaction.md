@@ -273,3 +273,34 @@ If the **manual legacy handoff itself** fails, stop and inspect its error and
 `manual-bootstrap-previous.json` before another reload. That boundary cannot
 provide the new daemon's crash-loop guarantee before the new daemon starts.
 Do not report success or remove either application in that state.
+
+## Paired acceptance smoke
+
+Before preparing a CLI and Desktop rollout, `jcode rollout` requires a local
+`PASS` receipt for the full resolved Git SHA pair. `--dry-run` checks it too.
+`--status`, `--check-update`, and `--no-desktop` do not require a paired receipt.
+The refusal prints the smoke command with the exact two SHAs. For example:
+
+```sh
+python3 scripts/accept-smoke.py \
+  --jcode-sha "$(git rev-parse origin/master)" \
+  --desktop-sha "$(git -C ../jcode-desktop rev-parse origin/main)"
+```
+
+The runner requires a macOS graphical login, Xcode, and `justrust`. Install
+`tesseract` to verify painted text when Desktop does not expose visible rows.
+The runner builds
+the exact commits in disposable sibling worktrees and launches only private
+processes: a CLI daemon and bridge with isolated sockets and `JCODE_HOME`, a
+loopback fixture provider, and hidden Desktop windows. It checks send in Clean
+Chat, queue while busy, `/btw` via Enter, answering an `ask`, image paste,
+scrolling in a long transcript, and restoring a window after restarting both
+Desktop and the daemon. The paste check uses private image bytes through the
+native Paste action. It does not read or change the macOS system pasteboard.
+
+The runner writes `$JCODE_HOME/rollout-acceptance/<cli-sha>-<desktop-sha>.json`
+with the schema version, exact pair, per-flow outcomes, overall outcome, and UTC
+finish time. A failure is `ISSUES`; a flow that could not run is `BLOCKED`.
+Neither authorizes rollout. The receipt points to retained evidence for the run.
+Use `--skip-acceptance-smoke` only in an emergency. A real invocation logs
+the override and both target SHAs. A dry run does not write an override log.

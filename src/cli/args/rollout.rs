@@ -30,6 +30,9 @@ pub(crate) struct RolloutArgs {
     /// Roll out the CLI and daemon only
     #[arg(long)]
     pub no_desktop: bool,
+    /// Bypass the paired acceptance smoke gate in an emergency (logged)
+    #[arg(long, conflicts_with_all = ["no_desktop", "status", "check_update"])]
+    pub skip_acceptance_smoke: bool,
 }
 
 #[cfg(test)]

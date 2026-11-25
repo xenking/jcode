@@ -152,6 +152,7 @@ chmod +x "$path"
         if session is None:
             env.pop("JCODE_SESSION_ID")
         process = subprocess.Popen([self.binary, "--no-update", "rollout",
+                                    "--skip-acceptance-smoke",
                                     "--jcode-ref", sha, "--desktop-ref", self.desktop], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)

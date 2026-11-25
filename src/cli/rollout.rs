@@ -7,6 +7,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[path = "rollout_acceptance.rs"]
+mod acceptance;
+
 pub const MIN_FREE_GB: u64 = 30;
 pub const PHASES: [&str; 8] = [
     "plan",
@@ -28,6 +31,7 @@ pub struct RolloutOptions {
     pub jcode_ref: String,
     pub desktop_ref: String,
     pub desktop: bool,
+    pub skip_acceptance_smoke: bool,
 }
 
 impl Default for RolloutOptions {
@@ -40,6 +44,7 @@ impl Default for RolloutOptions {
             jcode_ref: "origin/master".into(),
             desktop_ref: "origin/main".into(),
             desktop: true,
+            skip_acceptance_smoke: false,
         }
     }
 }
@@ -103,6 +108,7 @@ pub struct Layout {
     pub dist_dir: PathBuf,
     pub app: PathBuf,
     pub builds: PathBuf,
+    pub acceptance_dir: PathBuf,
 }
 
 /// CLI preparation cannot mutate installed channels or reload the daemon.
@@ -222,6 +228,31 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         cli: run.host.resolve(Repo::Jcode, &opts.jcode_ref, fetch)?,
         desktop: run.host.resolve(Repo::Desktop, &opts.desktop_ref, fetch)?,
     };
+    if opts.desktop {
+        if opts.skip_acceptance_smoke {
+            let warning = format!(
+                "--skip-acceptance-smoke {} CLI {} Desktop {}",
+                if opts.dry_run {
+                    "(dry run)"
+                } else {
+                    "override"
+                },
+                pair.cli,
+                pair.desktop
+            );
+            if !opts.dry_run {
+                crate::logging::warn(&warning);
+            }
+            run.say("plan", "WARN", warning)?;
+        } else {
+            let receipt = acceptance::require(&layout, &pair)?;
+            run.say(
+                "plan",
+                "ok",
+                format!("acceptance smoke: {}", receipt.display()),
+            )?;
+        }
+    }
     if !opts.dry_run
         && let Some(id) = run.host.admit(&pair, opts)?
     {
