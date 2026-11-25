@@ -118,6 +118,28 @@ pub struct LoginProviderDescriptor {
     pub order: LoginProviderSurfaceOrder,
 }
 
+impl LoginProviderDescriptor {
+    /// Canonical provider key written to config after login, if the target can be a default.
+    pub fn default_provider_key(self) -> Option<&'static str> {
+        match self.target {
+            LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => Some("claude"),
+            LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => Some("openai"),
+            LoginProviderTarget::OpenRouter => Some("openrouter"),
+            LoginProviderTarget::Bedrock => Some("bedrock"),
+            LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
+            LoginProviderTarget::Cursor => Some("cursor"),
+            LoginProviderTarget::Copilot => Some("copilot"),
+            LoginProviderTarget::Gemini => Some("gemini"),
+            LoginProviderTarget::Antigravity => Some("antigravity"),
+            LoginProviderTarget::AutoImport
+            | LoginProviderTarget::Jcode
+            | LoginProviderTarget::Azure
+            | LoginProviderTarget::GrokBuild
+            | LoginProviderTarget::Google => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAiCompatibleProfile {
     pub id: &'static str,

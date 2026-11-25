@@ -139,9 +139,8 @@ pub fn default_route_for_key(key: &str) -> Option<&'static str> {
         "anthropic-api" => Some("anthropic-api"),
         "openai" => Some("openai-oauth"),
         "openai-api" => Some("openai-api"),
-        other => crate::provider_catalog::resolve_login_provider(other).and_then(|login| {
-            crate::provider::MultiProvider::config_default_provider_for_login_provider(login)
-        }),
+        other => crate::provider_catalog::resolve_login_provider(other)
+            .and_then(|login| login.default_provider_key()),
     }
 }
 

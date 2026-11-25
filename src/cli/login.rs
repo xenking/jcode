@@ -588,9 +588,7 @@ fn maybe_persist_default_provider_after_login(
         return;
     }
 
-    let provider_id =
-        crate::provider::MultiProvider::config_default_provider_for_login_provider(provider);
-    let Some(provider_id) = provider_id else {
+    let Some(provider_id) = provider.default_provider_key() else {
         return;
     };
 
