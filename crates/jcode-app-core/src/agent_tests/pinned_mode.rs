@@ -140,3 +140,39 @@ async fn pinned_mode_reappears_once_in_compacted_provider_transcript() {
         assert_eq!(agent.session.messages.len(), len);
     }
 }
+
+#[tokio::test]
+async fn a_client_reporting_its_primary_skill_keeps_the_other_pinned_modes() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (project, mut agent) = mode_agent();
+    let other = project.path().join(".jcode/skills/second-probe");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(
+        other.join("SKILL.md"),
+        "---\nname: second-probe\ndescription: Second mode\n---\nSECOND_BODY\n",
+    )
+    .unwrap();
+    agent
+        .set_pinned_skills(vec!["pinned-probe".into(), "second-probe".into()])
+        .unwrap();
+    // A client sends only the primary name with each prompt or on attach.
+    assert!(agent.set_remote_active_skill(Some("pinned-probe".into())));
+    assert_eq!(
+        agent.session_for_split().pinned_skill_names(),
+        ["pinned-probe", "second-probe"]
+    );
+    assert!(agent.set_queued_active_skill(Some("pinned-probe".into())));
+    assert_eq!(
+        agent.session_for_split().pinned_skill_names(),
+        ["pinned-probe", "second-probe"]
+    );
+    // A skill the session does not pin still replaces the set.
+    agent
+        .set_pinned_skills(vec!["pinned-probe".into()])
+        .unwrap();
+    assert!(agent.set_remote_active_skill(Some("second-probe".into())));
+    assert_eq!(
+        agent.session_for_split().pinned_skill_names(),
+        ["second-probe"]
+    );
+}

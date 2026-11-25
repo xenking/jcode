@@ -837,6 +837,9 @@ impl Agent {
     /// present in the daemon's own registry snapshot.
     pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
         match active_skill {
+            // Clients report only the primary pinned skill. When the session
+            // already pins it, together with other modes, keep the whole set.
+            Some(name) if self.session.pinned_skill_names().contains(&name) => true,
             Some(name) => self.set_pinned_skill(Some(&name)).is_ok(),
             None => true,
         }
@@ -960,7 +963,9 @@ impl Agent {
         if self.current_skills_snapshot().get(&name).is_none() {
             return false;
         }
-        self.session.set_pinned_skill_names(vec![name.clone()]);
+        if !self.session.pinned_skill_names().contains(&name) {
+            self.session.set_pinned_skill_names(vec![name.clone()]);
+        }
         self.active_skill = Some(name);
         self.announce_active_skill_inner()
     }
