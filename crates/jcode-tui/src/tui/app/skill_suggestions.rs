@@ -9,6 +9,8 @@ use crate::tui::CommandSuggestionInfo;
 
 /// Help shown for a row whose skill details are unavailable.
 const TOGGLE_HELP: &str = "Toggle session mode";
+/// Help for the row that submits `/mode <skill>` exactly as typed.
+const REPLACE_HELP: &str = "Use only this mode";
 
 impl App {
     /// Skills known to this client, as `(name, description, is_mode)`.
@@ -47,11 +49,12 @@ impl App {
     /// skills, each as `/mode toggle <name>`, followed by `/mode off` when
     /// anything is pinned. Matching is a case-insensitive substring of the name.
     pub(super) fn mode_picker_suggestions(&self, input: &str) -> Vec<(String, &'static str)> {
-        let query = input
+        let typed = input
             .trim_start()
             .strip_prefix("/mode")
             .unwrap_or_default()
             .trim();
+        let query = typed;
         let query = if query == "toggle" {
             ""
         } else {
@@ -59,9 +62,17 @@ impl App {
         }
         .to_lowercase();
         let pinned = self.session.pinned_skill_names();
-        let mut rows: Vec<(u8, String)> = self
-            .known_skills()
+        let known = self.known_skills();
+        // A skill typed out in full keeps its meaning: Enter submits
+        // `/mode <skill>` as typed, replacing the session's modes, instead of
+        // turning into a toggle row that needs a second Enter.
+        let exact = known
+            .iter()
+            .any(|(name, _, _)| name == typed)
+            .then(|| typed.to_string());
+        let mut rows: Vec<(u8, String)> = known
             .into_iter()
+            .filter(|(name, _, _)| exact.as_deref() != Some(name.as_str()))
             .filter(|(name, _, _)| name.to_lowercase().contains(&query))
             .map(|(name, _, mode)| {
                 let rank = if pinned.contains(&name) {
@@ -76,9 +87,13 @@ impl App {
             .collect();
         // Stable: names are already sorted, so each group stays alphabetical.
         rows.sort_by_key(|(rank, _)| *rank);
-        let mut suggestions: Vec<(String, &'static str)> = rows
+        let mut suggestions: Vec<(String, &'static str)> = exact
             .into_iter()
-            .map(|(_, name)| (format!("/mode toggle {name}"), TOGGLE_HELP))
+            .map(|name| (format!("/mode {name}"), REPLACE_HELP))
+            .chain(
+                rows.into_iter()
+                    .map(|(_, name)| (format!("/mode toggle {name}"), TOGGLE_HELP)),
+            )
             .collect();
         if !pinned.is_empty() && "off".contains(&query) {
             suggestions.push(("/mode off".into(), "Clear all active modes"));

@@ -118,3 +118,23 @@ fn skills_report_marks_modes_and_every_pinned_skill() {
     assert!(report.contains("- /zz-worker-mode [mode]\n"), "{report}");
     assert!(report.contains("- /zz-optout-mode\n"), "{report}");
 }
+
+#[test]
+fn a_skill_typed_in_full_is_submitted_as_typed_not_completed_to_a_toggle() {
+    let mut app = create_test_app();
+    let project = mode_picker_project();
+    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session.set_pinned_skill_names(vec!["zz-quiet".into()]);
+
+    assert_eq!(
+        mode_picker_rows(&mut app, "/mode zz-plain")[0],
+        "/mode zz-plain"
+    );
+    // Enter on the row that equals the input is not consumed as a completion.
+    app.input = "/mode zz-plain".into();
+    app.cursor_pos = app.input.len();
+    app.advance_command_suggestions_epoch();
+    assert!(!app.accept_selected_command_suggestion());
+    app.submit_input();
+    assert_eq!(app.session.pinned_skill_names(), ["zz-plain"]);
+}
