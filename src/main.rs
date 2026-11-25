@@ -119,11 +119,11 @@ fn run_main() -> Result<()> {
 
     #[cfg(unix)]
     {
-        use jcode::tool::background_worker;
+        use jcode::tool::{background_worker, detached_jobs};
         if std::env::args_os().nth(1).as_deref()
             == Some(std::ffi::OsStr::new(background_worker::ARG))
         {
-            return background_worker::run();
+            return detached_jobs::run();
         }
         background_worker::enable();
     }

@@ -363,7 +363,16 @@ async fn restart_bridge(
     }
 }
 
-pub(super) async fn run_reload(new_launch: BridgeLaunch, output: PathBuf) -> Result<TaskResult> {
+#[cfg(unix)]
+impl super::background_worker::DetachedJob for BridgeLaunch {
+    const KIND: &'static str = "BridgeReload";
+
+    async fn run(self, output: PathBuf) -> Result<TaskResult> {
+        run_reload(self, output).await
+    }
+}
+
+async fn run_reload(new_launch: BridgeLaunch, output: PathBuf) -> Result<TaskResult> {
     let log = crate::storage::jcode_dir()
         .map(|dir| dir.join("logs").join("api-bridge.log"))
         .unwrap_or_else(|_| std::env::temp_dir().join("jcode-api-bridge.log"));
@@ -393,7 +402,7 @@ pub(crate) async fn spawn_bridge_reload(
             session_id,
             true,
             true,
-            super::background_worker::Job::BridgeReload(new_launch),
+            &new_launch,
         )
         .await?;
         return Ok(bridge_reload_output(&program, &info));

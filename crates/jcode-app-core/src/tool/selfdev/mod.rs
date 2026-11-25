@@ -27,7 +27,7 @@ mod reload;
 mod setup;
 mod status;
 #[cfg(unix)]
-pub(crate) use build_queue::QueueJob;
+pub(crate) use build_queue::SelfDevJob;
 #[cfg(test)]
 mod tests;
 mod ui_diff;

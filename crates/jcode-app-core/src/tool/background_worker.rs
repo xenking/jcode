@@ -20,21 +20,16 @@ pub(crate) fn available() -> bool {
     AVAILABLE.load(Ordering::Relaxed)
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) enum Job {
-    SelfDev {
-        request_id: String,
-        job: super::selfdev::QueueJob,
-    },
-    BridgeReload(super::bridge_reload::BridgeLaunch),
-    AgentGrep {
-        params: serde_json::Value,
-        context: CallContext,
-    },
-    RemoteBash {
-        params: serde_json::Value,
-        context: CallContext,
-    },
+/// A self-contained unit of work that can run in a detached worker process.
+///
+/// Each job owns its payload and its execution, and is reached over the wire by
+/// `KIND`. The worker's entry point, [`super::detached_jobs`], maps kinds back
+/// to jobs, so job modules never depend on the dispatcher that runs them.
+pub(crate) trait DetachedJob: Serialize {
+    /// Externally tagged name under which the job travels to the worker.
+    const KIND: &'static str;
+
+    async fn run(self, output: PathBuf) -> Result<TaskResult>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +38,18 @@ pub(crate) struct CallContext {
     message_id: String,
     tool_call_id: String,
     working_dir: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl CallContext {
+    pub(crate) fn for_session(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.into(),
+            message_id: String::new(),
+            tool_call_id: String::new(),
+            working_dir: None,
+        }
+    }
 }
 
 impl From<&super::ToolContext> for CallContext {
@@ -81,6 +88,14 @@ impl Drop for PendingChild {
     }
 }
 
+/// Wire form read by the worker: the task id and the job under its kind tag.
+pub(crate) fn envelope<J: DetachedJob>(task_id: &str, job: &J) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&(
+        task_id,
+        serde_json::json!({ J::KIND: job }),
+    ))?)
+}
+
 pub(crate) async fn start(
     info: &BackgroundTaskInfo,
     tool: &str,
@@ -88,9 +103,9 @@ pub(crate) async fn start(
     session_id: &str,
     notify: bool,
     wake: bool,
-    job: Job,
+    job: &impl DetachedJob,
 ) -> Result<()> {
-    let envelope = serde_json::to_vec(&(info.task_id.as_str(), job))?;
+    let envelope = envelope(&info.task_id, job)?;
     let manager = background::global();
     let mut command = Command::new(std::env::current_exe()?);
     command.arg(ARG).stdin(Stdio::piped()).stdout(Stdio::null());
@@ -124,48 +139,4 @@ pub(crate) async fn start(
     drop(child.0.stdin.take());
     super::follow_detached_task(info);
     Ok(())
-}
-
-async fn run_job(job: Job, output: PathBuf) -> Result<TaskResult> {
-    match job {
-        Job::SelfDev { request_id, job } => job.run(request_id, output).await,
-        Job::BridgeReload(launch) => super::bridge_reload::run_reload(launch, output).await,
-        Job::AgentGrep { params, context } => {
-            let result = super::agentgrep::run_detached_search(params, &context.into())?;
-            tokio::fs::write(output, result.output).await?;
-            Ok(TaskResult::completed(None))
-        }
-        Job::RemoteBash { params, context } => {
-            let result = super::remote_exec::call_supervised_bash(params, &context.into()).await?;
-            let code = result
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("exit_code"))
-                .and_then(serde_json::Value::as_i64)
-                .and_then(|value| i32::try_from(value).ok());
-            tokio::fs::write(output, result.output).await?;
-            Ok(match code {
-                Some(code) if code != 0 => {
-                    TaskResult::failed(Some(code), format!("Command exited with code {code}"))
-                }
-                _ => TaskResult::completed(code),
-            })
-        }
-    }
-}
-
-pub fn run() -> Result<()> {
-    let (task_id, job): (String, Job) = serde_json::from_reader(std::io::stdin().lock())?;
-    anyhow::ensure!(
-        !task_id.is_empty() && task_id.bytes().all(|ch| ch.is_ascii_alphanumeric()),
-        "invalid background task ID"
-    );
-    let output = background::global().output_path_for(&task_id);
-    let receipt = output.with_extension("exit");
-    let result = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(run_job(job, output))
-        .unwrap_or_else(|error| TaskResult::failed(None, error.to_string()));
-    crate::storage::write_json(&receipt, &result)
 }

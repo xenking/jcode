@@ -44,6 +44,7 @@ pub(crate) mod file_lock;
 mod gmail;
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 pub mod applet;
+mod approval_request;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
@@ -53,6 +54,8 @@ pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 #[cfg(unix)]
 pub mod background_worker;
+#[cfg(unix)]
+pub mod detached_jobs;
 pub mod mcp;
 mod mcp_approval;
 mod memory;
@@ -588,7 +591,11 @@ impl Registry {
                 "side_panel",
                 side_panel::SidePanelTool::new,
             );
-            interactive::register_presentation_tools(&mut m, &mut timings);
+            Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "user_response", || {
+                user_response::UserResponseTool
+            });
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.

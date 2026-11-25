@@ -2,19 +2,8 @@
 //!
 //! A turn may outlive its originating socket. A newly attached client must be
 //! able to answer subsequent questions without waiting for that turn's lock.
-use super::{Registry, StdinInputRequest, Tool, applet, panel, user_response};
-use std::sync::Arc;
-
-pub(super) fn register_presentation_tools(
-    tools: &mut HashMap<String, Arc<dyn Tool>>,
-    timings: &mut Vec<(String, u128)>,
-) {
-    Registry::insert_tool_timed(tools, timings, "panel", panel::PanelTool::new);
-    Registry::insert_tool_timed(tools, timings, "applet", applet::AppletTool::new);
-    Registry::insert_tool_timed(tools, timings, "user_response", || {
-        user_response::UserResponseTool
-    });
-}
+use super::StdinInputRequest;
+pub(crate) use super::approval_request::{is_human_approval, is_owner_approval};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -32,19 +21,6 @@ struct PendingAsk {
 
 static PENDING: LazyLock<Mutex<HashMap<String, HashMap<String, PendingAsk>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(crate) fn is_owner_approval(request_id: &str) -> bool {
-    request_id.starts_with("ask-premium-spawn-")
-}
-
-/// Approvals only a person may answer. Owner approvals are the strictest and
-/// are routed to the TUI alone. An MCP call approval may be answered from any
-/// attached UI, but never by the model: automation tools and key injection
-/// refuse to answer these, and the plain-text stdin path cannot.
-pub(crate) fn is_human_approval(request_id: &str) -> bool {
-    is_owner_approval(request_id)
-        || request_id.starts_with(&format!("ask-{}", super::mcp_approval::REQUEST_PREFIX))
-}
 
 fn dispatch_ask(
     session_id: &str,

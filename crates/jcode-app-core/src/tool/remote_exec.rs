@@ -322,10 +322,7 @@ async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolO
             &ctx.session_id,
             notify,
             wake,
-            super::background_worker::Job::RemoteBash {
-                params: input,
-                context: ctx.into(),
-            },
+            &RemoteBashJob::new(input, ctx.into()),
         )
         .await?;
         return Ok(background_output(&info, &display_name, notify, wake));
@@ -376,8 +373,41 @@ async fn call(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput>
     call_transport(name, input, ctx, false).await
 }
 
-pub(super) async fn call_supervised_bash(input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-    call_transport("bash", input, ctx, true).await
+#[cfg(unix)]
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RemoteBashJob {
+    params: Value,
+    context: super::background_worker::CallContext,
+}
+
+#[cfg(unix)]
+impl RemoteBashJob {
+    pub(crate) fn new(params: Value, context: super::background_worker::CallContext) -> Self {
+        Self { params, context }
+    }
+}
+
+#[cfg(unix)]
+impl super::background_worker::DetachedJob for RemoteBashJob {
+    const KIND: &'static str = "RemoteBash";
+
+    async fn run(self, output: PathBuf) -> Result<crate::background::TaskResult> {
+        use crate::background::TaskResult;
+        let result = call_transport("bash", self.params, &self.context.into(), true).await?;
+        let code = result
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("exit_code"))
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok());
+        tokio::fs::write(output, result.output).await?;
+        Ok(match code {
+            Some(code) if code != 0 => {
+                TaskResult::failed(Some(code), format!("Command exited with code {code}"))
+            }
+            _ => TaskResult::completed(code),
+        })
+    }
 }
 
 async fn call_transport(

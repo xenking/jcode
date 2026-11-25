@@ -31,6 +31,34 @@ impl QueueJob {
     }
 }
 
+/// A queued selfdev job as it travels to a detached worker.
+#[cfg(unix)]
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SelfDevJob {
+    request_id: String,
+    job: QueueJob,
+}
+
+#[cfg(unix)]
+impl SelfDevJob {
+    #[cfg(test)]
+    pub(crate) fn watching(request_id: String, existing: String) -> Self {
+        Self {
+            request_id,
+            job: QueueJob::Watch(existing),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl super::super::background_worker::DetachedJob for SelfDevJob {
+    const KIND: &'static str = "SelfDev";
+
+    async fn run(self, output: PathBuf) -> Result<TaskResult> {
+        self.job.run(self.request_id, output).await
+    }
+}
+
 async fn start_queue_job(
     request: &mut BuildRequest,
     ctx: &ToolContext,
@@ -43,7 +71,7 @@ async fn start_queue_job(
     let request_id = request.request_id.clone();
     #[cfg(unix)]
     if super::super::background_worker::available() {
-        use super::super::background_worker::{Job, start};
+        use super::super::background_worker::start;
         let info = manager.reserve_task_info();
         request.background_task_id = Some(info.task_id.clone());
         request.output_file = Some(info.output_file.display().to_string());
@@ -56,7 +84,7 @@ async fn start_queue_job(
             &ctx.session_id,
             notify,
             wake,
-            Job::SelfDev { request_id, job },
+            &SelfDevJob { request_id, job },
         )
         .await?;
         return Ok(info);

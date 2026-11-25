@@ -312,12 +312,8 @@ impl Tool for AgentGrepTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         #[cfg(unix)]
-        let detached = super::background_worker::available().then(|| {
-            super::background_worker::Job::AgentGrep {
-                params: input.clone(),
-                context: (&ctx).into(),
-            }
-        });
+        let detached = super::background_worker::available()
+            .then(|| AgentGrepJob::new(input.clone(), (&ctx).into()));
         let example = example_for_mode(input["mode"].as_str().unwrap_or_default());
         let params: AgentGrepInput = super::parse_tool_args(input, example)?;
         let display_name = summarize_background_search(&params);
@@ -349,7 +345,7 @@ async fn await_or_background_search(
     foreground_budget: Duration,
     display_name: String,
     session_id: String,
-    #[cfg(unix)] detached: Option<super::background_worker::Job>,
+    #[cfg(unix)] detached: Option<AgentGrepJob>,
 ) -> Result<ToolOutput> {
     let mut owner = SearchTaskOwner(Some(work_handle));
     let work_handle = owner
@@ -375,7 +371,7 @@ async fn await_or_background_search(
                     &session_id,
                     true,
                     false,
-                    job,
+                    &job,
                 )
                 .await?;
                 return Ok(background_search_output(
@@ -435,9 +431,29 @@ fn background_search_output(
 }
 
 #[cfg(unix)]
-pub(super) fn run_detached_search(input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-    let params = serde_json::from_value(input)?;
-    run_agentgrep_blocking(&params, ctx)
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AgentGrepJob {
+    params: Value,
+    context: super::background_worker::CallContext,
+}
+
+#[cfg(unix)]
+impl AgentGrepJob {
+    pub(crate) fn new(params: Value, context: super::background_worker::CallContext) -> Self {
+        Self { params, context }
+    }
+}
+
+#[cfg(unix)]
+impl super::background_worker::DetachedJob for AgentGrepJob {
+    const KIND: &'static str = "AgentGrep";
+
+    async fn run(self, output: PathBuf) -> Result<crate::background::TaskResult> {
+        let params = serde_json::from_value(self.params)?;
+        let result = run_agentgrep_blocking(&params, &self.context.into())?;
+        tokio::fs::write(output, result.output).await?;
+        Ok(crate::background::TaskResult::completed(None))
+    }
 }
 
 fn summarize_background_search(params: &AgentGrepInput) -> String {
