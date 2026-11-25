@@ -68,7 +68,9 @@ pub(super) use input_dispatch::{
     route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
     submit_prepared_remote_input,
 };
+#[cfg(test)]
 pub(super) use key_handling::submit_remote_slash_input;
+#[allow(unused_imports)]
 pub(super) use transcript_input::{
     apply_remote_transcript_event, apply_transcript_event, apply_voice_transcript,
     submit_remote_voice_transcript, submit_voice_transcript, voice_transcript_mode,
