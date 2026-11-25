@@ -125,13 +125,11 @@ pub(super) fn checkpoint_text(text: &str) -> Message {
 }
 
 pub(super) fn retained_checkpoint_messages(
-    stored: &[StoredMessage],
-    cutoff: usize,
+    mut compacted: std::slice::Iter<'_, StoredMessage>,
 ) -> Vec<Message> {
-    let compacted = &stored[..cutoff.min(stored.len())];
     let mut budget = RECENT_USER_TEXT_BYTES;
     let mut recent = Vec::new();
-    for message in compacted.iter().rev() {
+    for message in compacted.clone().rev() {
         if message.role != Role::User || !crate::session::is_visible_conversation_message(message) {
             continue;
         }
@@ -169,7 +167,7 @@ pub(super) fn retained_checkpoint_messages(
         });
     }
     recent.reverse();
-    let environment = compacted.iter().find_map(|message| {
+    let environment = compacted.find_map(|message| {
         if message.display_role != Some(StoredDisplayRole::System) {
             return None;
         }

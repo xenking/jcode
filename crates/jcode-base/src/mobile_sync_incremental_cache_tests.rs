@@ -2,9 +2,9 @@ use super::*;
 
 fn legacy(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
     let mut messages = wire_messages(session, 0);
-    let fingerprint = wire_fingerprint(&messages, session.messages().len());
+    let fingerprint = wire_fingerprint(&messages, session.message_count());
     if progress.wire_version == WIRE_VERSION
-        && progress.uploaded <= session.messages().len()
+        && progress.uploaded <= session.message_count()
         && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded))
     {
         messages.retain(|message| message.seq >= progress.uploaded);
@@ -42,7 +42,7 @@ fn fixture() -> Session {
 fn progress(session: &Session) -> SessionProgress {
     SessionProgress {
         wire_version: WIRE_VERSION,
-        uploaded: session.messages().len(),
+        uploaded: session.message_count(),
         fingerprint: Some(legacy(session, &SessionProgress::default()).1),
         ..Default::default()
     }
@@ -189,14 +189,14 @@ fn source_validation_distinguishes_json_spelling_and_inline_images() {
         }],
     );
     let mut first = SourceHasher::default();
-    assert!(first.extend(session.messages(), 0));
+    assert!(first.extend(session.iter_messages(), 0));
     if let ContentBlock::Image { data, .. } =
         &mut session.messages_mut_for_tests().last_mut().unwrap().content[0]
     {
         *data = "invalid-b".into();
     }
     let mut second = SourceHasher::default();
-    assert!(second.extend(session.messages(), 0));
+    assert!(second.extend(session.iter_messages(), 0));
     assert_ne!(first.digest(), second.digest());
     let mut cache = PrefixCache::default();
     check(&mut cache, &session, &SessionProgress::default());

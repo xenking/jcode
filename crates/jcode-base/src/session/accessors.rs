@@ -154,8 +154,41 @@ impl Session {
 
 /// Transcript and the state that rides along with it.
 impl Session {
-    pub fn messages(&self) -> &[StoredMessage] {
-        &self.messages
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn has_no_messages(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// The transcript, oldest first. Callers that need only a window skip,
+    /// take or reverse the iterator.
+    pub fn iter_messages(&self) -> std::slice::Iter<'_, StoredMessage> {
+        self.messages.iter()
+    }
+
+    pub fn last_message(&self) -> Option<&StoredMessage> {
+        self.messages.last()
+    }
+
+    /// The oldest `end` messages, or all of them when fewer exist.
+    pub fn iter_messages_before(&self, end: usize) -> std::slice::Iter<'_, StoredMessage> {
+        self.messages[..end.min(self.messages.len())].iter()
+    }
+
+    /// Everything from message `start` on, or nothing when fewer exist.
+    pub fn iter_messages_from(&self, start: usize) -> std::slice::Iter<'_, StoredMessage> {
+        self.messages[start.min(self.messages.len())..].iter()
+    }
+
+    pub fn message_at(&self, index: usize) -> Option<&StoredMessage> {
+        self.messages.get(index)
+    }
+
+    /// An owned copy of the transcript for a caller that outlives the borrow.
+    pub fn cloned_messages(&self) -> Vec<StoredMessage> {
+        self.messages.to_vec()
     }
 
     pub fn system_prompt(&self) -> Option<&str> {

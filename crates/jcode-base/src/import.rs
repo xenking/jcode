@@ -471,11 +471,11 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
 }
 
 fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool {
-    let original_count = session.messages().len();
+    let original_count = session.message_count();
     let mut changed = false;
     let mut normalized = Vec::with_capacity(original_count);
 
-    for mut message in session.messages().to_vec() {
+    for mut message in session.cloned_messages() {
         let (text, message_changed) = imported_message_text(&message.content, apply_limits);
         changed |= message_changed;
         if text.trim().is_empty() {
@@ -541,7 +541,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
         session.replace_messages(normalized);
     }
 
-    changed || session.messages().len() != original_count
+    changed || session.message_count() != original_count
 }
 
 fn reuse_existing_imported_session(session_id: &str) -> bool {
@@ -988,7 +988,7 @@ fn finalize_imported_session(
     // transcript. This protection applies to every importer, not only Claude.
     if crate::session::session_exists(session.id())
         && let Ok(mut existing) = Session::load(session.id())
-        && existing.messages().len() > session.messages().len()
+        && existing.message_count() > session.message_count()
     {
         if normalize_imported_history(&mut existing, false) {
             existing.save()?;
@@ -996,7 +996,7 @@ fn finalize_imported_session(
         return Ok(existing);
     }
 
-    let original_messages = session.messages().len();
+    let original_messages = session.message_count();
     session.restamp_imported(crate::session::ImportedStamps {
         created_at,
         updated_at,
@@ -1006,7 +1006,7 @@ fn finalize_imported_session(
     session.save()?;
     crate::logging::info(&format!(
         "Imported session prepared: source_messages={original_messages} kept_messages={}",
-        session.messages().len()
+        session.message_count()
     ));
     Ok(session)
 }

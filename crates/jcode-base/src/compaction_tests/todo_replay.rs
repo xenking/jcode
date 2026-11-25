@@ -218,7 +218,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     let mut manager = CompactionManager::new();
     manager.restore_persisted_state(
         session.compaction().as_deref().unwrap(),
-        session.messages().len(),
+        session.message_count(),
     );
     let with_nudge = request(&mut manager, &mut session, true);
     assert_eq!(&with_nudge[..second.len()], second);
@@ -264,7 +264,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
         plan_context: None,
         ..checkpoint
     };
-    manager.restore_persisted_state(&new_checkpoint, session.messages().len());
+    manager.restore_persisted_state(&new_checkpoint, session.message_count());
     let after_compaction = request(&mut manager, &mut session, false);
     assert!(
         after_compaction.last().unwrap()["content"][0]["text"]

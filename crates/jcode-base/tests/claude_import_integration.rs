@@ -64,8 +64,7 @@ fn make_project_dir(home: &Path) -> PathBuf {
 
 fn all_text(session: &Session) -> String {
     session
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
             ContentBlock::Text { text, .. } => Some(text.clone()),
@@ -109,10 +108,10 @@ fn import_array_tool_result_with_image_uses_placeholder_not_base64() {
 
     // All three message lines survived (none dropped).
     assert_eq!(
-        session.messages().len(),
+        session.message_count(),
         3,
         "expected user+assistant+toolresult to all import, got {}",
-        session.messages().len()
+        session.message_count()
     );
 
     let text = all_text(&session);
@@ -166,7 +165,7 @@ fn import_tool_result_null_and_missing_content_does_not_drop_lines() {
     std::fs::write(&path, lines).unwrap();
 
     let session = import_session_from_file(&path, "nullc").unwrap();
-    assert_eq!(session.messages().len(), 3, "no line should be dropped");
+    assert_eq!(session.message_count(), 3, "no line should be dropped");
     let text = all_text(&session);
     assert!(text.contains("after null"));
     assert!(text.contains("after missing"));
@@ -204,7 +203,7 @@ fn import_excludes_sidechain_messages() {
     );
     assert!(text.contains("main question"));
     assert!(text.contains("main answer"));
-    assert_eq!(session.messages().len(), 2);
+    assert_eq!(session.message_count(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +232,7 @@ fn import_skips_only_malformed_lines() {
 
     let session = import_session_from_file(&path, "mixed").unwrap();
     assert_eq!(
-        session.messages().len(),
+        session.message_count(),
         2,
         "only the malformed line should be skipped"
     );
@@ -346,7 +345,7 @@ fn index_with_missing_full_path_falls_back_to_sibling_jsonl() {
 
     // And it must actually import from the recovered path.
     let imported = import_session("renamed-session").unwrap();
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
     assert!(all_text(&imported).contains("recovered"));
 }
 

@@ -61,7 +61,7 @@ pub fn collect_source(session: &Session) -> Option<TitlePromptSource> {
     let mut prompts: Vec<String> = Vec::new();
     let mut assistant_gist: Option<String> = None;
 
-    for message in session.messages() {
+    for message in session.iter_messages() {
         match message.role {
             Role::User => {
                 if message.display_role.is_some() {

@@ -92,16 +92,16 @@ impl SourceHasher {
         self.0.finish()
     }
 
-    fn extend(&mut self, messages: &[crate::session::StoredMessage], start: usize) -> bool {
+    fn extend(&mut self, messages: std::slice::Iter<'_, crate::session::StoredMessage>, start: usize) -> bool {
         // Wire prose is bounded. Do not hash megabytes of invisible text just
         // to avoid converting a cheap bounded prefix. Admission inspects lengths
         // before any payload work, including external-image marker scans.
-        if messages.iter().flat_map(|message| message.content.iter()).any(|block| {
+        if messages.clone().flat_map(|message| message.content.iter()).any(|block| {
             matches!(block, ContentBlock::Text { text, .. } if text.len() > MAX_TEXT_CHARS * 4)
         }) {
             return false;
         }
-        for (offset, message) in messages.iter().enumerate() {
+        for (offset, message) in messages.enumerate() {
             // Generated images are external mutable files, including missing
             // files that may appear later. Always use the uncached path if an
             // assistant message could reference one. Attachment bytes are inline.
@@ -194,7 +194,7 @@ impl PrefixCache {
             }
             self.0.push_back(Entry {
                 id: session.id().to_owned(),
-                count: session.messages().len(),
+                count: session.message_count(),
                 source: source.digest(),
                 wire,
             });
@@ -207,7 +207,7 @@ impl PrefixCache {
         progress: &SessionProgress,
     ) -> (Vec<WireMessage>, u64) {
         if progress.wire_version == WIRE_VERSION
-            && progress.uploaded <= session.messages().len()
+            && progress.uploaded <= session.message_count()
             && let Some(entry) = self
                 .0
                 .iter()
@@ -219,7 +219,7 @@ impl PrefixCache {
                 .cloned()
         {
             let mut source = SourceHasher::default();
-            if source.extend(&session.messages()[..progress.uploaded], 0)
+            if source.extend(session.iter_messages_before(progress.uploaded), 0)
                 && source.digest() == entry.source
             {
                 let messages = wire_messages(session, progress.uploaded);
@@ -229,7 +229,7 @@ impl PrefixCache {
                 }
                 let fingerprint = wire.finish();
                 let cacheable =
-                    source.extend(&session.messages()[progress.uploaded..], progress.uploaded);
+                    source.extend(session.iter_messages_from(progress.uploaded), progress.uploaded);
                 self.remember(session, cacheable.then_some(source), wire);
                 return (messages, fingerprint);
             }
@@ -241,10 +241,10 @@ impl PrefixCache {
         }
         let fingerprint = wire.finish();
         let unchanged_prefix = progress.wire_version == WIRE_VERSION
-            && progress.uploaded <= session.messages().len()
+            && progress.uploaded <= session.message_count()
             && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
         let mut source = SourceHasher::default();
-        let cacheable = source.extend(&session.messages(), 0);
+        let cacheable = source.extend(session.iter_messages(), 0);
         self.remember(session, cacheable.then_some(source), wire);
         if unchanged_prefix {
             messages.retain(|message| message.seq >= progress.uploaded);

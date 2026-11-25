@@ -952,9 +952,9 @@ mod tests {
         assert!(session.provider_session_id().is_none());
         assert!(session.system_prompt().is_none());
         assert!(session.compaction().is_none());
-        assert_eq!(session.messages().len(), 5);
-        assert_eq!(session.messages()[1].role, Role::Assistant);
-        for message in session.messages() {
+        assert_eq!(session.message_count(), 5);
+        assert_eq!(session.message_at(1).expect("transcript message").role, Role::Assistant);
+        for message in session.iter_messages() {
             assert!(
                 message
                     .content
@@ -962,7 +962,7 @@ mod tests {
                     .all(|b| matches!(b, ContentBlock::Text { .. }))
             );
         }
-        let ContentBlock::Text { text, .. } = &session.messages().last().unwrap().content[0] else {
+        let ContentBlock::Text { text, .. } = &session.last_message().unwrap().content[0] else {
             panic!()
         };
         assert!(text.starts_with("[Session transferred to Jcode Cloud]"));

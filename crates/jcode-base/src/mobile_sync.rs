@@ -1034,7 +1034,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 continue;
             }
         };
-        if session.is_debug() || session.messages().is_empty() {
+        if session.is_debug() || session.has_no_messages() {
             failures.sessions.remove(&id);
             upload_timing.outcome = "skipped_empty_or_debug";
             updates.insert(
@@ -1093,7 +1093,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 id,
                 SessionProgress {
                     wire_version: WIRE_VERSION,
-                    uploaded: session.messages().len(),
+                    uploaded: session.message_count(),
                     mtime_ms: mtime,
                     revision: Some(revision),
                     fingerprint: Some(fingerprint),

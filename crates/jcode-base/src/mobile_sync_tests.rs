@@ -855,8 +855,7 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         out
     }
     session
-        .messages()
-        .iter()
+        .iter_messages()
         .enumerate()
         .skip(start)
         .filter_map(|(seq, message)| {
@@ -1021,8 +1020,8 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
         0,
         1,
         3,
-        session.messages().len(),
-        session.messages().len() + 1,
+        session.message_count(),
+        session.message_count() + 1,
     ] {
         let expected = old_wire_messages(&session, start);
         let mut actual = wire_messages(&session, start);
@@ -1034,7 +1033,7 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
             message.tool_results.clear();
         }
         assert_eq!(actual, expected, "start={start}");
-        for end in [0, 1, session.messages().len() / 2, session.messages().len()] {
+        for end in [0, 1, session.message_count() / 2, session.message_count()] {
             assert_eq!(
                 wire_fingerprint(&actual, end),
                 wire_fingerprint(&expected, end)

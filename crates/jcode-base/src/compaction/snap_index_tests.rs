@@ -328,7 +328,7 @@ fn snap_index_copied_real_session_golden_and_timing() {
     );
     let session: crate::session::Session =
         serde_json::from_slice(&std::fs::read(&fixture).unwrap()).unwrap();
-    let messages: Vec<_> = session.messages().iter().map(|m| m.to_message()).collect();
+    let messages: Vec<_> = session.iter_messages().map(|m| m.to_message()).collect();
     let state = session.compaction().unwrap();
     let prior = state.snapcompact.as_ref().unwrap();
     let prepared = prepare_messages_with(
@@ -439,8 +439,8 @@ fn snap_index_copied_archive_profile() {
         &state.summary_text,
         archive.pages.len(),
     );
-    let messages: Vec<_> = session.messages()[..state.compacted_count]
-        .iter()
+    let messages: Vec<_> = session
+        .iter_messages_before(state.compacted_count)
         .map(|m| m.to_message())
         .collect();
     let started = Instant::now();

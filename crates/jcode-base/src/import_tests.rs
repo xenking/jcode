@@ -102,16 +102,15 @@ fn imported_tool_history_is_provider_neutral() {
     .unwrap();
 
     let imported = import_session_from_file(&transcript, "safe-tools").unwrap();
-    assert_eq!(imported.messages().len(), 3);
-    assert!(imported.messages().iter().all(|message| {
+    assert_eq!(imported.message_count(), 3);
+    assert!(imported.iter_messages().all(|message| {
         message
             .content
             .iter()
             .all(|block| matches!(block, ContentBlock::Text { .. }))
     }));
     let visible = imported
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -150,10 +149,9 @@ fn imported_history_is_bounded_for_fast_initial_render() {
     }
 
     assert!(normalize_imported_history(&mut session, true));
-    assert!(session.messages().len() <= IMPORT_HISTORY_MAX_MESSAGES + 1);
+    assert!(session.message_count() <= IMPORT_HISTORY_MAX_MESSAGES + 1);
     let text_bytes = session
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|message| message.content.iter())
         .map(|block| match block {
             ContentBlock::Text { text, .. } => text.len(),
@@ -162,7 +160,7 @@ fn imported_history_is_bounded_for_fast_initial_render() {
         .sum::<usize>();
     assert!(text_bytes <= IMPORT_HISTORY_MAX_TEXT_BYTES + 512);
     assert!(matches!(
-        session.messages()[0].content.first(),
+        session.message_at(0).expect("transcript message").content.first(),
         Some(ContentBlock::Text { text, .. }) if text.contains("older messages were omitted")
     ));
 }
@@ -536,8 +534,8 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
     );
     let preserved = Session::load(&imported_id).unwrap();
     assert_eq!(
-        serde_json::to_value(preserved.messages()).unwrap(),
-        serde_json::to_value(legacy.messages()).unwrap()
+        serde_json::to_value(preserved.cloned_messages()).unwrap(),
+        serde_json::to_value(legacy.cloned_messages()).unwrap()
     );
 }
 
@@ -768,7 +766,7 @@ fn test_import_claude_session_uses_recovered_live_transcript() {
     assert_eq!(imported.provider_key(), Some("claude-code"));
     assert_eq!(imported.working_dir(), Some("/tmp/demo-project"));
     assert_eq!(imported.model(), Some("claude-sonnet-4-6"));
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
 }
 
 #[test]
@@ -799,7 +797,7 @@ fn test_import_pi_session_creates_jcode_snapshot() {
     assert_eq!(imported.provider_key(), Some("pi"));
     assert_eq!(imported.model(), Some("pi-model"));
     assert_eq!(imported.working_dir(), Some("/tmp/pi-demo"));
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
 }
 
 #[test]
@@ -900,10 +898,9 @@ fn test_import_opencode_session_creates_jcode_snapshot() {
     assert_eq!(imported.provider_key(), Some("opencode"));
     assert_eq!(imported.model(), Some("big-pickle"));
     assert_eq!(imported.working_dir(), Some("/tmp/opencode-demo"));
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
     let all_text: String = imported
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|m| m.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -956,7 +953,7 @@ fn test_resolve_resume_target_to_jcode_imports_codex_session() {
         }
     );
     let loaded = Session::load(&imported_codex_session_id("codex-resolve-test")).unwrap();
-    assert_eq!(loaded.messages().len(), 2);
+    assert_eq!(loaded.message_count(), 2);
 }
 
 /// The resume picker builds a `ClaudeCodeSession` target with id `claude:<id>`
@@ -1009,7 +1006,7 @@ fn test_resolve_resume_target_to_jcode_imports_claude_code_session() {
     );
 
     let loaded = Session::load(&imported_id).unwrap();
-    assert_eq!(loaded.messages().len(), 2);
+    assert_eq!(loaded.message_count(), 2);
     assert_eq!(loaded.provider_session_id(), Some("claude-resolve-test"));
     assert_eq!(loaded.provider_key(), Some("claude-code"));
 }
@@ -1040,7 +1037,7 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
 
     // First selection imports the transcript.
     let imported = import_session_from_file(&transcript_path, "claude-continued").unwrap();
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
     let imported_id = imported_claude_code_session_id("claude-continued");
 
     // User resumes inside jcode and appends a jcode-only follow-up message.
@@ -1061,7 +1058,7 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
         token_usage: None,
     });
     session.save().unwrap();
-    assert_eq!(Session::load(&imported_id).unwrap().messages().len(), 3);
+    assert_eq!(Session::load(&imported_id).unwrap().message_count(), 3);
 
     // Re-selecting the external entry re-enters import; the continuation must survive.
     let resumed =
@@ -1079,11 +1076,11 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
 
     let after = Session::load(&imported_id).unwrap();
     assert_eq!(
-        after.messages().len(),
+        after.message_count(),
         3,
         "jcode-side continuation must not be clobbered by re-import"
     );
-    let preserved = after.messages().iter().flat_map(|m| m.content.iter()).any(
+    let preserved = after.iter_messages().flat_map(|m| m.content.iter()).any(
         |block| matches!(block, ContentBlock::Text { text, .. } if text == "jcode-only follow up"),
     );
     assert!(
@@ -1119,10 +1116,9 @@ fn test_import_cursor_session_creates_jcode_snapshot() {
     let imported = import_cursor_session(session_id).unwrap();
     assert_eq!(imported.id(), imported_cursor_session_id(session_id));
     assert_eq!(imported.provider_key(), Some("cursor"));
-    assert_eq!(imported.messages().len(), 2);
+    assert_eq!(imported.message_count(), 2);
     let all_text: String = imported
-        .messages()
-        .iter()
+        .iter_messages()
         .flat_map(|m| m.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
