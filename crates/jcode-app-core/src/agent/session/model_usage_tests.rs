@@ -74,7 +74,7 @@ async fn usage_agent(fail: bool) -> Agent {
     });
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    agent.session.is_debug = false;
+    agent.session.set_debug(false);
     agent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -119,7 +119,7 @@ async fn both_turn_paths_record_once_across_continuations_and_attribute_serving_
         assert!(
             agent
                 .session
-                .messages
+                .messages()
                 .iter()
                 .filter(|m| m.role == Role::Assistant)
                 .count()
@@ -145,7 +145,7 @@ async fn failed_requests_and_debug_sessions_do_not_record_turns() {
     let mut failed = usage_agent(true).await;
     assert!(failed.run_turn(false).await.is_err());
     let mut debug = usage_agent(false).await;
-    debug.session.is_debug = true;
+    debug.session.set_debug(true);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     debug.run_turn_streaming_mpsc(tx).await.unwrap();
     assert!(!home.root().join("model-usage-v1.sqlite3").exists());
@@ -162,11 +162,11 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let mut original = usage_agent(false).await;
     original.run_turn(false).await.unwrap();
-    let session_id = original.session.id.clone();
-    let anchor = original.session.model_usage_turn_id.clone();
+    let session_id = original.session.id().to_owned();
+    let anchor = original.session.model_usage_turn_id().map(str::to_owned);
     let mut resumed = usage_agent(false).await;
     resumed.session = crate::session::Session::load(&session_id).unwrap();
-    assert_eq!(resumed.session.model_usage_turn_id, anchor);
+    assert_eq!(resumed.session.model_usage_turn_id(), anchor.as_deref());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     resumed
         .run_once_streaming_mpsc("", vec![], Some("Continue after reload".into()), tx)
@@ -174,7 +174,7 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
         .unwrap();
     let continuation_texts: Vec<String> = resumed
         .session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == crate::message::Role::User)
         .flat_map(|message| message.content.iter())
@@ -210,15 +210,15 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
         1,
         "reload continuation must not count twice"
     );
-    assert_eq!(resumed.session.model_usage_turn_id, anchor);
+    assert_eq!(resumed.session.model_usage_turn_id(), anchor.as_deref());
     resumed.run_once_capture("new input").await.unwrap();
     assert_eq!(count(&resumed), 2);
-    assert_ne!(resumed.session.model_usage_turn_id, anchor);
+    assert_ne!(resumed.session.model_usage_turn_id(), anchor.as_deref());
     assert_eq!(
         crate::session::Session::load(&session_id)
             .unwrap()
-            .model_usage_turn_id,
-        resumed.session.model_usage_turn_id,
+            .model_usage_turn_id(),
+        resumed.session.model_usage_turn_id(),
         "journal must persist the changed anchor"
     );
 }

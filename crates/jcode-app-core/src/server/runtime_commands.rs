@@ -579,7 +579,7 @@ mod tests {
         assert!(agent.set_speed_mode(SpeedMode::Ultrafast).is_err());
         let session_id = agent.session_id().to_owned();
         let load = || crate::session::Session::load_for_resume(&session_id).unwrap();
-        assert_eq!(load().speed_selection.unwrap().mode, SpeedMode::Fast);
+        assert_eq!(load().speed_selection().unwrap().mode, SpeedMode::Fast);
         drop(agent);
 
         let same_route = provider("account-a");
@@ -602,7 +602,7 @@ mod tests {
             restored.set_speed_mode(SpeedMode::Standard).unwrap(),
             SpeedMode::Standard
         );
-        assert!(load().speed_selection.is_none());
+        assert!(load().speed_selection().is_none());
     }
 
     #[tokio::test]
@@ -773,8 +773,7 @@ mod tests {
             assert_eq!(
                 crate::session::Session::load(agent.session_id())
                     .unwrap()
-                    .pinned_skill
-                    .as_deref(),
+                    .pinned_skill(),
                 Some("mode-probe")
             );
         }
@@ -819,7 +818,7 @@ mod tests {
         assert!(
             crate::session::Session::load(agent.session_id())
                 .unwrap()
-                .pinned_skill
+                .pinned_skill()
                 .is_none()
         );
     }
@@ -853,7 +852,7 @@ mod tests {
         }
         let saved = crate::session::Session::load(agent.session_id()).unwrap();
         let rendered: Vec<_> = saved
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .filter_map(|block| match block {

@@ -80,10 +80,10 @@ pub(super) async fn resolve_coordinator_spawn_identity(
     match Session::load_startup_stub(req_session_id) {
         Ok(session) => {
             let identity = CoordinatorSpawnIdentity {
-                model: session.model.clone(),
-                provider_key: session.provider_key.clone(),
-                route_api_method: session.route_api_method.clone(),
-                is_canary: session.is_canary,
+                model: session.model().map(str::to_owned),
+                provider_key: session.provider_key().map(str::to_owned),
+                route_api_method: session.route_api_method().map(str::to_owned),
+                is_canary: session.is_canary(),
             };
             crate::logging::info(&format!(
                 "Swarm spawn: coordinator {} agent busy/unavailable, inheriting identity from persisted session (model={:?} provider_key={:?} route={:?} canary={})",

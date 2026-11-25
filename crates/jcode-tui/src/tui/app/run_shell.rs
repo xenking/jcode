@@ -895,7 +895,7 @@ impl App {
         self.extract_session_memories().await;
 
         if self.stashed_input.is_some() {
-            self.save_input_for_reload(&self.session.id);
+            self.save_input_for_reload(self.session.id());
         }
 
         Ok(RunResult {
@@ -906,7 +906,7 @@ impl App {
             hibernate_session: self.hibernate_exit_requested.take(),
             cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
-            session_id: Some(self.session.id.clone()),
+            session_id: Some(self.session.id().to_owned()),
         })
     }
 

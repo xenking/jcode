@@ -44,7 +44,7 @@ impl Agent {
                 break;
             }
             let ctx = ToolContext {
-                session_id: self.session.id.clone(),
+                session_id: self.session.id().to_owned(),
                 message_id: message_id.to_string(),
                 tool_call_id: call.id.clone(),
                 working_dir: self.working_dir().map(PathBuf::from),
@@ -71,7 +71,7 @@ impl Agent {
             let input = call.input.clone();
             let started = Instant::now();
             let Some(handle) =
-                crate::runtime_activity::spawn_session(&self.session.id, async move {
+                crate::runtime_activity::spawn_session(self.session.id(), async move {
                     registry.execute_parallel_read(&name, input, ctx).await
                 })
             else {

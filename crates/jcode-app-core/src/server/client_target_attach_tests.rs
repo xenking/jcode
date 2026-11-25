@@ -73,7 +73,7 @@ async fn live_agent(id: &str, root: &str) -> Arc<Mutex<Agent>> {
     let provider: Arc<dyn Provider> = Arc::new(NoRequests);
     let registry = Registry::new(provider.clone()).await;
     let mut session = crate::session::Session::create_with_id(id.into(), None, None);
-    session.working_dir = Some(root.into());
+    session.set_working_dir(Some(root.into()));
     Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )))
@@ -115,9 +115,9 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.working_dir = Some("/workspace/persisted-original".into());
+    session.set_working_dir(Some("/workspace/persisted-original".into()));
     session.save().unwrap();
-    let mut request = subscribe(&session.id);
+    let mut request = subscribe(session.id());
     resolve_target_subscribe_working_dir(
         &mut request,
         &Arc::new(crate::server::session_manager::SessionManager::new()),
@@ -155,7 +155,7 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
     std::fs::create_dir(&target_root).unwrap();
     std::fs::create_dir(&client_root).unwrap();
     let mut target = crate::session::Session::create(None, Some("Target project".into()));
-    target.working_dir = Some(target_root.to_string_lossy().into_owned());
+    target.set_working_dir(Some(target_root.to_string_lossy().into_owned()));
     target.save().unwrap();
 
     let sockets = tempfile::tempdir_in("/tmp").unwrap();
@@ -174,9 +174,9 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
     let mut lines = BufReader::new(reader).lines();
     let mut requests = vec![json!({"type":"subscribe","id":1,"working_dir":client_root})];
     if target_subscribe {
-        requests[0]["target_session_id"] = json!(target.id);
+        requests[0]["target_session_id"] = json!(target.id());
     } else {
-        requests.push(json!({"type":"resume_session","id":2,"session_id":target.id}));
+        requests.push(json!({"type":"resume_session","id":2,"session_id":target.id()}));
     }
     for (index, request) in requests.into_iter().enumerate() {
         let request_id = index as u64 + 1;
@@ -204,7 +204,7 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
         .sessions
         .read()
         .await
-        .get(&target.id)
+        .get(target.id())
         .cloned()
         .unwrap();
     let cwd = agent
@@ -221,13 +221,13 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.working_dir = Some("/workspace/stale".into());
+    session.set_working_dir(Some("/workspace/stale".into()));
     session.save().unwrap();
-    let agent = live_agent(&session.id, "/workspace/live").await;
+    let agent = live_agent(session.id(), "/workspace/live").await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
-        HashMap::from([(session.id.clone(), agent)]),
+        HashMap::from([(session.id().to_owned(), agent)]),
     ));
-    let mut request = subscribe(&session.id);
+    let mut request = subscribe(session.id());
     resolve_target_subscribe_working_dir(
         &mut request,
         &sessions,
@@ -319,12 +319,12 @@ async fn target_subscribe_reports_corrupt_persisted_state_without_using_process_
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let session = crate::session::Session::create(None, None);
-    let path = crate::session::session_path(&session.id).unwrap();
+    let path = crate::session::session_path(session.id()).unwrap();
     // Empty sessions are lazily persisted. Seed an actual broken snapshot.
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, b"{broken session json").unwrap();
-    let cause = crate::session::Session::load_startup_stub(&session.id).unwrap_err();
-    let mut request = subscribe(&session.id);
+    let cause = crate::session::Session::load_startup_stub(session.id()).unwrap_err();
+    let mut request = subscribe(session.id());
     let error = resolve_target_subscribe_working_dir(
         &mut request,
         &Arc::new(crate::server::session_manager::SessionManager::new()),
@@ -332,7 +332,7 @@ async fn target_subscribe_reports_corrupt_persisted_state_without_using_process_
     )
     .await
     .unwrap_err();
-    assert!(error.contains(&session.id), "{error}");
+    assert!(error.contains(session.id()), "{error}");
     assert!(error.contains(&cause.to_string()), "{error}");
     assert!(initial_subscribe_working_dir(&request).is_err());
 }
@@ -379,9 +379,9 @@ async fn target_subscribe_busy_agent_without_member_root_uses_persisted_root() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("busy".into()));
-    session.working_dir = Some("/workspace/busy-persisted".into());
+    session.set_working_dir(Some("/workspace/busy-persisted".into()));
     session.save().unwrap();
-    let id = session.id.clone();
+    let id = session.id().to_owned();
     let agent = live_agent(&id, "/workspace/busy-persisted").await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(id.clone(), agent.clone())]),

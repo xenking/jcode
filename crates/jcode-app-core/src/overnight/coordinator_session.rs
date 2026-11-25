@@ -1,4 +1,4 @@
-use crate::session::Session;
+use crate::session::{Inherit, Session};
 use anyhow::Result;
 
 pub(super) fn create_coordinator_session(
@@ -9,20 +9,21 @@ pub(super) fn create_coordinator_session(
         Some(mission) => format!("Overnight: {}", crate::util::truncate_str(mission, 48)),
         None => "Overnight coordinator".to_string(),
     });
-    let mut child = Session::create(Some(parent.id.clone()), title);
-    child.agent_started = true;
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.reasoning_effort = parent.reasoning_effort.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = Some(false);
-    child.autojudge_enabled = Some(false);
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.provider_session_id = None;
+    let mut child = Session::create(Some(parent.id().to_owned()), title);
+    child.set_agent_started(true);
+    child.inherit_from(
+        parent,
+        Inherit::MESSAGES
+            | Inherit::COMPACTION
+            | Inherit::ACCOUNT_ROUTE
+            | Inherit::REASONING_EFFORT
+            | Inherit::SUBAGENT_MODEL
+            | Inherit::IMPROVE_MODE
+            | Inherit::BUILD_UNDER_TEST
+            | Inherit::WORKING_DIR,
+    );
+    child.set_autoreview_enabled(Some(false));
+    child.set_autojudge_enabled(Some(false));
+    child.set_provider_session_id(None);
     Ok(child)
 }

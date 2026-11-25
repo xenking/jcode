@@ -11,18 +11,18 @@ impl Agent {
         }
 
         // Need at least 4 messages for meaningful extraction
-        if self.session.messages.len() < 4 {
+        if self.session.messages().len() < 4 {
             return 0;
         }
 
         logging::info(&format!(
             "Extracting memories from {} messages",
-            self.session.messages.len()
+            self.session.messages().len()
         ));
 
         // Build transcript
         let mut transcript = String::new();
-        for msg in &self.session.messages {
+        for msg in self.session.messages() {
             let role = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -75,7 +75,7 @@ impl Agent {
         let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar.extract_memories(&transcript).await {
             Ok(extracted) if !extracted.is_empty() => {
-                let manager = match self.session.working_dir.as_deref() {
+                let manager = match self.session.working_dir() {
                     Some(dir) => crate::memory::MemoryManager::new().with_project_dir(dir),
                     None => crate::memory::MemoryManager::new(),
                 };
@@ -91,7 +91,7 @@ impl Agent {
                     };
 
                     let entry = crate::memory::MemoryEntry::new(category, &memory.content)
-                        .with_source(&self.session.id)
+                        .with_source(self.session.id())
                         .with_trust(trust);
 
                     if manager.remember_project(entry).is_ok() {

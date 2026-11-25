@@ -54,7 +54,7 @@ where
         .remote_session_id
         .as_deref()
         .or(app.resume_session_id.as_deref())
-        .unwrap_or(app.session.id.as_str());
+        .unwrap_or(app.session.id());
     let mut session = crate::session::Session::load(session_id)?;
     update(&mut session);
     session.save()?;

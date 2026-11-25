@@ -922,10 +922,7 @@ impl App {
 
         if prefix.starts_with("/goals show ") {
             let relevant_goals = crate::goal::list_relevant_goals(
-                self.session
-                    .working_dir
-                    .as_deref()
-                    .map(std::path::Path::new),
+                self.session.working_dir().map(std::path::Path::new),
             )
             .unwrap_or_default();
             let suggestions = relevant_goals
@@ -1211,9 +1208,9 @@ impl App {
         }
         let preview_mode = self.onboarding_preview_mode;
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
         if is_canary && !preview_mode {
             return Vec::new();

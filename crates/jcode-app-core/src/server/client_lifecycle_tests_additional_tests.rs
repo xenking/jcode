@@ -62,7 +62,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.model = Some("never-ending-stream".to_string());
+        session.set_model(Some("never-ending-stream".to_string()));
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));

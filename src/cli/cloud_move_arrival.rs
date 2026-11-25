@@ -9,13 +9,13 @@ pub(super) fn append_system_notice(sess: &mut session::Session, text: &str) {
 pub(super) fn dangling_tool_use_ids(sess: &session::Session) -> Vec<String> {
     use crate::message::{ContentBlock, Role};
     let Some(last_assistant) = sess
-        .messages
+        .messages()
         .iter()
         .rposition(|m| m.role == Role::Assistant)
     else {
         return Vec::new();
     };
-    let answered: std::collections::HashSet<&str> = sess.messages[last_assistant + 1..]
+    let answered: std::collections::HashSet<&str> = sess.messages()[last_assistant + 1..]
         .iter()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
@@ -23,7 +23,7 @@ pub(super) fn dangling_tool_use_ids(sess: &session::Session) -> Vec<String> {
             _ => None,
         })
         .collect();
-    sess.messages[last_assistant]
+    sess.messages()[last_assistant]
         .content
         .iter()
         .filter_map(|b| match b {

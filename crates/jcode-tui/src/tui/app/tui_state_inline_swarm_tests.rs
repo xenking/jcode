@@ -44,7 +44,7 @@ fn boolean_app_modes_match_owned_members_and_gallery() {
                         app.swarm_enabled = enabled;
                         app.is_remote = remote;
                         app.remote_session_id = identity.map(str::to_owned);
-                        app.session.id = "me".to_owned();
+                        app.session.set_id_for_tests("me".to_owned());
                         app.remote_swarm_members = members;
                         app.remote_swarm_members_received_at = Some(std::time::Instant::now());
                         let expected = !app.inline_swarm_members().is_empty();

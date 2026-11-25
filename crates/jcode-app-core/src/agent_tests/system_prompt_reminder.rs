@@ -255,9 +255,9 @@ async fn remote_skill_activation_persists_system_entry_before_user_prompt() {
         .run_once_streaming_mpsc("fix this please", vec![], None, tx)
         .await
         .unwrap();
-    let persisted = crate::session::Session::load(&agent.session.id).unwrap();
+    let persisted = crate::session::Session::load(agent.session.id()).unwrap();
     let reminder = persisted
-        .messages
+        .messages()
         .iter()
         .position(|message| {
             message.display_role == Some(crate::session::StoredDisplayRole::System)
@@ -265,11 +265,17 @@ async fn remote_skill_activation_persists_system_entry_before_user_prompt() {
                 && content_text(&message.content).contains("Be concise.")
         })
         .expect("skill reminder persisted");
-    assert!(persisted.messages.iter().skip(reminder + 1).any(|message| {
-        matches!(message.role, Role::User)
-            && message.display_role.is_none()
-            && content_text(&message.content) == "fix this please"
-    }));
+    assert!(
+        persisted
+            .messages()
+            .iter()
+            .skip(reminder + 1)
+            .any(|message| {
+                matches!(message.role, Role::User)
+                    && message.display_role.is_none()
+                    && content_text(&message.content) == "fix this please"
+            })
+    );
 }
 
 #[derive(Clone, Default)]
@@ -414,11 +420,11 @@ async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
         "repeated alerts remain separate entries"
     );
     assert_eq!(entries[2], "[auto] Resume after reload");
-    let persisted = crate::session::Session::load(&agent.session.id).unwrap();
+    let persisted = crate::session::Session::load(agent.session.id()).unwrap();
     for entry in entries {
         assert!(
             persisted
-                .messages
+                .messages()
                 .iter()
                 .any(|message| content_text(&message.content) == entry
                     && message.display_role == Some(crate::session::StoredDisplayRole::System))

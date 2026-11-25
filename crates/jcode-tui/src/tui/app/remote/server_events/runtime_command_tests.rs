@@ -220,7 +220,7 @@ fn pinned_mode_remote_acknowledgement_updates_session_without_a_turn() {
             &mut remote
         ));
         assert_eq!(app.active_skill.as_deref(), mode);
-        assert_eq!(app.session.pinned_skill.as_deref(), mode);
+        assert_eq!(app.session.pinned_skill(), mode);
         assert!(!app.is_processing);
     }
 }

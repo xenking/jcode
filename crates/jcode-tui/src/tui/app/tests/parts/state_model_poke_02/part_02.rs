@@ -71,7 +71,7 @@ fn test_agents_review_picker_saves_session_override_without_global_write() {
         assert_eq!(cfg.autoreview.model, None);
         assert_eq!(
             app.session
-                .agent_model_overrides
+                .agent_model_overrides()
                 .get("review")
                 .map(String::as_str),
             Some(expected.as_str())
@@ -118,7 +118,7 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
             crate::config::Config::load().autoreview.model.as_deref(),
             Some("inherit")
         );
-        assert!(app.session.agent_model_overrides.is_empty());
+        assert!(app.session.agent_model_overrides().is_empty());
 
         // The role list toggles too, and the next save stays in session scope.
         app.input = "/agents default".into();
@@ -129,7 +129,12 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
         assert!(!app.agent_models_global_scope);
         let roles = app.inline_interactive_state.as_ref().expect("role list");
         assert!(roles.is_agent_target_picker());
-        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        assert!(
+            roles
+                .entries
+                .iter()
+                .all(|entry| entry.name.ends_with("[session]"))
+        );
         configure_test_remote_models(&mut app);
         app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
         app.is_remote = false;
@@ -143,7 +148,7 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
             .unwrap();
         assert_eq!(
             app.session
-                .agent_model_overrides
+                .agent_model_overrides()
                 .get("review")
                 .map(String::as_str),
             Some("inherit")
@@ -170,7 +175,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
         app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
             .unwrap();
         assert_eq!(crate::config::Config::load().autoreview.model, None);
-        assert!(app.session.agent_model_overrides.is_empty());
+        assert!(app.session.agent_model_overrides().is_empty());
 
         // Locally, the global scope still saves this machine's config.
         app.input = "/agents default review".into();
@@ -188,7 +193,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
             crate::config::Config::load().autoreview.model.as_deref(),
             Some("inherit")
         );
-        assert!(app.session.agent_model_overrides.is_empty());
+        assert!(app.session.agent_model_overrides().is_empty());
         configure_test_remote_models(&mut app);
 
         app.input = "/agents review".into();
@@ -205,7 +210,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
             .unwrap();
         assert_eq!(
             app.session
-                .agent_model_overrides
+                .agent_model_overrides()
                 .get("review")
                 .map(String::as_str),
             Some("inherit")
@@ -229,7 +234,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
             .unwrap();
         app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
             .unwrap();
-        assert!(app.session.agent_model_overrides.is_empty());
+        assert!(app.session.agent_model_overrides().is_empty());
         assert_eq!(
             crate::config::Config::load().autoreview.model.as_deref(),
             Some("inherit")
@@ -495,8 +500,7 @@ fn test_model_picker_preview_enter_selects_model() {
     app.is_remote = true;
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.3-codex".to_string());
-    app.remote_available_entries =
-        vec!["gpt-5.2-codex".to_string(), "gpt-5.3-codex".to_string()];
+    app.remote_available_entries = vec!["gpt-5.2-codex".to_string(), "gpt-5.3-codex".to_string()];
     app.remote_model_options = app
         .remote_available_entries
         .iter()
@@ -533,7 +537,8 @@ fn test_model_picker_preview_enter_selects_model() {
         .map(|entry| (entry.name.as_str(), entry.effort.as_deref()))
         .collect();
     assert!(
-        rows.iter().all(|(name, effort)| effort.is_some() && name.starts_with("gpt-5.2-codex (")),
+        rows.iter()
+            .all(|(name, effort)| effort.is_some() && name.starts_with("gpt-5.2-codex (")),
         "the level step lists the chosen model's levels: {rows:?}"
     );
     assert!(app.input().is_empty());

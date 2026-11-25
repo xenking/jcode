@@ -9,7 +9,7 @@ fn default_auto_poke_does_not_recheck_completed_confidence_or_ownership() {
             let mut app = create_test_app();
             app.auto_poke_incomplete_todos = true;
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
                     id: "done".into(),
                     content: "Finished work".into(),
@@ -24,7 +24,7 @@ fn default_auto_poke_does_not_recheck_completed_confidence_or_ownership() {
             )
             .expect("save completed todo");
             crate::todo::save_goals(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoGoal {
                     delivery_state: Some(crate::todo::DeliveryState::ChangeMade),
                     ..Default::default()
@@ -54,7 +54,7 @@ fn reload_interrupt_never_triggers_an_auto_poke() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "resume".into(),
                 content: "Finish work".into(),
@@ -64,27 +64,29 @@ fn reload_interrupt_never_triggers_an_auto_poke() {
             }],
         )
         .unwrap();
-        app.session.messages.push(crate::session::StoredMessage {
-            codemode: None,
-            attachment_data: None,
-            id: "interrupted".into(),
-            role: Role::Assistant,
-            content: vec![ContentBlock::Text {
-                text: "[generation interrupted - server reloading]".into(),
-                cache_control: None,
-            }]
-            .into(),
-            display_role: None,
-            timestamp: None,
-            tool_duration_ms: None,
-            token_usage: None,
-        });
+        app.session
+            .messages_mut_for_tests()
+            .push(crate::session::StoredMessage {
+                codemode: None,
+                attachment_data: None,
+                id: "interrupted".into(),
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "[generation interrupted - server reloading]".into(),
+                    cache_control: None,
+                }]
+                .into(),
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
         assert!(app.was_interrupted_by_reload());
         app.reload_recovery_dispatch_pending = true;
         assert!(!app.schedule_turn_end_followups());
         assert!(app.queued_messages.is_empty());
         app.reload_recovery_dispatch_pending = false;
-        app.session.messages.pop();
+        app.session.messages_mut_for_tests().pop();
         assert!(app.schedule_turn_end_followups());
     });
 }
@@ -108,7 +110,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 
         // Later work with incomplete todos must still be poked.
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Finish the thing".to_string(),
@@ -141,7 +143,7 @@ fn auto_poke_once_until_incomplete_todos_change() {
             ..Default::default()
         };
 
-        crate::todo::save_todos(&app.session.id, &[pending("Wait for worker")]).expect("save");
+        crate::todo::save_todos(app.session.id(), &[pending("Wait for worker")]).expect("save");
         assert!(app.schedule_auto_poke_followup_if_needed());
 
         // Simulate dispatch and completion of the automatically poked turn.
@@ -154,10 +156,12 @@ fn auto_poke_once_until_incomplete_todos_change() {
             "an unchanged list must stop after one attempt"
         );
 
-        app.save_input_for_reload(&app.session.id);
-        let restored = App::restore_input_for_reload(&app.session.id).expect("retry budget saved");
+        app.save_input_for_reload(app.session.id());
+        let restored = App::restore_input_for_reload(app.session.id()).expect("retry budget saved");
         let mut reloaded = create_test_app();
-        reloaded.session.id = app.session.id.clone();
+        reloaded
+            .session
+            .set_id_for_tests(app.session.id().to_owned());
         reloaded.auto_poke_incomplete_todos = true;
         reloaded.auto_poke_default_on = true;
         reloaded.apply_restored_reload_input(restored);
@@ -165,7 +169,7 @@ fn auto_poke_once_until_incomplete_todos_change() {
         assert!(!reloaded.schedule_auto_poke_followup_if_needed());
         app = reloaded;
 
-        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+        crate::todo::save_todos(app.session.id(), &[pending("Review worker result")])
             .expect("update");
         assert!(
             app.schedule_auto_poke_followup_if_needed(),
@@ -175,9 +179,9 @@ fn auto_poke_once_until_incomplete_todos_change() {
 
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
-        crate::todo::save_todos(&app.session.id, &[]).expect("finish cycle");
+        crate::todo::save_todos(app.session.id(), &[]).expect("finish cycle");
         assert!(!app.schedule_auto_poke_followup_if_needed());
-        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+        crate::todo::save_todos(app.session.id(), &[pending("Review worker result")])
             .expect("start equivalent new cycle");
         assert!(
             app.schedule_auto_poke_followup_if_needed(),
@@ -209,9 +213,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         app.auto_poke_default_on = true;
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
+        crate::todo::save_todos(app.session.id(), &[completed("todo-1")]).expect("save");
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -237,11 +241,13 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         );
 
         // The final handoff must stay latched across a client reload too.
-        app.save_input_for_reload(&app.session.id);
-        let restored = App::restore_input_for_reload(&app.session.id)
+        app.save_input_for_reload(app.session.id());
+        let restored = App::restore_input_for_reload(app.session.id())
             .expect("final handoff should survive reload");
         let mut reloaded = create_test_app();
-        reloaded.session.id = app.session.id.clone();
+        reloaded
+            .session
+            .set_id_for_tests(app.session.id().to_owned());
         reloaded.auto_poke_incomplete_todos = true;
         reloaded.auto_poke_default_on = true;
         reloaded.apply_restored_reload_input(restored);
@@ -256,7 +262,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         let review_path = crate::storage::jcode_dir()
             .expect("jcode home")
             .join("todos")
-            .join(format!("{}-review-state.json", app.session.id));
+            .join(format!("{}-review-state.json", app.session.id()));
         crate::storage::write_json_fast(
             &review_path,
             &serde_json::json!({
@@ -269,7 +275,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         // A late observation must not resurrect gates after the final answer,
         // even when the scheduler is called repeatedly with the same todo state.
         crate::todo::append_gate_observations(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::GateObservation {
                 kind: crate::todo::GateObservationKind::IntentUnderstanding,
                 group: None,
@@ -284,18 +290,18 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         }
 
         // Rewriting identical data is not a new cycle either.
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
+        crate::todo::save_todos(app.session.id(), &[completed("todo-1")]).expect("save");
         assert!(!app.schedule_auto_poke_followup_if_needed());
 
         assert!(
-            crate::todo::take_long_session_review_if_due(&app.session.id)
+            crate::todo::take_long_session_review_if_due(app.session.id())
                 .expect("the final-response guard must not consume the timed review")
         );
 
         // A real todo change re-arms the quality checks and final handoff.
         let mut changed = completed("todo-1");
         changed.completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
-        crate::todo::save_todos(&app.session.id, &[changed]).expect("save changed todo");
+        crate::todo::save_todos(app.session.id(), &[changed]).expect("save changed todo");
         assert!(app.schedule_auto_poke_followup_if_needed());
         // Default-off quality reviews must not buy a validation turn.
         assert_eq!(
@@ -305,7 +311,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         assert!(app.todo_final_response_requested);
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
-        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save validated");
+        crate::todo::save_todos(app.session.id(), &[completed("todo-1")]).expect("save validated");
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert_eq!(
             app.queued_messages,
@@ -317,9 +323,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         app.auto_poke_incomplete_todos = true;
         app.auto_poke_default_on = true;
         crate::tui::app::commands::disable_auto_poke(&mut app);
-        crate::todo::save_todos(&app.session.id, &[completed("todo-2")]).expect("save");
+        crate::todo::save_todos(app.session.id(), &[completed("todo-2")]).expect("save");
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -348,7 +354,7 @@ fn peer_auto_poke_is_shown_and_suppresses_duplicate_local_poke() {
         app.auto_poke_incomplete_todos = true;
         app.auto_poke_default_on = true;
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Send the email".to_string(),
@@ -391,7 +397,7 @@ fn stale_incomplete_todo_poke_is_dropped_once_todos_are_done() {
             priority: "high".to_string(),
             ..Default::default()
         };
-        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&done)).expect("save");
+        crate::todo::save_todos(app.session.id(), std::slice::from_ref(&done)).expect("save");
         let mut pending = done.clone();
         pending.status = "pending".to_string();
         let poke = crate::todo::build_actionable_poke_message(&[pending]);
@@ -404,11 +410,11 @@ fn stale_incomplete_todo_poke_is_dropped_once_todos_are_done() {
         super::commands::drop_stale_incomplete_todo_pokes(&app, &mut gated);
         assert_eq!(gated.len(), 1, "non incomplete-todo continuations are kept");
 
-        crate::todo::save_todos(&app.session.id, &[done]).expect("save");
+        crate::todo::save_todos(app.session.id(), &[done]).expect("save");
         let mut open_case = vec![poke];
-        let mut todo = crate::todo::load_todos(&app.session.id).unwrap();
+        let mut todo = crate::todo::load_todos(app.session.id()).unwrap();
         todo[0].status = "in_progress".to_string();
-        crate::todo::save_todos(&app.session.id, &todo).expect("save");
+        crate::todo::save_todos(app.session.id(), &todo).expect("save");
         super::commands::drop_stale_incomplete_todo_pokes(&app, &mut open_case);
         assert_eq!(open_case.len(), 1, "poke is kept while todos are open");
     });

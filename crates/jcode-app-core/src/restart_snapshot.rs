@@ -90,13 +90,13 @@ pub fn arm_auto_restore_from_recent_crashes() -> Result<Option<RestartSnapshot>>
         };
 
         if !matches!(
-            session.status,
+            session.status(),
             crate::session::SessionStatus::Crashed { .. }
         ) {
             continue;
         }
 
-        let sort_key = session.last_active_at.unwrap_or(session.updated_at);
+        let sort_key = session.last_active_at().unwrap_or(session.updated_at());
         if sort_key < cutoff {
             continue;
         }
@@ -104,10 +104,10 @@ pub fn arm_auto_restore_from_recent_crashes() -> Result<Option<RestartSnapshot>>
         captured.push((
             sort_key,
             RestartSnapshotSession {
-                session_id: session.id.clone(),
+                session_id: session.id().to_owned(),
                 display_name: session.display_name().to_string(),
-                working_dir: session.working_dir.clone(),
-                is_selfdev: session.is_canary,
+                working_dir: session.working_dir().map(str::to_owned),
+                is_selfdev: session.is_canary(),
             },
         ));
     }
@@ -151,18 +151,18 @@ pub fn capture_current_snapshot() -> Result<RestartSnapshot> {
             continue;
         }
 
-        if !matches!(session.status, crate::session::SessionStatus::Active) {
+        if !matches!(session.status(), crate::session::SessionStatus::Active) {
             continue;
         }
 
-        let sort_key = session.last_active_at.unwrap_or(session.updated_at);
+        let sort_key = session.last_active_at().unwrap_or(session.updated_at());
         captured.push((
             sort_key,
             RestartSnapshotSession {
-                session_id: session.id.clone(),
+                session_id: session.id().to_owned(),
                 display_name: session.display_name().to_string(),
-                working_dir: session.working_dir.clone(),
-                is_selfdev: session.is_canary,
+                working_dir: session.working_dir().map(str::to_owned),
+                is_selfdev: session.is_canary(),
             },
         ));
     }

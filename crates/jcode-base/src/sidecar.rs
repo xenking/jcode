@@ -168,7 +168,7 @@ impl Sidecar {
             .effective_agent_model("memory", crate::config::Config::load().agents.memory_model);
         let inherit = model.as_deref() == Some("inherit");
         let model = if inherit {
-            session.model.clone()
+            session.model().map(str::to_owned)
         } else {
             model
         };
@@ -178,8 +178,8 @@ impl Sidecar {
             let request = if inherit {
                 crate::provider::MultiProvider::model_switch_request_for_session_route(
                     model,
-                    session.provider_key.as_deref(),
-                    session.route_api_method.as_deref(),
+                    session.provider_key(),
+                    session.route_api_method(),
                 )
             } else {
                 model.to_string()

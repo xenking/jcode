@@ -47,12 +47,12 @@ impl Drop for HomeGuard {
 fn fixtures(home: &Path, count: usize) -> Vec<SessionInfo> {
     let id = "session_benchmark_1793661873000";
     let mut local = Session::create_with_id(id.into(), None, Some("Benchmark session".into()));
-    local.is_debug = false;
-    local.working_dir = Some(
+    local.set_debug(false);
+    local.set_working_dir(Some(
         home.join("synthetic-workspace")
             .to_string_lossy()
             .into_owned(),
-    );
+    ));
     for i in 0..count {
         let text = format!(
             "{} turn {i} {}",

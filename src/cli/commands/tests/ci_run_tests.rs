@@ -46,7 +46,7 @@ async fn resumed_one_shot_closes_the_restored_session() {
     assert!(!marker.exists(), "resumed run left its active PID marker");
     let persisted = crate::session::Session::load(&session_id).expect("load resumed session");
     assert!(matches!(
-        persisted.status,
+        persisted.status(),
         crate::session::SessionStatus::Closed
     ));
     assert!(
@@ -129,12 +129,12 @@ fn run_ephemeral_policy_blocks_direct_session_checkpoints() {
     crate::env::set_var("JCODE_HOME", home.path());
     let mut session = crate::session::Session::create_ephemeral();
     let persistent = crate::session::Session::create(None, None);
-    assert_eq!(session.is_debug, persistent.is_debug);
+    assert_eq!(session.is_debug(), persistent.is_debug());
     let _streaming = crate::session::StreamingGuard::for_session(&session);
     assert!(
         !crate::storage::streaming_pids_dir()
             .unwrap()
-            .join(&session.id)
+            .join(session.id())
             .exists()
     );
     let explicit_path = home.path().join("explicit.json");
@@ -142,6 +142,6 @@ fn run_ephemeral_policy_blocks_direct_session_checkpoints() {
     session.save_rewritten_context().unwrap();
     session.save_snapshot_to(&explicit_path).unwrap();
     assert!(!explicit_path.exists());
-    assert!(!crate::session::session_exists(&session.id));
+    assert!(!crate::session::session_exists(session.id()));
     assert!(session.save_for_idle_unload().is_err());
 }

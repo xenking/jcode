@@ -6,7 +6,8 @@ fn seed_onboarding_git_project(app: &mut App) -> tempfile::TempDir {
         .status()
         .expect("initialize isolated Git project");
     assert!(status.success());
-    app.session.working_dir = Some(directory.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(directory.path().to_string_lossy().into_owned()));
     directory
 }
 
@@ -55,7 +56,7 @@ fn starting_recent_project_review_runs_as_a_visible_local_turn() {
         assert!(app.is_processing, "local review should enter Sending");
         assert!(app.queued_messages.is_empty());
         assert_eq!(
-            app.session.messages.last().and_then(|message| {
+            app.session.messages().last().and_then(|message| {
                 message.content.iter().find_map(|block| match block {
                     crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
                     _ => None,

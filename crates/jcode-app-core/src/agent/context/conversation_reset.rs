@@ -3,12 +3,12 @@ use super::*;
 impl Agent {
     /// Clear conversation history
     pub fn clear(&mut self) {
-        let preserve_canary = self.session.is_canary;
-        let preserve_testing_build = self.session.testing_build.clone();
-        let preserve_debug = self.session.is_debug;
-        let preserve_working_dir = self.session.working_dir.clone();
+        let preserve_canary = self.session.is_canary();
+        let preserve_testing_build = self.session.testing_build().map(str::to_owned);
+        let preserve_debug = self.session.is_debug();
+        let preserve_working_dir = self.session.working_dir().map(str::to_owned);
         // A cleared conversation keeps the kind of agent it was.
-        let preserve_profile = self.session.agent_profile.clone();
+        let preserve_profile = self.session.agent_profile().map(str::to_owned);
 
         self.session.mark_closed();
         self.finish_concurrency_tracking();
@@ -17,17 +17,16 @@ impl Agent {
         let mut new_session = Session::create(None, None);
         // begin_concurrency_tracking below writes the presence markers.
         new_session.mark_active_unregistered();
-        new_session.model = Some(self.provider_model());
-        new_session.provider_key = self.provider_key_for_new_session();
-        new_session.is_canary = preserve_canary;
-        new_session.testing_build = preserve_testing_build;
-        new_session.is_debug = preserve_debug;
-        new_session.working_dir = preserve_working_dir;
-        new_session.agent_profile = preserve_profile;
+        new_session.set_model(Some(self.provider_model()));
+        new_session.set_provider_key(self.provider_key_for_new_session());
+        new_session.set_build_under_test(preserve_canary, preserve_testing_build);
+        new_session.set_debug(preserve_debug);
+        new_session.set_working_dir(preserve_working_dir);
+        new_session.set_agent_profile(preserve_profile);
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
-        self.provider.set_session_id(&self.session.id);
+        self.provider.set_session_id(self.session.id());
         self.begin_concurrency_tracking();
         self.refresh_profile_tool_policy();
         self.refresh_agents_md_snapshot();
@@ -40,7 +39,7 @@ impl Agent {
     /// Clear provider session so the next turn sends full context.
     pub fn reset_provider_session(&mut self) {
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
         self.persist_session_best_effort("provider session reset");
     }
 
@@ -108,45 +107,37 @@ impl Agent {
             .try_write()
             .map_err(|_| "Compaction state is busy. Try rewinding again.")?;
         let mut snapshot = RewindUndoSnapshot {
-            messages: self.session.messages.clone(),
-            compaction: self.session.compaction.clone(),
+            messages: self.session.messages().to_vec(),
+            compaction: self.session.compaction().cloned(),
             removed_compaction_events: Vec::new(),
             provider_session_id: self.provider_session_id.clone(),
-            session_provider_session_id: self.session.provider_session_id.clone(),
+            session_provider_session_id: self.session.provider_session_id().map(str::to_owned),
             visible_message_count: message_count,
         };
-        if let Some(first_discarded) = self.session.messages.get(stored_len) {
+        if let Some(cutoff) = self
+            .session
+            .messages()
+            .get(stored_len)
+            .map(|message| message.timestamp)
+        {
             if snapshot
                 .compaction
                 .as_ref()
                 .is_some_and(|state| state.compacted_count > stored_len)
             {
-                self.session.compaction = None;
+                self.session.set_compaction(None);
             }
             // A later compaction can display a discarded summary or occupancy.
-            let cutoff = first_discarded.timestamp;
-            let mut index = 0;
-            self.session.replay_events.retain(|event| {
-                let discard = matches!(
-                    event.kind,
-                    crate::session::StoredReplayEventKind::Compaction { .. }
-                ) && cutoff.is_none_or(|cutoff| event.timestamp >= cutoff);
-                if discard {
-                    snapshot
-                        .removed_compaction_events
-                        .push((index, event.clone()));
-                }
-                index += 1;
-                !discard
-            });
+            let removed = self.session.drain_compaction_replay_events_since(cutoff);
+            snapshot.removed_compaction_events.extend(removed);
             // Truncation forces a full snapshot, including the pruned replay.
             self.session.truncate_messages(stored_len);
             self.refresh_tool_call_snapshot();
         }
         self.rewind_undo_snapshot = Some(snapshot);
-        self.session.updated_at = chrono::Utc::now();
+        self.session.set_updated_at(chrono::Utc::now());
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
@@ -168,15 +159,15 @@ impl Agent {
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        self.session.compaction = snapshot.compaction;
-        for (index, event) in snapshot.removed_compaction_events {
-            self.session.replay_events.insert(index, event);
-        }
+        self.session.set_compaction(snapshot.compaction);
+        self.session
+            .restore_replay_events(snapshot.removed_compaction_events);
         self.session.replace_messages(snapshot.messages);
         self.refresh_tool_call_snapshot();
         self.provider_session_id = snapshot.provider_session_id;
-        self.session.provider_session_id = snapshot.session_provider_session_id;
-        self.session.updated_at = chrono::Utc::now();
+        self.session
+            .set_provider_session_id(snapshot.session_provider_session_id);
+        self.session.set_updated_at(chrono::Utc::now());
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;

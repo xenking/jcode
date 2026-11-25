@@ -591,9 +591,9 @@ impl crate::tui::TuiState for App {
 
     fn is_canary(&self) -> bool {
         if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         }
     }
 
@@ -609,7 +609,7 @@ impl crate::tui::TuiState for App {
         if self.is_remote {
             self.remote_session_id.clone()
         } else {
-            Some(self.session.id.clone())
+            Some(self.session.id().to_owned())
         }
     }
 
@@ -794,14 +794,14 @@ impl crate::tui::TuiState for App {
         let session_key = if self.is_remote {
             self.remote_session_id
                 .clone()
-                .unwrap_or_else(|| self.session.id.clone())
+                .unwrap_or_else(|| self.session.id().to_owned())
         } else {
-            self.session.id.clone()
+            self.session.id().to_owned()
         };
         let message_count = if self.is_remote {
             self.display_messages.len()
         } else {
-            self.session.messages.len()
+            self.session.messages().len()
         };
         let (compaction_count, compaction_summary_chars, is_compacting, compaction_fresh) =
             if self.is_remote {
@@ -897,7 +897,7 @@ impl crate::tui::TuiState for App {
                 0
             };
 
-            for msg in self.session.messages.iter().skip(skip) {
+            for msg in self.session.messages().iter().skip(skip) {
                 match msg.role {
                     Role::User => user_count += 1,
                     Role::Assistant => asst_count += 1,
@@ -1063,10 +1063,10 @@ impl crate::tui::TuiState for App {
             // status, cloud status, or prompt sizing. Unknown is not today's
             // value, and cumulative token totals are not the current context.
             return crate::tui::info_widget::InfoWidgetData {
-                model: self.session.model.clone(),
+                model: self.session.model().map(str::to_owned),
                 provider_name: self.remote_provider_name.clone(),
                 session_name: self.session.short_name.clone(),
-                working_dir: self.session.working_dir.clone(),
+                working_dir: self.session.working_dir().map(str::to_owned),
                 historical_context: true,
                 ..Default::default()
             };
@@ -1171,7 +1171,7 @@ impl crate::tui::TuiState for App {
                 let has_activity = status != "ready" || detail.is_some();
                 if has_activity {
                     members.push(crate::protocol::SwarmMemberStatus {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         friendly_name: Some(self.session.display_name().to_string()),
                         status,
                         detail,
@@ -1318,7 +1318,7 @@ impl crate::tui::TuiState for App {
             let session_id = if self.is_remote {
                 self.remote_session_id.as_deref()
             } else {
-                Some(self.session.id.as_str())
+                Some(self.session.id())
             };
             self.workspace_client
                 .visible_rows(5, session_id, self.is_processing)
@@ -1413,8 +1413,8 @@ impl crate::tui::TuiState for App {
             native_compaction_threshold_tokens,
             session_count,
             session_name,
-            working_dir: self.session.working_dir.clone(),
-            original_working_dir: self.session.original_working_dir.clone(),
+            working_dir: self.session.working_dir().map(str::to_owned),
+            original_working_dir: self.session.original_working_dir().map(str::to_owned),
             client_count,
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
@@ -1471,7 +1471,7 @@ impl crate::tui::TuiState for App {
         let session_id = if self.is_remote {
             self.remote_session_id.as_deref()
         } else {
-            Some(self.session.id.as_str())
+            Some(self.session.id())
         };
         self.workspace_client
             .visible_rows(5, session_id, self.is_processing)
@@ -1536,7 +1536,7 @@ impl crate::tui::TuiState for App {
         // SSH must avoid host-local credentials, not daemon-reported identity.
         remote_oauth_account_label(
             self.remote_provider_oauth_account_label.as_deref(),
-            self.session.route_api_method.as_deref(),
+            self.session.route_api_method(),
         )
         .map(str::to_owned)
     }
@@ -1567,7 +1567,7 @@ impl crate::tui::TuiState for App {
         let self_id = if self.is_remote {
             self.remote_session_id.as_deref()
         } else {
-            Some(self.session.id.as_str())
+            Some(self.session.id())
         };
         self_id.is_some_and(|id| has_inline_swarm_descendants(&self.remote_swarm_members, id))
     }
@@ -1755,7 +1755,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn working_dir(&self) -> Option<String> {
-        self.session.working_dir.clone()
+        self.session.working_dir().map(str::to_owned)
     }
 
     fn git_branch(&self) -> Option<String> {

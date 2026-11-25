@@ -536,10 +536,10 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     let repo = create_repo_fixture();
 
     let mut parent = session::Session::create(None, Some("Origin Session".to_string()));
-    parent.working_dir = Some("/tmp/origin-project".to_string());
-    parent.model = Some("gpt-test".to_string());
-    parent.provider_key = Some("openai".to_string());
-    parent.subagent_model = Some("gpt-subagent".to_string());
+    parent.set_working_dir(Some("/tmp/origin-project".to_string()));
+    parent.set_model(Some("gpt-test".to_string()));
+    parent.set_provider_key(Some("openai".to_string()));
+    parent.set_subagent_model(Some("gpt-subagent".to_string()));
     parent.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
@@ -547,7 +547,7 @@ async fn enter_creates_selfdev_session_in_test_mode() {
             cache_control: None,
         }],
     );
-    parent.compaction = Some(
+    parent.set_compaction(Some(
         session::StoredCompactionState {
             summary_text: "summary".to_string(),
             plan_context: None,
@@ -558,12 +558,12 @@ async fn enter_creates_selfdev_session_in_test_mode() {
             compacted_count: 1,
         }
         .into(),
-    );
+    ));
     parent.record_replay_display_message("system", None, "remember this context");
     parent.save().expect("save parent session");
 
     let tool = SelfDevTool::new();
-    let ctx = create_test_context(&parent.id, Some(repo.path().to_path_buf()));
+    let ctx = create_test_context(parent.id(), Some(repo.path().to_path_buf()));
     let output = tool
         .execute(
             json!({"action": "enter", "prompt": "Work on jcode itself"}),
@@ -590,22 +590,22 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     assert_eq!(metadata["inherited_context"].as_bool(), Some(true));
     let session = session::Session::load(session_id).expect("load spawned session");
     assert!(
-        session.is_canary,
+        session.is_canary(),
         "spawned session should be canary/self-dev"
     );
-    assert_eq!(session.testing_build.as_deref(), Some("self-dev"));
+    assert_eq!(session.testing_build(), Some("self-dev"));
     assert_eq!(
-        session.working_dir.as_deref(),
+        session.working_dir(),
         Some(repo.path().to_string_lossy().as_ref())
     );
-    assert_eq!(session.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(session.messages.len(), parent.messages.len());
-    assert_eq!(session.messages[0].content_preview(), "hello from parent");
-    assert_eq!(session.compaction, parent.compaction);
-    assert_eq!(session.model, parent.model);
-    assert_eq!(session.provider_key, parent.provider_key);
-    assert_eq!(session.subagent_model, parent.subagent_model);
-    assert_eq!(session.replay_events, parent.replay_events);
+    assert_eq!(session.parent_id(), Some(parent.id()));
+    assert_eq!(session.messages().len(), parent.messages().len());
+    assert_eq!(session.messages()[0].content_preview(), "hello from parent");
+    assert_eq!(session.compaction(), parent.compaction());
+    assert_eq!(session.model(), parent.model());
+    assert_eq!(session.provider_key(), parent.provider_key());
+    assert_eq!(session.subagent_model(), parent.subagent_model());
+    assert_eq!(session.replay_events(), parent.replay_events());
 }
 
 #[tokio::test]
@@ -630,10 +630,10 @@ async fn enter_falls_back_to_fresh_session_when_parent_missing() {
     assert_eq!(metadata["inherited_context"].as_bool(), Some(false));
 
     let session = session::Session::load(session_id).expect("load spawned session");
-    assert!(session.messages.is_empty());
-    assert!(session.parent_id.is_none());
+    assert!(session.messages().is_empty());
+    assert!(session.parent_id().is_none());
     assert_eq!(
-        session.working_dir.as_deref(),
+        session.working_dir(),
         Some(repo.path().to_string_lossy().as_ref())
     );
 }
@@ -650,7 +650,10 @@ async fn reload_in_non_selfdev_session_is_upgrade_in_place() {
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
-    let ctx = create_test_context(&session.id, session.working_dir.clone().map(Into::into));
+    let ctx = create_test_context(
+        session.id(),
+        session.working_dir().map(str::to_owned).map(Into::into),
+    );
     let output = tool
         .execute(json!({"action": "reload"}), ctx)
         .await
@@ -677,7 +680,10 @@ async fn socket_actions_require_selfdev_session() {
 
     let tool = SelfDevTool::new();
     for action in ["socket-info", "socket-help"] {
-        let ctx = create_test_context(&session.id, session.working_dir.clone().map(Into::into));
+        let ctx = create_test_context(
+            session.id(),
+            session.working_dir().map(str::to_owned).map(Into::into),
+        );
         let output = tool
             .execute(json!({"action": action}), ctx)
             .await
@@ -702,7 +708,7 @@ async fn find_config_reports_key_paths() {
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
-    let ctx = create_test_context(&session.id, None);
+    let ctx = create_test_context(session.id(), None);
     let output = tool
         .execute(json!({"action": "find-config"}), ctx)
         .await
@@ -728,7 +734,7 @@ async fn setup_reports_dependency_checks() {
     session.save().expect("save session");
 
     let tool = SelfDevTool::new();
-    let ctx = create_test_context(&session.id, Some(repo.path().to_path_buf()));
+    let ctx = create_test_context(session.id(), Some(repo.path().to_path_buf()));
     let output = tool
         .execute(json!({"action": "setup"}), ctx)
         .await
@@ -772,7 +778,7 @@ async fn build_actions_reject_missing_or_blank_notes_before_creating_queue() {
     let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
     let mut session = session::Session::create(None, None);
-    session.is_canary = true;
+    session.set_is_canary_for_tests(true);
     session.save().unwrap();
     for action in ["build", "build-reload"] {
         for notes in [None, Some(""), Some(" \t\n")] {
@@ -780,7 +786,7 @@ async fn build_actions_reject_missing_or_blank_notes_before_creating_queue() {
             if let Some(notes) = notes {
                 input["release_notes"] = json!(notes);
             }
-            let ctx = create_test_context(&session.id, Some(repo.path().to_owned()));
+            let ctx = create_test_context(session.id(), Some(repo.path().to_owned()));
             let error = SelfDevTool::new().execute(input, ctx).await.unwrap_err();
             assert!(error.to_string().contains("nonblank `release_notes`"));
             assert!(!home.path().join("selfdev-build-requests").exists());
@@ -808,14 +814,14 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let first = tool
         .execute(
             json!({"action": "build", "reason": "first reason", "release_notes": "First highlight"}),
-            create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_one.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
             json!({"action": "build", "reason": "second reason", "release_notes": "From attached session"}),
-            create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_two.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("second build should queue");
@@ -884,7 +890,7 @@ async fn build_reload_waits_for_build_then_reloads() {
     let repo = create_repo_fixture();
 
     let mut session = session::Session::create(None, Some("Build+reload session".to_string()));
-    session.is_canary = true;
+    session.set_is_canary_for_tests(true);
     session.short_name = Some("gamma".to_string());
     session.save().expect("save session");
 
@@ -910,7 +916,7 @@ async fn build_reload_waits_for_build_then_reloads() {
     let output = tool
         .execute(
             json!({"action": "build-reload", "reason": "private coordination", "context": "private context", "release_notes": " Public highlight "}),
-            create_test_context(&session.id, Some(repo.path().to_path_buf())),
+            create_test_context(session.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("build-reload should succeed");
@@ -963,14 +969,14 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     let first = tool
         .execute(
             json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
-            create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_one.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
             json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
-            create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_two.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("second build should attach");
@@ -1023,14 +1029,14 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     let first = tool
         .execute(
             json!({"action": "build", "reason": "keep building", "release_notes": "No user-visible changes."}),
-            create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_one.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
             json!({"action": "build", "reason": "cancel me", "release_notes": "No user-visible changes."}),
-            create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_two.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("second build should queue");
@@ -1042,7 +1048,7 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
                 "action": "cancel-build",
                 "request_id": second_meta["request_id"].as_str().unwrap()
             }),
-            create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
+            create_test_context(session_two.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("cancel should succeed");
@@ -1081,7 +1087,7 @@ fn status_output_prunes_stale_pending_requests() {
     let request = BuildRequest {
         request_id: "stale-request".to_string(),
         background_task_id: Some("missing-task".to_string()),
-        session_id: session.id.clone(),
+        session_id: session.id().to_owned(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
         release_notes: None,
@@ -1150,7 +1156,7 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
         request_id: "fresh-request".to_string(),
         // No background task metadata yet: mid-bootstrap.
         background_task_id: None,
-        session_id: session.id.clone(),
+        session_id: session.id().to_owned(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Fresh Build".to_string()),
         release_notes: None,
@@ -1212,7 +1218,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
             task_id: "stale-task".to_string(),
             tool_name: "selfdev-build".to_string(),
             display_name: Some("selfdev build".to_string()),
-            session_id: stale_session.id.clone(),
+            session_id: stale_session.id().to_owned(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
             error: None,
@@ -1237,7 +1243,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
     let stale_request = BuildRequest {
         request_id: "stale-queued-request".to_string(),
         background_task_id: Some("stale-task".to_string()),
-        session_id: stale_session.id.clone(),
+        session_id: stale_session.id().to_owned(),
         session_short_name: stale_session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
         release_notes: None,
@@ -1276,7 +1282,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
     let output = tool
         .execute(
             json!({"action": "build", "reason": "fresh build", "release_notes": "No user-visible changes."}),
-            create_test_context(&live_session.id, Some(repo.path().to_path_buf())),
+            create_test_context(live_session.id(), Some(repo.path().to_path_buf())),
         )
         .await
         .expect("build should queue");
@@ -1315,7 +1321,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
             task_id: "superseded-task".to_string(),
             tool_name: "selfdev-build".to_string(),
             display_name: Some("selfdev build".to_string()),
-            session_id: session.id.clone(),
+            session_id: session.id().to_owned(),
             status: BackgroundTaskStatus::Superseded,
             exit_code: Some(0),
             error: Some("Build completed, but source changed before activation".to_string()),
@@ -1340,7 +1346,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
     let request = BuildRequest {
         request_id: "superseded-request".to_string(),
         background_task_id: Some("superseded-task".to_string()),
-        session_id: session.id.clone(),
+        session_id: session.id().to_owned(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Superseded Build".to_string()),
         release_notes: None,

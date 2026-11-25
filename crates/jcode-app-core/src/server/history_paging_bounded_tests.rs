@@ -38,7 +38,8 @@ async fn journal_tail_pages_from_live_to_busy_with_snapshot_replay_events() {
     };
     add(&mut session, "old");
     session.record_replay_display_message("error", None, "historical failure");
-    session.replay_events[0].timestamp = chrono::Utc::now() - chrono::Duration::seconds(1);
+    session.replay_events_mut_for_tests()[0].timestamp =
+        chrono::Utc::now() - chrono::Duration::seconds(1);
     add(&mut session, "middle");
     session.save().unwrap();
     add(&mut session, "journal tail");
@@ -489,7 +490,7 @@ fn generate_large_runtime_fixture() {
             );
         }
     }
-    session.compaction = Some(std::sync::Arc::new(StoredCompactionState {
+    session.set_compaction(Some(std::sync::Arc::new(StoredCompactionState {
         summary_text: "synthetic summary".into(),
         plan_context: None,
         openai_encrypted_content: None,
@@ -497,7 +498,7 @@ fn generate_large_runtime_fixture() {
         covers_up_to_turn: 80,
         original_turn_count: 100,
         compacted_count: 160,
-    }));
+    })));
     let dir = std::path::Path::new(&home).join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session_bounded_fixture.json");

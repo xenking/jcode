@@ -8,7 +8,7 @@ impl Agent {
     }
     pub(super) fn refresh_tool_call_snapshot(&self) {
         self.turn_ownership.replace_tool_call_snapshot(
-            &self.session.id,
+            self.session.id(),
             crate::session::summarize_tool_calls(
                 &self.session,
                 crate::protocol::MAX_COMM_SUMMARY_TOOL_CALLS,
@@ -86,10 +86,10 @@ impl Agent {
     }
 
     fn note_session_message_added(&self) {
-        let message = self.session.messages.last();
+        let message = self.session.messages().last();
         if let Some(message) = message.filter(|message| message.role == Role::Assistant) {
             self.turn_ownership.append_tool_call_snapshot(
-                &self.session.id,
+                self.session.id(),
                 crate::session::summarize_message_tool_calls(
                     message,
                     crate::protocol::MAX_COMM_SUMMARY_TOOL_CALLS,
@@ -111,7 +111,7 @@ impl Agent {
     /// Export the full conversation as a markdown transcript.
     pub fn export_conversation_markdown(&self) -> String {
         let mut md = String::new();
-        for msg in &self.session.messages {
+        for msg in self.session.messages() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -254,7 +254,7 @@ mod durable_error_tests {
         assert!(
             agent
                 .session
-                .messages
+                .messages()
                 .last()
                 .unwrap()
                 .content
@@ -346,16 +346,18 @@ mod durable_error_tests {
             Message::user("discard this answer").content,
         );
         let summary_text = "summary of the discarded answer";
-        let folded_count = agent.session.messages.len();
-        agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
-            summary_text: summary_text.into(),
-            plan_context: None,
-            openai_encrypted_content: None,
-            snapcompact: None,
-            covers_up_to_turn: 1,
-            original_turn_count: 1,
-            compacted_count: folded_count,
-        }));
+        let folded_count = agent.session.messages().len();
+        agent
+            .session
+            .set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
+                summary_text: summary_text.into(),
+                plan_context: None,
+                openai_encrypted_content: None,
+                snapcompact: None,
+                covers_up_to_turn: 1,
+                original_turn_count: 1,
+                compacted_count: folded_count,
+            })));
         agent.seed_compaction_from_session();
         agent.session.record_compaction_event(
             &CompactionEvent {
@@ -388,13 +390,13 @@ mod durable_error_tests {
 
         let saved = Session::load(&session_id).unwrap();
         assert!(
-            saved.compaction.is_none(),
+            saved.compaction().is_none(),
             "rewind retained a summary of discarded turns"
         );
-        assert_eq!(saved.messages.len(), folded_count - 1);
+        assert_eq!(saved.messages().len(), folded_count - 1);
         assert_eq!(saved.context_occupancy_tokens(), None);
         assert_eq!(
-            saved.replay_events.len(),
+            saved.replay_events().len(),
             1,
             "unrelated replay events survive"
         );
@@ -408,20 +410,17 @@ mod durable_error_tests {
         );
         agent.undo_rewind().unwrap();
         let saved = Session::load(&session_id).unwrap();
-        assert_eq!(saved.messages.len(), folded_count);
-        assert_eq!(
-            saved.compaction.as_ref().unwrap().summary_text,
-            summary_text
-        );
+        assert_eq!(saved.messages().len(), folded_count);
+        assert_eq!(saved.compaction().unwrap().summary_text, summary_text);
         assert_eq!(saved.context_occupancy_tokens(), Some(4321));
-        assert_eq!(saved.replay_events.len(), 2);
+        assert_eq!(saved.replay_events().len(), 2);
         assert!(
             agent
                 .registry
                 .compaction()
                 .try_read()
                 .unwrap()
-                .persisted_state_matches(saved.compaction.as_deref())
+                .persisted_state_matches(saved.compaction_state())
         );
     }
 
@@ -441,14 +440,14 @@ mod durable_error_tests {
         let error = anyhow::anyhow!("invalid_request_error: missing call_id")
             .context("provider rejected wake");
         let message = crate::util::format_error_chain(&error);
-        let message_count = agent.session.messages.len();
-        let provider_messages = serde_json::to_value(&agent.session.messages).unwrap();
+        let message_count = agent.session.messages().len();
+        let provider_messages = serde_json::to_value(agent.session.messages()).unwrap();
         agent.persist_turn_error(&message).unwrap();
         let loaded = Session::load(agent.session_id()).unwrap();
-        assert_eq!(loaded.messages.len(), message_count);
-        assert_eq!(agent.session.messages.len(), message_count);
+        assert_eq!(loaded.messages().len(), message_count);
+        assert_eq!(agent.session.messages().len(), message_count);
         assert_eq!(
-            serde_json::to_value(&loaded.messages).unwrap(),
+            serde_json::to_value(loaded.messages()).unwrap(),
             provider_messages
         );
         let history = crate::session::render_messages(&loaded);

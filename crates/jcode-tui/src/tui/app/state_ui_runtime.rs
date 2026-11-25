@@ -15,11 +15,7 @@ impl App {
             .try_read()
             .map(|skills| std::sync::Arc::new(skills.clone()))
             .unwrap_or_else(|_| self.skills.clone());
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         std::sync::Arc::new(crate::skill::SkillRegistry::effective_for_working_dir(
             &global,
             working_dir,

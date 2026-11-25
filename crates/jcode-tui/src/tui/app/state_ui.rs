@@ -166,7 +166,7 @@ impl App {
         if self.is_remote {
             self.remote_session_id.as_deref()
         } else {
-            Some(self.session.id.as_str())
+            Some(self.session.id())
         }
     }
 
@@ -1100,7 +1100,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/version" {
         let version = jcode_build_meta::version();
-        let is_canary = if app.session.is_canary {
+        let is_canary = if app.session.is_canary() {
             " (canary/self-dev)"
         } else {
             ""
@@ -1208,7 +1208,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .filter(|m| m.role == "user")
             .count();
 
-        let session_duration = chrono::Utc::now().signed_duration_since(app.session.created_at);
+        let session_duration = chrono::Utc::now().signed_duration_since(app.session.created_at());
         let duration_str = if session_duration.num_hours() > 0 {
             format!(
                 "{}h {}m",
@@ -1226,7 +1226,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         info.push_str(&format!(
             "Session: {} ({})\n",
             app.session.short_name.as_deref().unwrap_or("unnamed"),
-            &app.session.id[..8]
+            &app.session.id()[..8]
         ));
         info.push_str(&format!(
             "Duration: {} ({} turns)\n",
@@ -1254,9 +1254,9 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             ));
         }
 
-        if app.session.is_canary {
+        if app.session.is_canary() {
             info.push_str("\nSelf-Dev Mode: enabled\n");
-            if let Some(ref build) = app.session.testing_build {
+            if let Some(ref build) = app.session.testing_build() {
                 info.push_str(&format!("Testing Build: {}\n", build));
             }
         }
@@ -1289,7 +1289,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .unwrap_or_else(|_| "unknown".to_string());
         let active_session_id = app
             .active_client_session_id()
-            .unwrap_or(app.session.id.as_str())
+            .unwrap_or(app.session.id())
             .to_string();
         let context = app.context_info();
 
@@ -1334,7 +1334,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 } else {
                     manager.mode().as_str().to_string()
                 };
-                let summary_kind = match app.session.compaction.as_ref() {
+                let summary_kind = match app.session.compaction() {
                     Some(state) if state.openai_encrypted_content.is_some() => {
                         "native/openai-encrypted"
                     }
@@ -1388,7 +1388,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             "- mode: {}{}{}\n",
             if app.is_remote { "remote" } else { "local" },
             if app.is_replay { ", replay" } else { "" },
-            if app.session.is_canary {
+            if app.session.is_canary() {
                 ", self-dev"
             } else {
                 ""

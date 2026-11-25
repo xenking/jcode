@@ -506,7 +506,7 @@ impl App {
                     "session_count": 1,
                     "client_count": null,
                     "members": vec![crate::protocol::SwarmMemberStatus {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         friendly_name: Some(self.session.display_name().to_string()),
                         status: match &self.status {
                             ProcessingStatus::Idle => "ready".to_string(),
@@ -1258,7 +1258,7 @@ impl App {
         self.last_version_check = Some(Instant::now());
 
         // Don't migrate if we're a canary session (we test changes, not receive them)
-        if self.session.is_canary {
+        if self.session.is_canary() {
             return false;
         }
 
@@ -1312,8 +1312,8 @@ impl App {
             }
 
             // Request reload to stable version
-            self.save_input_for_reload(&self.session.id.clone());
-            self.reload_requested = Some(self.session.id.clone());
+            self.save_input_for_reload(self.session.id());
+            self.reload_requested = Some(self.session.id().to_owned());
 
             // The actual exec happens in main.rs when run() returns
             // We store the binary path in an env var for the reload handler

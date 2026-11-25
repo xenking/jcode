@@ -48,7 +48,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
                 cache_control: None,
             }],
         );
-        session.compaction = Some(
+        session.set_compaction(Some(
             StoredCompactionState {
                 summary_text: "Worked on Gemini OAuth reload fixes.".to_string(),
                 openai_encrypted_content: None,
@@ -59,7 +59,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
                 compacted_count: 2,
             }
             .into(),
-        );
+        ));
         session.mark_closed();
         session.save()?;
 
@@ -69,7 +69,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
         let subscribe_id = client.subscribe().await?;
         let _ = collect_until_done_unix(&mut client, subscribe_id).await?;
 
-        let resume_id = client.resume_session(&session.id).await?;
+        let resume_id = client.resume_session(session.id()).await?;
         let _ = collect_until_history_unix(&mut client, resume_id).await?;
 
         let message_id = client
@@ -152,7 +152,7 @@ async fn test_simple_response() -> Result<()> {
     let saved = Session::load(agent.session_id())?;
 
     assert_eq!(response, "Hello! How can I help?");
-    assert!(saved.is_debug, "test sessions should be marked debug");
+    assert!(saved.is_debug(), "test sessions should be marked debug");
     Ok(())
 }
 
@@ -197,7 +197,7 @@ async fn test_debug_create_session_marks_debug() -> Result<()> {
 
     let session_id = debug_create_headless_session(debug_socket_path.clone()).await?;
     let session = Session::load(&session_id)?;
-    assert!(session.is_debug);
+    assert!(session.is_debug());
 
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
@@ -232,8 +232,8 @@ async fn test_debug_create_selfdev_session_marks_canary() -> Result<()> {
     )
     .await?;
     let session = Session::load(&session_id)?;
-    assert!(session.is_debug);
-    assert!(session.is_canary);
+    assert!(session.is_debug());
+    assert!(session.is_canary());
 
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
@@ -308,7 +308,7 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Did not receive new session id after clear"))?;
     assert_ne!(new_session_id, debug_session_id);
     let session = Session::load(&new_session_id)?;
-    assert!(session.is_debug);
+    assert!(session.is_debug());
 
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 

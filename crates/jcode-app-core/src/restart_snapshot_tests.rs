@@ -43,7 +43,7 @@ fn capture_current_snapshot_includes_active_sessions_only() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 
     let mut active = Session::create(None, Some("Active".to_string()));
-    active.working_dir = Some("/tmp".to_string());
+    active.set_working_dir(Some("/tmp".to_string()));
     active.mark_active_with_pid(std::process::id());
     active.save().expect("save active session");
 
@@ -53,7 +53,7 @@ fn capture_current_snapshot_includes_active_sessions_only() {
 
     let snapshot = capture_current_snapshot().expect("capture snapshot");
     assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(snapshot.sessions[0].session_id, active.id);
+    assert_eq!(snapshot.sessions[0].session_id, active.id());
     assert_eq!(snapshot.sessions[0].working_dir.as_deref(), Some("/tmp"));
 }
 
@@ -70,7 +70,7 @@ fn save_and_load_snapshot_round_trip() {
     assert_eq!(saved.sessions.len(), 1);
     assert_eq!(loaded.sessions.len(), 1);
     assert!(!loaded.auto_restore_on_next_start);
-    assert_eq!(loaded.sessions[0].session_id, active.id);
+    assert_eq!(loaded.sessions[0].session_id, active.id());
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
         None,
         Some("Crash Me".to_string()),
     );
-    crashed.working_dir = Some("/tmp".to_string());
+    crashed.set_working_dir(Some("/tmp".to_string()));
     crashed.mark_active_with_pid(dead_pid);
     crashed.save().expect("save crashed session");
 
@@ -126,16 +126,16 @@ fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
         .expect("expected crash snapshot");
     assert!(snapshot.auto_restore_on_next_start);
     assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(snapshot.sessions[0].session_id, crashed.id);
+    assert_eq!(snapshot.sessions[0].session_id, crashed.id());
     assert_eq!(snapshot.sessions[0].working_dir.as_deref(), Some("/tmp"));
 
     let persisted = load_snapshot().expect("load persisted snapshot");
     assert!(persisted.auto_restore_on_next_start);
     assert_eq!(persisted.sessions.len(), 1);
 
-    let refreshed = Session::load(&crashed.id).expect("reload crashed session");
+    let refreshed = Session::load(crashed.id()).expect("reload crashed session");
     assert!(matches!(
-        refreshed.status,
+        refreshed.status(),
         crate::session::SessionStatus::Crashed { .. }
     ));
 }
@@ -158,16 +158,16 @@ fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
         Some("Old Crash".to_string()),
     );
     let old_ts = Utc::now() - chrono::Duration::hours(AUTO_RESTORE_CRASH_MAX_AGE_HOURS + 2);
-    crashed.updated_at = old_ts;
-    crashed.last_active_at = Some(old_ts);
-    crashed.status = crate::session::SessionStatus::Active;
+    crashed.set_updated_at(old_ts);
+    crashed.set_last_active_at(Some(old_ts));
+    crashed.set_status(crate::session::SessionStatus::Active);
     crashed.last_pid = Some(dead_pid);
     crashed.save().expect("save stale active session");
     let active_dir = crate::storage::jcode_dir()
         .expect("jcode dir")
         .join("active_pids");
     std::fs::create_dir_all(&active_dir).expect("create active pid dir");
-    std::fs::write(active_dir.join(&crashed.id), dead_pid.to_string())
+    std::fs::write(active_dir.join(crashed.id()), dead_pid.to_string())
         .expect("write active pid file");
 
     assert!(

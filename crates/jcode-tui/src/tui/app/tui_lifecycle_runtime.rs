@@ -22,7 +22,7 @@ impl App {
         // The saved session supplies metadata only. Transcript state must enter
         // exclusively through historical events, never through today's startup.
         app.display_messages.clear();
-        app.session.messages.clear();
+        app.session.replace_messages(Vec::new());
         app.auto_poke_incomplete_todos = false;
         app.auto_poke_default_on = false;
         app.overnight_auto_poke = None;
@@ -33,7 +33,7 @@ impl App {
         app.status_notice = None;
         // Historical replay must never show today's on-disk todo state.
         app.pinned_todos_payload = None;
-        let model_name = app.session.model.clone().unwrap_or_default();
+        let model_name = app.session.model().map(str::to_owned).unwrap_or_default();
         let session_name = app.session.short_name.clone().unwrap_or_default();
 
         // Set provider/model info so status widgets show correct values
@@ -68,7 +68,7 @@ impl App {
 
     /// Get the current session ID
     pub fn session_id(&self) -> &str {
-        &self.session.id
+        self.session.id()
     }
 
     pub(super) fn update_terminal_title(&self) {
@@ -87,9 +87,9 @@ impl App {
         let session_id = if self.is_remote {
             self.remote_session_id
                 .as_deref()
-                .unwrap_or(&self.session.id)
+                .unwrap_or(self.session.id())
         } else {
-            &self.session.id
+            self.session.id()
         };
         let session_name = crate::id::extract_session_name(session_id)
             .map(|s| s.to_string())
@@ -98,19 +98,15 @@ impl App {
         // Keep the live terminal title aligned with /resume: an explicit rename
         // wins, then the generated title. A todo group is a lane label, so it is
         // only a last resort for sessions that have no title at all.
-        let todo_title = (self.session.custom_title.is_none() && self.session.title.is_none())
+        let todo_title = (self.session.custom_title().is_none() && self.session.title().is_none())
             .then(|| crate::todo::load_session_title(session_id))
             .flatten();
-        let display_title = self
-            .session
-            .custom_title
-            .as_deref()
-            .or(self.session.title.as_deref());
+        let display_title = self.session.custom_title().or(self.session.title());
         let display_title = display_title.or(todo_title.as_deref());
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
         let server_name = self.remote_server_short_name.as_deref().unwrap_or("jcode");
         let icon = connection_type_icon(self.connection_type.as_deref()).unwrap_or(session_icon);
@@ -196,9 +192,9 @@ impl App {
         };
 
         let is_selfdev_session = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
 
         let Some((candidate, _label)) =
@@ -244,7 +240,8 @@ impl App {
         let session_id = if self.is_remote {
             self.reload_handoff_session_id()
         } else {
-            self.session.provider_session_id = self.provider_session_id.clone();
+            self.session
+                .set_provider_session_id(self.provider_session_id.clone());
             self.session
                 .set_status(crate::session::SessionStatus::Reloaded);
             if let Err(error) = self.session.save() {
@@ -252,7 +249,7 @@ impl App {
                     "Failed to save session during TUI lifecycle: {error}"
                 ));
             }
-            self.session.id.clone()
+            self.session.id().to_owned()
         };
         self.append_reload_message("Newer jcode build published; hot reloading client...");
         self.save_input_for_reload(&session_id);
@@ -271,7 +268,7 @@ impl App {
         if !self.is_remote {
             return false;
         }
-        let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary);
+        let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary());
         if !is_selfdev_session {
             return false;
         }
@@ -353,7 +350,7 @@ impl App {
         }
 
         // Register self-dev tools if this is a canary session
-        if self.session.is_canary {
+        if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
     }
@@ -385,21 +382,21 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
-            self.active_skill = session.pinned_skill.clone();
+            self.active_skill = session.pinned_skill().map(str::to_owned);
             self.session = session;
             crate::memory::sync_injected_memories(
-                &self.session.id,
+                self.session.id(),
                 &self.session.injected_memory_ids(),
             );
             // Clear the saved provider_session_id since it's no longer valid
-            self.session.provider_session_id = None;
+            self.session.set_provider_session_id(None);
             let mut restored_model = false;
-            if let Some(model) = self.session.model.clone() {
+            if let Some(model) = self.session.model().map(str::to_owned) {
                 match crate::provider::restore_session_model(
                     self.provider.as_ref(),
                     &model,
-                    self.session.provider_key.as_deref(),
-                    self.session.route_api_method.as_deref(),
+                    self.session.provider_key(),
+                    self.session.route_api_method(),
                 ) {
                     Err(e) => {
                         self.push_display_message(DisplayMessage {
@@ -414,8 +411,8 @@ impl App {
                     }
                     Ok(restore) => {
                         if let Some(healed) = restore.healed_route {
-                            self.session.provider_key = healed.provider_key;
-                            self.session.route_api_method = healed.route_api_method;
+                            self.session.set_provider_key(healed.provider_key);
+                            self.session.set_route_api_method(healed.route_api_method);
                         }
                         restored_model = true;
                     }
@@ -423,8 +420,8 @@ impl App {
             }
 
             let active_model = self.provider.model();
-            if restored_model || self.session.model.is_none() {
-                self.session.model = Some(active_model.clone());
+            if restored_model || self.session.model().is_none() {
+                self.session.set_model(Some(active_model.clone()));
             }
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
@@ -531,7 +528,7 @@ impl App {
     /// 2. Last assistant message ends with "[generation interrupted - server reloading]"
     pub(super) fn was_interrupted_by_reload(&self) -> bool {
         use crate::message::{ContentBlock, Role};
-        let messages = &self.session.messages;
+        let messages = self.session.messages();
         if messages.is_empty() {
             return false;
         }
@@ -723,12 +720,13 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             tool_data: None,
             codemode: None,
         });
-        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_provider_session_id(app.provider_session_id.clone());
         app.session
             .set_status(crate::session::SessionStatus::Reloaded);
         let _ = app.session.save();
-        app.save_input_for_reload(&app.session.id.clone());
-        app.reload_requested = Some(app.session.id.clone());
+        app.save_input_for_reload(app.session.id());
+        app.reload_requested = Some(app.session.id().to_owned());
         app.should_quit = true;
         return true;
     }
@@ -743,18 +741,19 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             tool_data: None,
             codemode: None,
         });
-        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_provider_session_id(app.provider_session_id.clone());
         app.session
             .set_status(crate::session::SessionStatus::Reloaded);
         let _ = app.session.save();
-        app.save_input_for_reload(&app.session.id.clone());
-        app.restart_requested = Some(app.session.id.clone());
+        app.save_input_for_reload(app.session.id());
+        app.restart_requested = Some(app.session.id().to_owned());
         app.should_quit = true;
         return true;
     }
 
     if trimmed == "/rebuild" {
-        app.start_background_client_rebuild(app.session.id.clone());
+        app.start_background_client_rebuild(app.session.id().to_owned());
         return true;
     }
 
@@ -762,7 +761,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         match parsed {
             Ok(explicit_channel) => {
                 app.start_background_client_update_with_channel(
-                    app.session.id.clone(),
+                    app.session.id().to_owned(),
                     explicit_channel,
                 );
             }

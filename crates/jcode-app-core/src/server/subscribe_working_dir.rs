@@ -21,7 +21,7 @@ pub(super) async fn live_session_working_dir(
         .map(|path| path.to_string_lossy().into_owned());
     member_dir.or_else(
         || match crate::session::Session::load_startup_stub(session_id) {
-            Ok(session) => session.working_dir,
+            Ok(session) => session.working_dir().map(str::to_owned),
             Err(error) => {
                 crate::logging::debug(&format!(
                     "Could not read working directory for busy session {session_id}: {error:#}"

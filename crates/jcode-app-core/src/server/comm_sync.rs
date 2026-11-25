@@ -128,15 +128,17 @@ async fn member_provider_extras(
             super::run_blocking_io(|| crate::session::Session::load_startup_stub(session_id).ok())
     {
         if retained.name.is_none() {
-            retained.name = session.provider_key.as_deref().and_then(|key| {
+            retained.name = session.provider_key().and_then(|key| {
                 crate::provider::models::provider_for_model_with_hint("", Some(key))
                     .map(str::to_owned)
             });
         }
-        retained.model = retained.model.or(session.model);
-        retained.effort = retained.effort.or(session.reasoning_effort);
+        retained.model = retained.model.or(session.model().map(str::to_owned));
+        retained.effort = retained
+            .effort
+            .or(session.reasoning_effort().map(str::to_owned));
         if is_worker {
-            retained.worker_speed = session.worker_speed;
+            retained.worker_speed = session.worker_speed().cloned();
         }
     }
     retained

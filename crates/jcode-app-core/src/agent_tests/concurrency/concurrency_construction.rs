@@ -71,14 +71,11 @@ async fn headless_parent_is_set_before_concurrency_tracking_begins() {
         None,
         Some("coordinator-session".to_owned()),
     );
-    assert_eq!(
-        child.session.parent_id.as_deref(),
-        Some("coordinator-session")
-    );
+    assert_eq!(child.session.parent_id(), Some("coordinator-session"));
     assert!(format!("{:?}", child.concurrency_session).contains("child: true"));
     let registry = Registry::new(provider.clone()).await;
     let root = Agent::new_with_parent_and_initial_working_dir(provider, registry, None, None);
-    assert!(root.session.parent_id.is_none());
+    assert!(root.session.parent_id().is_none());
     assert!(format!("{:?}", root.concurrency_session).contains("child: false"));
 }
 
@@ -114,8 +111,8 @@ async fn provisional_agent_defers_presence_markers_until_committed() {
     let mut agent = Agent::new_provisional_with_initial_working_dir(provider, registry, None);
     let marker = crate::storage::active_pids_dir()
         .expect("active_pids dir")
-        .join(&agent.session.id);
-    assert!(agent.session.status == crate::session::SessionStatus::Active);
+        .join(agent.session.id());
+    assert!(*agent.session.status() == crate::session::SessionStatus::Active);
     assert!(
         !marker.exists(),
         "placeholder must not write a presence marker"

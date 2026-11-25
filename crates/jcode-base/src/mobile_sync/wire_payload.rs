@@ -19,7 +19,7 @@ mod tests;
 /// stable and idempotent.
 pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
     session
-        .messages
+        .messages()
         .iter()
         .enumerate()
         .skip(start)

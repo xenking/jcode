@@ -131,19 +131,19 @@ async fn backfill(
         };
 
         let manual_title = session
-            .custom_title
+            .custom_title()
             .as_deref()
             .is_some_and(|title| !title.trim().is_empty())
-            || (session.saved
+            || (session.is_saved()
                 && session
-                    .save_label
+                    .save_label()
                     .as_deref()
                     .is_some_and(|label| !label.trim().is_empty()));
         if manual_title {
             skipped += 1;
             continue;
         }
-        if matches!(session.status, SessionStatus::Active) && !include_active {
+        if matches!(session.status(), SessionStatus::Active) && !include_active {
             skipped += 1;
             continue;
         }
@@ -151,13 +151,13 @@ async fn backfill(
             skipped += 1;
             continue;
         };
-        if !all && !needs_title_backfill(session.title.as_deref()) {
+        if !all && !needs_title_backfill(session.title()) {
             skipped += 1;
             continue;
         }
 
         processed += 1;
-        let old_title = session.title.clone();
+        let old_title = session.title().map(str::to_owned);
         let Some(provider) = provider.as_ref() else {
             continue;
         };

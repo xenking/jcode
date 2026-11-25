@@ -213,9 +213,9 @@ impl App {
     /// Such sessions should never auto-start the guided onboarding flow.
     pub(super) fn is_selfdev_canary_session(&self) -> bool {
         if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         }
     }
 
@@ -854,7 +854,7 @@ impl App {
     /// later through `/resume`, but first run stays focused on two clear paths.
     pub(super) fn onboarding_open_start_choice(&mut self) {
         let mut picker = SessionPicker::new(Vec::new());
-        picker.set_current_dir(self.session.working_dir.clone());
+        picker.set_current_dir(self.session.working_dir().map(str::to_owned));
         picker.activate_onboarding_banner(Self::onboarding_start_choice_banner_lines());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Onboarding;
@@ -916,7 +916,7 @@ impl App {
         }
         let slot: Arc<Mutex<Option<Option<PathBuf>>>> = Arc::new(Mutex::new(None));
         self.onboarding_recent_project_prefetch = Some(slot.clone());
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
         // A plain OS thread (not `tokio::spawn`) keeps this blocking filesystem
         // scan off the async runtime and works in tests without a reactor.
         std::thread::spawn(move || {
@@ -935,7 +935,7 @@ impl App {
         let excluded: Vec<PathBuf> = home.iter().cloned().collect();
 
         if self.is_remote
-            && let Some(working_dir) = self.session.working_dir.as_deref()
+            && let Some(working_dir) = self.session.working_dir()
         {
             let working_dir = Path::new(working_dir);
             // Remote session history is not available on the client. Trust the
@@ -961,15 +961,14 @@ impl App {
             return Some(repository);
         }
 
-        if let Some(repository) = Self::recent_project_path_from_sessions(&self.session.id) {
+        if let Some(repository) = Self::recent_project_path_from_sessions(self.session.id()) {
             return Some(repository);
         }
 
         // A brand-new user has no history to rank yet. In that case only, use
         // the repository they launched jcode from rather than disabling review.
         self.session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .and_then(|working_dir| repo_ranking::resolve_git_root(Path::new(working_dir)))
             .filter(|root| !excluded.iter().any(|excluded| excluded == root))
     }
@@ -1085,9 +1084,9 @@ impl App {
             return model;
         }
         self.session
-            .model
-            .clone()
+            .model()
             .filter(|m| !m.trim().is_empty() && !m.eq_ignore_ascii_case("unknown"))
+            .map(str::to_owned)
             .unwrap_or_else(|| self.provider.model())
     }
 
@@ -1113,7 +1112,7 @@ impl App {
         if self.recent_authenticated_provider.is_some() && self.auth_catalog_refresh_pending {
             self.onboarding_pending_model_validation =
                 Some(OnboardingPendingValidation::awaiting_catalog_refresh(
-                    self.session.id.clone(),
+                    self.session.id().to_owned(),
                     self.remote_model_catalog_generation,
                 ));
             return;
@@ -1124,8 +1123,9 @@ impl App {
         if self.onboarding_default_model_id_is_concrete() {
             self.onboarding_spawn_model_validation();
         } else {
-            self.onboarding_pending_model_validation =
-                Some(OnboardingPendingValidation::new(self.session.id.clone()));
+            self.onboarding_pending_model_validation = Some(OnboardingPendingValidation::new(
+                self.session.id().to_owned(),
+            ));
         }
     }
 
@@ -1145,7 +1145,7 @@ impl App {
         };
         let model_label = self.onboarding_default_model_label();
         let provider_key = crate::session::derive_session_provider_key(provider.name());
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
         // Whether to also run a definitive live Copilot auth check. Copilot is
         // unusual: a local GitHub token can exist while the account is banned or
         // not entitled, so the presence-only probe used by the readiness summary
@@ -1185,7 +1185,7 @@ impl App {
         let Some(pending) = self.onboarding_pending_model_validation.as_ref() else {
             return false;
         };
-        if pending.session_id != self.session.id {
+        if pending.session_id != self.session.id() {
             // Session changed out from under us; drop the stale request.
             self.onboarding_pending_model_validation = None;
             return false;
@@ -1453,7 +1453,7 @@ impl App {
         &mut self,
         result: crate::bus::OnboardingModelValidated,
     ) -> bool {
-        if result.session_id != self.session.id {
+        if result.session_id != self.session.id() {
             return false;
         }
 

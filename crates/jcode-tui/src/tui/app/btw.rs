@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::Inherit;
 use crate::tui::InlineViewState;
 
 /// How the side question is steered. Jcode Desktop sends exactly this reminder
@@ -412,21 +413,21 @@ impl App {
                 child.add_message(message.role, message.content);
             }
         }
-        child.compaction = self.session.compaction.clone();
-        child.system_prompt = self.session.system_prompt.clone();
-        child.working_dir = self.session.working_dir.clone();
-        child.model = self.session.model.clone();
-        child.provider_key = self.session.provider_key.clone();
-        child.route_api_method = self.session.route_api_method.clone();
-        child.reasoning_effort = self.session.reasoning_effort.clone();
-        child.context_cap = self.session.context_cap;
-        child.subagent_model = self.session.subagent_model.clone();
+        child.inherit_from(
+            &self.session,
+            Inherit::COMPACTION
+                | Inherit::SYSTEM_PROMPT
+                | Inherit::WORKING_DIR
+                | Inherit::ROUTE
+                | Inherit::LIMITS
+                | Inherit::SUBAGENT_MODEL,
+        );
         // Never inherit the provider session id: the parent's provider-side
         // state (and its prompt cache) must not be appended to.
-        child.provider_session_id = None;
-        child.status = crate::session::SessionStatus::Closed;
+        child.set_provider_session_id(None);
+        child.set_status(crate::session::SessionStatus::Closed);
         child.save_new_side_question()?;
-        Ok(child.id)
+        Ok(child.id().to_owned())
     }
 
     /// Take the inline slot for a picker or a notice. An open card keeps its
@@ -512,9 +513,9 @@ impl App {
         let (mut session, request) = if let Some(child) = child {
             let session = Session::load(&child)?;
             let mut messages = session.messages_for_provider_uncached();
-            if let Some(state) = session.compaction.as_deref() {
+            if let Some(state) = session.compaction_state() {
                 let mut compaction = crate::compaction::CompactionManager::new();
-                compaction.restore_persisted_stored_state_with(state, &session.messages);
+                compaction.restore_persisted_stored_state_with(state, session.messages());
                 messages = compaction.messages_for_api_with_vision(
                     &messages,
                     crate::compaction::snapcompact_pages_usable(
@@ -534,7 +535,7 @@ impl App {
         session.add_message(Role::User, Message::user(question).content);
         session.save_prepared()?;
         if let Some(card) = self.btw.as_mut() {
-            card.child = Some(session.id);
+            card.child = Some(session.id().to_owned());
         }
         Ok(request)
     }
@@ -560,7 +561,7 @@ impl App {
     /// when the parent already compacted, but nothing is triggered or saved.
     fn btw_provider_messages(&self) -> Vec<Message> {
         let base = self.materialized_provider_messages();
-        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
+        if !self.provider.supports_compaction() && self.session.compaction().is_none() {
             return base;
         }
         match self.registry.compaction().try_write() {

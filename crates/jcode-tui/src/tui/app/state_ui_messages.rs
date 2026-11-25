@@ -295,7 +295,7 @@ impl App {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
         let goals = match crate::todo::load_goals(session_id) {
             Ok(goals) => goals,
             Err(error) => {
@@ -330,7 +330,7 @@ impl App {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
         crate::todo::await_dependency::running(&crate::storage::runtime_dir(), task_id, session_id)
     }
 
@@ -341,7 +341,7 @@ impl App {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
         if std::path::Path::new(task_id)
             .file_name()
             .and_then(|s| s.to_str())
@@ -572,17 +572,18 @@ impl App {
         &mut self,
         manifest: &crate::overnight::OvernightManifest,
     ) -> bool {
-        if manifest.coordinator_session_id != self.session.id {
+        if manifest.coordinator_session_id != self.session.id() {
             return false;
         }
-        let Ok(latest_session) = crate::session::Session::load(&self.session.id) else {
+        let Ok(latest_session) = crate::session::Session::load(self.session.id()) else {
             return false;
         };
-        if latest_session.messages.len() <= self.session.messages.len() {
+        if latest_session.messages().len() <= self.session.messages().len() {
             return false;
         }
 
-        let appended: Vec<DisplayMessage> = latest_session.messages[self.session.messages.len()..]
+        let appended: Vec<DisplayMessage> = latest_session.messages()
+            [self.session.messages().len()..]
             .iter()
             .filter_map(display_message_from_stored_message)
             .collect();

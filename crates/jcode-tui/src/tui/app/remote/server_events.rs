@@ -212,7 +212,7 @@ fn handle_server_event_inner(
                         .collect()
                 });
             app.session.set_pinned_skill_names(names);
-            app.active_skill = app.session.pinned_skill.clone();
+            app.active_skill = app.session.pinned_skill().map(str::to_owned);
         }
         if command == "poke"
             && let Some(enabled) = data["poke_enabled"].as_bool()
@@ -689,10 +689,10 @@ fn handle_server_event_inner(
             session_id,
             overrides,
         } => {
-            if app.remote_session_id.as_deref().unwrap_or(&app.session.id) != session_id {
+            if app.remote_session_id.as_deref().unwrap_or(app.session.id()) != session_id {
                 return false;
             }
-            app.session.agent_model_overrides = overrides;
+            app.session.set_agent_model_overrides(overrides);
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
                 app.set_status_notice(if app.agent_models_global_scope {
@@ -960,14 +960,14 @@ fn handle_server_event_inner(
                 .remote_session_id
                 .as_deref()
                 .or(app.resume_session_id.as_deref())
-                .unwrap_or(app.session.id.as_str());
+                .unwrap_or(app.session.id());
             if active_session_id == session_id {
                 app.session.rename_title(title.clone());
                 if title.is_none()
-                    && app.session.title.is_none()
+                    && app.session.title().is_none()
                     && display_title != app.session.display_name()
                 {
-                    app.session.title = Some(display_title.clone());
+                    app.session.set_title(Some(display_title.clone()));
                 }
                 app.update_terminal_title();
                 if title.is_some() {
@@ -1131,7 +1131,7 @@ fn handle_server_event_inner(
                 let self_id = if app.is_remote {
                     app.remote_session_id.clone()
                 } else {
-                    Some(app.session.id.clone())
+                    Some(app.session.id().to_owned())
                 };
                 if let Some(self_id) = self_id.as_deref() {
                     let prev = app_mod::tui_state::filter_inline_swarm_subtree(
@@ -1385,7 +1385,7 @@ fn handle_server_event_inner(
                 let model_changed = if let Some(new_model) = model {
                     let changed = app.remote_provider_model.as_deref() != Some(new_model.as_str());
                     app.remote_provider_model = Some(new_model.clone());
-                    app.session.model = Some(new_model);
+                    app.session.set_model(Some(new_model));
                     changed
                 } else {
                     false

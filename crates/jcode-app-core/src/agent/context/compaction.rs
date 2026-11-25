@@ -49,7 +49,7 @@ impl Agent {
 
     pub(super) fn request_cache_domain_switch(&self) -> Option<MissReason> {
         let legacy;
-        let previous = if let Some(domain) = &self.session.last_provider_cache_domain {
+        let previous = if let Some(domain) = &self.session.last_provider_cache_domain() {
             domain
         } else {
             legacy = self.kv_cache_monitor.checkpoint_cache_domain()?;
@@ -181,7 +181,7 @@ impl Agent {
         let detail = format!("⚠ {}", crate::compaction::MISSING_NATIVE_SUMMARY);
         logging::warn(&format!(
             "[compaction] session={}: {detail}",
-            self.session.id
+            self.session.id()
         ));
         self.session
             .record_replay_display_message("system", None, &detail);
@@ -200,7 +200,8 @@ impl Agent {
             .try_read()
             .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
         anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
-        self.session.compaction = manager.persisted_state().map(Arc::new);
+        self.session
+            .set_compaction(manager.persisted_state().map(Arc::new));
         // Prepared blank sessions also have externally visible IDs. Ordinary
         // save intentionally skips these until the first user message.
         self.session.save_prepared()?;
@@ -213,14 +214,14 @@ impl Agent {
     }
 
     pub(super) fn note_compaction_applied(&mut self) {
-        crate::cache_keepalive::invalidate(&self.session.id);
+        crate::cache_keepalive::invalidate(self.session.id());
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        if self.session.pinned_skill.is_some() {
-            self.active_skill = self.session.pinned_skill.clone();
+        self.session.set_provider_session_id(None);
+        if self.session.pinned_skill().is_some() {
+            self.active_skill = self.session.pinned_skill().map(str::to_owned);
             self.announce_active_skill();
         }
     }
@@ -268,7 +269,7 @@ impl Agent {
             now,
             ttl,
             self.session
-                .last_cache_expiry_compaction_for
+                .last_cache_expiry_compaction_for()
                 .map(Into::into),
         ) {
             return (false, None);
@@ -510,7 +511,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
 
         logging::warn(&format!(
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
@@ -521,7 +522,7 @@ impl Agent {
                 "auto_compaction_applied",
                 "context_limit_auto_compaction",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .with_detail(format!(
                 "dropped_messages={dropped},usage_pct={usage_pct:.1}"
             ))
@@ -581,7 +582,7 @@ impl Agent {
                 "payload_too_large_recovered",
                 "request_payload_too_large",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .with_detail(format!("images_stripped={stripped}"))
             .force_attribution(),
         );
@@ -616,7 +617,7 @@ impl Agent {
                 "image_rejection_recovered",
                 "provider_image_rejected",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .with_detail(format!("images_stripped={stripped}"))
             .force_attribution(),
         );
@@ -630,13 +631,13 @@ impl Agent {
         if let Ok(mut manager) = compaction.try_write() {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
-            manager.set_context_cap_override(self.session.context_cap);
+            manager.set_context_cap_override(self.session.context_cap());
             manager.set_budget_for_model(
                 self.provider.context_window(),
                 self.provider.name(),
                 &self.provider.model(),
             );
-            if let Some(state) = self.session.compaction.as_ref() {
+            if let Some(state) = self.session.compaction() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
                 manager.seed_restored_messages_with(&provider_messages);
@@ -648,7 +649,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
     }
 
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
@@ -677,7 +678,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",
@@ -687,7 +688,7 @@ impl Agent {
                 "native_compaction_payload_recovered",
                 "openai_encrypted_content_too_large",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .force_attribution(),
         );
 

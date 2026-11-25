@@ -661,7 +661,7 @@ fn finish_pending(session_id: &str, status: ReloadRecoveryStatus, reason: &str) 
 }
 
 fn has_receipt(session: &crate::session::Session, record: &ReloadRecoveryRecord) -> bool {
-    session.messages.iter().any(|message| {
+    session.messages().iter().any(|message| {
         message.id.strip_prefix("queued:")
             .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
             .is_some_and(|ids| ids.contains(&record.input_id()))
@@ -784,7 +784,7 @@ pub(crate) fn admit_ask_answer(
     tool_id: &str,
 ) -> Result<bool> {
     let _guard = lock_store()?;
-    let Some(mut record) = peek_locked(&session.id)? else {
+    let Some(mut record) = peek_locked(session.id())? else {
         return Ok(true);
     };
     if record.ask_tool_id.as_deref() != Some(tool_id) {
@@ -802,7 +802,7 @@ pub(crate) fn admit_ask_answer(
         ReloadRecoveryStatus::Started,
         "answered interrupted ask admitted",
     )?;
-    let _ = crate::tool::selfdev::ReloadContext::load_for_session(&session.id);
+    let _ = crate::tool::selfdev::ReloadContext::load_for_session(session.id());
     Ok(true)
 }
 
@@ -1183,7 +1183,7 @@ impl RecoveryOwner {
                 );
                 let provider = self.provider.fork();
                 let registry = crate::tool::Registry::new(provider.clone()).await;
-                if session.is_canary {
+                if session.is_canary() {
                     registry.register_selfdev_tools().await;
                 }
                 let pool = super::get_shared_mcp_pool(&self.mcp_pool).await;
@@ -1192,7 +1192,7 @@ impl RecoveryOwner {
                         None,
                         Some(pool),
                         Some("reload-recovery".into()),
-                        session.working_dir.as_ref().map(PathBuf::from),
+                        session.working_dir().as_ref().map(PathBuf::from),
                     )
                     .await;
                 let agent = Arc::new(tokio::sync::Mutex::new(
@@ -1450,7 +1450,7 @@ mod tests {
         let path = crate::session::session_path(session)?;
         if !path.try_exists()? {
             let mut fixture = crate::session::Session::create(None, None);
-            fixture.id = session.to_owned();
+            fixture.set_id_for_tests(session.to_owned());
             fixture.save_snapshot_to(&path)?;
         }
         persist_intent(
@@ -1477,13 +1477,13 @@ mod tests {
         let _lock = crate::storage::lock_test_env();
         let _home = IsolatedHome::new();
         let session = crate::session::Session::create(None, None);
-        let record = intent(&session.id, "reload")?;
-        let path = crate::session::session_path(&session.id)?;
+        let record = intent(session.id(), "reload")?;
+        let path = crate::session::session_path(session.id())?;
         std::fs::remove_file(&path)?;
         std::fs::create_dir_all(&path)?;
         assert!(claim(&record, &identity("runtime", 1)).is_err());
         assert_eq!(
-            peek_for_session(&session.id)?.unwrap().status,
+            peek_for_session(session.id())?.unwrap().status,
             ReloadRecoveryStatus::Pending
         );
         Ok(())
@@ -1555,17 +1555,17 @@ mod tests {
         let _home = IsolatedHome::new();
         let mut session = crate::session::Session::create(None, None);
         session.save()?;
-        let record = intent(&session.id, "reload")?;
+        let record = intent(session.id(), "reload")?;
         let turn = identity("runtime", 1);
         let claimed = claim(&record, &turn)?.unwrap();
         let ids = vec![claimed.input_id()];
         assert!(!admit_input(
-            &session.id,
+            session.id(),
             &identity("stale", 1),
             Some(&ids),
             || panic!("stale claim")
         )?);
-        let session_id = session.id.clone();
+        let session_id = session.id().to_owned();
         assert!(admit_input(&session_id, &turn, Some(&ids), || {
             session.add_message(crate::message::Role::User, vec![]);
             session.rename_last_message(format!("queued:{}", serde_json::to_string(&ids)?));
@@ -1586,7 +1586,7 @@ mod tests {
         let _home = IsolatedHome::new();
         let mut session = crate::session::Session::create(None, None);
         session.save()?;
-        let record = intent(&session.id, "reload")?;
+        let record = intent(session.id(), "reload")?;
         let claimed = claim(&record, &identity("crashed", 1))?.unwrap();
         session.add_message(crate::message::Role::User, vec![]);
         session.rename_last_message(format!(
@@ -1596,7 +1596,7 @@ mod tests {
         session.save()?;
         assert!(claim(&claimed, &identity("replacement", 1))?.is_none());
         assert_eq!(
-            peek_for_session(&session.id)?.unwrap().status,
+            peek_for_session(session.id())?.unwrap().status,
             ReloadRecoveryStatus::Started
         );
         Ok(())

@@ -255,11 +255,11 @@ impl Agent {
                 .finish_request_with_prefix(reusable, Some(prefix), cache_read);
         if !self.session.is_ephemeral()
             && reusable > 0
-            && let Err(error) = self.kv_cache_monitor.save_checkpoint(&self.session.id)
+            && let Err(error) = self.kv_cache_monitor.save_checkpoint(self.session.id())
         {
             logging::warn(&format!(
                 "Failed to save KV cache baseline for {}: {error}",
-                self.session.id
+                self.session.id()
             ));
         }
         let miss = miss?;
@@ -275,7 +275,7 @@ impl Agent {
         };
         let diagnostic = format!(
             "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
-            self.session.id,
+            self.session.id(),
             miss.reason.id(),
             miss.reason.harness_caused(),
             miss.missed_tokens,
@@ -484,7 +484,7 @@ impl Agent {
     }
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
-        self.turn_ownership.claim(&self.session.id)
+        self.turn_ownership.claim(self.session.id())
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
@@ -492,11 +492,7 @@ impl Agent {
     }
 
     fn refresh_agents_md_snapshot(&mut self) {
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         self.static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
         self.refresh_prompt_skills_snapshot();
@@ -548,11 +544,11 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let t = Instant::now();
-        provider.set_session_id(&session.id);
+        provider.set_session_id(session.id());
         let skills = SkillRegistry::shared_snapshot();
         let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
-        let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let working_dir = session.working_dir().map(std::path::Path::new);
         let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
@@ -560,9 +556,9 @@ impl Agent {
         let initial_provider_model = provider.model();
         let base_tool_selection = (allowed_tools, disabled_tools);
         let (allowed_tools, disabled_tools) =
-            profile_tool_selection(&base_tool_selection, session.agent_profile.as_deref());
+            profile_tool_selection(&base_tool_selection, session.agent_profile());
         let tool_policy_registration = crate::tool::register_session_tool_policy(
-            &session.id,
+            session.id(),
             allowed_tools.clone(),
             disabled_tools.clone(),
         );
@@ -645,11 +641,7 @@ impl Agent {
             .try_read()
             .map(|skills| Arc::new(skills.clone()))
             .unwrap_or_else(|_| self.skills.clone());
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         Arc::new(SkillRegistry::effective_for_working_dir(
             &global,
             working_dir,
@@ -667,7 +659,7 @@ impl Agent {
     fn seed_compaction_from_session(&mut self) {
         logging::info(&format!(
             "seed_compaction_from_session: session has {} messages",
-            self.session.messages.len()
+            self.session.messages().len()
         ));
         let compaction = self.registry.compaction();
         let mut manager = match compaction.try_write() {
@@ -687,11 +679,11 @@ impl Agent {
         };
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
-            self.session.messages.len()
+            self.session.messages().len()
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.compaction = state.map(Arc::new);
+            self.session.set_compaction(state.map(Arc::new));
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
@@ -701,7 +693,7 @@ impl Agent {
         manager: &mut crate::compaction::CompactionManager,
     ) {
         manager.reset();
-        manager.set_context_cap_override(self.session.context_cap);
+        manager.set_context_cap_override(self.session.context_cap());
         manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
         manager.set_budget(self.provider.context_window());
         // The cold-cache clock must survive the reload that created this
@@ -710,9 +702,9 @@ impl Agent {
         manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
         if (self.provider.name().eq_ignore_ascii_case("anthropic")
             || self.provider.name().eq_ignore_ascii_case("claude"))
-            && let Some(previous) = self.session.last_provider_cache_domain.as_ref()
+            && let Some(previous) = self.session.last_provider_cache_domain().as_ref()
             && self.request_cache_domain().switch_from(previous).is_none()
-            && let Some(hit) = crate::cache_keepalive::load_usage(&self.session.id)
+            && let Some(hit) = crate::cache_keepalive::load_usage(self.session.id())
                 .and_then(|usage| usage.last_hit)
             && let Some(at) = chrono::DateTime::from_timestamp_millis(hit.at_ms)
         {
@@ -721,16 +713,16 @@ impl Agent {
                 manager.note_cache_keepalive(at.into());
             }
         }
-        if let Some(state) = self.session.compaction.as_ref() {
-            manager.restore_persisted_stored_state_with(state, &self.session.messages);
+        if let Some(state) = self.session.compaction() {
+            manager.restore_persisted_stored_state_with(state, self.session.messages());
         } else {
-            manager.seed_restored_stored_messages_with(&self.session.messages);
+            manager.seed_restored_stored_messages_with(self.session.messages());
         }
     }
 
     fn sync_memory_dedup_state_from_session(&self) {
         crate::memory::sync_injected_memories(
-            &self.session.id,
+            self.session.id(),
             &self.session.injected_memory_ids(),
         );
     }
@@ -768,7 +760,7 @@ impl Agent {
             message.content.clone(),
             Some(StoredDisplayRole::System),
         );
-        message.timestamp = self.session.messages.last().and_then(|m| m.timestamp);
+        message.timestamp = self.session.messages().last().and_then(|m| m.timestamp);
         message
     }
 
@@ -803,7 +795,9 @@ impl Agent {
         if let Err(err) = self.session.save() {
             logging::warn(&format!(
                 "Failed to persist {} for session {}: {}",
-                context, self.session.id, err
+                context,
+                self.session.id(),
+                err
             ));
         }
     }
@@ -838,7 +832,8 @@ impl Agent {
         if let Err(err) = self.persist_compaction_checkpoint(manager) {
             logging::error(&format!(
                 "Failed to persist compaction state for session {}: {}",
-                self.session.id, err
+                self.session.id(),
+                err
             ));
         }
     }
@@ -847,8 +842,9 @@ impl Agent {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) -> Result<()> {
-        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
-            self.session.compaction = manager.persisted_state().map(Arc::new);
+        if !manager.persisted_state_matches(self.session.compaction_state()) {
+            self.session
+                .set_compaction(manager.persisted_state().map(Arc::new));
             self.compaction_persist_pending = true;
         }
         if self.compaction_persist_pending {
@@ -868,13 +864,13 @@ impl Agent {
     /// the artifact kind is what a reader needs to know, not the trigger label.
     fn record_compaction_divider(&mut self, event: &crate::compaction::CompactionEvent) {
         if event.trigger == crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER {
-            self.session.last_cache_expiry_compaction_for =
-                self.persisted_last_provider_request_at().map(Into::into);
+            self.session.set_last_cache_expiry_compaction_for(
+                self.persisted_last_provider_request_at().map(Into::into),
+            );
         }
         let summary = self
             .session
-            .compaction
-            .as_ref()
+            .compaction()
             .map(|state| state.summary_text.clone());
         self.session
             .record_compaction_event(event, event.method.as_deref(), summary.as_deref());
@@ -923,12 +919,12 @@ impl Agent {
             compacted_count,
         };
 
-        self.session.compaction = Some(Arc::new(state.clone()));
+        self.session.set_compaction(Some(Arc::new(state.clone())));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
             manager.set_budget(self.provider.context_window());
-            manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            manager.restore_persisted_stored_state_with(&state, self.session.messages());
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
@@ -938,9 +934,9 @@ impl Agent {
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        if self.session.pinned_skill.is_some() {
-            self.active_skill = self.session.pinned_skill.clone();
+        self.session.set_provider_session_id(None);
+        if self.session.pinned_skill().is_some() {
+            self.active_skill = self.session.pinned_skill().map(str::to_owned);
             self.announce_active_skill();
         }
         self.session.save()?;
@@ -949,7 +945,7 @@ impl Agent {
                 "native_compaction_applied",
                 "provider_native_compaction_persisted",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .force_attribution(),
         );
         Ok((pre_tokens, post_tokens))
@@ -973,7 +969,7 @@ impl Agent {
         ttl: Option<u64>,
     ) -> bool {
         self.session
-            .last_cache_expiry_compaction_for
+            .last_cache_expiry_compaction_for()
             .is_some_and(|compacted_for| {
                 manager.expired_cache_response(now, ttl) == Some(compacted_for.into())
             })
@@ -1064,8 +1060,9 @@ impl Agent {
             // shake would overwrite that slot and leave the shake invisible.
             self.note_compaction_applied();
             self.record_compaction_divider(event);
-            self.session.last_cache_expiry_compaction_for =
-                manager.expired_cache_response(now, ttl).map(Into::into);
+            self.session.set_last_cache_expiry_compaction_for(
+                manager.expired_cache_response(now, ttl).map(Into::into),
+            );
             self.persist_session_best_effort("shake compaction");
         }
         if event.is_some() {
@@ -1097,7 +1094,7 @@ impl Agent {
             "🧊 Cache cold · ~{}K tok re-cached in full",
             prompt_tokens / 1000
         );
-        let already_noted = self.session.replay_events.last().is_some_and(|last| {
+        let already_noted = self.session.replay_events().last().is_some_and(|last| {
             matches!(
                 &last.kind,
                 crate::session::StoredReplayEventKind::Compaction { method: Some(method), .. }
@@ -1175,8 +1172,8 @@ impl Agent {
     /// this reason: a daemon reload, `exec` or resume starts a new process, and
     /// the persisted session is the only place that timestamp can come from.
     fn note_provider_request_sent(&mut self) {
-        self.session.last_provider_request_at = Some(chrono::Utc::now());
-        self.session.last_provider_cache_domain = Some(self.request_cache_domain());
+        self.session
+            .record_provider_dispatch(chrono::Utc::now(), self.request_cache_domain());
     }
 
     /// The last provider request time, from the session file when possible.
@@ -1185,10 +1182,10 @@ impl Agent {
     /// the last assistant message: it was written right after that request.
     fn persisted_last_provider_request_at(&self) -> Option<std::time::SystemTime> {
         self.session
-            .last_provider_request_at
+            .last_provider_request_at()
             .or_else(|| {
                 self.session
-                    .messages
+                    .messages()
                     .iter()
                     .rev()
                     .find(|message| matches!(message.role, Role::Assistant))
@@ -1199,7 +1196,8 @@ impl Agent {
 
     async fn note_shake_provider_response(&mut self, cache_read_tokens: Option<u64>) {
         let now = std::time::SystemTime::now();
-        self.session.last_provider_request_at = Some(chrono::DateTime::<chrono::Utc>::from(now));
+        self.session
+            .set_last_provider_request_at(Some(chrono::DateTime::<chrono::Utc>::from(now)));
         self.registry
             .compaction()
             .write()
@@ -1215,7 +1213,7 @@ impl Agent {
         let route_switch = self.request_cache_domain_switch();
         if route_switch.is_some()
             || self.provider.supports_compaction()
-            || self.session.compaction.is_some()
+            || self.session.compaction().is_some()
         {
             let compaction = self.registry.compaction();
             {
@@ -1391,7 +1389,7 @@ impl Agent {
                     self.note_compaction_applied();
                     self.record_compaction_divider(event);
                     self.persist_session_best_effort("compaction completion");
-                    if self.session.pinned_skill.is_some() {
+                    if self.session.pinned_skill().is_some() {
                         let replay = manager.messages_for_api_session(
                             &mut self.session,
                             supports_archive,
@@ -1499,7 +1497,7 @@ impl Agent {
         }
 
         let fast_snapshot =
-            if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
+            if !self.provider.uses_jcode_compaction() && self.session.compaction().is_none() {
                 let previous_count = self.cache_tracker.previous_message_count();
                 let prefix_hashes = self.session.provider_message_prefix_hashes();
                 let current_count = prefix_hashes.len();
@@ -1552,7 +1550,7 @@ impl Agent {
     ) -> Vec<(String, String)> {
         let results: std::collections::HashSet<String> = self
             .session
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
@@ -1562,7 +1560,7 @@ impl Agent {
             .collect();
         let pending = self
             .session
-            .messages
+            .messages()
             .iter()
             .skip(start_index)
             .flat_map(|message| message.content.iter())
@@ -1574,7 +1572,7 @@ impl Agent {
             })
             .collect();
         self.reset_tool_output_tracking();
-        self.tool_output_scan_index = start_index.min(self.session.messages.len());
+        self.tool_output_scan_index = start_index.min(self.session.messages().len());
         if self.repair_missing_tool_outputs_with("[Tool stopped by user]", false) == 0 {
             self.persist_session_best_effort("force-stopped turn");
         }
@@ -1582,7 +1580,7 @@ impl Agent {
     }
 
     fn repair_missing_tool_outputs_with(&mut self, text: &str, skip_inflight: bool) -> usize {
-        if self.tool_output_scan_index > self.session.messages.len() {
+        if self.tool_output_scan_index > self.session.messages().len() {
             self.reset_tool_output_tracking();
         }
 
@@ -1590,7 +1588,7 @@ impl Agent {
         let mut new_result_ids = Vec::new();
         let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
 
-        for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
+        for (index, msg) in self.session.messages().iter().enumerate().skip(scan_start) {
             match msg.role {
                 Role::User => {
                     for block in &msg.content {
@@ -1642,7 +1640,7 @@ impl Agent {
             }
         }
 
-        self.tool_output_scan_index = self.session.messages.len();
+        self.tool_output_scan_index = self.session.messages().len();
 
         let mut repaired = 0usize;
         let mut inserted = 0usize;
@@ -1672,7 +1670,7 @@ impl Agent {
             inserted += missing_for_message.len();
         }
 
-        self.tool_output_scan_index = self.session.messages.len();
+        self.tool_output_scan_index = self.session.messages().len();
 
         if repaired > 0 {
             self.persist_session_best_effort("missing tool-output repair");
@@ -1692,15 +1690,14 @@ impl Agent {
     }
 
     pub fn session_id(&self) -> &str {
-        &self.session.id
+        self.session.id()
     }
 
     /// Desktop self-development is selected by the session checkout, including
     /// restored sessions. It must not set the CLI canary/reload flags.
     pub fn is_desktop_selfdev(&self) -> bool {
         self.session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .map(std::path::Path::new)
             .and_then(jcode_selfdev_types::desktop_repo_root)
             .is_some()
@@ -1708,17 +1705,18 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
-            if self.session.original_working_dir.is_none()
-                && self.session.working_dir != working_dir
+            if self.session.original_working_dir().is_none()
+                && self.session.working_dir() != working_dir.as_deref()
                 && self
                     .session
-                    .messages
+                    .messages()
                     .iter()
                     .any(|message| message.role == Role::User)
             {
-                self.session.original_working_dir = self.session.working_dir.clone();
+                self.session
+                    .set_original_working_dir(self.session.working_dir().map(str::to_owned));
             }
-            self.session.working_dir = working_dir;
+            self.session.set_working_dir(working_dir);
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();
         }
@@ -1748,7 +1746,7 @@ impl Agent {
         crate::telemetry::begin_session_with_parent(
             self.provider.name(),
             &self.provider.model(),
-            self.session.parent_id.clone(),
+            self.session.parent_id().map(str::to_owned),
             false,
         );
     }
@@ -1757,7 +1755,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
-        if !self.session.messages.is_empty() {
+        if !self.session.messages().is_empty() {
             self.persist_session_best_effort("session close state");
         }
         self.upload_transcript_telemetry(end_reason);
@@ -1780,7 +1778,7 @@ impl Agent {
             return;
         }
         let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(self.session.id.clone())
+            .session_id(self.session.id().to_owned())
             .field("SOURCE", source)
             .field("MODEL", self.provider_model());
         if let Some(cwd) = self.working_dir() {
@@ -1793,7 +1791,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
-        if !self.session.messages.is_empty() {
+        if !self.session.messages().is_empty() {
             self.persist_session_best_effort("session crash state");
         }
         self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::Unknown);
@@ -1818,7 +1816,7 @@ impl Agent {
         }
         // Provisional agents defer their presence markers, telemetry session,
         // and context message until committed.
-        if self.session.status == crate::session::SessionStatus::Active {
+        if *self.session.status() == crate::session::SessionStatus::Active {
             self.session.register_presence_markers();
         }
         if self.telemetry_session_deferred {
@@ -1829,8 +1827,8 @@ impl Agent {
             self.seed_compaction_from_session();
         }
         self.concurrency_session = Some(crate::telemetry::begin_concurrency_session(
-            &self.session.id,
-            self.session.parent_id.as_deref(),
+            self.session.id(),
+            self.session.parent_id(),
         ));
     }
 
@@ -1855,7 +1853,7 @@ impl Agent {
     }
 
     fn upload_transcript_telemetry(&mut self, end_reason: crate::telemetry::SessionEndReason) {
-        if self.transcript_telemetry_sent || self.session.messages.is_empty() {
+        if self.transcript_telemetry_sent || self.session.messages().is_empty() {
             return;
         }
         // Keep code and ordinary transcript content intact, but reuse the
@@ -1863,7 +1861,7 @@ impl Agent {
         // text, reasoning, tool inputs, and tool results before leaving the
         // machine.
         let redacted_session = self.session.redacted_for_export();
-        let Ok(messages) = serde_json::to_value(&redacted_session.messages) else {
+        let Ok(messages) = serde_json::to_value(redacted_session.messages()) else {
             crate::logging::warn("failed to serialize consented transcript telemetry");
             return;
         };

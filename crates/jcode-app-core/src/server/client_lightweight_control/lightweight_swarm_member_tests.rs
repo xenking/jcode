@@ -46,7 +46,7 @@ async fn persisted_headless_session_is_registered_with_its_working_dir() {
     let _home = isolated_home();
     let session_id = "session_headless_run_1748";
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.working_dir = Some("/tmp/project-a".to_string());
+    session.set_working_dir(Some("/tmp/project-a".to_string()));
     session.save_prepared().expect("save session");
 
     let (sessions, members, swarms) = empty_state();

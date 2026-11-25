@@ -47,8 +47,8 @@ pub(super) fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     app.set_status_notice("Running subagent");
 
     let registry = app.registry.clone();
-    let session_id = app.session.id.clone();
-    let working_dir = app.session.working_dir.clone();
+    let session_id = app.session.id().to_owned();
+    let working_dir = app.session.working_dir().map(str::to_owned);
     let tool_call_for_task = tool_call.clone();
     tokio::spawn(async move {
         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {

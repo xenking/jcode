@@ -57,7 +57,7 @@ impl Tool for AdvisorTool {
             let messages: Vec<_> = Session::load(&session_id)
                 .map(|session| {
                     session
-                        .messages
+                        .messages()
                         .into_iter()
                         .map(|message| message.to_message())
                         .collect()

@@ -550,10 +550,10 @@ impl Tool for SessionSearchTool {
 
 fn current_message_by_index(session_id: &str, index: usize) -> Result<String> {
     let session = Session::load(session_id)?;
-    let Some(message) = session.messages.get(index) else {
+    let Some(message) = session.messages().get(index) else {
         return Ok(format!(
             "UNKNOWN: message {index} is unavailable in the current session ({} messages).",
-            session.messages.len()
+            session.messages().len()
         ));
     };
     let mut value = serde_json::to_value(message)?;
@@ -1482,7 +1482,7 @@ fn append_session_results(
     query: &QueryProfile,
     options: &SearchOptions,
 ) {
-    if !options.include_current && session.id == options.current_session_id {
+    if !options.include_current && session.id() == options.current_session_id {
         return;
     }
     if !jcode_session_matches_filters(session, options) {
@@ -1491,26 +1491,25 @@ fn append_session_results(
 
     if let Some(filter) = options.working_dir_filter.as_deref()
         && !session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .is_some_and(|working_dir| working_dir_matches(working_dir, filter))
     {
         return;
     }
 
     if role_filter_allows_metadata(options)
-        && session_datetime_matches(session.updated_at, options.after, options.before)
+        && session_datetime_matches(session.updated_at(), options.after, options.before)
         && let Some(match_score) = score_message_match(&metadata_text(session), query)
     {
         results.push(SearchResult {
             source: "jcode".to_string(),
-            session_id: session.id.clone(),
+            session_id: session.id().to_owned(),
             short_name: session.short_name.clone(),
             title: session.display_title().map(ToOwned::to_owned),
-            working_dir: session.working_dir.clone(),
-            provider_key: session.provider_key.clone(),
-            model: session.model.clone(),
-            updated_at: session.updated_at,
+            working_dir: session.working_dir().map(str::to_owned),
+            provider_key: session.provider_key().map(str::to_owned),
+            model: session.model().map(str::to_owned),
+            updated_at: session.updated_at(),
             kind: SearchResultKind::Metadata,
             role: "metadata".to_string(),
             message_index: None,
@@ -1524,8 +1523,8 @@ fn append_session_results(
         });
     }
 
-    let ask_ids = ask_tool_ids(&session.messages);
-    for (message_index, msg) in session.messages.iter().enumerate() {
+    let ask_ids = ask_tool_ids(session.messages());
+    for (message_index, msg) in session.messages().iter().enumerate() {
         if !options.include_system && is_system_like_message(msg) {
             continue;
         }
@@ -1533,7 +1532,7 @@ fn append_session_results(
             continue;
         }
         if !session_datetime_matches(
-            msg.timestamp.unwrap_or(session.updated_at),
+            msg.timestamp.unwrap_or(session.updated_at()),
             options.after,
             options.before,
         ) {
@@ -1556,13 +1555,13 @@ fn append_session_results(
 
         results.push(SearchResult {
             source: "jcode".to_string(),
-            session_id: session.id.clone(),
+            session_id: session.id().to_owned(),
             short_name: session.short_name.clone(),
             title: session.display_title().map(ToOwned::to_owned),
-            working_dir: session.working_dir.clone(),
-            provider_key: session.provider_key.clone(),
-            model: session.model.clone(),
-            updated_at: session.updated_at,
+            working_dir: session.working_dir().map(str::to_owned),
+            provider_key: session.provider_key().map(str::to_owned),
+            model: session.model().map(str::to_owned),
+            updated_at: session.updated_at(),
             kind: SearchResultKind::Message,
             role: role_label(msg).to_string(),
             message_index: Some(message_index),
@@ -1572,16 +1571,16 @@ fn append_session_results(
             score,
             matched_terms: match_score.matched_terms,
             exact_match: match_score.exact_match,
-            context: build_jcode_context(&session.messages, message_index, options),
+            context: build_jcode_context(session.messages(), message_index, options),
         });
     }
 }
 
 fn metadata_text(session: &Session) -> String {
     let mut fields = vec![
-        format!("Session ID: {}", session.id),
-        format!("Updated: {}", format_datetime(session.updated_at)),
-        format!("Created: {}", format_datetime(session.created_at)),
+        format!("Session ID: {}", session.id()),
+        format!("Updated: {}", format_datetime(session.updated_at())),
+        format!("Created: {}", format_datetime(session.created_at())),
     ];
 
     if let Some(short_name) = &session.short_name {
@@ -1590,22 +1589,22 @@ fn metadata_text(session: &Session) -> String {
     if let Some(title) = session.display_title() {
         fields.push(format!("Title: {title}"));
     }
-    if let Some(generated_title) = &session.title
-        && session.custom_title.is_some()
-        && Some(generated_title.as_str()) != session.display_title()
+    if let Some(generated_title) = session.title()
+        && session.custom_title().is_some()
+        && Some(generated_title) != session.display_title()
     {
         fields.push(format!("Generated title: {generated_title}"));
     }
-    if let Some(working_dir) = &session.working_dir {
+    if let Some(working_dir) = &session.working_dir() {
         fields.push(format!("Working directory: {working_dir}"));
     }
-    if let Some(save_label) = &session.save_label {
+    if let Some(save_label) = &session.save_label() {
         fields.push(format!("Save label: {save_label}"));
     }
-    if let Some(provider_key) = &session.provider_key {
+    if let Some(provider_key) = &session.provider_key() {
         fields.push(format!("Provider: {provider_key}"));
     }
-    if let Some(model) = &session.model {
+    if let Some(model) = &session.model() {
         fields.push(format!("Model: {model}"));
     }
 
@@ -1624,27 +1623,27 @@ fn jcode_session_matches_filters(session: &Session, options: &SearchOptions) -> 
     if !source_matches_filter("jcode", options) {
         return false;
     }
-    if !provider_matches(session.provider_key.as_deref(), "jcode", options) {
+    if !provider_matches(session.provider_key(), "jcode", options) {
         return false;
     }
-    if !field_filter_matches(session.model.as_deref(), options.model_filter.as_deref()) {
+    if !field_filter_matches(session.model(), options.model_filter.as_deref()) {
         return false;
     }
     if options
         .saved_filter
-        .is_some_and(|expected| session.saved != expected)
+        .is_some_and(|expected| session.is_saved() != expected)
     {
         return false;
     }
     if options
         .debug_filter
-        .is_some_and(|expected| session.is_debug != expected)
+        .is_some_and(|expected| session.is_debug() != expected)
     {
         return false;
     }
     if options
         .canary_filter
-        .is_some_and(|expected| session.is_canary != expected)
+        .is_some_and(|expected| session.is_canary() != expected)
     {
         return false;
     }

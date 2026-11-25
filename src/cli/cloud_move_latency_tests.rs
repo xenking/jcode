@@ -233,9 +233,9 @@ fn isolated_latency_child() {
     }
     if mode == "overlap" || mode == "join-error" {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.set_working_dir(Some(root.to_string_lossy().into_owned()));
         if mode == "join-error" {
-            sess.route_api_method = Some("openai-oauth@".into());
+            sess.set_route_api_method(Some("openai-oauth@".into()));
         }
         sess.save_prepared().unwrap();
         let error = format!("{:#}", run_move(None, &target, true, true).unwrap_err());
@@ -265,7 +265,7 @@ fn isolated_latency_child() {
     }
     let result = if mode.starts_with("prepare") {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.set_working_dir(Some(root.to_string_lossy().into_owned()));
         sess.save_prepared().unwrap();
         storage::mark_streaming("latency-session");
         assert!(storage::streaming_session_ids().contains(&"latency-session".to_string()));

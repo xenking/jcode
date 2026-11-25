@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::Inherit;
 
 pub fn enter_selfdev_session(
     parent_session_id: Option<&str>,
@@ -16,17 +17,15 @@ pub fn enter_selfdev_session(
                     Some(parent_session_id.to_string()),
                     Some("Self-development session".to_string()),
                 );
-                child.replace_messages(parent.messages.clone());
-                child.compaction = parent.compaction.clone();
-                child.model = parent.model.clone();
-                child.provider_key = parent.provider_key.clone();
-                child.route_api_method = parent.route_api_method.clone();
-                child.subagent_model = parent.subagent_model.clone();
-                child.improve_mode = parent.improve_mode;
-                child.autoreview_enabled = parent.autoreview_enabled;
-                child.autojudge_enabled = parent.autojudge_enabled;
-                child.memory_injections = parent.memory_injections.clone();
-                child.replay_events = parent.replay_events.clone();
+                child.inherit_from(
+                    &parent,
+                    Inherit::MESSAGES
+                        | Inherit::COMPACTION
+                        | Inherit::ROUTE
+                        | Inherit::SUBAGENT_MODEL
+                        | Inherit::AUTONOMY
+                        | Inherit::REPLAY,
+                );
                 inherited_context = true;
                 child
             }
@@ -42,11 +41,11 @@ pub fn enter_selfdev_session(
         session::Session::create(None, Some("Self-development session".to_string()))
     };
     session.set_canary("self-dev");
-    session.working_dir = Some(repo_dir.display().to_string());
-    session.status = session::SessionStatus::Closed;
+    session.set_working_dir(Some(repo_dir.display().to_string()));
+    session.set_status(session::SessionStatus::Closed);
     session.save()?;
 
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
 
     if super::is_test_session() {
         return Ok(SelfDevLaunchResult {

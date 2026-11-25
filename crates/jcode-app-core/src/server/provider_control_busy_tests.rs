@@ -206,11 +206,11 @@ async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
     );
     drop(busy_worker);
     let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
-    assert!(saved.is_swarm_worker);
-    saved.model = Some("test-model-b".into());
-    saved.provider_key = None;
-    saved.route_api_method = None;
-    saved.reasoning_effort = Some("max".into());
+    assert!(saved.is_swarm_worker());
+    saved.set_model(Some("test-model-b".into()));
+    saved.set_provider_key(None);
+    saved.set_route_api_method(None);
+    saved.set_reasoning_effort(Some("max".into()));
     let resumed_provider = Arc::new(TestEffortProvider {
         model: StdMutex::new(Some("test-model-b".into())),
         ..Default::default()
@@ -248,7 +248,7 @@ async fn test_agent(
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some(provider.model());
+    session.set_model(Some(provider.model()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         Arc::clone(&provider_dyn),
         registry,
@@ -323,7 +323,7 @@ async fn set_context_cap_is_deferred_isolated_and_persisted() {
         original_other_budget
     );
     let saved = crate::session::Session::load("session_context_cap_control").unwrap();
-    assert_eq!(saved.context_cap, Some(8_000));
+    assert_eq!(saved.context_cap(), Some(8_000));
     let provider: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
     let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
     let mut resumed = Agent::new_with_session(provider, registry, saved, None);
@@ -337,7 +337,7 @@ async fn set_context_cap_is_deferred_isolated_and_persisted() {
     assert_eq!(
         crate::session::Session::load("session_context_cap_control")
             .unwrap()
-            .context_cap,
+            .context_cap(),
         None
     );
 }
@@ -387,7 +387,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
         loop {
             if crate::session::Session::load("session_busy_reasoning_effort")
                 .ok()
-                .and_then(|session| session.reasoning_effort)
+                .and_then(|session| session.reasoning_effort().map(str::to_owned))
                 .as_deref()
                 == Some("low")
             {
@@ -456,8 +456,7 @@ async fn effort_applied_to_a_busy_turn_survives_a_restart_before_it_ends() {
     assert_eq!(
         crate::session::Session::load(session_id)
             .unwrap()
-            .reasoning_effort
-            .as_deref(),
+            .reasoning_effort(),
         Some("high"),
         "the restored session must store the effort the turn was using"
     );
@@ -540,7 +539,7 @@ async fn set_reasoning_effort_without_provider_queues_for_next_turn() {
         loop {
             if crate::session::Session::load("session_busy_reasoning_effort_without_provider")
                 .ok()
-                .and_then(|session| session.reasoning_effort)
+                .and_then(|session| session.reasoning_effort().map(str::to_owned))
                 .as_deref()
                 == Some("high")
             {
@@ -998,7 +997,7 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
         None,
         None,
     );
-    session.model = Some(provider.model());
+    session.set_model(Some(provider.model()));
     session.save_prepared().unwrap();
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
@@ -1034,5 +1033,5 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
     assert_eq!(provider.model(), "gemini-4-neon-high");
     assert_eq!(agent.lock().await.provider_model(), "gemini-4-neon-high");
     let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
-    assert_eq!(saved.model.as_deref(), Some("gemini-4-neon-high"));
+    assert_eq!(saved.model(), Some("gemini-4-neon-high"));
 }

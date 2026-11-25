@@ -6,7 +6,7 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
         for command in ["/cloud", "/local"] {
             let mut app = create_test_app();
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
                     lane_speed: None,
                     lane_profile: None,
@@ -33,7 +33,7 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
             app.auto_poke_default_on = true;
             app.auto_poke_incomplete_todos = true;
             app.is_processing = true;
-            let session = app.session.id.clone();
+            let session = app.session.id().to_owned();
             assert!(super::commands_cloud::handle_cloud_command(
                 &mut app, command, &session
             ));
@@ -546,7 +546,7 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
             .unwrap();
         app.handle_key(KeyCode::Enter, KeyModifiers::empty())
             .unwrap();
-        assert!(app.session.subagent_model.is_some());
+        assert!(app.session.subagent_model().is_some());
         assert_eq!(app.provider.model(), "counting-a");
     });
 }
@@ -730,7 +730,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         app.inline_interactive_state.is_none(),
         "activation completion should still not open /model automatically"
     );
-    assert_eq!(app.session.model.as_deref(), Some("state-space-alpha"));
+    assert_eq!(app.session.model(), Some("state-space-alpha"));
     let last = app.display_messages.last().expect("activation message");
     assert!(last.content.contains("Added models:"));
     assert!(last.content.contains("state-space-alpha"));
@@ -742,7 +742,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         &mut app,
         "/model state-space-beta"
     ));
-    assert_eq!(app.session.model.as_deref(), Some("state-space-beta"));
+    assert_eq!(app.session.model(), Some("state-space-beta"));
     assert_eq!(
         app.status_notice(),
         Some("Model → state-space-beta".to_string())
@@ -804,10 +804,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .content
         .clone();
     assert!(prompt.contains("Cerebras API Key"), "{prompt}");
-    assert!(
-        prompt.contains("Default model: gpt-oss-120b"),
-        "{prompt}"
-    );
+    assert!(prompt.contains("Default model: gpt-oss-120b"), "{prompt}");
     assert!(prompt.contains("Paste your API key below"), "{prompt}");
 
     let pending = app
@@ -956,11 +953,8 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         activation_events, 1,
         "expected exactly one provider activation event"
     );
-    assert_eq!(
-        app.session.model.as_deref(),
-        Some("qwen-3-235b-a22b-instruct-2507")
-    );
-    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
+    assert_eq!(app.session.model(), Some("qwen-3-235b-a22b-instruct-2507"));
+    assert_eq!(app.session.provider_key(), Some("cerebras"));
     assert_eq!(
         set_model_requests.lock().unwrap().as_slice(),
         ["cerebras:qwen-3-235b-a22b-instruct-2507"],
@@ -1068,8 +1062,8 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
     app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::empty())
         .expect("Cerebras picker selection should switch models");
 
-    assert_eq!(app.session.model.as_deref(), Some("llama3.1-8b"));
-    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
+    assert_eq!(app.session.model(), Some("llama3.1-8b"));
+    assert_eq!(app.session.provider_key(), Some("cerebras"));
     assert_eq!(app.provider.model(), "llama3.1-8b");
     assert_eq!(
         set_model_requests.lock().unwrap().as_slice(),
@@ -1707,8 +1701,9 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.provider_session_id = Some("stale-upstream".to_string());
-    app.session.provider_session_id = Some("stale-upstream".to_string());
-    app.session.model = Some("old-model".to_string());
+    app.session
+        .set_provider_session_id(Some("stale-upstream".to_string()));
+    app.session.set_model(Some("old-model".to_string()));
 
     app.handle_login_completed(crate::bus::LoginCompleted {
         provider: "Azure OpenAI".to_string(),
@@ -1717,9 +1712,9 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     });
 
     assert_eq!(&*model.lock().unwrap(), "azure-deployment");
-    assert_eq!(app.session.model.as_deref(), Some("azure-deployment"));
+    assert_eq!(app.session.model(), Some("azure-deployment"));
     assert_eq!(app.provider_session_id, None);
-    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id(), None);
     assert_eq!(auth_changed.load(Ordering::SeqCst), 1);
     assert_eq!(complete_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -2203,16 +2198,16 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
     // Navigate deliberately to the offline API-key flow by semantic action,
     // rather than assuming a fixed number of saved-account/add-account rows.
     let picker = app.inline_interactive_state.as_ref().unwrap();
-        let target = picker
-            .filtered
-            .iter()
-            .position(|&index| {
-                matches!(
-                    &picker.entries[index].action,
-                    crate::tui::PickerAction::AutoApiKey
-                )
-            })
-            .expect("Paste an API key login should be listed in starter view");
+    let target = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            matches!(
+                &picker.entries[index].action,
+                crate::tui::PickerAction::AutoApiKey
+            )
+        })
+        .expect("Paste an API key login should be listed in starter view");
     for _ in 0..target {
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -2293,7 +2288,10 @@ fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter()
         "GitHub Copilot should be collapsed under More providers"
     );
     assert!(
-        !picker.filtered.iter().any(|&i| picker.entries[i].name == "Z.AI"),
+        !picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
         "non-starter unconfigured provider should be collapsed by default"
     );
 
@@ -2344,10 +2342,10 @@ fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter()
         "expanded login picker should reveal hidden providers like Z.AI"
     );
     assert!(
-        !picker.entries.iter().any(|e| matches!(
-            e.action,
-            crate::tui::PickerAction::ExpandLoginProviders
-        )),
+        !picker
+            .entries
+            .iter()
+            .any(|e| matches!(e.action, crate::tui::PickerAction::ExpandLoginProviders)),
         "ExpandLoginProviders row should be removed once expanded"
     );
 }
@@ -2360,13 +2358,13 @@ fn test_subagent_model_command_sets_and_resets_session_preference() {
         &mut app,
         "/subagent-model gpt-5.4"
     ));
-    assert_eq!(app.session.subagent_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(app.session.subagent_model(), Some("gpt-5.4"));
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/subagent-model inherit"
     ));
-    assert_eq!(app.session.subagent_model, None);
+    assert_eq!(app.session.subagent_model(), None);
 }
 
 #[test]
@@ -2377,14 +2375,14 @@ fn test_autoreview_command_toggles_session_preference() {
         &mut app,
         "/autoreview on"
     ));
-    assert_eq!(app.session.autoreview_enabled, Some(true));
+    assert_eq!(app.session.autoreview_enabled(), Some(true));
     assert!(app.autoreview_enabled);
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/autoreview off"
     ));
-    assert_eq!(app.session.autoreview_enabled, Some(false));
+    assert_eq!(app.session.autoreview_enabled(), Some(false));
     assert!(!app.autoreview_enabled);
 }
 
@@ -2396,14 +2394,14 @@ fn test_autojudge_command_toggles_session_preference() {
         &mut app,
         "/autojudge on"
     ));
-    assert_eq!(app.session.autojudge_enabled, Some(true));
+    assert_eq!(app.session.autojudge_enabled(), Some(true));
     assert!(app.autojudge_enabled);
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/autojudge off"
     ));
-    assert_eq!(app.session.autojudge_enabled, Some(false));
+    assert_eq!(app.session.autojudge_enabled(), Some(false));
     assert!(!app.autojudge_enabled);
 }
 
@@ -2411,7 +2409,7 @@ fn test_autojudge_command_toggles_session_preference() {
 fn test_transcript_path_command_reports_current_session_file() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        let expected = crate::session::session_path(&app.session.id).expect("session path");
+        let expected = crate::session::session_path(app.session.id()).expect("session path");
 
         assert!(super::commands::handle_session_command(
             &mut app,
@@ -2430,7 +2428,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -2472,7 +2470,7 @@ fn test_poke_status_reports_current_state() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -2535,7 +2533,7 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -2593,7 +2591,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -2637,7 +2635,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         }));
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
                     lane_speed: None,
@@ -2728,7 +2726,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -2769,7 +2767,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
                     lane_speed: None,
@@ -2822,7 +2820,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -2876,7 +2874,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
 
         // Once the model records sufficient completion confidence through the
         // todo tool, the next completion check requests one clean final answer.
-        let mut validated = crate::todo::load_todos(&app.session.id).expect("load todos");
+        let mut validated = crate::todo::load_todos(app.session.id()).expect("load todos");
         for todo in &mut validated {
             todo.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(100));
             todo.confidence_history = match todo.id.as_str() {
@@ -2892,7 +2890,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                 ],
             };
         }
-        crate::todo::save_todos(&app.session.id, &validated).expect("save validated todos");
+        crate::todo::save_todos(app.session.id(), &validated).expect("save validated todos");
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
@@ -2976,7 +2974,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Validate provider result".to_string(),
@@ -2997,7 +2995,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -3081,7 +3079,7 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -3125,7 +3123,7 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -3202,7 +3200,7 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             app.auto_poke_incomplete_todos = true;
             app.auto_poke_default_on = false;
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
                     id: "validated-result".into(),
                     content: "Validate the requested result".into(),
@@ -3218,7 +3216,7 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             )
             .unwrap();
             // Missing goal metadata is not unfinished ownership work either.
-            crate::todo::save_goals(&app.session.id, &[]).unwrap();
+            crate::todo::save_goals(app.session.id(), &[]).unwrap();
             for id in 42..44 {
                 app.is_processing = true;
                 super::local::finish_turn(&mut app);

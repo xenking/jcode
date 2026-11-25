@@ -11,10 +11,10 @@ pub(super) fn handles(command: &str) -> bool {
 }
 
 fn summary(session: &Session) -> Value {
-    json!({"id": session.id, "title": session.display_title_or_name(),
-        "parent_id": session.parent_id, "saved": session.saved,
-        "status": session.status.display(), "updated_at": session.updated_at,
-        "working_dir": session.working_dir, "model": session.model})
+    json!({"id": session.id(), "title": session.display_title_or_name(),
+        "parent_id": session.parent_id(), "saved": session.is_saved(),
+        "status": session.status().display(), "updated_at": session.updated_at(),
+        "working_dir": session.working_dir(), "model": session.model()})
 }
 
 fn list_sessions(current: Value, command: &str, args: &[String]) -> Result<(Value, String)> {
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn current_session_summary_preserves_remote_identity() {
         let mut session = Session::create(None, Some("host title".into()));
-        session.id = "remote-only-id".into();
+        session.set_id_for_tests("remote-only-id".into());
         session.mark_saved(None);
         let data = summary(&session);
         assert_eq!(data["id"], "remote-only-id");

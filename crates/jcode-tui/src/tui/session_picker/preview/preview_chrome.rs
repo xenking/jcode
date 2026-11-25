@@ -26,14 +26,14 @@ pub(super) fn persisted_info_from_snapshot(
     InfoWidgetData {
         auth_method,
         usage_info,
-        model: session.model.clone(),
-        provider_name: session.provider_key.clone(),
-        working_dir: session.working_dir.clone(),
+        model: session.model().map(str::to_owned),
+        provider_name: session.provider_key().map(str::to_owned),
+        working_dir: session.working_dir().map(str::to_owned),
         session_name: session.short_name.clone(),
-        reasoning_effort: session.reasoning_effort.clone(),
-        original_working_dir: session.original_working_dir.clone(),
+        reasoning_effort: session.reasoning_effort().map(str::to_owned),
+        original_working_dir: session.original_working_dir().map(str::to_owned),
         context_limit: session
-            .context_cap
+            .context_cap()
             .or_else(|| snapshot.as_ref().and_then(|s| s.context_limit)),
         observed_context_tokens: context_tokens,
         historical_context: context_tokens.is_some(),

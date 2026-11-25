@@ -502,7 +502,7 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         None,
         Some("Parent".to_string()),
     );
-    parent.working_dir = Some(temp.path().display().to_string());
+    parent.set_working_dir(Some(temp.path().display().to_string()));
     parent.save().expect("save parent session");
 
     let item = ScheduledItem {
@@ -511,11 +511,11 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         context: "Follow up later".to_string(),
         priority: Priority::Normal,
         target: ScheduleTarget::Spawn {
-            parent_session_id: parent.id.clone(),
+            parent_session_id: parent.id().to_owned(),
         },
-        created_by_session: parent.id.clone(),
+        created_by_session: parent.id().to_owned(),
         created_at: chrono::Utc::now(),
-        working_dir: parent.working_dir.clone(),
+        working_dir: parent.working_dir().map(str::to_owned),
         task_description: Some("Follow up later".to_string()),
         relevant_files: vec!["src/lib.rs".to_string()],
         git_branch: None,
@@ -524,21 +524,21 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
 
     let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
     let child_session_id = runner
-        .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
+        .spawn_session_for_scheduled_item(&provider, &item, parent.id())
         .await
         .expect("spawned scheduled task should succeed");
 
-    assert_ne!(child_session_id, parent.id);
+    assert_ne!(child_session_id, parent.id());
 
     let child = Session::load(&child_session_id).expect("load spawned child session");
-    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(child.working_dir, parent.working_dir);
-    assert!(child.messages.iter().any(|message| {
+    assert_eq!(child.parent_id(), Some(parent.id()));
+    assert_eq!(child.working_dir(), parent.working_dir());
+    assert!(child.messages().iter().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")
             && message.content_preview().contains("Follow up later")
     }));
-    assert!(child.messages.iter().any(|message| {
+    assert!(child.messages().iter().any(|message| {
         message.role == Role::Assistant
             && message
                 .content_preview()

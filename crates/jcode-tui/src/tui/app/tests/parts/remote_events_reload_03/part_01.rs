@@ -598,7 +598,8 @@ fn test_reload_persisted_background_tasks_note_mentions_running_task() {
         &started_at,
         true,
         false,
-    )).expect("register detached task fixture");
+    ))
+    .expect("register detached task fixture");
 
     let note = reload_persisted_background_tasks_note(&session_id);
 
@@ -636,7 +637,8 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         &started_at,
         true,
         false,
-    )).expect("register detached task fixture");
+    ))
+    .expect("register detached task fixture");
 
     remote::finalize_reload_reconnect(
         &mut app,
@@ -1015,12 +1017,12 @@ fn test_remote_swarm_status_does_not_clobber_newer_session_history_on_disk() {
 
     let persisted = crate::session::Session::load(session_id).expect("reload persisted session");
     assert_eq!(
-        persisted.messages.len(),
+        persisted.messages().len(),
         2,
         "remote UI persistence should not roll back newer server-written messages"
     );
     let last_text = persisted
-        .messages
+        .messages()
         .last()
         .and_then(|msg| {
             msg.content.iter().find_map(|block| match block {

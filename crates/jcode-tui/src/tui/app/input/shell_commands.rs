@@ -71,9 +71,9 @@ impl super::App {
             crate::util::truncate_str(command, 48)
         ));
         spawn_input_shell_command(
-            self.session.id.clone(),
+            self.session.id().to_owned(),
             command.to_string(),
-            self.session.working_dir.clone(),
+            self.session.working_dir().map(str::to_owned),
         );
     }
 }

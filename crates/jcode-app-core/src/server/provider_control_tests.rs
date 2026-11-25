@@ -199,7 +199,10 @@ async fn account_switch_rebinds_pinned_session_and_acknowledges_same_model_ident
             Some(format!("openai-oauth@{label}").as_str())
         );
         let saved = crate::session::Session::load(agent.session_id()).unwrap();
-        assert_eq!(saved.route_api_method, agent.session_route_api_method());
+        assert_eq!(
+            saved.route_api_method(),
+            agent.session_route_api_method().as_deref()
+        );
     }
     let mut agent = agent.lock().await;
     apply_account_switch(82, "openai", "missing", &mut agent, &tx);

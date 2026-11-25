@@ -20,7 +20,7 @@ impl Agent {
     ) {
         // Debug sessions include both test sessions and headless swarm workers.
         // Workers use their assigned task label instead of a second model call.
-        if self.session.is_debug || self.session.is_ephemeral() {
+        if self.session.is_debug() || self.session.is_ephemeral() {
             return;
         }
         let (action, source) = titles::plan_for_session(&self.session, self.auto_title_owned);
@@ -36,7 +36,7 @@ impl Agent {
             Err(error) => {
                 logging::info(&format!(
                     "Session title not generated for {} ({stage:?}): {error}",
-                    self.session.id
+                    self.session.id()
                 ));
                 return;
             }
@@ -47,12 +47,13 @@ impl Agent {
                 crate::session_list_cache::invalidate();
                 logging::info(&format!(
                     "Session title set for {} ({stage:?}): {:?}",
-                    self.session.id, generated
+                    self.session.id(),
+                    generated
                 ));
                 if let Some(event_tx) = event_tx
                     && event_tx
                         .send(ServerEvent::SessionRenamed {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             title: Some(generated),
                             display_title: self.session.display_title_or_name().to_string(),
                         })
@@ -60,14 +61,14 @@ impl Agent {
                 {
                     logging::debug(&format!(
                         "Session title persisted for {}, but rename event receiver disconnected",
-                        self.session.id
+                        self.session.id()
                     ));
                 }
             }
             Ok(false) => {}
             Err(error) => logging::warn(&format!(
                 "Failed to persist session title for {}: {error}",
-                self.session.id
+                self.session.id()
             )),
         }
     }

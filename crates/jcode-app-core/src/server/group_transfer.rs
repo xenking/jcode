@@ -369,7 +369,7 @@ async fn handle_with_gate(
                 );
                 let previous_lease = read_transfer_lease(id)?;
                 let epoch = session
-                    .migration_epoch
+                    .migration_epoch()
                     .max(previous_lease.as_ref().map_or(0, |l| l.epoch))
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("migration epoch exhausted"))?;
@@ -703,14 +703,14 @@ async fn import_bundle(
     for transfer in &bundle.sessions {
         let session = crate::session::Session::load(&transfer.session_id)?;
         ensure!(
-            session.migration_epoch == transfer.epoch,
+            session.migration_epoch() == transfer.epoch,
             "destination session/lease epoch mismatch: {}",
             transfer.session_id
         );
         verify_source_fence(transfer, INBOUND_HOST)?;
         destination_dirs.insert(
             transfer.session_id.clone(),
-            session.working_dir.map(std::path::PathBuf::from),
+            session.working_dir().map(std::path::PathBuf::from),
         );
     }
     let mut guards = Vec::new();

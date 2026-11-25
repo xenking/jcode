@@ -93,8 +93,8 @@ pub fn build_brief(session: &Session) -> CatchupBrief {
     let tool_counts = collect_tool_counts(session);
     let validation_notes = collect_validation_notes(&rendered);
     let activity_steps = collect_activity_steps(session);
-    let (reason, tags) = reason_and_tags(&session.status);
-    let needs_from_user = infer_needs_from_user(&session.status, latest_agent_response.as_deref());
+    let (reason, tags) = reason_and_tags(session.status());
+    let needs_from_user = infer_needs_from_user(session.status(), latest_agent_response.as_deref());
 
     CatchupBrief {
         reason,
@@ -106,7 +106,7 @@ pub fn build_brief(session: &Session) -> CatchupBrief {
         validation_notes,
         latest_agent_response,
         needs_from_user,
-        updated_at: session.updated_at,
+        updated_at: session.updated_at(),
     }
 }
 
@@ -118,8 +118,8 @@ pub fn render_markdown(
 ) -> String {
     let display_name = session.display_name().to_string();
     let icon = crate::id::session_icon(&display_name);
-    let status_icon = status_icon(&session.status);
-    let status_label = status_label(&session.status);
+    let status_icon = status_icon(session.status());
+    let status_label = status_label(session.status());
     let updated_ago = format_time_ago(brief.updated_at);
     let source_label = source_session_id
         .and_then(crate::id::extract_session_name)
@@ -138,7 +138,7 @@ pub fn render_markdown(
     if source_session_id.is_some() {
         out.push_str(&format!("- From: **{}**\n", source_label));
     }
-    out.push_str(&format!("- Session: `{}`\n\n", session.id));
+    out.push_str(&format!("- Session: `{}`\n\n", session.id()));
 
     if crate::config::config().features.mermaid && !brief.activity_steps.is_empty() {
         out.push_str("```mermaid\nflowchart TD\n");
@@ -371,7 +371,7 @@ fn infer_needs_from_user(status: &SessionStatus, latest_response: Option<&str>) 
 fn collect_touched_files(session: &Session) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for msg in &session.messages {
+    for msg in session.messages() {
         for block in &msg.content {
             if let ContentBlock::ToolUse { input, .. } = block {
                 for key in ["file_path", "path"] {
@@ -395,7 +395,7 @@ fn collect_touched_files(session: &Session) -> Vec<String> {
 
 fn collect_tool_counts(session: &Session) -> Vec<(String, usize)> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for msg in &session.messages {
+    for msg in session.messages() {
         for block in &msg.content {
             if let ContentBlock::ToolUse { name, .. } = block {
                 *counts.entry(name.clone()).or_default() += 1;
@@ -410,7 +410,7 @@ fn collect_tool_counts(session: &Session) -> Vec<(String, usize)> {
 fn collect_activity_steps(session: &Session) -> Vec<String> {
     let mut steps = Vec::new();
     let mut last = String::new();
-    for msg in &session.messages {
+    for msg in session.messages() {
         for block in &msg.content {
             let Some(step) = tool_use_step(block) else {
                 continue;
@@ -658,7 +658,7 @@ mod tests {
     fn render_markdown_includes_key_sections() {
         let mut session = Session::create(None, Some("catchup".to_string()));
         session.short_name = Some("fox".to_string());
-        session.status = SessionStatus::Closed;
+        session.set_status(SessionStatus::Closed);
         session.add_message(
             Role::User,
             vec![ContentBlock::Text {

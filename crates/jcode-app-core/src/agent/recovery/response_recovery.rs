@@ -775,7 +775,7 @@ mod malformed_tool_call_recovery_tests {
     fn correction_reminders(agent: &Agent) -> Vec<String> {
         agent
             .session
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .filter_map(|block| match block {
@@ -794,7 +794,7 @@ mod malformed_tool_call_recovery_tests {
     fn null_tool_use_count(agent: &Agent) -> usize {
         agent
             .session
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .filter(|block| matches!(block, ContentBlock::ToolUse { input, .. } if input.is_null()))
@@ -804,7 +804,7 @@ mod malformed_tool_call_recovery_tests {
     fn error_tool_result_count(agent: &Agent) -> usize {
         agent
             .session
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .filter(|block| {
@@ -875,7 +875,7 @@ mod malformed_tool_call_recovery_tests {
             run_scripted_turn(&mut agent, streaming).await.unwrap();
             let results: Vec<_> = agent
                 .session
-                .messages
+                .messages()
                 .iter()
                 .flat_map(|m| &m.content)
                 .filter_map(|block| match block {
@@ -932,7 +932,7 @@ mod malformed_tool_call_recovery_tests {
                     cache_control: None,
                 }],
             );
-            let session = agent.session.id.clone();
+            let session = agent.session.id().to_owned();
             crate::tool::set_test_read_gate(&session, Some(Arc::new(tokio::sync::Barrier::new(2))));
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -943,7 +943,7 @@ mod malformed_tool_call_recovery_tests {
             result.expect("reads did not overlap").unwrap();
             let ids: Vec<_> = agent
                 .session
-                .messages
+                .messages()
                 .iter()
                 .flat_map(|m| &m.content)
                 .filter_map(|block| match block {
@@ -993,7 +993,7 @@ mod malformed_tool_call_recovery_tests {
                 );
                 let assistant = agent
                     .session
-                    .messages
+                    .messages()
                     .iter()
                     .rfind(|m| m.role == Role::Assistant)
                     .unwrap();

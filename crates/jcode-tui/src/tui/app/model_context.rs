@@ -519,7 +519,7 @@ impl App {
             Ok(()) => {
                 let new_model = self.provider.model();
                 if new_model != prev_model {
-                    self.session.model = Some(new_model);
+                    self.session.set_model(Some(new_model));
                     self.invalidate_model_picker_cache();
                     crate::tui::ui::prepare::invalidate_header_prep_cache();
                 }
@@ -690,7 +690,7 @@ impl App {
             return self.remote_context_tokens;
         }
         self.session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find_map(|message| message.token_usage.as_ref()?.prompt_tokens)
@@ -1005,7 +1005,7 @@ impl App {
     /// the compaction manager lock must `drop` it before calling this.
     fn reset_state_for_compaction_retry(&mut self) {
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
         self.context_warning_shown = false;
         self.clear_streaming_render_state();
         self.stream_buffer.clear();
@@ -1379,9 +1379,9 @@ impl App {
             actions.push("Created a recovery session with text-only history.".to_string());
         }
 
-        if self.provider_session_id.is_some() || self.session.provider_session_id.is_some() {
+        if self.provider_session_id.is_some() || self.session.provider_session_id().is_some() {
             self.provider_session_id = None;
-            self.session.provider_session_id = None;
+            self.session.set_provider_session_id(None);
             actions.push("Reset provider session resume state.".to_string());
         }
 
@@ -1482,7 +1482,7 @@ impl App {
     ) {
         let completion_matches_active =
             self.active_client_session_id() == Some(completed.session_id.as_str());
-        let completion_matches_local = completed.session_id == self.session.id;
+        let completion_matches_local = completed.session_id == self.session.id();
         if !completion_matches_active && !completion_matches_local {
             return;
         }

@@ -187,10 +187,7 @@ impl App {
             && picker.preview
         {
             if matches!(request, InlinePickerPreviewRequest::SubagentModel { .. }) {
-                Self::configure_subagent_model_picker(
-                    picker,
-                    self.session.subagent_model.as_deref(),
-                );
+                Self::configure_subagent_model_picker(picker, self.session.subagent_model());
             }
             picker.filter = request.filter().to_string();
             Self::apply_inline_interactive_filter(picker);

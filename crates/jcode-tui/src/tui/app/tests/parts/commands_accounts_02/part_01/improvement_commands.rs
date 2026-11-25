@@ -8,12 +8,16 @@ fn test_improve_command_starts_improvement_loop() {
 
     assert_eq!(app.improve_mode, Some(ImproveMode::ImproveRun));
     assert_eq!(
-        app.session.improve_mode,
+        app.session.improve_mode(),
         Some(crate::session::SessionImproveMode::ImproveRun)
     );
     assert!(app.is_processing());
 
-    let msg = app.session.messages.last().expect("missing improve prompt");
+    let msg = app
+        .session
+        .messages()
+        .last()
+        .expect("missing improve prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -36,14 +40,14 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
 
     assert_eq!(app.improve_mode, Some(ImproveMode::ImprovePlan));
     assert_eq!(
-        app.session.improve_mode,
+        app.session.improve_mode(),
         Some(crate::session::SessionImproveMode::ImprovePlan)
     );
     assert!(app.is_processing());
 
     let msg = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("missing improve plan prompt");
     assert!(matches!(
@@ -60,7 +64,7 @@ fn test_improve_status_summarizes_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
                     lane_speed: None,
@@ -129,7 +133,7 @@ fn test_improve_status_summarizes_current_todos() {
 #[test]
 fn test_improve_stop_without_active_run_reports_idle() {
     let mut app = create_test_app();
-    app.session.improve_mode = None;
+    app.session.set_improve_mode(None);
     app.input = "/improve stop".to_string();
     app.submit_input();
 
@@ -144,17 +148,18 @@ fn test_improve_stop_without_active_run_reports_idle() {
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     let mut app = create_test_app();
     app.improve_mode = Some(ImproveMode::ImproveRun);
-    app.session.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);
+    app.session
+        .set_improve_mode(Some(crate::session::SessionImproveMode::ImproveRun));
     app.input = "/improve stop".to_string();
     app.submit_input();
 
     assert_eq!(app.improve_mode, None);
-    assert_eq!(app.session.improve_mode, None);
+    assert_eq!(app.session.improve_mode(), None);
     assert!(app.is_processing());
 
     let msg = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("missing improve stop prompt");
     assert!(matches!(
@@ -181,10 +186,11 @@ fn test_improve_resume_requires_saved_mode() {
 fn test_improve_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);
+        app.session
+            .set_improve_mode(Some(crate::session::SessionImproveMode::ImproveRun));
         app.session.save().expect("save session");
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -214,14 +220,14 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
 
         assert_eq!(app.improve_mode, Some(ImproveMode::ImproveRun));
         assert_eq!(
-            app.session.improve_mode,
+            app.session.improve_mode(),
             Some(crate::session::SessionImproveMode::ImproveRun)
         );
         assert!(app.is_processing());
 
         let msg = app
             .session
-            .messages
+            .messages()
             .last()
             .expect("missing improve resume prompt");
         assert!(matches!(

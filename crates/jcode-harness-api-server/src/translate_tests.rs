@@ -2384,7 +2384,10 @@ fn a_queued_model_change_answers_immediately_and_settles_later() {
     assert_eq!(queued[1].reply_to, Some(4));
     assert!(matches!(
         queued[1].event,
-        ApiEvent::ModelSwitch { state: ModelSwitchState::Queued, .. }
+        ApiEvent::ModelSwitch {
+            state: ModelSwitchState::Queued,
+            ..
+        }
     ));
     assert_eq!(
         state.current_model.as_deref(),
@@ -2396,12 +2399,15 @@ fn a_queued_model_change_answers_immediately_and_settles_later() {
         "type": "model_changed", "id": legacy_id,
         "model": "gpt-6.2-sol", "provider_name": "openai",
     }));
-    assert!(applied
-        .iter()
-        .all(|frame| frame.reply_to.is_none()), "the request was already answered");
-    assert!(applied
-        .iter()
-        .any(|frame| matches!(frame.event, ApiEvent::ModelInfo { .. })));
+    assert!(
+        applied.iter().all(|frame| frame.reply_to.is_none()),
+        "the request was already answered"
+    );
+    assert!(
+        applied
+            .iter()
+            .any(|frame| matches!(frame.event, ApiEvent::ModelInfo { .. }))
+    );
     assert!(applied.iter().any(|frame| matches!(
         &frame.event,
         ApiEvent::ModelSwitch { state: ModelSwitchState::Applied, model: Some(model), .. }
@@ -2441,9 +2447,11 @@ fn a_queued_model_change_can_be_cancelled_or_fail() {
         ApiEvent::ModelSwitch { state: ModelSwitchState::Cancelled, model: Some(model), .. }
             if model == "gpt-6.2-sol"
     )));
-    assert!(frames
-        .iter()
-        .any(|frame| frame.reply_to == Some(5) && matches!(frame.event, ApiEvent::Ok)));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.reply_to == Some(5) && matches!(frame.event, ApiEvent::Ok))
+    );
 
     // A queued switch that the daemon then rejects is an event, not silence.
     let out = state.api_request_to_legacy(&json!({
@@ -4357,11 +4365,11 @@ fn history_response_stats_old_and_malformed_fields_are_optional() {
 #[test]
 fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     let mut session = jcode_base::session::Session::create(None, None);
-    session.messages = serde_json::from_value(json!([
+    session.replace_messages(serde_json::from_value(json!([
         {"id":"u","role":"user","timestamp":"2026-11-15T05:21:00Z","content":[{"type":"text","text":"question"}]},
         {"id":"a","role":"assistant","timestamp":"2026-11-15T05:21:14Z","content":[{"type":"text","text":"answer"}],
             "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
-    ])).unwrap();
+    ])).unwrap());
     let legacy: Vec<_> = jcode_base::session::render_messages(&session)
         .into_iter()
         .map(|row| jcode_base::protocol::HistoryMessage {

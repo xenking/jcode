@@ -67,7 +67,7 @@ fn git_state_for_snapshot(dir: &Path) -> Option<GitState> {
 impl Agent {
     /// Set logging context for this agent's session/provider
     pub(super) fn set_log_context(&self) {
-        logging::set_session(&self.session.id);
+        logging::set_session(self.session.id());
         // Log the profile this session actually talks to. `name()` is the
         // stable machine id for the provider class, which the multiplexing
         // slot reports as `OpenRouter` (a concrete runtime instance reports
@@ -93,7 +93,7 @@ impl Agent {
     fn record_env_snapshot_inner(&mut self, reason: &str, persist: bool) {
         let snapshot = self.build_env_snapshot(reason, self.env_snapshot_detail());
         self.session.record_env_snapshot(snapshot.clone());
-        if persist && !self.session.messages.is_empty() {
+        if persist && !self.session.messages().is_empty() {
             self.persist_session_best_effort("environment snapshot");
         }
         if let Ok(json) = serde_json::to_string(&snapshot) {
@@ -136,7 +136,7 @@ impl Agent {
             EnvSnapshotDetail::Minimal => (None, None),
         };
 
-        let working_dir = self.session.working_dir.clone();
+        let working_dir = self.session.working_dir().map(str::to_owned);
         let working_git = match detail {
             EnvSnapshotDetail::Full => working_dir
                 .as_deref()
@@ -147,7 +147,7 @@ impl Agent {
         EnvSnapshot {
             captured_at: Utc::now(),
             reason: reason.to_string(),
-            session_id: self.session.id.clone(),
+            session_id: self.session.id().to_owned(),
             working_dir,
             provider: self.provider.name().to_string(),
             model: self.provider.model().to_string(),
@@ -158,9 +158,9 @@ impl Agent {
             arch: std::env::consts::ARCH.to_string(),
             pid: std::process::id(),
             is_selfdev: self.session.is_self_dev(),
-            is_debug: self.session.is_debug,
-            is_canary: self.session.is_canary,
-            testing_build: self.session.testing_build.clone(),
+            is_debug: self.session.is_debug(),
+            is_canary: self.session.is_canary(),
+            testing_build: self.session.testing_build().map(str::to_owned),
             working_git,
         }
     }

@@ -34,7 +34,7 @@ fn text(text: &str) -> ContentBlock {
 fn save_test_session(id: &str, messages: Vec<(Role, Vec<ContentBlock>)>) -> Session {
     let mut session = Session::create_with_id(id.to_string(), None, None);
     session.short_name = Some(format!("short-{id}"));
-    session.working_dir = Some("/tmp/project".to_string());
+    session.set_working_dir(Some("/tmp/project".to_string()));
     for (role, content) in messages {
         session.add_message(role, content);
     }
@@ -251,7 +251,7 @@ fn journal_entries_are_searchable() {
     with_temp_home(|home| {
         let mut session = Session::create_with_id("journal-session".to_string(), None, None);
         session.short_name = Some("journal-test".to_string());
-        session.working_dir = Some("/tmp/project".to_string());
+        session.set_working_dir(Some("/tmp/project".to_string()));
         session.add_message(Role::User, vec![text("snapshot-only baseline message")]);
         session.save().expect("save snapshot");
         session.add_message(
@@ -427,8 +427,8 @@ fn metadata_is_searchable_and_returned_with_locator() {
             vec![(Role::User, vec![text("ordinary content without the label")])],
         );
         session.short_name = Some("pegasus".to_string());
-        session.title = Some("Saved architecture discussion".to_string());
-        session.save_label = Some("project-pegasus".to_string());
+        session.set_title(Some("Saved architecture discussion".to_string()));
+        session.set_save_label_for_tests(Some("project-pegasus".to_string()));
         session.save().expect("save metadata update");
 
         let options = SearchOptions::for_test("current-session");
@@ -444,7 +444,7 @@ fn metadata_is_searchable_and_returned_with_locator() {
 fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
     with_temp_home(|home| {
         let mut session = Session::create_with_id("system-session".to_string(), None, None);
-        session.working_dir = Some("/tmp/project".to_string());
+        session.set_working_dir(Some("/tmp/project".to_string()));
         session.add_message(
             Role::User,
             vec![text(
@@ -478,7 +478,7 @@ fn working_dir_filter_is_case_insensitive_and_prefix_based() {
             "dir-session",
             vec![(Role::Assistant, vec![text("directory-filter-needle")])],
         );
-        session.working_dir = Some("/tmp/Project/Subdir".to_string());
+        session.set_working_dir(Some("/tmp/Project/Subdir".to_string()));
         session.save().expect("save working dir update");
 
         let mut options = SearchOptions::for_test("current-session");
@@ -552,11 +552,11 @@ fn filters_cover_role_provider_model_flags_and_dates() {
                 ),
             ],
         );
-        session.provider_key = Some("anthropic".to_string());
-        session.model = Some("claude-sonnet-4".to_string());
-        session.saved = true;
-        session.is_debug = true;
-        session.is_canary = true;
+        session.set_provider_key(Some("anthropic".to_string()));
+        session.set_model(Some("claude-sonnet-4".to_string()));
+        session.set_saved_for_tests(true);
+        session.set_debug(true);
+        session.set_is_canary_for_tests(true);
         session.save().expect("save filter metadata");
 
         let mut options = SearchOptions::for_test("current-session");
@@ -607,7 +607,7 @@ fn role_all_searches_user_assistant_and_metadata() {
                 ),
             ],
         );
-        session.save_label = Some("shared-needle metadata".to_string());
+        session.set_save_label_for_tests(Some("shared-needle metadata".to_string()));
         session.save().expect("save metadata update");
 
         let mut options = SearchOptions::for_test("current-session");

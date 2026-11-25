@@ -82,7 +82,7 @@ pub(super) async fn live_or_revived_agent(
         }
         let provider = context.provider.fork();
         let registry = crate::tool::Registry::new(provider.clone()).await;
-        if session.is_canary {
+        if session.is_canary() {
             registry.register_selfdev_tools().await;
         }
         let mcp_pool = super::get_shared_mcp_pool(&context.mcp_pool).await;
@@ -91,7 +91,7 @@ pub(super) async fn live_or_revived_agent(
                 None,
                 Some(mcp_pool),
                 is_headless_member.then(|| "headless".to_string()),
-                session.working_dir.as_ref().map(std::path::PathBuf::from),
+                session.working_dir().as_ref().map(std::path::PathBuf::from),
             )
             .await;
         let mut agent = Agent::reopen_session(provider, registry, session, was_idle_unloaded);

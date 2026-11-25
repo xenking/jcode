@@ -23,7 +23,7 @@ async fn formal_recovery_running_worker_requires_owner() -> Result<()> {
     );
     worker.save()?;
     let swarm = "formal-running-without-owner";
-    let mut member = persisted_headless_member(&worker.id, swarm, "running", "interrupted");
+    let mut member = persisted_headless_member(worker.id(), swarm, "running", "interrupted");
     member.report_back_to_session_id = Some("historical-owner".into());
     let mut owner = persisted_headless_member(
         "historical-owner",
@@ -35,11 +35,11 @@ async fn formal_recovery_running_worker_requires_owner() -> Result<()> {
     persist_swarm_state_snapshot(swarm, None, Some("historical-owner"), &[member, owner]);
     let server = Server::new(provider);
     server.recover_headless_sessions_on_startup().await;
-    let agent = server.sessions.read().await.get(&worker.id).cloned();
+    let agent = server.sessions.read().await.get(worker.id()).cloned();
     if let Some(agent) = agent {
         timeout(Duration::from_secs(5), async {
             loop {
-                if server.swarm_state.members.read().await[&worker.id].status == "ready" {
+                if server.swarm_state.members.read().await[worker.id()].status == "ready" {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -73,7 +73,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     let mut worker = crate::session::Session::create(None, Some("formal worker".into()));
     worker.save()?;
     crate::todo::save_todos(
-        &worker.id,
+        worker.id(),
         &[crate::todo::TodoItem {
             id: "formal-open-lane".into(),
             content: "unfinished work".into(),
@@ -83,7 +83,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
         }],
     )?;
     let swarm = "formal-stop-after-owner-read";
-    let mut member = persisted_headless_member(&worker.id, swarm, "ready", "between turns");
+    let mut member = persisted_headless_member(worker.id(), swarm, "ready", "between turns");
     member.report_back_to_session_id = Some("formal-owner".into());
     let mut owner = persisted_headless_member("formal-owner", swarm, "ready", "live");
     owner.is_headless = false;
@@ -97,7 +97,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     });
     let agent = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(agent) = server.sessions.read().await.get(&worker.id).cloned() {
+            if let Some(agent) = server.sessions.read().await.get(worker.id()).cloned() {
                 break agent;
             }
             tokio::task::yield_now().await;
@@ -114,7 +114,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
-    assert!(!crate::turn_cancel_registry::has_active_turn(&worker.id));
+    assert!(!crate::turn_cancel_registry::has_active_turn(worker.id()));
     crate::server::update_member_status(
         "formal-owner",
         "stopped",
@@ -130,7 +130,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     timeout(Duration::from_secs(5), recovering).await??;
     timeout(Duration::from_secs(5), async {
         loop {
-            if server.swarm_state.members.read().await[&worker.id].status == "ready" {
+            if server.swarm_state.members.read().await[worker.id()].status == "ready" {
                 break;
             }
             tokio::task::yield_now().await;
@@ -158,7 +158,7 @@ async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()
     let mut worker = crate::session::Session::create(None, Some("worker".into()));
     worker.save()?;
     crate::todo::save_todos(
-        &worker.id,
+        worker.id(),
         &[crate::todo::TodoItem {
             content: "open".into(),
             status: "in_progress".into(),
@@ -168,7 +168,7 @@ async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()
         }],
     )?;
     let swarm = "stopped-after-load";
-    let mut member = persisted_headless_member(&worker.id, swarm, "ready", "idle");
+    let mut member = persisted_headless_member(worker.id(), swarm, "ready", "idle");
     member.report_back_to_session_id = Some("owner".into());
     let mut owner = persisted_headless_member("owner", swarm, "ready", "live");
     owner.is_headless = false;
@@ -186,7 +186,7 @@ async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()
     )
     .await;
     server.recover_headless_sessions_on_startup().await;
-    assert!(!server.sessions.read().await.contains_key(&worker.id));
+    assert!(!server.sessions.read().await.contains_key(worker.id()));
     Ok(())
 }
 
@@ -205,7 +205,7 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
     let mut worker = crate::session::Session::create(None, Some("old worker".into()));
     worker.save()?;
     crate::todo::save_todos(
-        &worker.id,
+        worker.id(),
         &[crate::todo::TodoItem {
             content: "old probe".into(),
             status: "in_progress".into(),
@@ -217,13 +217,13 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
     let mut coordinator = crate::session::Session::create(None, Some("old coordinator".into()));
     coordinator.save()?;
     let swarm_id = "old-coordinator-swarm";
-    let mut member = persisted_headless_member(&worker.id, swarm_id, "ready", "idle");
-    member.report_back_to_session_id = Some(coordinator.id.clone());
+    let mut member = persisted_headless_member(worker.id(), swarm_id, "ready", "idle");
+    member.report_back_to_session_id = Some(coordinator.id().to_owned());
     let mut stale_crashed =
         crate::session::Session::create(None, Some("old crashed worker".into()));
     stale_crashed.save()?;
     crate::todo::save_todos(
-        &stale_crashed.id,
+        stale_crashed.id(),
         &[crate::todo::TodoItem {
             content: "old crashed probe".into(),
             status: "in_progress".into(),
@@ -233,15 +233,15 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
         }],
     )?;
     let mut stale_crashed_member = persisted_headless_member(
-        &stale_crashed.id,
+        stale_crashed.id(),
         swarm_id,
         "crashed",
         "crashed before reload",
     );
-    stale_crashed_member.report_back_to_session_id = Some(coordinator.id.clone());
+    stale_crashed_member.report_back_to_session_id = Some(coordinator.id().to_owned());
     super::super::reload_recovery::persist_intent(
         "earlier-reload",
-        &worker.id,
+        worker.id(),
         super::super::reload_recovery::ReloadRecoveryRole::Headless,
         crate::tool::selfdev::ReloadRecoveryDirective {
             reconnect_notice: None,
@@ -249,7 +249,7 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
         },
         "previous reload",
     )?;
-    super::super::reload_recovery::cancel(&worker.id)?;
+    super::super::reload_recovery::cancel(worker.id())?;
     crate::server::write_reload_state(
         "current-reload",
         "test",
@@ -257,7 +257,7 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
         None,
     );
     let mut owner = persisted_headless_member(
-        &coordinator.id,
+        coordinator.id(),
         swarm_id,
         "stopped",
         "client not attached after server restart",
@@ -269,17 +269,21 @@ async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopp
     server.recover_headless_sessions_on_startup().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !server.sessions.read().await.contains_key(&worker.id),
+        !server.sessions.read().await.contains_key(worker.id()),
         "old worker must not be revived"
     );
     assert!(
-        !server.sessions.read().await.contains_key(&stale_crashed.id),
+        !server
+            .sessions
+            .read()
+            .await
+            .contains_key(stale_crashed.id()),
         "old crashed worker must not be revived"
     );
     crate::server::clear_reload_marker();
     server.recover_headless_sessions_on_startup().await;
     assert!(
-        !server.sessions.read().await.contains_key(&worker.id),
+        !server.sessions.read().await.contains_key(worker.id()),
         "stale intent without a current reload must not revive an orphan"
     );
     Ok(())
@@ -319,7 +323,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
         task_context: Some("Verify multi-session reload recovery".to_string()),
         version_before: "old-build".to_string(),
         version_after: "new-build".to_string(),
-        session_id: initiator.id.clone(),
+        session_id: initiator.id().to_owned(),
         timestamp: "2026-04-19T00:00:00Z".to_string(),
     }
     .save()?;
@@ -341,8 +345,8 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
         None,
         None,
         &[
-            persisted_headless_member(&initiator.id, swarm_id, "running", "selfdev reload"),
-            persisted_headless_member(&peer.id, swarm_id, "running", "bash tool"),
+            persisted_headless_member(initiator.id(), swarm_id, "running", "selfdev reload"),
+            persisted_headless_member(peer.id(), swarm_id, "running", "bash tool"),
         ],
     );
 
@@ -351,18 +355,18 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
         let members = server.swarm_state.members.read().await;
         assert_eq!(
             members
-                .get(&initiator.id)
+                .get(initiator.id())
                 .map(|member| member.status.as_str()),
             Some("running"),
             "an interrupted turn is still busy even before recovery is admitted"
         );
         assert_eq!(
-            members.get(&peer.id).map(|member| member.status.as_str()),
+            members.get(peer.id()).map(|member| member.status.as_str()),
             Some("running")
         );
     }
 
-    let watched = [peer.id.clone()];
+    let watched = [peer.id().to_owned()];
     let targets = [
         "ready".into(),
         "failed".into(),
@@ -371,7 +375,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     ];
     let read_wait = || {
         crate::server::comm_await::awaited_member_statuses(
-            &initiator.id,
+            initiator.id(),
             swarm_id,
             &watched,
             &targets,
@@ -383,7 +387,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     use crate::server::await_members_state::{ensure_pending_state, load_state};
     let wait = ensure_pending_state(
         "interrupted-headless-wait",
-        &initiator.id,
+        initiator.id(),
         swarm_id,
         &watched,
         &targets,
@@ -408,12 +412,12 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     timeout(Duration::from_secs(5), async {
         loop {
             let sessions = server.sessions.read().await;
-            let Some(initiator_agent) = sessions.get(&initiator.id).cloned() else {
+            let Some(initiator_agent) = sessions.get(initiator.id()).cloned() else {
                 drop(sessions);
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
             };
-            let Some(peer_agent) = sessions.get(&peer.id).cloned() else {
+            let Some(peer_agent) = sessions.get(peer.id()).cloned() else {
                 drop(sessions);
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
@@ -437,10 +441,10 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
             let statuses_ready = {
                 let members = server.swarm_state.members.read().await;
                 members
-                    .get(&initiator.id)
+                    .get(initiator.id())
                     .map(|member| member.status.as_str())
                     == Some("ready")
-                    && members.get(&peer.id).map(|member| member.status.as_str()) == Some("ready")
+                    && members.get(peer.id()).map(|member| member.status.as_str()) == Some("ready")
             };
 
             if initiator_done && peer_done && statuses_ready {
@@ -472,7 +476,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     assert_eq!(result.members[0].status, "ready");
 
     assert!(
-        ReloadContext::peek_for_session(&initiator.id)?.is_none(),
+        ReloadContext::peek_for_session(initiator.id())?.is_none(),
         "initiator reload context should be consumed by headless recovery"
     );
 
@@ -516,7 +520,7 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
         }],
     );
     headed.save()?;
-    for id in [&worker.id, &headed.id, &idle.id] {
+    for id in [worker.id(), headed.id(), idle.id()] {
         super::super::reload_recovery::persist_intent(
             "reload-stopped-worker",
             id,
@@ -530,7 +534,7 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
     }
     assert!(
         super::super::reload_recovery::mark_delivered_if_matching_continuation(
-            &idle.id,
+            idle.id(),
             "Continue interrupted work",
             "test-completed-recovery",
         )?
@@ -546,10 +550,10 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
         crate::server::ReloadPhase::Starting,
         None,
     );
-    let mut headed_member = persisted_headless_member(&headed.id, swarm_id, "ready", "attached");
+    let mut headed_member = persisted_headless_member(headed.id(), swarm_id, "ready", "attached");
     headed_member.is_headless = false;
     let mut interrupted_worker =
-        persisted_headless_member(&worker.id, swarm_id, "ready", "aborted turn");
+        persisted_headless_member(worker.id(), swarm_id, "ready", "aborted turn");
     interrupted_worker.report_back_to_session_id = Some("stopped-owner".into());
     let mut stopped_owner =
         persisted_headless_member("stopped-owner", swarm_id, "stopped", "stopped earlier");
@@ -560,23 +564,23 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
         None,
         &[
             interrupted_worker,
-            persisted_headless_member(&idle.id, swarm_id, "ready", "genuinely idle"),
+            persisted_headless_member(idle.id(), swarm_id, "ready", "genuinely idle"),
             headed_member,
             stopped_owner,
         ],
     );
     let server = Server::new(provider);
     assert_eq!(
-        server.swarm_state.members.read().await[&worker.id].status,
+        server.swarm_state.members.read().await[worker.id()].status,
         "stopped"
     );
     server.recover_headless_sessions_on_startup().await;
     timeout(Duration::from_secs(5), async {
         loop {
-            if !super::super::reload_recovery::has_pending_for_session(&worker.id)
-                && !super::super::reload_recovery::has_pending_for_session(&headed.id)
-                && server.swarm_state.members.read().await[&worker.id].status == "ready"
-                && server.swarm_state.members.read().await[&headed.id].status == "ready"
+            if !super::super::reload_recovery::has_pending_for_session(worker.id())
+                && !super::super::reload_recovery::has_pending_for_session(headed.id())
+                && server.swarm_state.members.read().await[worker.id()].status == "ready"
+                && server.swarm_state.members.read().await[headed.id()].status == "ready"
             {
                 break;
             }
@@ -587,20 +591,20 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
     .expect("durable intent must resume even a stopped worker");
     let sessions = server.sessions.read().await;
     assert!(
-        !sessions.contains_key(&idle.id),
+        !sessions.contains_key(idle.id()),
         "idle workers must not be resurrected"
     );
     assert!(
-        sessions.contains_key(&headed.id),
+        sessions.contains_key(headed.id()),
         "attached recovery belongs to the same daemon owner"
     );
-    let agent = sessions[&worker.id].clone();
+    let agent = sessions[worker.id()].clone();
     drop(sessions);
     assert!(agent.lock().await.messages().iter().any(|message| {
         message.role == Role::Assistant && message.content_preview().contains("recovered ")
     }));
     assert!(!super::super::reload_recovery::has_pending_for_session(
-        &headed.id
+        headed.id()
     ));
     Ok(())
 }
@@ -621,7 +625,7 @@ async fn startup_recovery_cannot_admit_an_explicitly_stopped_worker() -> Result<
         None,
         None,
         &[persisted_headless_member(
-            &worker.id,
+            worker.id(),
             swarm_id,
             "running",
             "old snapshot",
@@ -629,7 +633,7 @@ async fn startup_recovery_cannot_admit_an_explicitly_stopped_worker() -> Result<
     );
     reload_recovery::persist_intent(
         "reload-explicit-stop",
-        &worker.id,
+        worker.id(),
         ReloadRecoveryRole::Headless,
         crate::tool::selfdev::ReloadRecoveryDirective {
             reconnect_notice: None,
@@ -638,20 +642,20 @@ async fn startup_recovery_cannot_admit_an_explicitly_stopped_worker() -> Result<
         "work in flight before stop",
     )?;
     // Crash after sealing stop, before cancelling the intent or writing a new snapshot.
-    drop(crate::turn_activity::global().stop(&worker.id)?);
+    drop(crate::turn_activity::global().stop(worker.id())?);
 
     let server = Server::new(Arc::new(StreamingMockProvider::default()));
     assert_eq!(
-        server.swarm_state.members.read().await[&worker.id].status,
+        server.swarm_state.members.read().await[worker.id()].status,
         "stopped"
     );
-    assert!(!server.running_before_restart.contains(&worker.id));
+    assert!(!server.running_before_restart.contains(worker.id()));
     for task in server.recover_headless_sessions_on_startup().await.tasks {
         task.await?;
     }
-    assert!(!server.sessions.read().await.contains_key(&worker.id));
+    assert!(!server.sessions.read().await.contains_key(worker.id()));
     assert_eq!(
-        reload_recovery::peek_for_session(&worker.id)?
+        reload_recovery::peek_for_session(worker.id())?
             .unwrap()
             .status,
         ReloadRecoveryStatus::Cancelled,
@@ -688,7 +692,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
         task_context: Some("resume headless worker".to_string()),
         version_before: "old-headless".to_string(),
         version_after: "new-headless".to_string(),
-        session_id: headless.id.clone(),
+        session_id: headless.id().to_owned(),
         timestamp: "2026-04-19T00:00:00Z".to_string(),
     }
     .save()?;
@@ -709,7 +713,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
         None,
         None,
         &[persisted_headless_member(
-            &headless.id,
+            headless.id(),
             swarm_id,
             "running",
             "bash tool",
@@ -722,7 +726,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
     timeout(Duration::from_secs(5), async {
         loop {
             let sessions = server.sessions.read().await;
-            let Some(headless_agent) = sessions.get(&headless.id).cloned() else {
+            let Some(headless_agent) = sessions.get(headless.id()).cloned() else {
                 drop(sessions);
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
@@ -747,7 +751,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
     .expect("headless reload recovery should complete");
 
     assert!(
-        ReloadContext::peek_for_session(&headless.id)?.is_none(),
+        ReloadContext::peek_for_session(headless.id())?.is_none(),
         "headless session reload context should be consumed by startup recovery"
     );
     assert!(
@@ -783,7 +787,7 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
         None,
         None,
         &[persisted_headless_member(
-            &headless.id,
+            headless.id(),
             swarm_id,
             "running",
             "delay startup recovery",
@@ -880,7 +884,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     );
     busy.save()?;
     crate::todo::save_todos(
-        &busy.id,
+        busy.id(),
         &[
             todo("wire the fix", "completed"),
             todo("run the tests", "in_progress"),
@@ -888,14 +892,14 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     )?;
     let mut done = crate::session::Session::create(None, Some("done".to_string()));
     done.save()?;
-    crate::todo::save_todos(&done.id, &[todo("everything", "completed")])?;
+    crate::todo::save_todos(done.id(), &[todo("everything", "completed")])?;
 
     let swarm_id = "swarm-open-lane";
-    let busy_member = persisted_headless_member(&busy.id, swarm_id, "ready", "between turns");
+    let busy_member = persisted_headless_member(busy.id(), swarm_id, "ready", "between turns");
     let mut owner = persisted_headless_member("coordinator", swarm_id, "ready", "coordinating");
     owner.is_headless = false;
     owner.role = "coordinator".to_string();
-    let mut done_member = persisted_headless_member(&done.id, swarm_id, "ready", "finished");
+    let mut done_member = persisted_headless_member(done.id(), swarm_id, "ready", "finished");
     done_member.report_back_to_session_id = Some("coordinator".to_string());
     persist_swarm_state_snapshot(
         swarm_id,
@@ -908,7 +912,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     server.recover_headless_sessions_on_startup().await;
     timeout(Duration::from_secs(5), async {
         loop {
-            let agent = server.sessions.read().await.get(&busy.id).cloned();
+            let agent = server.sessions.read().await.get(busy.id()).cloned();
             if let Some(agent) = agent {
                 let resumed = agent.lock().await.messages().iter().any(|message| {
                     message.role == Role::Assistant
@@ -929,7 +933,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
         .sessions
         .read()
         .await
-        .get(&busy.id)
+        .get(busy.id())
         .cloned()
         .expect("worker agent");
     assert!(
@@ -942,7 +946,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
         "the continuation must include actionable todo details"
     );
     assert!(
-        !server.sessions.read().await.contains_key(&done.id),
+        !server.sessions.read().await.contains_key(done.id()),
         "a worker with no open todos is idle and is not resurrected"
     );
     Ok(())
@@ -976,7 +980,7 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
     worker.save()?;
     super::super::reload_recovery::persist_intent(
         "earlier-reload",
-        &worker.id,
+        worker.id(),
         super::super::reload_recovery::ReloadRecoveryRole::Headless,
         crate::tool::selfdev::ReloadRecoveryDirective {
             reconnect_notice: None,
@@ -985,10 +989,10 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
         "previous reload",
     )?;
     let mut consumed =
-        super::super::reload_recovery::peek_for_session(&worker.id)?.expect("persisted intent");
+        super::super::reload_recovery::peek_for_session(worker.id())?.expect("persisted intent");
     consumed.status = super::super::reload_recovery::ReloadRecoveryStatus::Started;
     crate::storage::write_json(
-        &super::super::reload_recovery::path_for_session(&worker.id)?,
+        &super::super::reload_recovery::path_for_session(worker.id())?,
         &consumed,
     )?;
     let swarm_id = "swarm-consumed-continuation";
@@ -997,7 +1001,7 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
         None,
         None,
         &[persisted_headless_member(
-            &worker.id,
+            worker.id(),
             swarm_id,
             "running",
             "bash tool",
@@ -1008,7 +1012,7 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
     server.recover_headless_sessions_on_startup().await;
     timeout(Duration::from_secs(5), async {
         loop {
-            let agent = server.sessions.read().await.get(&worker.id).cloned();
+            let agent = server.sessions.read().await.get(worker.id()).cloned();
             if let Some(agent) = agent
                 && agent.lock().await.messages().iter().any(|message| {
                     message.role == Role::Assistant

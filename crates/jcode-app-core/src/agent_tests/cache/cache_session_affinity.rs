@@ -46,7 +46,7 @@ impl Provider for SessionAffinityProvider {
 async fn cache_session_affinity_binds_new_and_restored_agents_before_prewarm() {
     let provider = Arc::new(SessionAffinityProvider::default());
     let agent = Agent::new(provider.clone(), Registry::empty());
-    let session_id = agent.session.id.clone();
+    let session_id = agent.session.id().to_owned();
     assert_eq!(
         provider.session.lock().unwrap().as_deref(),
         Some(session_id.as_str())
@@ -67,7 +67,7 @@ async fn cache_session_affinity_binds_new_and_restored_agents_before_prewarm() {
         agent.session.clone(),
         None,
     );
-    assert_eq!(restored.session.id, session_id);
+    assert_eq!(restored.session.id(), session_id);
     assert_eq!(
         restored_provider.session.lock().unwrap().as_deref(),
         Some(session_id.as_str())
@@ -75,9 +75,9 @@ async fn cache_session_affinity_binds_new_and_restored_agents_before_prewarm() {
 
     let independent_provider = Arc::new(SessionAffinityProvider::default());
     let independent = Agent::new(independent_provider.clone(), Registry::empty());
-    assert_ne!(independent.session.id, session_id);
+    assert_ne!(independent.session.id(), session_id);
     assert_eq!(
         independent_provider.session.lock().unwrap().as_deref(),
-        Some(independent.session.id.as_str())
+        Some(independent.session.id())
     );
 }

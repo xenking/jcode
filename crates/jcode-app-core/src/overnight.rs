@@ -78,19 +78,19 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         create_coordinator_session(&options.parent_session, &options.mission)?
     };
     if let Some(working_dir) = options.working_dir.as_ref() {
-        child.working_dir = Some(working_dir.to_string_lossy().to_string());
+        child.set_working_dir(Some(working_dir.to_string_lossy().to_string()));
     }
-    child.model = Some(options.provider.model());
-    let coordinator_session_id = child.id.clone();
+    child.set_model(Some(options.provider.model()));
+    let coordinator_session_id = child.id().to_owned();
     let coordinator_session_name = child.display_name().to_string();
-    let child_is_canary = child.is_canary;
+    let child_is_canary = child.is_canary();
     if !options.use_current_session {
-        child.status = SessionStatus::Closed;
+        child.set_status(SessionStatus::Closed);
     }
     child.save()?;
 
     if !options.use_current_session
-        && let Ok(todos) = crate::todo::load_todos(&options.parent_session.id)
+        && let Ok(todos) = crate::todo::load_todos(options.parent_session.id())
     {
         let _ = crate::todo::save_todos(&coordinator_session_id, &todos);
     }
@@ -98,7 +98,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     let manifest = OvernightManifest {
         version: OVERNIGHT_VERSION,
         run_id: run_id.clone(),
-        parent_session_id: options.parent_session.id.clone(),
+        parent_session_id: options.parent_session.id().to_owned(),
         coordinator_session_id: coordinator_session_id.clone(),
         coordinator_session_name,
         started_at,
@@ -110,7 +110,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         cancel_requested_at: None,
         status: OvernightRunStatus::Running,
         mission: options.mission.clone(),
-        working_dir: child.working_dir.clone(),
+        working_dir: child.working_dir().map(str::to_owned),
         provider_name: options.provider.name().to_string(),
         model: options.provider.model(),
         max_agents_guidance: 2,

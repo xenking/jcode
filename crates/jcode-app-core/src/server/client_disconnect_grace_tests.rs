@@ -71,10 +71,10 @@ impl Fixture {
         let registry = Registry::new(provider.clone()).await;
         let mut session = Session::create(None, None);
         if persisted {
-            session.title = Some("Explicit saved panel".into());
+            session.set_title(Some("Explicit saved panel".into()));
             session.save().unwrap();
         }
-        let id = session.id.clone();
+        let id = session.id().to_owned();
         let mut agent = Agent::new_with_session(provider, registry, session, None);
         agent.set_memory_enabled(false);
         let agent = Arc::new(Mutex::new(agent));
@@ -308,7 +308,7 @@ async fn continued_turn_remains_live_after_owner_finishes() {
     assert!(fixture.sessions.read().await.contains_key(&fixture.id));
     assert_eq!(fixture.members.read().await[&fixture.id].status, "ready");
     assert!(!matches!(
-        fixture.agent.lock().await.session_for_split().status,
+        fixture.agent.lock().await.session_for_split().status(),
         SessionStatus::Closed | SessionStatus::Crashed { .. }
     ));
 }
@@ -432,7 +432,7 @@ async fn interrupted_session_does_not_wait_for_reconnect_grace() {
     .unwrap();
     assert!(fixture.sessions.read().await.is_empty());
     assert!(matches!(
-        fixture.agent.lock().await.session_for_split().status,
+        fixture.agent.lock().await.session_for_split().status(),
         SessionStatus::Crashed { .. }
     ));
 }
@@ -491,7 +491,7 @@ async fn busy_without_successor_aborts_owner_and_marks_crashed() {
     );
     assert!(fixture.sessions.read().await.is_empty());
     assert!(matches!(
-        fixture.agent.lock().await.session_for_split().status,
+        fixture.agent.lock().await.session_for_split().status(),
         SessionStatus::Crashed { .. }
     ));
 }

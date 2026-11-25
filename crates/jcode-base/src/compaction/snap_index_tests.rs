@@ -328,8 +328,8 @@ fn snap_index_copied_real_session_golden_and_timing() {
     );
     let session: crate::session::Session =
         serde_json::from_slice(&std::fs::read(&fixture).unwrap()).unwrap();
-    let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
-    let state = session.compaction.unwrap();
+    let messages: Vec<_> = session.messages().iter().map(|m| m.to_message()).collect();
+    let state = session.compaction().unwrap();
     let prior = state.snapcompact.as_ref().unwrap();
     let prepared = prepare_messages_with(
         &messages[state.compacted_count..],
@@ -432,14 +432,14 @@ fn snap_index_copied_archive_profile() {
     assert!(fixture.starts_with(scratch));
     let session: crate::session::Session =
         serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
-    let state = session.compaction.unwrap();
+    let state = session.compaction().unwrap();
     let archive = state.snapcompact.as_ref().unwrap();
     let page_ranges = jcode_compaction_core::snapcompact::legacy_page_ranges(
         &archive.source,
         &state.summary_text,
         archive.pages.len(),
     );
-    let messages: Vec<_> = session.messages[..state.compacted_count]
+    let messages: Vec<_> = session.messages()[..state.compacted_count]
         .iter()
         .map(|m| m.to_message())
         .collect();

@@ -118,7 +118,7 @@ fn checkpoint_preserves_blank_session_ids_overrides_and_queued_input() {
     let blank_id = blank.session_id().to_string();
     blank.checkpoint_idle_runtime_upgrade().unwrap();
     assert_eq!(
-        crate::session::Session::load(&blank_id).unwrap().id,
+        crate::session::Session::load(&blank_id).unwrap().id(),
         blank_id
     );
 
@@ -146,10 +146,10 @@ fn checkpoint_preserves_blank_session_ids_overrides_and_queued_input() {
     configured.checkpoint_idle_runtime_upgrade().unwrap();
     let restored = crate::session::Session::load(configured.session_id()).unwrap();
     assert_eq!(
-        restored.system_prompt.as_deref(),
+        restored.system_prompt(),
         Some("Keep this custom prompt after runtime reconnect")
     );
-    assert_eq!(restored.subagent_model.as_deref(), Some("test-model"));
+    assert_eq!(restored.subagent_model(), Some("test-model"));
     let pending = crate::soft_interrupt_store::load(configured.session_id()).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].client_id.as_deref(), Some("follow-up-7"));

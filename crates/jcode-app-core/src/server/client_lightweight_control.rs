@@ -276,7 +276,7 @@ async fn ensure_lightweight_swarm_member(
     let Ok(stub) = crate::session::Session::load_startup_stub(session_id) else {
         return;
     };
-    let working_dir = stub.working_dir.map(PathBuf::from);
+    let working_dir = stub.working_dir().map(PathBuf::from);
 
     let swarm_id = super::util::swarm_id_for_session(session_id);
     let now = std::time::Instant::now();

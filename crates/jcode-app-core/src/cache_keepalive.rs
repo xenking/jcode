@@ -83,20 +83,20 @@ pub(crate) struct Turn {
 
 impl Turn {
     pub(crate) fn begin(session: &crate::session::Session, clock: CompactionClock) -> Option<Self> {
-        if session.is_debug || !crate::config::config().cache.keepalive {
+        if session.is_debug() || !crate::config::config().cache.keepalive {
             return None;
         }
         let hub = {
             let mut hubs = HUBS.lock().unwrap_or_else(|error| error.into_inner());
-            hubs.get(&session.id)
+            hubs.get(session.id())
                 .and_then(Weak::upgrade)
                 .unwrap_or_else(|| {
                     let hub = Arc::new(Hub {
-                        session_id: session.id.clone(),
+                        session_id: session.id().to_owned(),
                         state: Mutex::default(),
                         changed: watch::channel(()).0,
                     });
-                    hubs.insert(session.id.clone(), Arc::downgrade(&hub));
+                    hubs.insert(session.id().to_owned(), Arc::downgrade(&hub));
                     hub
                 })
         };

@@ -119,9 +119,9 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     let messages = provider.messages.lock().unwrap().clone();
     assert_eq!(messages.len(), 2, "{messages:?}");
     let journal = crate::session::Session::load(&session_id).unwrap();
-    assert_eq!(journal.pinned_skill.as_deref(), Some("batch-two"));
+    assert_eq!(journal.pinned_skill(), Some("batch-two"));
     let contents: Vec<_> = journal
-        .messages
+        .messages()
         .iter()
         .map(|message| (message.display_role, format!("{:?}", message.content)))
         .collect();

@@ -134,7 +134,7 @@ fn assistant(text: &str) -> StoredMessage {
 
 fn session_with(messages: Vec<StoredMessage>) -> Session {
     let mut session = Session::create_with_id("session_title_test".to_string(), None, None);
-    session.messages = messages;
+    session.replace_messages(messages);
     session
 }
 
@@ -166,16 +166,16 @@ fn title_timing_is_first_and_third_turn_only() {
         TitleAction::Generate(jcode_session_types::TitleStage::FirstTurn)
     );
 
-    session.messages.push(assistant("ok"));
-    session.messages.push(user("second prompt"));
+    session.messages_mut_for_tests().push(assistant("ok"));
+    session.messages_mut_for_tests().push(user("second prompt"));
     assert!(matches!(
         plan_for_session(&session, true).0,
         TitleAction::Skip(jcode_session_types::TitleSkipReason::NotATitleTurn)
     ));
 
-    session.messages.push(assistant("ok"));
-    session.messages.push(user("third prompt"));
-    session.title = Some("Earlier title".to_string());
+    session.messages_mut_for_tests().push(assistant("ok"));
+    session.messages_mut_for_tests().push(user("third prompt"));
+    session.set_title(Some("Earlier title".to_string()));
     assert_eq!(
         plan_for_session(&session, true).0,
         TitleAction::Generate(jcode_session_types::TitleStage::ThirdTurn)
@@ -185,7 +185,7 @@ fn title_timing_is_first_and_third_turn_only() {
 #[test]
 fn manual_titles_are_never_regenerated() {
     let mut session = session_with(vec![user("first prompt")]);
-    session.custom_title = Some("Mine".to_string());
+    session.set_custom_title_for_tests(Some("Mine".to_string()));
     assert!(matches!(
         plan_for_session(&session, false).0,
         TitleAction::Skip(jcode_session_types::TitleSkipReason::ManualTitle)
@@ -237,10 +237,10 @@ async fn unusable_answers_leave_the_title_alone() {
 fn set_title_respects_a_rename_and_is_idempotent() {
     let mut session = session_with(vec![user("first prompt")]);
     assert!(set_title_if_allowed(&mut session, "Fix session titles"));
-    assert_eq!(session.title.as_deref(), Some("Fix session titles"));
+    assert_eq!(session.title(), Some("Fix session titles"));
     assert!(!set_title_if_allowed(&mut session, "Fix session titles"));
 
-    session.custom_title = Some("Mine".to_string());
+    session.set_custom_title_for_tests(Some("Mine".to_string()));
     assert!(!set_title_if_allowed(&mut session, "Other title"));
-    assert_eq!(session.title.as_deref(), Some("Fix session titles"));
+    assert_eq!(session.title(), Some("Fix session titles"));
 }

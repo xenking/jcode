@@ -345,7 +345,7 @@ fn replacement_notice_reaches_next_local_turn_once() {
     app.input = "continue configuring cloud".into();
     app.submit_input();
     assert!(app.cloud_recovery_context.is_none());
-    assert!(app.session.messages.iter().any(|message| {
+    assert!(app.session.messages().iter().any(|message| {
         message.content.iter().any(|block| {
             matches!(block, crate::message::ContentBlock::Text { text, .. } if text.contains(&reminder))
         })
@@ -504,7 +504,7 @@ fn cloud_failure_reaches_next_local_agent_turn() {
     app.input = "fix that cloud error".into();
     app.submit_input();
     assert!(app.cloud_recovery_context.is_none());
-    assert!(app.session.messages.iter().any(|message| {
+    assert!(app.session.messages().iter().any(|message| {
         message.content.iter().any(|block| {
             matches!(block,
                 crate::message::ContentBlock::Text { text, .. }

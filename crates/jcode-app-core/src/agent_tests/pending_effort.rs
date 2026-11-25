@@ -121,8 +121,7 @@ async fn effort_chosen_mid_turn_reaches_the_next_request_and_is_saved() {
     assert_eq!(
         crate::session::Session::load(&session_id)
             .unwrap()
-            .reasoning_effort
-            .as_deref(),
+            .reasoning_effort(),
         Some("high"),
         "the applied effort must be persisted with the session"
     );
@@ -139,7 +138,7 @@ async fn effort_chosen_before_a_restart_is_adopted_by_the_restored_agent() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let session_id = "session_pending_effort_restart";
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.reasoning_effort = Some("xhigh".into());
+    session.set_reasoning_effort(Some("xhigh".into()));
     session.save_prepared().unwrap();
     crate::session_effort::queue_pending_effort(session_id, "high");
     crate::session_effort::forget_pending_efforts_in_memory();
@@ -153,12 +152,11 @@ async fn effort_chosen_before_a_restart_is_adopted_by_the_restored_agent() {
     );
 
     assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
-    assert_eq!(agent.session.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(agent.session.reasoning_effort(), Some("high"));
     assert_eq!(
         crate::session::Session::load(session_id)
             .unwrap()
-            .reasoning_effort
-            .as_deref(),
+            .reasoning_effort(),
         Some("high"),
         "the adopted effort must replace the stale one on disk"
     );

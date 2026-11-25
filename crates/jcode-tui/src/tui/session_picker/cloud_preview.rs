@@ -294,7 +294,7 @@ mod tests {
             panic!("fresh cloud preview must be disk-only")
         })
         .unwrap();
-        assert_eq!(session.title.as_deref(), Some("Cloud copy"));
+        assert_eq!(session.title(), Some("Cloud copy"));
     }
 
     #[test]
@@ -313,13 +313,13 @@ mod tests {
             Some(new)
         })
         .unwrap();
-        assert_eq!(session.title.as_deref(), Some("Old cloud copy"));
+        assert_eq!(session.title(), Some("Old cloud copy"));
         started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let (session, _) = load_cached_or_fetch("cached", Some(path.clone()), || {
             panic!("must not duplicate a pending refresh")
         })
         .unwrap();
-        assert_eq!(session.title.as_deref(), Some("Old cloud copy"));
+        assert_eq!(session.title(), Some("Old cloud copy"));
         release_tx.send(()).unwrap();
         let started = std::time::Instant::now();
         while !cache::fresh(&path) {
@@ -330,7 +330,7 @@ mod tests {
             panic!("refreshed cloud preview must be disk-only")
         })
         .unwrap();
-        assert_eq!(session.title.as_deref(), Some("New cloud copy"));
+        assert_eq!(session.title(), Some("New cloud copy"));
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
         let copy = expected.clone();
         let (session, _) =
             load_cached_or_fetch("cached", Some(path.clone()), move || Some(copy)).unwrap();
-        assert_eq!(session.title.as_deref(), Some("Repaired cloud copy"));
+        assert_eq!(session.title(), Some("Repaired cloud copy"));
         assert_eq!(cache::read(&path).unwrap(), expected);
     }
 
@@ -425,7 +425,7 @@ mod tests {
                 projected.as_secs_f64() * 1000.0,
                 frame_elapsed.as_secs_f64() * 1000.0,
                 started.elapsed().as_secs_f64() * 1000.0,
-                session.messages.len(),
+                session.messages().len(),
                 preview_count,
             );
             assert!(preview_count > 0);
@@ -438,9 +438,9 @@ mod tests {
         let mut bytes = serde_json::to_vec(&session).unwrap();
         bytes.extend_from_slice(b"\0\0");
         let telemetry = serde_json::json!({
-            "session_id": session.id,
-            "model": session.model,
-            "provider": session.provider_key,
+            "session_id": session.id(),
+            "model": session.model(),
+            "provider": session.provider_key(),
             "measured_at": chrono::Utc::now(),
             "context_tokens": 12_345,
             "context_limit": 100_000,
@@ -491,8 +491,8 @@ mod tests {
         bytes.extend_from_slice(&serde_json::to_vec(&entry).unwrap());
         bytes.push(b'\n');
         let loaded = parse_transcript(&bytes).unwrap();
-        assert_eq!(loaded.id, session.id);
-        assert_eq!(loaded.title.as_deref(), Some("Latest cloud title"));
+        assert_eq!(loaded.id(), session.id());
+        assert_eq!(loaded.title(), Some("Latest cloud title"));
         let preview = build_messages_preview(&loaded);
         assert!(
             preview

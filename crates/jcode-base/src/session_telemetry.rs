@@ -81,7 +81,7 @@ pub fn save_context(
     if session.is_ephemeral() {
         return;
     }
-    let Some(path) = path(&session.id) else {
+    let Some(path) = path(session.id()) else {
         return;
     };
     let account_usage = if matches!(
@@ -120,14 +120,14 @@ pub fn save_context(
         None
     };
     let snapshot = SessionTelemetry {
-        session_id: session.id.clone(),
-        model: session.model.clone(),
-        provider: session.provider_key.clone(),
+        session_id: session.id().to_owned(),
+        model: session.model().map(str::to_owned),
+        provider: session.provider_key().map(str::to_owned),
         measured_at: chrono::Utc::now(),
         context_tokens,
         context_limit,
-        compaction: session.compaction.clone(),
-        route_api_method: session.route_api_method.clone(),
+        compaction: session.compaction().cloned(),
+        route_api_method: session.route_api_method().map(str::to_owned),
         serving_provider: Some(serving_provider.to_ascii_lowercase()),
         credential,
         account_label,
@@ -141,7 +141,7 @@ pub fn save_context(
 }
 
 pub fn load_context(session: &Session) -> Option<SessionTelemetry> {
-    read_context(&session.id).filter(|snapshot| snapshot.matches_session(session))
+    read_context(session.id()).filter(|snapshot| snapshot.matches_session(session))
 }
 
 pub fn read_context(session_id: &str) -> Option<SessionTelemetry> {
@@ -174,11 +174,11 @@ fn read_persisted_context(path: &Path, session_id: &str) -> Option<SessionTeleme
 
 impl SessionTelemetry {
     pub fn matches_session(&self, session: &Session) -> bool {
-        self.session_id == session.id
-            && self.model == session.model
-            && self.provider == session.provider_key
-            && self.route_api_method == session.route_api_method
-            && self.compaction == session.compaction
+        self.session_id == session.id()
+            && self.model.as_deref() == session.model()
+            && self.provider.as_deref() == session.provider_key()
+            && self.route_api_method.as_deref() == session.route_api_method()
+            && self.compaction.as_ref() == session.compaction()
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(directory.path());
         let session = Session::create_with_id("telemetry-write-amp".into(), None, None);
-        let path = path(&session.id).unwrap();
+        let path = path(session.id()).unwrap();
         let observe = || save_context(&session, 1234, Some(200_000), "OpenAI", None, None, None);
         observe();
         let first = std::fs::read(&path).unwrap();
@@ -229,9 +229,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(directory.path());
         let mut session = Session::create_with_id("telemetry-test".into(), None, None);
-        session.model = Some("future-model".into());
-        session.provider_key = Some("openai".into());
-        session.route_api_method = Some("openai:account-a".into());
+        session.set_model(Some("future-model".into()));
+        session.set_provider_key(Some("openai".into()));
+        session.set_route_api_method(Some("openai:account-a".into()));
         save_context(
             &session,
             1234,
@@ -250,10 +250,10 @@ mod tests {
             saved.account_usage.is_none(),
             "missing quota cache is unknown"
         );
-        session.route_api_method = Some("openai:account-b".into());
+        session.set_route_api_method(Some("openai:account-b".into()));
         assert!(load_context(&session).is_none());
-        session.route_api_method = saved.route_api_method;
-        std::fs::write(path(&session.id).unwrap(), b"{broken").unwrap();
+        session.set_route_api_method(saved.route_api_method);
+        std::fs::write(path(session.id()).unwrap(), b"{broken").unwrap();
         assert!(load_context(&session).is_none());
     }
 

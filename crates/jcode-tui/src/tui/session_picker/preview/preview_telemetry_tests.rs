@@ -3,14 +3,14 @@ use crate::session_telemetry::SessionTelemetry;
 
 fn fixture() -> (Session, SessionTelemetry) {
     let mut session = Session::create_with_id("preview-telemetry-test".into(), None, None);
-    session.model = Some("model".into());
-    session.provider_key = Some("openai".into());
-    session.route_api_method = Some("openai:account-a".into());
+    session.set_model(Some("model".into()));
+    session.set_provider_key(Some("openai".into()));
+    session.set_route_api_method(Some("openai:account-a".into()));
     let snapshot = SessionTelemetry {
-        session_id: session.id.clone(),
-        model: session.model.clone(),
-        provider: session.provider_key.clone(),
-        route_api_method: session.route_api_method.clone(),
+        session_id: session.id().to_owned(),
+        model: session.model().map(str::to_owned),
+        provider: session.provider_key().map(str::to_owned),
+        route_api_method: session.route_api_method().map(str::to_owned),
         serving_provider: Some("openai".into()),
         measured_at: chrono::Utc::now(),
         context_tokens: 12_000,
@@ -79,24 +79,22 @@ fn foreign_or_changed_route_snapshots_are_rejected() {
     for field in ["id", "model", "provider", "account", "compaction"] {
         let mut changed = session.clone();
         match field {
-            "id" => changed.id = "different".into(),
-            "model" => changed.model = Some("different".into()),
-            "provider" => changed.provider_key = Some("different".into()),
-            "account" => changed.route_api_method = Some("openai:other".into()),
-            _ => {
-                changed.compaction = Some(
-                    jcode_session_types::StoredCompactionState {
-                        summary_text: "new summary".into(),
-                        plan_context: None,
-                        openai_encrypted_content: None,
-                        snapcompact: None,
-                        covers_up_to_turn: 2,
-                        original_turn_count: 3,
-                        compacted_count: 2,
-                    }
-                    .into(),
-                )
-            }
+            "id" => changed.set_id_for_tests("different".into()),
+            "model" => changed.set_model(Some("different".into())),
+            "provider" => changed.set_provider_key(Some("different".into())),
+            "account" => changed.set_route_api_method(Some("openai:other".into())),
+            _ => changed.set_compaction(Some(
+                jcode_session_types::StoredCompactionState {
+                    summary_text: "new summary".into(),
+                    plan_context: None,
+                    openai_encrypted_content: None,
+                    snapcompact: None,
+                    covers_up_to_turn: 2,
+                    original_turn_count: 3,
+                    compacted_count: 2,
+                }
+                .into(),
+            )),
         }
         let data = persisted_info_from_snapshot(&changed, Some(snapshot.clone()));
         assert!(data.observed_context_tokens.is_none(), "{field}");
@@ -146,7 +144,7 @@ fn unattributed_legacy_requests_never_become_current_context_or_quota() {
     snapshot.context_tokens = 12_000;
     let data = persisted_info_from_snapshot(&session, Some(snapshot));
     assert_eq!(data.observed_context_tokens, Some(12_000));
-    for message in &mut session.messages {
+    for message in session.messages_mut_for_tests().iter_mut() {
         message.token_usage.as_mut().unwrap().prompt_tokens = None;
     }
     assert!(

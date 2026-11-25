@@ -207,12 +207,12 @@ pub async fn export_swarm_video(
             .run_headless_replay(&pane.timeline, speed, pane_width, pane_height, fps)
             .await?;
         rendered_panes.push(crate::swarm_compose::SwarmPaneFrames {
-            session_id: pane.session.id.clone(),
+            session_id: pane.session.id().to_owned(),
             title: pane
                 .session
                 .short_name
                 .clone()
-                .unwrap_or_else(|| pane.session.id.clone()),
+                .unwrap_or_else(|| pane.session.id().to_owned()),
             frames,
         });
     }

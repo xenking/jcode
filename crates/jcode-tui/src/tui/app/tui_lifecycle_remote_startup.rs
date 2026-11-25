@@ -42,13 +42,13 @@ impl App {
                 && handoff_preview_session.as_deref() == Some(session_id)
             {
                 app.restore_remote_startup_history(session_id);
-                app.remote_provider_model = app.session.model.clone();
+                app.remote_provider_model = app.session.model().map(str::to_owned);
             }
             // The server supplies history, credentials, models and project state.
             // Local reload files can belong to an unrelated session with the same id.
             app.onboarding_startup_checked = true;
             app.auto_server_reload = false;
-            app.session.working_dir = None;
+            app.session.set_working_dir(None);
             app.resume_session_id = resume_session;
             app.set_status_notice(format!("SSH: {host} (remote server)"));
             // `/cloud` hands a mid-task session over and asks the new runtime

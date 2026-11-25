@@ -40,7 +40,7 @@ fn daemon_poke_never_schedules_client_continuations() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
-        app.remote_session_id = Some(app.session.id.clone());
+        app.remote_session_id = Some(app.session.id().to_owned());
         app.auto_poke_default_on = true;
         app.auto_poke_incomplete_todos = true;
         // Without an explicit campaign, daemon-owned todo policy must not

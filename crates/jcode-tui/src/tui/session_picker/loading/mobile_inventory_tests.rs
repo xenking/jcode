@@ -12,7 +12,7 @@ fn inventory_projection_uses_bounded_transport_without_mixing_timing_into_json()
         None,
         Some("Private title must stay out of timing records".into()),
     );
-    session.migration_epoch = 8;
+    session.set_migration_epoch(8);
     session.save().unwrap();
     let mut command = crate::tui::cloud_git::script_command(
         None,
@@ -286,7 +286,7 @@ fn known_cloud_metadata_refreshes_without_changing_migration_or_snapshot() {
     lease.last_sync_head = Some("preserved-head".into());
     storage::write_session_lease(&lease).unwrap();
     let mut session = Session::create_with_id(id.into(), None, Some("Old local title".into()));
-    session.working_dir = Some("/old/local/project".into());
+    session.set_working_dir(Some("/old/local/project".into()));
     session.add_message(
         Role::User,
         vec![crate::message::ContentBlock::Text {
@@ -394,8 +394,8 @@ fn verification_script_reads_authoritative_metadata_and_skips_moved_sessions() {
     let id = "session_verification_script";
     let mut session =
         Session::create_with_id(id.into(), None, Some("Verified remote title".into()));
-    session.working_dir = Some("/remote/current".into());
-    session.migration_epoch = 6;
+    session.set_working_dir(Some("/remote/current".into()));
+    session.set_migration_epoch(6);
     session.save().unwrap();
     let run = || {
         let output = std::process::Command::new("sh")
@@ -424,7 +424,7 @@ fn verification_script_reads_authoritative_metadata_and_skips_moved_sessions() {
     );
     assert_eq!(verified.sessions[0].cwd.as_deref(), Some("/remote/current"));
     assert!(verified.sessions[0].updated_at.is_some());
-    session.custom_title = Some("Renamed by user".into());
+    session.set_custom_title_for_tests(Some("Renamed by user".into()));
     session.save().unwrap();
     assert_eq!(run().sessions[0].title.as_deref(), Some("Renamed by user"));
     storage::write_session_lease(&storage::SessionLease {

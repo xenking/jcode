@@ -113,7 +113,7 @@ async fn a_user_message_creates_a_request_todo_in_the_requests_group() {
     assert_eq!(
         crate::session::Session::load(agent.session_id())
             .unwrap()
-            .user_asks
+            .user_asks()
             .last_id,
         2
     );
@@ -142,7 +142,7 @@ async fn a_reply_without_any_status_never_costs_a_second_model_call() {
     assert!(requests(&agent).iter().all(|todo| todo.status == "pending"));
     let transcript = agent
         .session
-        .messages
+        .messages()
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
@@ -196,10 +196,10 @@ async fn an_old_session_moves_its_open_asks_into_request_todos_once() {
     let _home = IsolatedHome::new();
     let script = ReplyScript::new([]);
     let mut agent = poteto_agent(&script);
-    agent.session.user_asks = serde_json::from_str(
+    agent.session.set_user_asks_for_tests(serde_json::from_str(
         r#"{"last_id":3,"open":[{"id":2,"preview":"Run the tests"},{"id":3,"preview":"Fix the build"}],"reminder_sent":true}"#,
     )
-    .unwrap();
+    .unwrap());
     agent.session.save().unwrap();
     let session_id = agent.session_id().to_owned();
     drop(agent);
@@ -213,8 +213,8 @@ async fn an_old_session_moves_its_open_asks_into_request_todos_once() {
         .collect();
     assert_eq!(titles, ["Ask #2: Run the tests", "Ask #3: Fix the build"]);
     let stored = crate::session::Session::load(&session_id).unwrap();
-    assert!(stored.user_asks.legacy_open.is_empty());
-    assert_eq!(stored.user_asks.last_id, 3);
+    assert!(stored.user_asks().legacy_open.is_empty());
+    assert_eq!(stored.user_asks().last_id, 3);
 
     // The next message continues the numbering and nothing is migrated twice.
     resumed

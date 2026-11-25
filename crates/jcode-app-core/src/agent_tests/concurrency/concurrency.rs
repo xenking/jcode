@@ -76,7 +76,7 @@ async fn concurrency_guard_follows_clear_restore_and_close() {
         Some("Concurrency restore fixture".to_owned()),
     );
     restored.save().unwrap();
-    agent.restore_session(&restored.id).unwrap();
+    agent.restore_session(restored.id()).unwrap();
     assert_owns_current_session(&agent);
 
     agent.mark_closed();
@@ -88,7 +88,7 @@ async fn concurrency_guard_follows_clear_restore_and_close() {
     assert!(agent.concurrency_session.is_none(), "closing is idempotent");
 
     // A retained Agent can resume after it has already been closed.
-    agent.restore_session(&restored.id).unwrap();
+    agent.restore_session(restored.id()).unwrap();
     assert_owns_current_session(&agent);
     agent.mark_crashed(Some("test".to_owned()));
     assert!(agent.concurrency_session.is_none());
@@ -142,12 +142,12 @@ async fn deferred_restore_save_persists_when_called() {
     });
     stored.mark_closed();
     stored.save().unwrap();
-    let id = stored.id.clone();
+    let id = stored.id().to_owned();
 
     agent.restore_session_deferring_save(&id, None).unwrap();
     assert!(
         matches!(
-            Session::load(&id).unwrap().status,
+            Session::load(&id).unwrap().status(),
             crate::session::SessionStatus::Closed
         ),
         "deferring must not write before persist_restored_session"
@@ -155,7 +155,7 @@ async fn deferred_restore_save_persists_when_called() {
     agent.persist_restored_session();
     assert!(
         matches!(
-            Session::load(&id).unwrap().status,
+            Session::load(&id).unwrap().status(),
             crate::session::SessionStatus::Active
         ),
         "deferred save must persist the resumed status"

@@ -94,8 +94,8 @@ use catalog_activity::format_auth_catalog_refresh_complete;
 
 #[path = "provider_control/pending_model_switch.rs"]
 mod pending_model_switch;
-pub(super) use pending_model_switch::handle_cancel_pending_model_change;
 use pending_model_switch::defer_model_switch;
+pub(super) use pending_model_switch::handle_cancel_pending_model_change;
 #[cfg(test)]
 use pending_model_switch::has_pending_model_switch;
 
@@ -237,7 +237,12 @@ pub(super) async fn handle_cycle_model(
         defer_model_switch(
             "cycle_model",
             id,
-            if direction >= 0 { "next model" } else { "previous model" }.to_string(),
+            if direction >= 0 {
+                "next model"
+            } else {
+                "previous model"
+            }
+            .to_string(),
             agent,
             client_event_tx,
             move |agent_guard, client_event_tx| {
@@ -645,7 +650,7 @@ pub(super) async fn handle_set_reasoning_effort(
                     .or_else(|_| crate::session::Session::load_startup_stub(&session_id))?;
                 Agent::worker_effort_for_provider(
                     provider.as_ref(),
-                    session.provider_key.as_deref(),
+                    session.provider_key(),
                     &effort,
                 )
             })

@@ -29,7 +29,7 @@ impl App {
         let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
-            self.session.is_canary,
+            self.session.is_canary(),
             memory_prompt,
             None,
         );
@@ -74,7 +74,8 @@ impl App {
         if let Err(err) = self.session.save() {
             crate::logging::warn(&format!(
                 "Failed to persist memory injection for session {}: {}",
-                self.session.id, err
+                self.session.id(),
+                err
             ));
         }
         self.push_display_message(DisplayMessage::memory(summary, display_prompt));
@@ -105,8 +106,8 @@ impl App {
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(messages);
         let pending = if fresh_user_turn {
             crate::memory::take_pending_memory_for_project(
-                &self.session.id,
-                self.session.working_dir.as_deref(),
+                self.session.id(),
+                self.session.working_dir(),
             )
         } else {
             None
@@ -120,9 +121,9 @@ impl App {
             let shared_messages: std::sync::Arc<[crate::message::Message]> =
                 messages.to_vec().into();
             crate::memory_agent::update_context_sync_with_dir(
-                &self.session.id,
+                self.session.id(),
                 shared_messages,
-                self.session.working_dir.clone(),
+                self.session.working_dir().map(str::to_owned),
             );
         }
 
@@ -198,8 +199,7 @@ impl App {
         // Extract memories using sidecar (with existing context for dedup)
         let manager = self
             .session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .map(|dir| {
                 crate::memory::MemoryManager::new()
                     .with_project_dir(dir)
@@ -224,8 +224,7 @@ impl App {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = self
                     .session
-                    .working_dir
-                    .as_deref()
+                    .working_dir()
                     .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
                     .unwrap_or_default();
                 let mut stored_count = 0;
@@ -242,7 +241,7 @@ impl App {
 
                     // Create memory entry
                     let entry = crate::memory::MemoryEntry::new(category, memory.content)
-                        .with_source(self.session.id.clone())
+                        .with_source(self.session.id().to_owned())
                         .with_trust(trust);
 
                     // Store memory

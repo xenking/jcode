@@ -7,7 +7,8 @@ fn ssh_git_command_diff_does_not_read_local_paths_or_send_a_request() {
     }
     let mut app = app_mod::tests::create_test_app();
     app.is_remote = true;
-    app.session.working_dir = Some(std::env::current_dir().unwrap().display().to_string());
+    app.session
+        .set_working_dir(Some(std::env::current_dir().unwrap().display().to_string()));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let mut remote = RemoteConnection::dummy();

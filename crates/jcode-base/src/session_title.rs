@@ -61,7 +61,7 @@ pub fn collect_source(session: &Session) -> Option<TitlePromptSource> {
     let mut prompts: Vec<String> = Vec::new();
     let mut assistant_gist: Option<String> = None;
 
-    for message in &session.messages {
+    for message in session.messages() {
         match message.role {
             Role::User => {
                 if message.display_role.is_some() {
@@ -149,13 +149,10 @@ pub fn plan_for_session(
     };
     let action = plan_title_update(&TitleDecisionInput {
         real_user_turns: source.real_user_turns,
-        current_title: session.title.as_deref(),
+        current_title: session.title(),
         heuristic_title: source.heuristic_title.as_deref(),
-        custom_title: session.custom_title.as_deref(),
-        save_label: session
-            .saved
-            .then_some(session.save_label.as_deref())
-            .flatten(),
+        custom_title: session.custom_title(),
+        save_label: session.is_saved().then_some(session.save_label()).flatten(),
         auto_owned,
     });
     (action, Some(source))
@@ -198,7 +195,7 @@ pub async fn generate_title(
         match attempt {
             Ok(Ok((text, usage))) => {
                 crate::telemetry::record_simple_completion_usage(
-                    Some(&session.id),
+                    Some(session.id()),
                     fork.name(),
                     &fork.model(),
                     crate::telemetry::UsageSource::Sidecar,
@@ -207,7 +204,7 @@ pub async fn generate_title(
                 if let Some(title) = sanitize_title(&text) {
                     crate::logging::info(&format!(
                         "Session title generated for {} with {}: {:?}",
-                        session.id,
+                        session.id(),
                         fork.model(),
                         title
                     ));
@@ -217,7 +214,7 @@ pub async fn generate_title(
             }
             Ok(Err(error)) => {
                 crate::telemetry::record_simple_completion_failure_usage(
-                    Some(&session.id),
+                    Some(session.id()),
                     crate::telemetry::UsageSource::Sidecar,
                     &error,
                 );
@@ -243,21 +240,19 @@ pub async fn generate_title(
 /// the file they loaded rather than the canonical session path.
 pub fn set_title_if_allowed(session: &mut Session, title: &str) -> bool {
     if session
-        .custom_title
-        .as_deref()
+        .custom_title()
         .is_some_and(|custom| !custom.trim().is_empty())
-        || (session.saved
+        || (session.is_saved()
             && session
-                .save_label
-                .as_deref()
+                .save_label()
                 .is_some_and(|label| !label.trim().is_empty()))
     {
         return false;
     }
-    if session.title.as_deref() == Some(title) {
+    if session.title() == Some(title) {
         return false;
     }
-    session.title = Some(title.to_string());
+    session.set_title(Some(title.to_string()));
     true
 }
 

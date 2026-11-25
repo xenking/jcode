@@ -255,7 +255,7 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     });
     let worktree = home.path().to_str().unwrap();
     let mut session = crate::session::Session::create_with_id(worker.into(), None, None);
-    session.working_dir = Some(worktree.into());
+    session.set_working_dir(Some(worktree.into()));
     for index in 0..30 {
         session.add_message(
             if index % 2 == 0 {
@@ -345,9 +345,9 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
         "{changed:?}"
     );
     let persisted = crate::session::Session::load(worker).unwrap();
-    assert_eq!(persisted.working_dir.as_deref(), Some(worktree));
-    assert_eq!(persisted.messages.len(), 30);
-    assert_eq!(persisted.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(persisted.working_dir(), Some(worktree));
+    assert_eq!(persisted.messages().len(), 30);
+    assert_eq!(persisted.reasoning_effort(), Some("medium"));
     assert!(Arc::ptr_eq(&sessions.read().await[worker], &agent));
     assert_eq!(
         members.read().await[worker].runtime.model.as_deref(),
@@ -371,12 +371,12 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     }).await.expect("headless compaction reaches the coordinator");
     let persisted = crate::session::Session::load(worker).unwrap();
     assert_eq!(
-        persisted.messages.len(),
+        persisted.messages().len(),
         30,
         "compaction must not erase the original transcript"
     );
     assert!(
-        persisted.compaction.is_some(),
+        persisted.compaction().is_some(),
         "manual compaction must be applied, not only acknowledged"
     );
     assert!(
@@ -392,8 +392,8 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("mock".to_string());
-    session.working_dir = Some(working_dir.to_string());
+    session.set_model(Some("mock".to_string()));
+    session.set_working_dir(Some(working_dir.to_string()));
     let mut agent = Agent::new_with_session(provider, registry, session, None);
     agent.set_working_dir(working_dir);
     Arc::new(Mutex::new(agent))
@@ -509,7 +509,7 @@ async fn resolve_spawn_working_dir_uses_persisted_session_when_agent_busy() {
     let home = tempfile::TempDir::new().unwrap();
     crate::env::set_var("JCODE_HOME", home.path());
     let mut session = crate::session::Session::create_with_id("cwd_busy".into(), None, None);
-    session.working_dir = Some("/tmp/persisted-project".into());
+    session.set_working_dir(Some("/tmp/persisted-project".into()));
     session.save_prepared().unwrap();
     let agent = test_agent_with_working_dir("cwd_busy", "/tmp/persisted-project").await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
@@ -819,8 +819,8 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("openai/gpt-5.4@OpenAI"));
-    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model(), Some("openai/gpt-5.4@OpenAI"));
+    assert_eq!(session.provider_key(), Some("openrouter"));
 
     crate::env::remove_var("JCODE_HOME");
 }
@@ -848,9 +848,9 @@ fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
         None,
         |id, _, selfdev, _| {
             assert!(selfdev);
-            super::inherit_visible_spawn_preferences(&parent.id, id)?;
+            super::inherit_visible_spawn_preferences(parent.id(), id)?;
             let child = crate::session::Session::load_startup_stub(id)?;
-            assert!(child.is_canary);
+            assert!(child.is_canary());
             assert_eq!(
                 child
                     .effective_agent_model("review", Some("global".into()))
@@ -865,7 +865,7 @@ fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
     assert_eq!(
         crate::session::Session::load_startup_stub(&id)
             .unwrap()
-            .agent_model_overrides
+            .agent_model_overrides()
             .get("review")
             .map(String::as_str),
         Some("review-override")
@@ -899,10 +899,10 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
-    assert!(session.is_swarm_worker);
+    assert_eq!(session.model(), Some("gpt-5.5"));
+    assert!(session.is_swarm_worker());
     assert_eq!(
-        session.reasoning_effort.as_deref(),
+        session.reasoning_effort(),
         Some("low"),
         "requested effort should persist so the headed client restores it"
     );
@@ -935,8 +935,8 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(session.provider_key.as_deref(), Some("ollama"));
+    assert_eq!(session.model(), Some("gpt-5.4"));
+    assert_eq!(session.provider_key(), Some("ollama"));
 
     crate::env::remove_var("JCODE_HOME");
 }
@@ -1278,9 +1278,9 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Persist after the agent is built so it reflects the authoritative on-disk
     // snapshot the spawn path will read when the agent lock is unavailable.
     let mut session = crate::session::Session::create_with_id("coord_busy".to_string(), None, None);
-    session.model = Some("claude-opus-4-6".to_string());
-    session.provider_key = Some("claude-api".to_string());
-    session.route_api_method = Some("claude-api".to_string());
+    session.set_model(Some("claude-opus-4-6".to_string()));
+    session.set_provider_key(Some("claude-api".to_string()));
+    session.set_route_api_method(Some("claude-api".to_string()));
     session
         .save_prepared()
         .expect("persist coordinator session");
@@ -1549,7 +1549,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             assert_eq!(startup_count, 1);
         }
         let saved = crate::session::Session::load(&sid).unwrap();
-        let status = saved.worker_speed.as_ref().unwrap();
+        let status = saved.worker_speed().unwrap();
         assert_eq!(status.requested, speed.unwrap_or_default());
         assert_eq!(status.effective, effective);
         assert!(saved.is_worker_model_approved(model, "mock", Some("high")));
@@ -1604,7 +1604,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             assert_eq!(
                 crate::session::Session::load(&sibling)
                     .unwrap()
-                    .worker_speed
+                    .worker_speed()
                     .unwrap()
                     .effective,
                 SpeedMode::Standard
@@ -1636,7 +1636,8 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             observed += 1;
             let status = crate::session::Session::load(&unsupported)
                 .unwrap()
-                .worker_speed
+                .worker_speed()
+                .cloned()
                 .unwrap();
             assert_eq!(status.requested, SpeedMode::Fast);
             assert_eq!(status.effective, SpeedMode::Standard);
@@ -1769,9 +1770,9 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     crate::env::set_var("JCODE_HOME", temp.path());
     let agent = test_agent_with_working_dir("routing_busy", "/tmp/coord").await;
     let mut session = crate::session::Session::create_with_id("routing_busy".into(), None, None);
-    session.model = Some("claude-opus-4-6".into());
-    session.provider_key = Some("claude-api".into());
-    session.route_api_method = Some("claude-api".into());
+    session.set_model(Some("claude-opus-4-6".into()));
+    session.set_provider_key(Some("claude-api".into()));
+    session.set_route_api_method(Some("claude-api".into()));
     session.set_canary("self-dev");
     session
         .set_agent_model_override("review", Some("review-override".into()))
@@ -1863,7 +1864,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         serde_json::to_value(&stored_child).unwrap()["pinned_skill"],
         "pinned-probe"
     );
-    assert_eq!(stored_child.messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b,
+    assert_eq!(stored_child.messages().iter().flat_map(|m| &m.content).filter(|b| matches!(b,
         crate::message::ContentBlock::Text { text, .. } if text.contains("INHERITED_MODE_BODY")
     )).count(), 1, "worker receives the announcement before any turn");
     assert_eq!(child.provider_model(), "gpt-5.5");

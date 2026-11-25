@@ -30,7 +30,7 @@ impl Agent {
 
         let raw_tx = event_tx.unbatched();
         let mut rollback_emitted = false;
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
 
         let outcome = tracker
             .wait_for_recovery(
@@ -96,7 +96,7 @@ impl Agent {
             NetworkRecoveryOutcome::RestoredAfterOffline => {
                 logging::info(&format!(
                     "Network connectivity restored for {}; automatically resuming turn",
-                    self.session.id
+                    self.session.id()
                 ));
                 let _ = event_tx.send(ServerEvent::ConnectionPhase {
                     phase: crate::message::ConnectionPhase::Connecting.to_string(),
@@ -109,7 +109,9 @@ impl Agent {
             NetworkRecoveryOutcome::RetryingWhileOnline { attempt, max } => {
                 logging::info(&format!(
                     "Retrying turn for {} after transient network error ({}/{})",
-                    self.session.id, attempt, max
+                    self.session.id(),
+                    attempt,
+                    max
                 ));
                 let _ = event_tx.send(ServerEvent::ConnectionPhase {
                     phase: crate::message::ConnectionPhase::Retrying { attempt, max }.to_string(),
@@ -119,7 +121,7 @@ impl Agent {
             NetworkRecoveryOutcome::Cancelled => {
                 logging::info(&format!(
                     "Turn cancelled while waiting for network recovery in {}",
-                    self.session.id
+                    self.session.id()
                 ));
                 NetworkRecoveryAction::Cancelled
             }
@@ -136,9 +138,9 @@ impl Agent {
         // Holds streamed text back while no attached client is focused. Every
         // other event flushes it first, and so does dropping this on return.
         let event_tx =
-            crate::stream_batching::BatchingSender::new(raw_event_tx, self.session.id.clone());
+            crate::stream_batching::BatchingSender::new(raw_event_tx, self.session.id().to_owned());
         let _runtime_activity =
-            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.ensure_session_lease()?;
         let mut cache_turn =
             crate::cache_keepalive::Turn::begin(&self.session, self.registry.compaction());
@@ -153,7 +155,7 @@ impl Agent {
         // stale one built for a different agent object, e.g. after a
         // reattach/reload) aborts this in-flight stream immediately (issue #428).
         let turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
-            &self.session.id,
+            self.session.id(),
             self.graceful_shutdown.clone(),
         );
         if !self
@@ -253,7 +255,7 @@ impl Agent {
                 .then(crate::subscription_notice::take)
                 .flatten()
             {
-                crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
+                crate::subscription_notice::show_upgrade_card(&notice, self.session.id());
                 let reminder = self.append_model_reminder(&Self::plan_limit_reminder(&notice));
                 self.persist_session_best_effort("plan-limit reminder");
                 messages_with_memory.push(reminder);
@@ -343,13 +345,13 @@ impl Agent {
                 .as_ref()
                 .map(crate::cache_keepalive::Turn::request);
             let (mut stream, mut canonical_input) = {
-                provider.set_session_id(&self.session.id);
+                provider.set_session_id(self.session.id());
                 let mut complete_future =
                     std::pin::pin!(super::cache_request::capture_canonical_input(
                         jcode_provider_core::cache_keepalive::Capture::scope(
                             cache_capture.clone(),
                             jcode_provider_core::with_pinned_worker_request(
-                                self.session.is_swarm_worker,
+                                self.session.is_swarm_worker(),
                                 jcode_provider_core::with_account_limit_fail_fast(
                                     self.routing_fail_fast_limits,
                                     provider.complete_split(
@@ -478,7 +480,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
-            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
+            let mut usage_recorder = StreamUsageRecorder::new(self.session.id());
             let mut saw_message_end = false;
             let mut openai_ws_delta = false;
             let mut executed_native_tool = false;
@@ -562,7 +564,7 @@ impl Agent {
 
                 if activity_mark_last.elapsed() >= std::time::Duration::from_secs(2) {
                     activity_mark_last = Instant::now();
-                    crate::session_metrics::record_activity(&self.session.id);
+                    crate::session_metrics::record_activity(self.session.id());
                 }
                 let Some(event) = event else {
                     Agent::log_agent_provider_stream_lifecycle(
@@ -1030,7 +1032,7 @@ impl Agent {
                         });
                         if let Some(image) = rendered_image {
                             let _ = event_tx.send(ServerEvent::SidePaneImages {
-                                session_id: self.session.id.clone(),
+                                session_id: self.session.id().to_owned(),
                                 images: vec![image],
                             });
                         }
@@ -1213,7 +1215,7 @@ impl Agent {
                         // the user lands in an empty new session while the
                         // real transcript sits untouched on disk.
                         self.provider_session_id = Some(sid.clone());
-                        self.session.provider_session_id = Some(sid);
+                        self.session.set_provider_session_id(Some(sid));
                     }
                     StreamEvent::OpenAIReasoning {
                         id,
@@ -1238,7 +1240,7 @@ impl Agent {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction.get_or_insert((
                                 encrypted_content,
-                                self.session.messages.len(),
+                                self.session.messages().len(),
                                 pre_tokens,
                                 trigger,
                             ));
@@ -1252,8 +1254,8 @@ impl Agent {
                         executed_native_tool = true;
                         // Execute native tool and send result back to SDK bridge
                         let ctx = ToolContext {
-                            session_id: self.session.id.clone(),
-                            message_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
+                            message_id: self.session.id().to_owned(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
@@ -1434,7 +1436,7 @@ impl Agent {
 
             if saw_message_end {
                 let _ = event_tx.send(ServerEvent::RequestUsage {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     request_id,
                     provider: provider.name().into(),
                     model: reported_model.unwrap_or_else(|| provider.model()),
@@ -1466,7 +1468,7 @@ impl Agent {
                         usage_cache_creation,
                     )
                     .saturating_add(output);
-                crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                crate::session_metrics::record_token_usage(self.session.id(), total, output);
             }
 
             if usage_input.is_some()
@@ -1536,7 +1538,7 @@ impl Agent {
                     "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
                     model_at_request_start, model_after_stream
                 ));
-                self.session.model = Some(self.provider_model());
+                self.session.set_model(Some(self.provider_model()));
                 self.provider_runtime_state.apply(
                     crate::provider::ProviderStateEvent::RuntimeModelObserved {
                         model: model_after_stream.clone(),

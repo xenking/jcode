@@ -4,7 +4,8 @@ fn test_git_command_shows_repo_status_for_working_directory() {
     std::fs::write(repo.path().join("tracked.txt"), "after\n").expect("update tracked file");
 
     let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().display().to_string());
+    app.session
+        .set_working_dir(Some(repo.path().display().to_string()));
     submit_git_command_and_wait_for_response(&mut app, "/git");
 
     let msg = app.display_messages().last().expect("missing git response");
@@ -21,7 +22,8 @@ fn test_git_command_works_in_remote_mode_with_accessible_working_directory() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_session_id = Some("ses_remote_git".to_string());
-    app.session.working_dir = Some(repo.path().display().to_string());
+    app.session
+        .set_working_dir(Some(repo.path().display().to_string()));
     submit_git_command_and_wait_for_response(&mut app, "/git status");
 
     let msg = app.display_messages().last().expect("missing git response");
@@ -41,7 +43,7 @@ fn test_git_command_diff_renders_dirty_session_worktree() {
     let cwd = root.join("session cwd");
     std::fs::create_dir(&cwd).unwrap();
     let mut app = create_test_app();
-    app.session.working_dir = Some(cwd.display().to_string());
+    app.session.set_working_dir(Some(cwd.display().to_string()));
     app.diff_mode = crate::config::DiffDisplayMode::Off;
 
     submit_git_command_and_wait_for_response(&mut app, "/git diff");
@@ -147,7 +149,8 @@ fn test_git_command_diff_caps_large_output_in_local_daemon_session() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_session_id = Some("ses_remote_git_diff".to_string());
-    app.session.working_dir = Some(repo.path().display().to_string());
+    app.session
+        .set_working_dir(Some(repo.path().display().to_string()));
 
     submit_git_command_and_wait_for_response(&mut app, "/git diff unstaged");
     let message = app.display_messages().last().unwrap();

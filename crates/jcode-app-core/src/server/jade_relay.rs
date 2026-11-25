@@ -1122,18 +1122,18 @@ fn create_launch_session(request: &LaunchRequest) -> Result<(String, PathBuf)> {
     }
 
     let mut session = Session::create(None, Some("Jade relay launch".to_string()));
-    session.working_dir = Some(cwd.display().to_string());
+    session.set_working_dir(Some(cwd.display().to_string()));
     if let Some(model) = &request.model {
-        session.model = Some(model.clone());
+        session.set_model(Some(model.clone()));
     }
     if let Some(provider_key) = &request.provider_key {
-        session.provider_key = Some(provider_key.clone());
+        session.set_provider_key(Some(provider_key.clone()));
     }
     if request.selfdev {
         session.set_canary("self-dev");
     }
     session.save()?;
-    Ok((session.id.clone(), cwd))
+    Ok((session.id().to_owned(), cwd))
 }
 
 fn spawn_launch_window(

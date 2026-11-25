@@ -38,7 +38,7 @@ impl Agent {
             estimated_tokens_saved: tokens_saved as u64,
         };
         let cache_at_risk = self.provider_session_id.is_some()
-            || self.session.provider_session_id.is_some()
+            || self.session.provider_session_id().is_some()
             || manager
                 .expired_cache_response(now, self.cache_expiry_ttl_secs(&manager))
                 .is_none();
@@ -50,15 +50,15 @@ impl Agent {
         let confirmation = format!(
             "{:016x}",
             CONFIRMATIONS.hash_one((
-                &self.session.id,
+                self.session.id(),
                 prefix,
                 start,
                 config,
-                self.session.last_provider_request_at,
+                self.session.last_provider_request_at(),
                 self.provider.name(),
                 self.provider.model(),
                 &self.provider_session_id,
-                &self.session.provider_session_id,
+                &self.session.provider_session_id(),
                 cache_at_risk,
             ))
         );
@@ -104,7 +104,7 @@ impl Agent {
             summary_chars: None,
             active_messages: None,
         };
-        staged.provider_session_id = None;
+        staged.set_provider_session_id(None);
         staged.record_compaction_event(&event, Some("shake"), None);
         staged
             .save_rewritten_context()

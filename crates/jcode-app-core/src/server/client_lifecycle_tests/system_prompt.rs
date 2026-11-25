@@ -205,7 +205,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
             observer_task.abort();
         }
         let saved = crate::session::Session::load(&parent_id).unwrap();
-        assert_eq!(saved.system_prompt.as_deref(), Some(prompt));
+        assert_eq!(saved.system_prompt(), Some(prompt));
         assert_eq!(saved.visible_conversation_message_count(), 0);
 
         // Repeated Subscribe cannot mutate even the current owner's prompt.
@@ -222,8 +222,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         assert_eq!(
             crate::session::Session::load(&parent_id)
                 .unwrap()
-                .system_prompt
-                .as_deref(),
+                .system_prompt(),
             Some(prompt)
         );
 
@@ -266,8 +265,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         assert_eq!(
             crate::session::Session::load(&child_id)
                 .unwrap()
-                .system_prompt
-                .as_deref(),
+                .system_prompt(),
             Some(prompt)
         );
         // This attachment restores a persisted fork, rather than a live Agent.

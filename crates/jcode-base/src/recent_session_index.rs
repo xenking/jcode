@@ -164,7 +164,7 @@ fn recent_with(connection: &Connection, limit: usize) -> Result<Vec<RecentSessio
 
 /// Update the index after a successful session persistence operation.
 pub fn upsert_session(session: &Session) -> Result<()> {
-    let fingerprint = SessionFingerprint::read(&crate::session::session_path(&session.id)?);
+    let fingerprint = SessionFingerprint::read(&crate::session::session_path(session.id())?);
     index_session(session, fingerprint.as_ref(), false)
 }
 
@@ -175,7 +175,7 @@ pub(crate) fn ensure_resume_entry(session: &Session) -> Result<()> {
         Ok(connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM recent_sessions
                            WHERE session_id = ?1 AND resume_fingerprint IS NOT NULL)",
-            [&session.id],
+            [session.id()],
             |row| row.get::<_, bool>(0),
         )?)
     })?;
@@ -200,15 +200,15 @@ fn index_session(
     backfill: bool,
 ) -> Result<()> {
     let entry = RecentSessionMetadata {
-        session_id: session.id.clone(),
-        working_dir: session.working_dir.clone(),
-        generated_title: session.title.clone(),
-        custom_title: session.custom_title.clone(),
-        todo_title: crate::todo::load_session_title(&session.id),
-        saved: session.saved,
-        save_label: session.save_label.clone(),
-        updated_at_ms: session.updated_at.timestamp_millis(),
-        last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
+        session_id: session.id().to_owned(),
+        working_dir: session.working_dir().map(str::to_owned),
+        generated_title: session.title().map(str::to_owned),
+        custom_title: session.custom_title().map(str::to_owned),
+        todo_title: crate::todo::load_session_title(session.id()),
+        saved: session.is_saved(),
+        save_label: session.save_label().map(str::to_owned),
+        updated_at_ms: session.updated_at().timestamp_millis(),
+        last_active_at_ms: session.last_active_at().map(|time| time.timestamp_millis()),
     };
     let encoded_fingerprint = fingerprint.map(serde_json::to_string).transpose()?;
     let context = session_catalog_context(session);
@@ -226,7 +226,7 @@ fn index_session(
             })
             .transpose()?;
         if backfill
-            && SessionFingerprint::read(&crate::session::session_path(&session.id)?).as_ref()
+            && SessionFingerprint::read(&crate::session::session_path(session.id())?).as_ref()
                 != fingerprint
         {
             return Ok(());
@@ -236,7 +236,7 @@ fn index_session(
             &entry,
             session.short_name.as_deref(),
             encoded_fingerprint.as_deref(),
-            Some(&session.updated_at.to_rfc3339()),
+            Some(&session.updated_at().to_rfc3339()),
             Some(&encoded_context),
         )?;
         if let Some(transaction) = transaction {
@@ -247,21 +247,17 @@ fn index_session(
 }
 
 fn session_catalog_context(session: &Session) -> SessionCatalogContext {
-    let cache_expires_at_ms = session.last_provider_request_at.and_then(|last_request| {
-        let provider = session
-            .route_api_method
-            .as_deref()
-            .or(session.provider_key.as_deref())?;
-        let ttl =
-            crate::provider::cache_ttl_for_provider_model(provider, session.model.as_deref())?;
+    let cache_expires_at_ms = session.last_provider_request_at().and_then(|last_request| {
+        let provider = session.route_api_method().or(session.provider_key())?;
+        let ttl = crate::provider::cache_ttl_for_provider_model(provider, session.model())?;
         let ttl = chrono::TimeDelta::try_seconds(ttl.try_into().ok()?)?;
         last_request
             .checked_add_signed(ttl)
             .map(|time| time.timestamp_millis())
     });
     SessionCatalogContext {
-        model: session.model.clone(),
-        reasoning_effort: session.reasoning_effort.clone(),
+        model: session.model().map(str::to_owned),
+        reasoning_effort: session.reasoning_effort().map(str::to_owned),
         modes: session.pinned_skill_names().to_vec(),
         cache_expires_at_ms,
         activity: Some(session.catalog_activity()),

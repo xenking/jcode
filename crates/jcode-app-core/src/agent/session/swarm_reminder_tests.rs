@@ -106,7 +106,7 @@ async fn jarvis_delegation_policy_only_changes_the_attached_root() {
     let description = swarm(agent.tool_definitions_for_debug().await);
     assert!(description.contains("single-lane work"));
     assert!(!description.contains("keep working yourself"));
-    agent.session.parent_id = Some("coordinator".into());
+    agent.session.set_parent_id(Some("coordinator".into()));
     assert_eq!(swarm(agent.tool_definitions_for_debug().await), baseline);
     assert!(
         !agent
@@ -253,7 +253,7 @@ async fn jarvis_root_defaults_reasoning_effort_to_none_and_allows_user_override(
     let applied = agent.apply_jarvis_default_reasoning_effort();
     assert_eq!(applied, Some(Some("none".to_string())));
     assert_eq!(agent.provider_reasoning_effort().as_deref(), Some("none"));
-    assert_eq!(agent.session.reasoning_effort.as_deref(), Some("none"));
+    assert_eq!(agent.session.reasoning_effort(), Some("none"));
 
     // Explicit user override is preserved even if Jarvis config is re-applied.
     agent.set_reasoning_effort("high").unwrap();
@@ -268,7 +268,7 @@ async fn jarvis_default_reasoning_effort_respects_persisted_session_and_non_root
     let provider: Arc<dyn Provider> = Arc::new(MutableEffortProvider::new(Some("medium"), false));
     let registry = Registry::new(provider.clone()).await;
     let mut session = Session::create(None, None);
-    session.reasoning_effort = Some("high".to_string());
+    session.set_reasoning_effort(Some("high".to_string()));
     let mut agent = Agent::new_with_session(provider.clone(), registry.clone(), session, None);
     let id = agent.session_id().to_owned();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -282,7 +282,7 @@ async fn jarvis_default_reasoning_effort_respects_persisted_session_and_non_root
     let child_provider: Arc<dyn Provider> =
         Arc::new(MutableEffortProvider::new(Some("medium"), false));
     let mut child = Agent::new(child_provider, registry.clone());
-    child.session.parent_id = Some("parent".into());
+    child.session.set_parent_id(Some("parent".into()));
     let child_id = child.session_id().to_owned();
     let _child_guard = crate::tool::sdk::ConnectionGuard(child_id.clone());
     crate::tool::sdk::configure(&child_id, &child_id, jarvis_tool_config(), tx.clone()).unwrap();

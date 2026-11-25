@@ -79,21 +79,23 @@ async fn failed_uploads_skip_unchanged_reloads_but_retry_changes_deadlines_and_g
     })
     .unwrap();
     let mut session = Session::create_with_id("failing".into(), None, None);
-    session.messages.push(jcode_session_types::StoredMessage {
-        codemode: None,
-        attachment_data: None,
-        id: "backoff-message".into(),
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: "hello".into(),
-            cache_control: None,
-        }]
-        .into(),
-        display_role: None,
-        timestamp: None,
-        tool_duration_ms: None,
-        token_usage: None,
-    });
+    session
+        .messages_mut_for_tests()
+        .push(jcode_session_types::StoredMessage {
+            codemode: None,
+            attachment_data: None,
+            id: "backoff-message".into(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+                cache_control: None,
+            }]
+            .into(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
     session.save().unwrap();
     let client = reqwest::Client::new();
     assert_eq!(sync_once(&client).await.unwrap().errors, 1);
@@ -120,7 +122,7 @@ async fn failed_uploads_skip_unchanged_reloads_but_retry_changes_deadlines_and_g
     notify_session_persisted("failing");
     assert_eq!(sync_pass(&client, false).await.unwrap().errors, 1);
     // Cross-process changes have no dirty hint and must also bypass backoff.
-    session.custom_title = Some("changed revision".into());
+    session.set_custom_title_for_tests(Some("changed revision".into()));
     session.save().unwrap();
     DIRTY_SESSIONS.lock().unwrap().clear();
     assert_eq!(sync_once(&client).await.unwrap().errors, 1);

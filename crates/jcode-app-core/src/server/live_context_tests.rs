@@ -217,7 +217,7 @@ async fn silent_stall_and_await_wakes_publish_idle_and_queued_context_entries() 
         .count();
     assert_eq!(delivered, 1);
     let stored = crate::session::Session::load(&sid).unwrap();
-    assert!(stored.messages.iter().any(|message| {
+    assert!(stored.messages().iter().any(|message| {
         message.display_role == Some(crate::session::StoredDisplayRole::System)
             && message.content.iter().any(|block| {
                 matches!(block,

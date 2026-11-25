@@ -116,7 +116,7 @@ fn session_menu_item_title_prefers_generated_title_then_persisted_todo_title() {
         format_session_menu_item_title(session_id, false),
         "🐃 Generated session title"
     );
-    session.title = None;
+    session.set_title(None);
     session.save().expect("clear generated session title");
     assert_eq!(
         format_session_menu_item_title(session_id, false),
@@ -157,7 +157,7 @@ fn menu_presence_includes_only_user_root_sessions() {
 
     let mut child = crate::session::Session::create_with_id(
         "session_bear_child".to_string(),
-        Some(root.id.clone()),
+        Some(root.id().to_owned()),
         Some("Child work".to_string()),
     );
     child.set_debug(false);

@@ -923,7 +923,7 @@ impl SelfDevTool {
 
     fn session_is_selfdev(session_id: &str) -> bool {
         session::Session::load(session_id)
-            .map(|session| session.is_canary)
+            .map(|session| session.is_canary())
             .unwrap_or(false)
     }
 

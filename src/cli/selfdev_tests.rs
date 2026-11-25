@@ -127,7 +127,7 @@ async fn test_selfdev_tool_registration() {
 
     let mut session = session::Session::create(None, Some("Test".to_string()));
     session.set_canary("test");
-    assert!(session.is_canary, "Session should be marked as canary");
+    assert!(session.is_canary(), "Session should be marked as canary");
 
     let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
     let registry = tool::Registry::new(provider).await;
@@ -160,11 +160,11 @@ async fn test_selfdev_session_and_registry() {
 
     let mut session = session::Session::create(None, Some("Test E2E".to_string()));
     session.set_canary("test-build");
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     session.save().expect("Failed to save session");
 
     let loaded = session::Session::load(&session_id).expect("Failed to load session");
-    assert!(loaded.is_canary, "Loaded session should be canary");
+    assert!(loaded.is_canary(), "Loaded session should be canary");
 
     let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
     let registry = tool::Registry::new(provider.clone()).await;

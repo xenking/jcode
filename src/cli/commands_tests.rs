@@ -1420,7 +1420,7 @@ async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
             .unwrap();
             let session = crate::session::Session::load(agent.session_id()).unwrap();
             let followups = session
-                .messages
+                .messages()
                 .iter()
                 .filter(|message| {
                     message.role == crate::message::Role::User
@@ -1506,7 +1506,7 @@ async fn run_dependency_resumes_same_session_in_all_output_modes() {
         }
         let session = crate::session::Session::load(&session_id).unwrap();
         let inputs: Vec<_> = session
-            .messages
+            .messages()
             .iter()
             .filter(|message| message.role == crate::message::Role::User)
             .flat_map(|message| message.content.iter())
@@ -1580,9 +1580,9 @@ async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
             );
         }
         assert!(
-            matches!(persisted.status, crate::session::SessionStatus::Closed),
+            matches!(persisted.status(), crate::session::SessionStatus::Closed),
             "{mode} run persisted status {:?}",
-            persisted.status
+            persisted.status()
         );
         assert!(
             !crate::session::find_recent_crashed_sessions()
@@ -1636,7 +1636,7 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         let persisted = crate::session::Session::load(&session_id)
             .unwrap_or_else(|error| panic!("load failed {mode} session: {error:#}"));
         assert!(matches!(
-            persisted.status,
+            persisted.status(),
             crate::session::SessionStatus::Closed
         ));
     }

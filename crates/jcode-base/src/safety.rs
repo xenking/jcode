@@ -485,13 +485,13 @@ fn stale_request_reason(request: &PermissionRequest) -> Option<String> {
         let _ = session.save();
     }
 
-    if session.status == crate::session::SessionStatus::Active {
+    if *session.status() == crate::session::SessionStatus::Active {
         None
     } else {
         Some(format!(
             "owner session '{}' is {}",
             session_id,
-            session.status.display()
+            session.status().display()
         ))
     }
 }

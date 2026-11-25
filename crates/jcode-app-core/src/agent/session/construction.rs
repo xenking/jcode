@@ -17,7 +17,7 @@ impl Agent {
     }
 
     pub(crate) fn mark_agent_started(&mut self) {
-        self.session.agent_started = true;
+        self.session.set_agent_started(true);
     }
 
     pub(crate) fn new_with_initial_working_dir(
@@ -79,7 +79,7 @@ impl Agent {
         };
         let tool_selection = crate::config::config().tools.selection();
         if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
+            session.set_working_dir(Some(working_dir.to_string()));
         }
         mark("session", &mut lap);
         let mut agent = Self::build_base(
@@ -95,8 +95,10 @@ impl Agent {
         // session never touches the marker files.
         agent.session.mark_active_unregistered();
         mark("mark_active", &mut lap);
-        agent.session.model = Some(agent.provider_model());
-        agent.session.provider_key = agent.provider_key_for_new_session();
+        agent.session.set_model(Some(agent.provider_model()));
+        agent
+            .session
+            .set_provider_key(agent.provider_key_for_new_session());
         agent.reconcile_explicit_provider_pin_route();
         agent.restore_speed_from_session();
         mark("provider", &mut lap);
@@ -177,8 +179,10 @@ impl Agent {
         );
         // begin_concurrency_tracking below writes the presence markers.
         agent.session.mark_active_unregistered();
-        if agent.session.provider_key.is_none() {
-            agent.session.provider_key = agent.provider_key_for_new_session();
+        if agent.session.provider_key().is_none() {
+            agent
+                .session
+                .set_provider_key(agent.provider_key_for_new_session());
         }
         agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
@@ -194,7 +198,7 @@ impl Agent {
         crate::telemetry::begin_session_with_parent(
             agent.provider.name(),
             &agent.provider.model(),
-            agent.session.parent_id.clone(),
+            agent.session.parent_id().map(str::to_owned),
             false,
         );
         agent

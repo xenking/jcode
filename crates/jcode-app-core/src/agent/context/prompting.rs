@@ -19,10 +19,10 @@ impl Agent {
     /// inputs. Legacy snapshots have only the latter and upgrade on next send.
     /// An explicit move to another directory keeps the existing recapture rule.
     pub(super) fn adopt_recorded_prompt_inputs(&mut self) -> bool {
-        let Some(recorded) = crate::session::load_prompt_inputs(&self.session.id) else {
+        let Some(recorded) = crate::session::load_prompt_inputs(self.session.id()) else {
             return false;
         };
-        if recorded.working_dir != self.session.working_dir {
+        if recorded.working_dir != self.session.working_dir().map(str::to_owned) {
             return false;
         }
         let info = crate::prompt::ContextInfo {
@@ -37,12 +37,9 @@ impl Agent {
         self.prompt_inputs_recorded = recorded.static_prompt.is_some();
         self.static_prompt = match recorded.static_prompt {
             Some(snapshot) => StaticPromptState::Frozen(snapshot),
-            None => StaticPromptState::bootstrap(
-                self.session
-                    .working_dir
-                    .as_deref()
-                    .map(std::path::Path::new),
-            ),
+            None => {
+                StaticPromptState::bootstrap(self.session.working_dir().map(std::path::Path::new))
+            }
         };
         // Skills installed since then are announced in the transcript, which
         // leaves the cached system prefix untouched.
@@ -66,7 +63,7 @@ impl Agent {
         };
         let (agents_md, info) = &self.agents_md_snapshot;
         let inputs = crate::session::PersistedPromptInputs {
-            working_dir: self.session.working_dir.clone(),
+            working_dir: self.session.working_dir().map(str::to_owned),
             agents_md: agents_md.clone(),
             has_project_agents_md: info.has_project_agents_md,
             project_agents_md_chars: info.project_agents_md_chars,
@@ -75,7 +72,7 @@ impl Agent {
             skills: self.prompt_skills_snapshot.clone(),
             static_prompt: Some(snapshot.clone()),
         };
-        crate::session::save_prompt_inputs(&self.session.id, &inputs)?;
+        crate::session::save_prompt_inputs(self.session.id(), &inputs)?;
         self.prompt_inputs_recorded = true;
         Ok(())
     }
@@ -102,7 +99,7 @@ impl Agent {
     }
 
     pub(crate) fn runtime_agent_model_overrides(&self) -> serde_json::Value {
-        serde_json::json!(self.session.agent_model_overrides)
+        serde_json::json!(self.session.agent_model_overrides())
     }
 
     pub(crate) async fn runtime_context_snapshot(&self) -> serde_json::Value {
@@ -134,11 +131,11 @@ impl Agent {
                 .collect::<Vec<_>>()
         });
         serde_json::json!({
-            "session_id": self.session.id,
-            "working_dir": self.session.working_dir,
+            "session_id": self.session.id(),
+            "working_dir": self.session.working_dir(),
             "mode": if self.is_desktop_selfdev() { "desktop" }
-                else if self.session.is_canary { "cli" } else { "regular" },
-            "is_canary": self.session.is_canary,
+                else if self.session.is_canary() { "cli" } else { "regular" },
+            "is_canary": self.session.is_canary(),
             "system_prompt": {
                 "static": prompt.static_part,
                 "dynamic": prompt.dynamic_part,
@@ -175,14 +172,11 @@ impl Agent {
             return None;
         }
 
-        let session_id = &self.session.id;
+        let session_id = self.session.id();
 
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(&messages);
         let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory_for_project(
-                session_id,
-                self.session.working_dir.as_deref(),
-            )
+            crate::memory::take_pending_memory_for_project(session_id, self.session.working_dir())
         } else {
             None
         };
@@ -200,7 +194,7 @@ impl Agent {
             crate::memory_agent::update_context_sync_with_dir(
                 session_id,
                 messages,
-                self.session.working_dir.clone(),
+                self.session.working_dir().map(str::to_owned),
             );
         }
 
@@ -234,7 +228,7 @@ impl Agent {
                 let (text, skills_chars) = self.render_static_prompt(sources);
                 (
                     text,
-                    self.session.system_prompt.is_some(),
+                    self.session.system_prompt().is_some(),
                     Some(skills_chars),
                 )
             }
@@ -257,17 +251,13 @@ impl Agent {
         &self,
         sources: &crate::prompt::StaticPromptSources,
     ) -> (String, usize) {
-        if let Some(ref override_prompt) = self.session.system_prompt {
+        if let Some(override_prompt) = self.session.system_prompt() {
             return (
-                self.append_session_system_prompt(override_prompt.clone()),
+                self.append_session_system_prompt(override_prompt.to_string()),
                 0,
             );
         }
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         let session_id = self.session_id().to_string();
         // A line about a tool stays only when the session may call it and the
         // tool exists here (opt-in tools such as codemode or advisor).
@@ -286,7 +276,7 @@ impl Agent {
         let (split, info) = crate::prompt::build_system_prompt_split_composed(
             None,
             &self.prompt_skills_snapshot,
-            self.session.is_canary,
+            self.session.is_canary(),
             None,
             working_dir,
             sources,
@@ -319,7 +309,7 @@ impl Agent {
                 text,
                 file_versions: self
                     .session
-                    .system_prompt
+                    .system_prompt()
                     .is_none()
                     .then(|| sources.files.versions()),
                 skills_chars: Some(skills_chars),
@@ -337,19 +327,15 @@ impl Agent {
         let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
             return;
         };
-        if self.session.system_prompt.is_some()
+        if self.session.system_prompt().is_some()
             || snapshot.rendered_for_model.is_empty()
             || snapshot.rendered_for_model == self.provider.model()
             || snapshot.model_prompt_key == self.model_prompt().key
         {
             return;
         }
-        self.static_prompt = StaticPromptState::bootstrap(
-            self.session
-                .working_dir
-                .as_deref()
-                .map(std::path::Path::new),
-        );
+        self.static_prompt =
+            StaticPromptState::bootstrap(self.session.working_dir().map(std::path::Path::new));
         self.prompt_inputs_recorded = false;
     }
 
@@ -360,11 +346,7 @@ impl Agent {
         let Some(previous) = snapshot.file_versions.as_ref() else {
             return Ok(());
         };
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         let files = crate::prompt::PromptFiles::load(working_dir);
         let Some((reminder, versions)) = files.change_reminder(previous) else {
             return Ok(());

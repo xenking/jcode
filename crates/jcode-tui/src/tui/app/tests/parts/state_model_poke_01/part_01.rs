@@ -49,15 +49,15 @@ fn test_strip_oversized_images_drops_oldest_first() {
             .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
         assert_eq!(stripped, 2);
         assert!(matches!(
-            app.session.messages[0].content[0],
+            app.session.messages()[0].content[0],
             ContentBlock::Text { .. }
         ));
         assert!(matches!(
-            app.session.messages[1].content[0],
+            app.session.messages()[1].content[0],
             ContentBlock::Text { .. }
         ));
         assert!(matches!(
-            app.session.messages[2].content[0],
+            app.session.messages()[2].content[0],
             ContentBlock::Image { .. }
         ));
     });
@@ -80,19 +80,20 @@ fn test_rewind_truncates_provider_messages() {
         );
     }
     app.provider_session_id = Some("provider-session".to_string());
-    app.session.provider_session_id = Some("provider-session".to_string());
+    app.session
+        .set_provider_session_id(Some("provider-session".to_string()));
 
     app.input = "/rewind 2".to_string();
     app.submit_input();
 
     assert_eq!(app.messages.len(), 2);
-    assert_eq!(app.session.messages.len(), 2);
+    assert_eq!(app.session.messages().len(), 2);
     assert!(matches!(
         &app.messages[1].content[0],
         ContentBlock::Text { text, .. } if text == "msg-2"
     ));
     assert!(app.provider_session_id.is_none());
-    assert!(app.session.provider_session_id.is_none());
+    assert!(app.session.provider_session_id().is_none());
 }
 
 #[test]
@@ -112,7 +113,8 @@ fn test_rewind_undo_restores_truncated_messages() {
         );
     }
     app.provider_session_id = Some("provider-session".to_string());
-    app.session.provider_session_id = Some("provider-session".to_string());
+    app.session
+        .set_provider_session_id(Some("provider-session".to_string()));
 
     app.input = "/rewind 1".to_string();
     app.submit_input();
@@ -131,10 +133,7 @@ fn test_rewind_undo_restores_truncated_messages() {
     assert_eq!(app.session.visible_conversation_message_count(), 3);
     assert_eq!(app.messages.len(), 3);
     assert_eq!(app.provider_session_id.as_deref(), Some("provider-session"));
-    assert_eq!(
-        app.session.provider_session_id.as_deref(),
-        Some("provider-session")
-    );
+    assert_eq!(app.session.provider_session_id(), Some("provider-session"));
     assert!(
         app.display_messages()
             .last()
@@ -236,7 +235,7 @@ fn test_rewind_autocomplete_uses_visible_message_count() {
         }],
     );
 
-    assert_eq!(app.session.messages.len(), 2);
+    assert_eq!(app.session.messages().len(), 2);
     assert_eq!(app.session.visible_conversation_message_count(), 1);
 
     app.input = "/rewind ".to_string();
@@ -702,7 +701,7 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     app.scroll_offset = 25;
     app.auto_scroll_paused = true;
     crate::tui::ui::set_last_chat_viewport_height(30);
-    let session_messages_before = app.session.messages.len();
+    let session_messages_before = app.session.messages().len();
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
@@ -718,7 +717,7 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     let spacer = &app.display_messages()[1];
     assert_eq!(spacer.role, "spacer");
     assert_eq!(spacer.content, "30", "spacer spans the viewport height");
-    assert_eq!(app.session.messages.len(), session_messages_before);
+    assert_eq!(app.session.messages().len(), session_messages_before);
     assert_eq!(app.input(), "draft message", "input draft must survive");
     assert_eq!(app.queued_messages.len(), 1, "queue must survive");
     assert!(!app.diagram_focus);
@@ -802,8 +801,8 @@ fn test_cls_command_clears_view_but_keeps_context() {
     );
     app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
     app.bump_display_messages_version();
-    let session_id_before = app.session.id.clone();
-    let session_messages_before = app.session.messages.len();
+    let session_id_before = app.session.id().to_owned();
+    let session_messages_before = app.session.messages().len();
 
     app.input = "/cls".to_string();
     app.cursor_pos = app.input.len();
@@ -811,12 +810,13 @@ fn test_cls_command_clears_view_but_keeps_context() {
 
     assert!(app.display_messages().is_empty(), "view should be cleared");
     assert_eq!(
-        app.session.messages.len(),
+        app.session.messages().len(),
         session_messages_before,
         "provider context must survive"
     );
     assert_eq!(
-        app.session.id, session_id_before,
+        app.session.id(),
+        session_id_before,
         "/cls must not start a fresh session (that is /clear)"
     );
 }
@@ -1221,7 +1221,7 @@ fn test_workspace_info_widget_appears_in_visual_debug_frame_when_enabled() {
     ];
     app.bump_display_messages_version();
 
-    let current_session = app.session.id.clone();
+    let current_session = app.session.id().to_owned();
     app.workspace_client.enable(
         Some(current_session.as_str()),
         &[current_session.clone(), "workspace_peer".to_string()],

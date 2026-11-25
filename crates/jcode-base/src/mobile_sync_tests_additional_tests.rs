@@ -174,19 +174,21 @@ async fn disable_reenable_during_upload_fences_remaining_chunks_and_progress() {
     })
     .unwrap();
     let mut session = Session::create_with_id("generation-cycle".into(), None, None);
-    session.messages = (0..MAX_MESSAGES_PER_UPLOAD + 1)
-        .map(|index| {
-            let mut message = msg(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: "visible".into(),
-                    cache_control: None,
-                }],
-            );
-            message.id = format!("message-{index}");
-            message
-        })
-        .collect();
+    session.replace_messages(
+        (0..MAX_MESSAGES_PER_UPLOAD + 1)
+            .map(|index| {
+                let mut message = msg(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: "visible".into(),
+                        cache_control: None,
+                    }],
+                );
+                message.id = format!("message-{index}");
+                message
+            })
+            .collect(),
+    );
     session.save().unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -403,7 +405,7 @@ async fn persistence_notifications_upload_under_one_second_and_retain_inflight_w
     );
     session.save().unwrap();
     for title in ["coalesce one", "coalesce two", "coalesce final"] {
-        session.custom_title = Some(title.into());
+        session.set_custom_title_for_tests(Some(title.into()));
         session.save().unwrap();
     }
     let (first, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
@@ -467,14 +469,14 @@ async fn persistence_notifications_upload_under_one_second_and_retain_inflight_w
     // backlog. Block the first old upload, then durably save a fresh session.
     for id in ["old-a", "old-b", "old-c"] {
         let mut old = Session::create_with_id(id.into(), None, None);
-        old.custom_title = Some(id.into());
-        old.messages = vec![msg(
+        old.set_custom_title_for_tests(Some(id.into()));
+        old.replace_messages(vec![msg(
             Role::User,
             vec![ContentBlock::Text {
                 text: id.into(),
                 cache_control: None,
             }],
-        )];
+        )]);
         storage::write_json_fast(&home.path().join(format!("sessions/{id}.json")), &old).unwrap();
     }
     let reconcile = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
@@ -485,14 +487,14 @@ async fn persistence_notifications_upload_under_one_second_and_retain_inflight_w
     let old_id = old["title"].as_str().unwrap().to_owned();
     assert!(old_id.starts_with("old-"));
     let mut fresh = Session::create_with_id("fresh-save".into(), None, None);
-    fresh.custom_title = Some("fresh-save".into());
-    fresh.messages = vec![msg(
+    fresh.set_custom_title_for_tests(Some("fresh-save".into()));
+    fresh.replace_messages(vec![msg(
         Role::User,
         vec![ContentBlock::Text {
             text: "fresh".into(),
             cache_control: None,
         }],
-    )];
+    )]);
     fresh.save().unwrap();
     release.send(()).unwrap();
     let (next, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
@@ -520,7 +522,7 @@ async fn persistence_notifications_upload_under_one_second_and_retain_inflight_w
         release.send(()).unwrap();
     }
     assert_eq!(resume.await.unwrap().sessions_uploaded, 2);
-    session.custom_title = Some("metadata only".into());
+    session.set_custom_title_for_tests(Some("metadata only".into()));
     session.save().unwrap();
     let (metadata, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
         .await

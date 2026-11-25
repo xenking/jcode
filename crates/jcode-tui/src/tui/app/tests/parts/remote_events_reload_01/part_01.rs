@@ -4,7 +4,7 @@ fn test_remote_bus_productivity_failure_clears_refresh_state() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
     app.productivity_refreshing = true;
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     let handled = rt.block_on(crate::tui::app::remote::handle_bus_event(
         &mut app,
@@ -55,7 +55,7 @@ fn test_handle_server_event_transcript_send_prefixes_user_message() {
     assert_eq!(last.content, "[transcription] dictated hello");
     assert!(app.messages.is_empty());
     assert!(matches!(
-        app.session.messages.last().and_then(|message| message.content.last()),
+        app.session.messages().last().and_then(|message| message.content.last()),
         Some(crate::message::ContentBlock::Text { text, .. }) if text == "[transcription] dictated hello"
     ));
     assert!(
@@ -98,7 +98,7 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.is_remote = true;
     app.remote_session_id = Some("session_remote_rename".to_string());
-    app.session.title = Some("Generated title".to_string());
+    app.session.set_title(Some("Generated title".to_string()));
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::SessionRenamed {
@@ -110,10 +110,7 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
     );
 
     assert!(redraw);
-    assert_eq!(
-        app.session.custom_title.as_deref(),
-        Some("Release planning")
-    );
+    assert_eq!(app.session.custom_title(), Some("Release planning"));
     assert_eq!(app.session.display_title(), Some("Release planning"));
     assert!(app.display_messages().iter().any(|message| {
         message
@@ -1379,7 +1376,7 @@ fn test_remote_done_does_not_duplicate_daemon_pokes() {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,

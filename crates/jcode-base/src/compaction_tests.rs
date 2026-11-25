@@ -11,8 +11,8 @@ async fn snapcompact_copied_session_pipeline_benchmark() {
     let fixture = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
     let session: crate::session::Session =
         serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
-    let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
-    let state = session.compaction.unwrap();
+    let messages: Vec<_> = session.messages().iter().map(|m| m.to_message()).collect();
+    let state = session.compaction().unwrap();
     let count = state.compacted_count;
     let existing = Some(Summary {
         text: state.summary_text.clone(),
@@ -54,8 +54,8 @@ async fn snapcompact_copied_session_incremental_benchmark() {
     let fixture = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
     let session: crate::session::Session =
         serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
-    let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
-    let state = session.compaction.unwrap();
+    let messages: Vec<_> = session.messages().iter().map(|m| m.to_message()).collect();
+    let state = session.compaction().unwrap();
     let count = state.compacted_count;
     let split = count + (messages.len() - count) / 2;
     let mut prior = Some(Summary {

@@ -298,13 +298,13 @@ pub(super) fn export_group(coordinator: String, epoch: u64, transfer: String) ->
         let stage = stage.join("members").join(&transfer.session_id);
         std::fs::create_dir_all(&stage)?;
         let mut sess = session::Session::load(&transfer.session_id)?;
-        sess.migration_epoch = transfer.epoch;
+        sess.set_migration_epoch(transfer.epoch);
         let session_file = stage.join("session.json");
         let todos = stage.join("todos.json");
         durable_json(&session_file, &sess)?;
-        copy_if_exists(&todo_file(&sess.id)?, &todos)?;
+        copy_if_exists(&todo_file(sess.id())?, &todos)?;
         members.push(ReturnedMember {
-            id: sess.id,
+            id: sess.id().to_owned(),
             session_sha256: digest(&session_file)?,
             todos_sha256: todos.is_file().then(|| digest(&todos)).transpose()?,
         });
@@ -382,14 +382,14 @@ fn return_archive_sessions(
             let file = dir.join("session.json");
             let mut sess: session::Session = read_json(&file)?;
             let todos = dir.join("todos.json");
-            if sess.id != *id
-                || sess.migration_epoch != next_epoch(manifest.epoch)?
+            if sess.id() != *id
+                || sess.migration_epoch() != next_epoch(manifest.epoch)?
                 || digest(&file)? != entry.session_sha256
                 || todos.is_file().then(|| digest(&todos)).transpose()? != entry.todos_sha256
             {
                 bail!("group return archive failed transcript or todo verification for {id}");
             }
-            sess.working_dir = manifest.repo.as_ref().map(|repo| repo.working_dir.clone());
+            sess.set_working_dir(manifest.repo.as_ref().map(|repo| repo.working_dir.clone()));
             Ok(sess)
         })
         .collect()
@@ -621,17 +621,17 @@ fn install_returned_group(
                 "Coordinated group returned from cloud host `{host}`. Swarm ownership, task assignments and todos came back. Cloud processes did not come back. Workers remain paused until explicitly resumed."
             ),
         );
-        let path = session::session_path(&sess.id)?;
+        let path = session::session_path(sess.id())?;
         remove_return_file(&session::session_journal_path_from_snapshot(&path))?;
         durable_json(&path, &sess)?;
-        let todos = stage.join("members").join(&sess.id).join("todos.json");
-        let dest = todo_file(&sess.id)?;
+        let todos = stage.join("members").join(sess.id()).join("todos.json");
+        let dest = todo_file(sess.id())?;
         if todos.is_file() {
             write_return_state(&dest, &std::fs::read(todos)?)?;
         } else {
             remove_return_file(&dest)?;
         }
-        messages += sess.messages.len();
+        messages += sess.messages().len();
     }
     Ok(messages)
 }

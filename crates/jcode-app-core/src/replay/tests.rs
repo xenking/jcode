@@ -229,9 +229,9 @@ fn test_user_message_and_thinking() {
 fn test_export_timeline_includes_persisted_swarm_replay_events() {
     let base = Utc::now();
     let mut session = Session::create_with_id("session_replay_swarm_test".to_string(), None, None);
-    session.created_at = base;
-    session.updated_at = base;
-    session.replay_events = vec![
+    session.set_created_at(base);
+    session.set_updated_at(base);
+    session.set_replay_events_for_tests(vec![
         StoredReplayEvent {
             timestamp: base + Duration::milliseconds(100),
             kind: StoredReplayEventKind::DisplayMessage {
@@ -280,7 +280,7 @@ fn test_export_timeline_includes_persisted_swarm_replay_events() {
                 reason: Some("proposal approved".to_string()),
             },
         },
-    ];
+    ]);
 
     let timeline = export_timeline(&session);
     assert!(timeline.iter().any(|event| matches!(
@@ -385,7 +385,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
     let mut seed = Session::create_with_id("session_seed".to_string(), None, None);
-    seed.working_dir = Some("/tmp/repo".to_string());
+    seed.set_working_dir(Some("/tmp/repo".to_string()));
     seed.record_swarm_status_event(vec![SwarmMemberStatus {
         session_id: "session_seed".to_string(),
         friendly_name: Some("seed".to_string()),
@@ -406,10 +406,10 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
 
     let mut child = Session::create_with_id(
         "session_child".to_string(),
-        Some(seed.id.clone()),
+        Some(seed.id().to_owned()),
         Some("child".to_string()),
     );
-    child.working_dir = Some("/tmp/repo".to_string());
+    child.set_working_dir(Some("/tmp/repo".to_string()));
     child.record_swarm_plan_event(
         "swarm_x".to_string(),
         1,
@@ -421,19 +421,19 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
             subsystem: None,
             file_scope: Vec::new(),
             blocked_by: vec![],
-            assigned_to: Some(seed.id.clone()),
+            assigned_to: Some(seed.id().to_owned()),
         }],
-        vec![seed.id.clone(), child.id.clone()],
+        vec![seed.id().to_owned(), child.id().to_owned()],
         None,
     );
     child.save_prepared().unwrap();
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
-    unrelated.working_dir = Some("/tmp/other".to_string());
+    unrelated.set_working_dir(Some("/tmp/other".to_string()));
     unrelated.save_prepared().unwrap();
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();
-    let ids: Vec<_> = loaded.iter().map(|s| s.session.id.as_str()).collect();
+    let ids: Vec<_> = loaded.iter().map(|s| s.session.id()).collect();
     assert!(ids.contains(&"session_seed"));
     assert!(ids.contains(&"session_child"));
     assert!(!ids.contains(&"session_other"));

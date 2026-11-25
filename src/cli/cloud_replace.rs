@@ -133,7 +133,7 @@ fn reject_owners(root: &Path) -> Result<()> {
         let sess = session::Session::load(&id).with_context(|| {
             format!("cannot verify repository for active session {id}; refusing replacement")
         })?;
-        reject_active_session(root, &id, sess.working_dir.as_deref())?;
+        reject_active_session(root, &id, sess.working_dir())?;
     }
     Ok(())
 }
@@ -424,14 +424,14 @@ mod tests {
         std::fs::write(cloud.path().join("cloud-only"), "unreturned work").unwrap();
         let id = "recover-session";
         let mut sess = session::Session::create_with_id(id.into(), None, None);
-        sess.working_dir = Some(cloud.path().to_string_lossy().into_owned());
-        sess.migration_epoch = 1;
+        sess.set_working_dir(Some(cloud.path().to_string_lossy().into_owned()));
+        sess.set_migration_epoch(1);
         sess.save_prepared().unwrap();
         storage::write_session_lease(&storage::SessionLease {
             session_id: id.into(),
             epoch: 1,
             away_host: None,
-            repo_root: sess.working_dir.clone(),
+            repo_root: sess.working_dir().map(str::to_owned),
             last_sync_snapshot: None,
             last_sync_head: None,
             updated_at: String::new(),
@@ -508,8 +508,8 @@ mod tests {
         }
         for (id, require_completion) in [("legacy-client", false), ("new-client", true)] {
             let mut sess = session::Session::create_with_id(id.into(), None, None);
-            sess.working_dir = None;
-            sess.migration_epoch = 1;
+            sess.set_working_dir(None);
+            sess.set_migration_epoch(1);
             sess.save_prepared().unwrap();
             storage::write_session_lease(&storage::SessionLease {
                 session_id: id.into(),
@@ -608,9 +608,9 @@ mod tests {
         );
         storage::remove_session_lease("different-session");
         let mut sess = session::Session::create_with_id("live-other-session".into(), None, None);
-        sess.working_dir = Some(root.join("nested").to_string_lossy().into_owned());
+        sess.set_working_dir(Some(root.join("nested").to_string_lossy().into_owned()));
         sess.save().unwrap();
-        storage::register_active_pid(&sess.id, std::process::id());
+        storage::register_active_pid(sess.id(), std::process::id());
         assert!(
             install(&repo, &stage.path().join("repo.bundle"), "replacement")
                 .unwrap_err()

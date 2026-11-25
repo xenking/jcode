@@ -16,7 +16,7 @@ impl Agent {
         let factors = self.routing_cache_factors(provider);
         let usages: Vec<_> = self
             .session
-            .messages
+            .messages()
             .iter()
             .rev()
             .filter_map(|message| message.token_usage.as_ref())
@@ -90,7 +90,7 @@ impl Agent {
     }
 
     pub(crate) fn routing_parent_id(&self) -> Option<String> {
-        self.session.parent_id.clone()
+        self.session.parent_id().map(str::to_owned)
     }
 
     /// A spent allowance must reach routing on its first occurrence, because

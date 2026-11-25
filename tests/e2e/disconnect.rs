@@ -144,11 +144,11 @@ async fn abrupt_disconnect(turn: Turn, continue_on_disconnect: bool) -> Result<(
         timeout(Duration::from_secs(10), async {
             loop {
                 let session = Session::load(&session_id)?;
-                if session.status != SessionStatus::Active {
+                if *session.status() != SessionStatus::Active {
                     if matches!(turn, Turn::Streaming) {
-                        assert!(matches!(session.status, SessionStatus::Crashed { .. }));
+                        assert!(matches!(session.status(), SessionStatus::Crashed { .. }));
                     } else {
-                        assert_eq!(session.status, SessionStatus::Closed);
+                        assert_eq!(*session.status(), SessionStatus::Closed);
                     }
                     if matches!(turn, Turn::Completed) {
                         assert!(serde_json::to_string(&session)?.contains("finished successfully"));
@@ -268,7 +268,7 @@ async fn assert_retained_and_reconnect(socket: &std::path::Path, session_id: &st
     // Give the old attachment's EOF cleanup a chance to run. Check throughout
     // the interval rather than accepting a single pre-cleanup Active snapshot.
     for _ in 0..25 {
-        assert_eq!(Session::load(session_id)?.status, SessionStatus::Active);
+        assert_eq!(*Session::load(session_id)?.status(), SessionStatus::Active);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let connection = server::connect_socket(socket).await?;
@@ -291,7 +291,7 @@ async fn assert_retained_and_reconnect(socket: &std::path::Path, session_id: &st
         )),
         "reconnect must restore the same retained idle session"
     );
-    assert_eq!(Session::load(session_id)?.status, SessionStatus::Active);
+    assert_eq!(*Session::load(session_id)?.status(), SessionStatus::Active);
     drop((reader, writer));
     Ok(())
 }
@@ -450,7 +450,7 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
                     .await?;
                     anyhow::ensure!(
                         !matches!(
-                            Session::load(&session_id)?.status,
+                            Session::load(&session_id)?.status(),
                             SessionStatus::Closed | SessionStatus::Crashed { .. }
                         ),
                         "old supervisor must not close its live successor"
@@ -465,7 +465,7 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
         timeout(Duration::from_secs(10), async {
             loop {
                 let session = Session::load(&session_id)?;
-                assert_eq!(session.status, SessionStatus::Active);
+                assert_eq!(*session.status(), SessionStatus::Active);
                 let transcript = serde_json::to_string(&session)?;
                 if matches!(end, RemoteTurnEnd::Cancel) || transcript.contains("after reconnect") {
                     if matches!(end, RemoteTurnEnd::Cancel) {
@@ -721,7 +721,7 @@ async fn desktop_busy_owner_disconnect_with_successor_finishes_original_turn() -
         )), "successor must stop reporting an active turn");
             anyhow::ensure!(
                 !matches!(
-                    Session::load(&session_id)?.status,
+                    Session::load(&session_id)?.status(),
                     SessionStatus::Closed | SessionStatus::Crashed { .. }
                 ),
                 "old owner must not close or crash its successor"

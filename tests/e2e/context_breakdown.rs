@@ -128,9 +128,9 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     )?;
 
     let mut saved = Session::create(None, None);
-    saved.model = Some("mock-model".into());
-    saved.provider_key = Some("mock".into());
-    saved.working_dir = Some(repo.display().to_string());
+    saved.set_model(Some("mock-model".into()));
+    saved.set_provider_key(Some("mock".into()));
+    saved.set_working_dir(Some(repo.display().to_string()));
     saved.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -138,7 +138,11 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
             cache_control: None,
         }],
     );
-    saved.messages.last_mut().unwrap().token_usage = Some(jcode::session::StoredTokenUsage {
+    saved
+        .messages_mut_for_tests()
+        .last_mut()
+        .unwrap()
+        .token_usage = Some(jcode::session::StoredTokenUsage {
         prompt_tokens: Some(30_000),
         input_tokens: 30_000,
         output_tokens: 0,
@@ -148,12 +152,12 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     saved.save()?;
 
     let mut long_saved = Session::create(None, None);
-    long_saved.model = Some("gpt-6.2-astra".into());
-    long_saved.provider_key = Some("openai-oauth@fixture".into());
-    long_saved.route_api_method = long_saved.provider_key.clone();
-    long_saved.working_dir = Some(repo.display().to_string());
-    long_saved.context_cap = Some(500_000);
-    long_saved.last_provider_request_at = Some(chrono::Utc::now());
+    long_saved.set_model(Some("gpt-6.2-astra".into()));
+    long_saved.set_provider_key(Some("openai-oauth@fixture".into()));
+    long_saved.set_route_api_method(long_saved.provider_key().map(str::to_owned));
+    long_saved.set_working_dir(Some(repo.display().to_string()));
+    long_saved.set_context_cap(Some(500_000));
+    long_saved.set_last_provider_request_at(Some(chrono::Utc::now()));
     long_saved.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -207,7 +211,7 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert_eq!(tokens(&draft, DynamicTools), None);
         assert_eq!(tokens(&draft, Conversation), Some(0));
 
-        let inactive = observer.inspect(3, Some(&saved.id), None).await?;
+        let inactive = observer.inspect(3, Some(saved.id()), None).await?;
         assert_eq!(inactive.total_tokens, Some(30_000));
         assert_eq!(inactive.limit_tokens, None);
         assert_eq!(inactive.meter.as_ref().unwrap().state, ContextMeterState::Saved);
@@ -218,9 +222,9 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert_eq!(tokens(&inactive, Unattributed), None);
         assert!(inactive.residual_tokens.is_some_and(|tokens| tokens > 0));
         assert!(calls.lock().unwrap().is_empty());
-        assert_eq!(Session::load(&saved.id)?.messages.len(), 1);
+        assert_eq!(Session::load(saved.id())?.messages().len(), 1);
 
-        let legacy = observer.inspect(12, Some(&long_saved.id), None).await?;
+        let legacy = observer.inspect(12, Some(long_saved.id()), None).await?;
         assert_eq!(legacy.total_tokens, Some(224_142));
         assert_eq!(legacy.meter.unwrap().compaction_threshold_tokens, None);
         jcode::session_telemetry::save_context(
@@ -239,7 +243,7 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
                 ..Default::default()
             }),
         );
-        let long = observer.inspect(13, Some(&long_saved.id), None).await?;
+        let long = observer.inspect(13, Some(long_saved.id()), None).await?;
         let meter = long.meter.as_ref().unwrap();
         assert_eq!(meter.occupied_tokens, Some(224_142));
         assert_eq!(meter.source, ContextOccupancySource::ProviderReported);
@@ -248,15 +252,15 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert_eq!(meter.compaction_threshold_tokens, Some(200_000));
         assert_eq!(meter.long_context_pricing_above_input_tokens, None);
         assert!(long.residual_tokens.is_some_and(|tokens| tokens < 0));
-        observer.send(json!({"v":1,"id":14,"req":"session_context_breakdown","session_id":long_saved.id,"summary_only":true})).await?;
+        observer.send(json!({"v":1,"id":14,"req":"session_context_breakdown","session_id":long_saved.id(),"summary_only":true})).await?;
         let fast: ContextBreakdown = serde_json::from_value(observer.wait(|frame| frame["reply_to"] == 14).await?)?;
         assert_eq!(fast.meter, long.meter);
         assert!(fast.categories.is_empty());
         assert_eq!(fast.residual_tokens, None);
-        long_saved.route_api_method = Some("openai-api".into());
-        long_saved.provider_key = long_saved.route_api_method.clone();
+        long_saved.set_route_api_method(Some("openai-api".into()));
+        long_saved.set_provider_key(long_saved.route_api_method().map(str::to_owned));
         long_saved.save()?;
-        let rerouted = observer.inspect(15, Some(&long_saved.id), None).await?;
+        let rerouted = observer.inspect(15, Some(long_saved.id()), None).await?;
         let rerouted = rerouted.meter.unwrap();
         assert_eq!(rerouted.source, ContextOccupancySource::Unknown);
         assert_eq!(rerouted.occupied_tokens, None);
@@ -302,9 +306,9 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert!(tokens(&after, SkillsModes).is_some_and(|tokens| tokens > 0));
         assert_eq!(calls.lock().unwrap().len(), 1);
 
-        observer.send(json!({"v": 1, "id": 9, "req": "attach_session", "session_id": saved.id})).await?;
+        observer.send(json!({"v": 1, "id": 9, "req": "attach_session", "session_id": saved.id()})).await?;
         observer.wait(|frame| frame["ev"] == "attached").await?;
-        let restored = observer.inspect(10, Some(&saved.id), None).await?;
+        let restored = observer.inspect(10, Some(saved.id()), None).await?;
         assert!(tokens(&restored, Conversation).is_some_and(|tokens| tokens > 0));
         assert!(restored.limit_tokens.is_some_and(|limit| limit > 0));
         assert_eq!(calls.lock().unwrap().len(), 1);

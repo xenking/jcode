@@ -25,7 +25,7 @@ async fn cache_keepalive_for_detached_wait_starts_only_after_parking() {
         use_tool: false,
     });
     let mut agent = Agent::new(provider.clone(), Registry::empty());
-    agent.session.is_debug = false;
+    agent.session.set_debug(false);
     let mut turn =
         crate::cache_keepalive::Turn::begin(&agent.session, agent.registry.compaction()).unwrap();
     let capture = turn.request();
@@ -166,10 +166,10 @@ impl crate::tool::Tool for ParkTool {
         _: Value,
         ctx: crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
-        let before = serde_json::to_value(Session::load(&ctx.session_id)?.messages)?;
+        let before = serde_json::to_value(Session::load(&ctx.session_id)?.messages())?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(crate::cache_keepalive::load_usage(&ctx.session_id).is_none());
-        let after = serde_json::to_value(Session::load(&ctx.session_id)?.messages)?;
+        let after = serde_json::to_value(Session::load(&ctx.session_id)?.messages())?;
         assert_eq!(
             before, after,
             "cache keepalive must not write transcript messages"
@@ -198,7 +198,7 @@ async fn tool_waits_inside_a_turn_never_ping_and_preserve_history() {
             .register("park-fixture".into(), Arc::new(ParkTool))
             .await;
         let mut agent = Agent::new(provider, registry);
-        agent.session.is_debug = false; // Test build uses an isolated home regardless.
+        agent.session.set_debug(false); // Test build uses an isolated home regardless.
         agent.add_message(
             Role::User,
             vec![ContentBlock::Text {

@@ -20,8 +20,7 @@ impl App {
 
         let repository = self
             .session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
         let Some(repository) = repository.and_then(|path| path.canonicalize().ok()) else {

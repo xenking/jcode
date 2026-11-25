@@ -25,7 +25,7 @@ impl Agent {
         };
         tokio::pin!(cancel_fut);
 
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
         let model = self.provider.model();
         let mut printed_notice = false;
 
@@ -96,7 +96,7 @@ impl Agent {
             NetworkRecoveryOutcome::RestoredAfterOffline => {
                 logging::info(&format!(
                     "Network connectivity restored for {}; automatically resuming turn",
-                    self.session.id
+                    self.session.id()
                 ));
                 if print_output {
                     eprintln!("[network restored; resuming...]");
@@ -106,14 +106,16 @@ impl Agent {
             NetworkRecoveryOutcome::RetryingWhileOnline { attempt, max } => {
                 logging::info(&format!(
                     "Retrying turn for {} after transient network error ({}/{})",
-                    self.session.id, attempt, max
+                    self.session.id(),
+                    attempt,
+                    max
                 ));
                 NetworkRecoveryAction::Retry
             }
             NetworkRecoveryOutcome::Cancelled => {
                 logging::info(&format!(
                     "Turn cancelled while waiting for network recovery in {}",
-                    self.session.id
+                    self.session.id()
                 ));
                 NetworkRecoveryAction::Cancelled
             }
@@ -126,21 +128,21 @@ impl Agent {
     /// Run turns until no more tool calls
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
-            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.ensure_session_lease()?;
         let mut cache_turn =
             crate::cache_keepalive::Turn::begin(&self.session, self.registry.compaction());
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
         self.provider.begin_turn(&usage_turn_id).await;
-        crate::session_metrics::record_turn(&self.session.id);
+        crate::session_metrics::record_turn(self.session.id());
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::for_session(&self.session);
         // Register this turn's cancel signal so session-level cancels reach
         // this in-flight turn even through stale control handles (issue #428).
         let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
-            &self.session.id,
+            self.session.id(),
             self.graceful_shutdown.clone(),
         );
         let mut final_text = String::new();
@@ -261,7 +263,7 @@ impl Agent {
             if !todo_nudge_sent
                 && turn_tool_calls > Self::TOOL_CALLS_BEFORE_TODO_NUDGE
                 && tools.iter().any(|tool| tool.name == "todo")
-                && crate::todo::load_todos(&self.session.id)
+                && crate::todo::load_todos(self.session.id())
                     .map(|t| t.is_empty())
                     .unwrap_or(false)
             {
@@ -278,7 +280,7 @@ impl Agent {
                 .then(crate::subscription_notice::take)
                 .flatten()
             {
-                crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
+                crate::subscription_notice::show_upgrade_card(&notice, self.session.id());
                 messages_with_memory
                     .push(self.append_model_reminder(&Self::plan_limit_reminder(&notice)));
             }
@@ -312,7 +314,7 @@ impl Agent {
 
             // Publish status for TUI to show during Task execution
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
-                session_id: self.session.id.clone(),
+                session_id: self.session.id().to_owned(),
                 status: "calling API".to_string(),
                 model: Some(self.provider.model()),
             }));
@@ -324,14 +326,14 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             self.enforce_worker_request()?;
             self.last_status_detail = None;
-            self.provider.set_session_id(&self.session.id);
+            self.provider.set_session_id(self.session.id());
             let cache_capture = cache_turn
                 .as_ref()
                 .map(crate::cache_keepalive::Turn::request);
             let completion = jcode_provider_core::cache_keepalive::Capture::scope(
                 cache_capture.clone(),
                 jcode_provider_core::with_pinned_worker_request(
-                    self.session.is_swarm_worker,
+                    self.session.is_swarm_worker(),
                     jcode_provider_core::with_account_limit_fail_fast(
                         self.routing_fail_fast_limits,
                         self.provider.complete_split(
@@ -414,7 +416,7 @@ impl Agent {
             );
 
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
-                session_id: self.session.id.clone(),
+                session_id: self.session.id().to_owned(),
                 status: "streaming".to_string(),
                 model: Some(self.provider.model()),
             }));
@@ -428,7 +430,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
-            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
+            let mut usage_recorder = StreamUsageRecorder::new(self.session.id());
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
@@ -877,7 +879,7 @@ impl Agent {
                             eprintln!("[trace] session_id {}", sid);
                         }
                         self.provider_session_id = Some(sid.clone());
-                        self.session.provider_session_id = Some(sid);
+                        self.session.set_provider_session_id(Some(sid));
                         // We've received session_id, can exit the loop now
                         if saw_message_end {
                             break;
@@ -912,7 +914,7 @@ impl Agent {
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction
-                                .get_or_insert((encrypted_content, self.session.messages.len()));
+                                .get_or_insert((encrypted_content, self.session.messages().len()));
                         }
                         if print_output {
                             let tokens_str = pre_tokens
@@ -939,8 +941,8 @@ impl Agent {
                             );
                         }
                         let ctx = ToolContext {
-                            session_id: self.session.id.clone(),
-                            message_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
+                            message_id: self.session.id().to_owned(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
@@ -1139,7 +1141,7 @@ impl Agent {
                         usage_cache_creation,
                     )
                     .saturating_add(output);
-                crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                crate::session_metrics::record_token_usage(self.session.id(), total, output);
                 if saw_message_end {
                     self.record_completed_context_observation(total.saturating_sub(output))
                         .await;
@@ -1354,7 +1356,7 @@ impl Agent {
             for (tool_index, tc) in tool_calls.iter().cloned().enumerate() {
                 let message_id = assistant_message_id
                     .clone()
-                    .unwrap_or_else(|| self.session.id.clone());
+                    .unwrap_or_else(|| self.session.id().to_owned());
 
                 if parallel_reads.is_empty() {
                     parallel_reads = self
@@ -1373,7 +1375,7 @@ impl Agent {
                     });
                     logging::warn(&error_msg);
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         message_id: message_id.clone(),
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
@@ -1433,7 +1435,7 @@ impl Agent {
                         }
 
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1466,7 +1468,7 @@ impl Agent {
                 }
 
                 let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
@@ -1479,7 +1481,7 @@ impl Agent {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
@@ -1493,7 +1495,7 @@ impl Agent {
 
                 // Publish status for TUI to show during Task execution
                 Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     status: format!("running {}", tc.name),
                     model: Some(self.provider.model()),
                 }));
@@ -1538,7 +1540,7 @@ impl Agent {
                         }
                         let output = cap_tool_output_for_history(&tc.name, output);
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1579,7 +1581,7 @@ impl Agent {
                     Err(e) => {
                         crate::telemetry::record_tool_failure();
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),

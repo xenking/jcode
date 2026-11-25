@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::Inherit;
 
 impl App {
     pub(super) fn clear_display_messages(&mut self) {
@@ -15,7 +16,7 @@ impl App {
     }
 
     pub(super) fn ensure_provider_messages_hydrated(&mut self) {
-        if !self.is_remote || !self.messages.is_empty() || self.session.messages.is_empty() {
+        if !self.is_remote || !self.messages.is_empty() || self.session.messages().is_empty() {
             return;
         }
 
@@ -35,7 +36,7 @@ impl App {
         if self.is_remote {
             self.messages.len()
         } else {
-            self.session.messages.len()
+            self.session.messages().len()
         }
     }
 
@@ -115,7 +116,7 @@ impl App {
 
     pub(super) fn reseed_compaction_from_provider_messages(&mut self) {
         if self.is_remote
-            || (!self.provider.uses_jcode_compaction() && self.session.compaction.is_none())
+            || (!self.provider.uses_jcode_compaction() && self.session.compaction().is_none())
         {
             return;
         }
@@ -129,7 +130,7 @@ impl App {
                 self.provider.name(),
                 &self.provider.model(),
             );
-            if let Some(state) = self.session.compaction.as_ref() {
+            if let Some(state) = self.session.compaction() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
                 manager.seed_restored_messages_with(&provider_messages);
@@ -144,12 +145,14 @@ impl App {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
-            self.session.compaction = manager.persisted_state().map(Arc::new);
+        if !manager.persisted_state_matches(self.session.compaction_state()) {
+            self.session
+                .set_compaction(manager.persisted_state().map(Arc::new));
             if let Err(err) = self.session.save() {
                 crate::logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
-                    self.session.id, err
+                    self.session.id(),
+                    err
                 ));
             }
         }
@@ -190,7 +193,7 @@ impl App {
             compacted_count,
         };
 
-        self.session.compaction = Some(Arc::new(state.clone()));
+        self.session.set_compaction(Some(Arc::new(state.clone())));
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
@@ -215,7 +218,7 @@ impl App {
             return (self.messages.clone(), None);
         }
         let base_messages = self.materialized_provider_messages();
-        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
+        if !self.provider.supports_compaction() && self.session.compaction().is_none() {
             return (base_messages, None);
         }
         let compaction = self.registry.compaction();
@@ -271,7 +274,7 @@ impl App {
                     let detail = crate::compaction::MISSING_NATIVE_SUMMARY;
                     crate::logging::warn(&format!(
                         "[compaction] session={}: {detail}",
-                        self.session.id
+                        self.session.id()
                     ));
                     self.push_display_message(DisplayMessage::system(detail));
                 }
@@ -283,7 +286,7 @@ impl App {
 
     pub(super) fn poll_compaction_completion(&mut self) -> bool {
         if self.is_remote
-            || (!self.provider.supports_compaction() && self.session.compaction.is_none())
+            || (!self.provider.supports_compaction() && self.session.compaction().is_none())
         {
             return false;
         }
@@ -334,7 +337,8 @@ impl App {
         {
             crate::logging::warn(&format!(
                 "Failed to persist provider session reset after compaction for session {}: {}",
-                self.session.id, err
+                self.session.id(),
+                err
             ));
         }
         if event.messages_dropped.is_some() {
@@ -405,7 +409,7 @@ impl App {
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.set_provider_session_id(None);
         self.context_warning_shown = false;
         // The sidebar/status context figure is derived from the last
         // provider-reported stream usage, which described the *pre-compaction*
@@ -520,7 +524,7 @@ impl App {
     pub(super) fn set_memory_feature_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory(&self.session.id);
+            crate::memory::clear_pending_memory(self.session.id());
             crate::memory::clear_activity();
             crate::memory_agent::reset();
             self.last_injected_memory_signature = None;
@@ -529,12 +533,12 @@ impl App {
 
     pub(super) fn set_autoreview_feature_enabled(&mut self, enabled: bool) {
         self.autoreview_enabled = enabled;
-        self.session.autoreview_enabled = Some(enabled);
+        self.session.set_autoreview_enabled(Some(enabled));
     }
 
     pub(super) fn set_autojudge_feature_enabled(&mut self, enabled: bool) {
         self.autojudge_enabled = enabled;
-        self.session.autojudge_enabled = Some(enabled);
+        self.session.set_autojudge_enabled(Some(enabled));
     }
 
     pub(super) fn trigger_save_memory_extraction(&self) {
@@ -546,8 +550,8 @@ impl App {
         let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
         crate::memory_agent::trigger_final_extraction_with_dir(
             transcript,
-            self.session.id.clone(),
-            self.session.working_dir.clone(),
+            self.session.id().to_owned(),
+            self.session.working_dir().map(str::to_owned),
         );
     }
 
@@ -642,7 +646,8 @@ impl App {
         if let Some(pending_time) = self.quit_pending
             && pending_time.elapsed() < QUIT_TIMEOUT
         {
-            self.session.provider_session_id = self.provider_session_id.clone();
+            self.session
+                .set_provider_session_id(self.provider_session_id.clone());
             crate::telemetry::end_session_with_reason(
                 self.provider.name(),
                 &self.provider.model(),
@@ -723,7 +728,7 @@ impl App {
                 }
             }
         } else {
-            for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
+            for (index, msg) in self.session.messages().iter().enumerate().skip(scan_start) {
                 match msg.role {
                     Role::User => {
                         for block in &msg.content {
@@ -859,21 +864,21 @@ impl App {
     /// Rebuild current session into a new one without tool calls
     pub(super) fn recover_session_without_tools(&mut self) {
         let old_session = self.session.clone();
-        let old_messages = old_session.messages.clone();
+        let old_messages = old_session.messages().to_vec();
 
         let new_session_id = format!("session_recovery_{}", id::new_id("rec"));
         let mut new_session =
-            Session::create_with_id(new_session_id, Some(old_session.id.clone()), None);
-        new_session.title = old_session.title.clone();
-        new_session.custom_title = old_session.custom_title.clone();
-        new_session.provider_session_id = old_session.provider_session_id.clone();
-        new_session.model = old_session.model.clone();
-        new_session.is_canary = old_session.is_canary;
-        new_session.testing_build = old_session.testing_build.clone();
-        new_session.is_debug = old_session.is_debug;
-        new_session.saved = old_session.saved;
-        new_session.save_label = old_session.save_label.clone();
-        new_session.working_dir = old_session.working_dir.clone();
+            Session::create_with_id(new_session_id, Some(old_session.id().to_owned()), None);
+        new_session.inherit_from(
+            &old_session,
+            Inherit::TITLES
+                | Inherit::PROVIDER_SESSION_ID
+                | Inherit::MODEL
+                | Inherit::BUILD_UNDER_TEST
+                | Inherit::DEBUG_FLAG
+                | Inherit::BOOKMARK
+                | Inherit::WORKING_DIR,
+        );
 
         self.clear_provider_messages();
         self.clear_display_messages();
@@ -893,7 +898,7 @@ impl App {
         self.provider_session_id = None;
         self.session = new_session;
         self.set_side_panel_snapshot(
-            crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),
+            crate::side_panel::snapshot_for_session(self.session.id()).unwrap_or_default(),
         );
 
         for msg in old_messages {
@@ -937,7 +942,7 @@ impl App {
 
         self.push_display_message(DisplayMessage::system(format!(
             "Recovery complete. New session: {}. Tool calls stripped; context preserved.",
-            self.session.id
+            self.session.id()
         )));
         self.set_status_notice("Recovered session");
     }

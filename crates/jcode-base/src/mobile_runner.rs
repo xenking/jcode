@@ -177,8 +177,8 @@ fn transfer_session(
     );
     let mut session =
         crate::session::Session::create(Some(metadata.session_id.clone()), metadata.title.clone());
-    session.working_dir = Some(workspace.to_string_lossy().into_owned());
-    session.original_working_dir = metadata.cwd.clone();
+    session.set_working_dir(Some(workspace.to_string_lossy().into_owned()));
+    session.set_original_working_dir(metadata.cwd.clone());
     for message in messages {
         // Imported tool entries are historical text, not executable tool calls
         // or unmatched tool results. Never elevate synced system text into the
@@ -295,7 +295,7 @@ async fn import_local_session(
         let (metadata, messages) = fetch_local_transcript(client, base, key, id).await?;
         let mut session = transfer_session(&metadata, messages, &workspace_dir())?;
         session.save()?;
-        Ok(session.id)
+        Ok(session.id().to_owned())
     })
     .await
 }
@@ -938,20 +938,17 @@ mod tests {
             std::path::Path::new("/cloud/workspaces"),
         )
         .unwrap();
-        assert_ne!(session.id, metadata.session_id);
-        assert_eq!(session.parent_id.as_deref(), Some("local-source"));
-        assert_eq!(session.working_dir.as_deref(), Some("/cloud/workspaces"));
-        assert_eq!(
-            session.original_working_dir.as_deref(),
-            Some("/home/local/project")
-        );
-        assert_eq!(session.title, metadata.title);
-        assert!(session.provider_session_id.is_none());
-        assert!(session.system_prompt.is_none());
-        assert!(session.compaction.is_none());
-        assert_eq!(session.messages.len(), 5);
-        assert_eq!(session.messages[1].role, Role::Assistant);
-        for message in &session.messages {
+        assert_ne!(session.id(), metadata.session_id);
+        assert_eq!(session.parent_id(), Some("local-source"));
+        assert_eq!(session.working_dir(), Some("/cloud/workspaces"));
+        assert_eq!(session.original_working_dir(), Some("/home/local/project"));
+        assert_eq!(session.title(), metadata.title.as_deref());
+        assert!(session.provider_session_id().is_none());
+        assert!(session.system_prompt().is_none());
+        assert!(session.compaction().is_none());
+        assert_eq!(session.messages().len(), 5);
+        assert_eq!(session.messages()[1].role, Role::Assistant);
+        for message in session.messages() {
             assert!(
                 message
                     .content
@@ -959,7 +956,7 @@ mod tests {
                     .all(|b| matches!(b, ContentBlock::Text { .. }))
             );
         }
-        let ContentBlock::Text { text, .. } = &session.messages.last().unwrap().content[0] else {
+        let ContentBlock::Text { text, .. } = &session.messages().last().unwrap().content[0] else {
             panic!()
         };
         assert!(text.starts_with("[Session transferred to Jcode Cloud]"));

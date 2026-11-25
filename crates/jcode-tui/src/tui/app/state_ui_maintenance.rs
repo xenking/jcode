@@ -573,13 +573,13 @@ Do not force-push or discard local commits without confirming they are already u
         prompt: String,
         repo_dir: Option<&std::path::Path>,
     ) -> anyhow::Result<bool> {
-        let mut session = crate::session::Session::create(Some(self.session.id.clone()), None);
+        let mut session = crate::session::Session::create(Some(self.session.id().to_owned()), None);
         if let Some(dir) = repo_dir {
-            session.working_dir = Some(dir.display().to_string());
+            session.set_working_dir(Some(dir.display().to_string()));
         } else {
-            session.working_dir = self.session.working_dir.clone();
+            session.set_working_dir(self.session.working_dir().map(str::to_owned));
         }
-        let session_id = session.id.clone();
+        let session_id = session.id().to_owned();
         let _ = session.save();
         App::save_startup_submission_for_session(&session_id, prompt, Vec::new());
         self.spawn_merge_session_terminal(&session_id, repo_dir)

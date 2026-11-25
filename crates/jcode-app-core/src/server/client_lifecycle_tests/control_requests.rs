@@ -95,7 +95,7 @@ async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
         None,
         None,
     );
-    session.model = Some("panic-on-fork".to_string());
+    session.set_model(Some("panic-on-fork".to_string()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -230,7 +230,7 @@ async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
     let registry = Registry::new(Arc::clone(&provider)).await;
     let session_id = "session_busy_background_signal_registry";
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("panic-on-fork".to_string());
+    session.set_model(Some("panic-on-fork".to_string()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -318,7 +318,7 @@ async fn context_message_persists_without_starting_turn() {
     });
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("panic-on-fork".to_string());
+    session.set_model(Some("panic-on-fork".to_string()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -345,8 +345,8 @@ async fn context_message_persists_without_starting_turn() {
     assert!(!forked.load(Ordering::SeqCst));
 
     let persisted = crate::session::Session::load(session_id).expect("persisted session");
-    assert_eq!(persisted.messages.len(), before + 1);
-    let message = persisted.messages.last().unwrap();
+    assert_eq!(persisted.messages().len(), before + 1);
+    let message = persisted.messages().last().unwrap();
     assert_eq!(format!("{:?}", message.role), "User");
     assert!(matches!(
         &message.content[0],

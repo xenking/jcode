@@ -247,10 +247,10 @@ impl Agent {
     }
 
     pub(crate) fn mark_swarm_worker(&mut self) -> Result<()> {
-        if self.session.is_swarm_worker {
+        if self.session.is_swarm_worker() {
             return Ok(());
         }
-        self.session.is_swarm_worker = true;
+        self.session.set_is_swarm_worker(true);
         self.session.save_prepared()
     }
 
@@ -264,39 +264,40 @@ impl Agent {
         profile: Option<String>,
     ) -> Result<()> {
         if provider_key.is_some() {
-            self.session.provider_key = provider_key;
+            self.session.set_provider_key(provider_key);
         }
-        self.session.route_api_method = route_api_method;
-        self.session.reasoning_effort = self.provider.reasoning_effort();
+        self.session.set_route_api_method(route_api_method);
+        self.session
+            .set_reasoning_effort(self.provider.reasoning_effort());
         self.session.set_worker_model_approval(approval);
-        self.session.worker_speed = Some(speed);
-        self.session.speed_selection = speed_selection;
+        self.session.set_worker_speed(Some(speed));
+        self.session.set_speed_selection(speed_selection);
         // The fresh-session constructor clears any inherited provider speed.
         // Reinstall only the selection granted for this new worker.
-        self.session.is_swarm_worker = true;
+        self.session.set_is_swarm_worker(true);
         // A worker never keeps a root default; it gets only its spawn profile.
         self.set_agent_profile(profile)?;
-        if let Some(choice) = &self.session.speed_selection {
+        if let Some(choice) = &self.session.speed_selection() {
             self.ensure_worker_speed_allowed(choice.mode)?;
             Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)?;
         }
         self.ensure_session_speed()?;
         crate::session_effort::record_session_effort(
-            &self.session.id,
-            self.session.reasoning_effort.as_deref(),
+            self.session.id(),
+            self.session.reasoning_effort(),
         );
         self.session.save_prepared()
     }
 
     pub(crate) fn worker_speed_status(&self) -> Option<jcode_message_types::WorkerSpeedStatus> {
-        self.session.worker_speed.clone()
+        self.session.worker_speed().cloned()
     }
 
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
-        self.session.is_swarm_worker
+        self.session.is_swarm_worker()
             && Self::worker_effort_is_constrained(
                 self.provider.as_ref(),
-                self.session.provider_key.as_deref(),
+                self.session.provider_key(),
                 &self.provider_model(),
             )
     }
@@ -319,12 +320,12 @@ impl Agent {
     }
 
     fn worker_effort(&self, requested: &str) -> Result<String> {
-        if !self.session.is_swarm_worker {
+        if !self.session.is_swarm_worker() {
             return Ok(requested.to_string());
         }
         capped_worker_effort(
             &crate::config::config().agents,
-            self.session.provider_key.as_deref(),
+            self.session.provider_key(),
             self.provider.name(),
             &self.provider_model(),
             requested,
@@ -337,14 +338,10 @@ impl Agent {
     /// older session) ends here before a request, so a worker can never spend
     /// on a model the user did not allow, whatever moved it there.
     pub(super) fn enforce_worker_model(&self) -> Result<()> {
-        if !self.session.is_swarm_worker {
+        if !self.session.is_swarm_worker() {
             return Ok(());
         }
-        let provider_key = self
-            .session
-            .provider_key
-            .as_deref()
-            .unwrap_or(self.provider.name());
+        let provider_key = self.session.provider_key().unwrap_or(self.provider.name());
         Self::validate_worker_route(provider_key, &self.provider_model())
     }
 
@@ -360,7 +357,7 @@ impl Agent {
     }
 
     pub(crate) fn enforce_worker_request(&self) -> Result<()> {
-        if !self.session.is_swarm_worker {
+        if !self.session.is_swarm_worker() {
             return Ok(());
         }
         self.enforce_worker_model()?;
@@ -385,19 +382,16 @@ impl Agent {
 
     fn ensure_worker_speed_allowed(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
         use jcode_provider_core::SpeedMode;
-        if !self.session.is_swarm_worker || mode == SpeedMode::Standard {
+        if !self.session.is_swarm_worker() || mode == SpeedMode::Standard {
             return Ok(());
         }
         anyhow::ensure!(
-            Self::cap_worker_speed(
-                self.provider.as_ref(),
-                self.session.provider_key.as_deref(),
-                mode
-            ) == mode,
+            Self::cap_worker_speed(self.provider.as_ref(), self.session.provider_key(), mode)
+                == mode,
             "Worker speed {mode:?} exceeds the configured swarm speed cap. Select Standard."
         );
         anyhow::ensure!(
-            self.session.speed_selection.as_ref().is_some_and(|speed| {
+            self.session.speed_selection().is_some_and(|speed| {
                 speed.mode == mode
                     && self.speed_selection_matches(speed)
                     && self.session.is_worker_speed_approved(speed)
@@ -408,7 +402,7 @@ impl Agent {
     }
 
     pub(super) fn enforce_worker_effort(&self) -> Result<()> {
-        if !self.session.is_swarm_worker {
+        if !self.session.is_swarm_worker() {
             return Ok(());
         }
         if let Some(current) = self.provider.reasoning_effort() {
@@ -419,7 +413,7 @@ impl Agent {
                     self.provider.reasoning_effort().as_deref() == Some(clamped.as_str()),
                     "Provider did not apply the required swarm effort {clamped}"
                 );
-                crate::session_effort::record_session_effort(&self.session.id, Some(&clamped));
+                crate::session_effort::record_session_effort(self.session.id(), Some(&clamped));
             }
         } else {
             anyhow::ensure!(
@@ -431,7 +425,7 @@ impl Agent {
     }
 
     fn clamp_worker_effort_after_model_switch(&mut self, previous: Option<String>) -> Result<()> {
-        if !self.session.is_swarm_worker {
+        if !self.session.is_swarm_worker() {
             return Ok(());
         }
         if !self.has_worker_effort_cap() {
@@ -444,10 +438,11 @@ impl Agent {
             {
                 self.provider.set_reasoning_effort(&effort)?;
             }
-            self.session.reasoning_effort = self.provider.reasoning_effort();
+            self.session
+                .set_reasoning_effort(self.provider.reasoning_effort());
             crate::session_effort::record_session_effort(
-                &self.session.id,
-                self.session.reasoning_effort.as_deref(),
+                self.session.id(),
+                self.session.reasoning_effort(),
             );
         }
         Ok(())
@@ -487,12 +482,13 @@ impl Agent {
     }
 
     pub(super) fn begin_model_usage_turn(&mut self, message_id: &str) {
-        self.session.model_usage_turn_id = Some(format!("{}:{}", self.session.id, message_id));
+        self.session
+            .set_model_usage_turn_id(Some(format!("{}:{}", self.session.id(), message_id)));
     }
 
     pub(super) fn model_usage_turn_id(&mut self) -> String {
-        if let Some(id) = &self.session.model_usage_turn_id {
-            return id.clone();
+        if let Some(id) = &self.session.model_usage_turn_id() {
+            return id.clone().to_owned();
         }
         // Old sessions and direct loop callers have no durable anchor yet.
         // Internal reminders and tool-result rows do not start a logical turn.
@@ -512,7 +508,10 @@ impl Agent {
             .map(|message| message.id.clone())
             .unwrap_or_else(|| "initial".to_string());
         self.begin_model_usage_turn(&message_id);
-        self.session.model_usage_turn_id.clone().unwrap()
+        self.session
+            .model_usage_turn_id()
+            .map(str::to_owned)
+            .unwrap()
     }
 
     pub(super) fn sync_bound_account_route(&mut self) {
@@ -521,8 +520,7 @@ impl Agent {
         };
         if self
             .session
-            .route_api_method
-            .as_deref()
+            .route_api_method()
             .and_then(jcode_provider_core::oauth_account_label)
             .is_some_and(|selected| selected != label)
         {
@@ -537,12 +535,11 @@ impl Agent {
             _ => return,
         };
         let route = format!("{method}@{label}");
-        if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+        if self.session.route_api_method() == Some(route.as_str()) {
             return;
         }
-        self.session.route_api_method = Some(route);
-        self.session.provider_key = Some(method.to_string());
-        self.session.model = Some(self.provider_model());
+        self.session
+            .select_route(self.provider_model(), method.to_string(), route);
         self.persist_session_best_effort("observed saved account route");
     }
 
@@ -592,12 +589,12 @@ impl Agent {
 
     pub(super) fn record_model_turn_usage(&mut self, turn_id: &str) {
         self.sync_bound_account_route();
-        if self.session.is_debug {
+        if self.session.is_debug() {
             return;
         }
         let Some(mut route) = crate::model_usage::serving_route(
             self.provider.as_ref(),
-            self.session.route_api_method.as_deref(),
+            self.session.route_api_method(),
         ) else {
             return;
         };
@@ -657,10 +654,10 @@ impl Agent {
         let cap = max_context_tokens.filter(|cap| *cap > 0);
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
-        let previous = self.session.context_cap;
-        self.session.context_cap = cap;
+        let previous = self.session.context_cap();
+        self.session.set_context_cap(cap);
         if let Err(error) = self.persist_session_now() {
-            self.session.context_cap = previous;
+            self.session.set_context_cap(previous);
             return Err(error);
         }
         manager.set_context_cap_override(cap);
@@ -723,7 +720,7 @@ impl Agent {
         use jcode_provider_core::SpeedMode;
         let candidate = self.provider.fork();
         crate::provider::set_model_with_auth_refresh(candidate.as_ref(), model)?;
-        let speed = self.session.speed_selection.as_ref().filter(|choice| {
+        let speed = self.session.speed_selection().filter(|choice| {
             choice.mode != SpeedMode::Standard
                 && choice.model == candidate.model()
                 && candidate.speed_route_identity().as_deref() == Some(choice.route.as_str())
@@ -736,7 +733,7 @@ impl Agent {
         let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
             model,
             candidate.name(),
-            self.session.provider_key.as_deref(),
+            self.session.provider_key(),
         );
         Self::validate_worker_route(
             provider_key.as_deref().unwrap_or_else(|| candidate.name()),
@@ -815,13 +812,15 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
-        crate::cache_keepalive::invalidate(&self.session.id);
+        crate::cache_keepalive::invalidate(self.session.id());
         self.provider.set_route_selection(selection)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
-        self.session.provider_key = Some(selection.runtime_key.stable_id());
-        self.session.route_api_method = Some(selection.api_method.clone());
-        self.session.model = Some(self.provider_model());
+        self.session.select_route(
+            self.provider_model(),
+            selection.runtime_key.stable_id(),
+            selection.api_method.clone(),
+        );
         self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -844,32 +843,33 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
-        crate::cache_keepalive::invalidate(&self.session.id);
+        crate::cache_keepalive::invalidate(self.session.id());
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
-        self.session.provider_key =
+        self.session.set_provider_key(
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
                 model,
                 self.provider.name(),
-                self.session.provider_key.as_deref(),
-            );
+                self.session.provider_key(),
+            ),
+        );
         if let Some(label) = self.provider.oauth_account_label() {
             let method = if self.provider.name().eq_ignore_ascii_case("openai") {
                 "openai-oauth"
             } else {
                 "claude-oauth"
             };
-            self.session.route_api_method = Some(format!("{method}@{label}"));
+            self.session
+                .set_route_api_method(Some(format!("{method}@{label}")));
         } else if self
             .session
-            .route_api_method
-            .as_deref()
+            .route_api_method()
             .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
         {
-            self.session.route_api_method = None;
+            self.session.set_route_api_method(None);
         }
-        self.session.model = Some(self.provider_model());
+        self.session.set_model(Some(self.provider_model()));
         self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -888,7 +888,7 @@ impl Agent {
     }
 
     pub(crate) fn restore_speed_from_session(&mut self) {
-        let Some(choice) = self.session.speed_selection.clone() else {
+        let Some(choice) = self.session.speed_selection().cloned() else {
             if self.provider.speed_mode() != jcode_provider_core::SpeedMode::Standard {
                 let _ = self
                     .provider
@@ -897,7 +897,7 @@ impl Agent {
             return;
         };
         if !self.speed_selection_matches(&choice) {
-            self.session.speed_selection = None;
+            self.session.set_speed_selection(None);
             self.session
                 .record_worker_standard_speed("The credential route changed");
             let _ = self
@@ -908,11 +908,11 @@ impl Agent {
             .and_then(|_| Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode))
         {
             crate::logging::warn(&format!("Could not restore session speed: {error}"));
-            if self.session.is_swarm_worker {
+            if self.session.is_swarm_worker() {
                 let _ = self
                     .provider
                     .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
-                self.session.speed_selection = None;
+                self.session.set_speed_selection(None);
                 self.session.record_worker_standard_speed(&format!(
                     "Saved worker speed unavailable: {error}"
                 ));
@@ -921,7 +921,7 @@ impl Agent {
     }
 
     pub(super) fn ensure_session_speed(&self) -> Result<()> {
-        if let Some(choice) = &self.session.speed_selection {
+        if let Some(choice) = &self.session.speed_selection() {
             anyhow::ensure!(
                 self.speed_selection_matches(choice) && self.provider.speed_mode() == choice.mode,
                 "The saved {:?} speed is unavailable on this route. Select Standard or choose a supported speed before retrying.",
@@ -939,16 +939,15 @@ impl Agent {
     fn reset_speed_after_route_change(&mut self) -> Result<()> {
         if self
             .session
-            .speed_selection
-            .as_ref()
+            .speed_selection()
             .is_some_and(|choice| !self.speed_selection_matches(choice))
         {
             self.provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
-            self.session.speed_selection = None;
+            self.session.set_speed_selection(None);
             self.session
                 .record_worker_standard_speed("The credential route changed");
-        } else if self.session.is_swarm_worker && self.session.speed_selection.is_none() {
+        } else if self.session.is_swarm_worker() && self.session.speed_selection().is_none() {
             self.provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
         }
@@ -1012,17 +1011,17 @@ impl Agent {
         use jcode_provider_core::SpeedMode;
         self.ensure_worker_speed_allowed(mode)?;
         let previous_mode = self.provider.speed_mode();
-        crate::cache_keepalive::invalidate(&self.session.id);
+        crate::cache_keepalive::invalidate(self.session.id());
         let next = Self::apply_speed_to_provider(self.provider.as_ref(), mode)?;
-        let previous = std::mem::replace(&mut self.session.speed_selection, next);
-        let previous_worker_speed = self.session.worker_speed.clone();
+        let previous = self.session.replace_speed_selection(next);
+        let previous_worker_speed = self.session.worker_speed().cloned();
         if mode == SpeedMode::Standard {
             self.session
                 .record_worker_standard_speed("Standard selected for this worker");
         }
         if let Err(error) = self.session.save_prepared() {
-            self.session.speed_selection = previous;
-            self.session.worker_speed = previous_worker_speed;
+            self.session.set_speed_selection(previous);
+            self.session.set_worker_speed(previous_worker_speed);
             let _ = self.provider.set_speed_mode(previous_mode);
             return Err(error);
         }
@@ -1034,10 +1033,10 @@ impl Agent {
             self.set_speed_mode(mode)?;
         } else {
             anyhow::ensure!(
-                !self.session.is_swarm_worker,
+                !self.session.is_swarm_worker(),
                 "Workers must use an approved speed mode, not a service tier override"
             );
-            crate::cache_keepalive::invalidate(&self.session.id);
+            crate::cache_keepalive::invalidate(self.session.id());
             self.provider.set_service_tier(tier)?;
         }
         Ok(())
@@ -1046,12 +1045,12 @@ impl Agent {
     pub fn restore_reasoning_effort_from_session(&mut self) {
         // A choice made while the previous daemon's turn held the agent was
         // never applied there. It is newer than the saved effort.
-        if let Some(pending) = crate::session_effort::take_pending_effort(&self.session.id) {
+        if let Some(pending) = crate::session_effort::take_pending_effort(self.session.id()) {
             crate::logging::info(&format!(
                 "Adopting reasoning effort '{pending}' chosen before the restart for {}",
-                self.session.id
+                self.session.id()
             ));
-            self.session.reasoning_effort = Some(pending);
+            self.session.set_reasoning_effort(Some(pending));
             self.restore_saved_reasoning_effort();
             if let Err(error) = self.session.save_prepared() {
                 crate::logging::warn(&format!(
@@ -1064,13 +1063,15 @@ impl Agent {
     }
 
     fn restore_saved_reasoning_effort(&mut self) {
-        if let Some(effort) = self.session.reasoning_effort.clone() {
+        if let Some(effort) = self.session.reasoning_effort().map(str::to_owned) {
             self.reasoning_effort_user_override = true;
             match self
                 .worker_effort(&effort)
                 .and_then(|effort| self.provider.set_reasoning_effort(&effort))
             {
-                Ok(()) => self.session.reasoning_effort = self.provider.reasoning_effort(),
+                Ok(()) => self
+                    .session
+                    .set_reasoning_effort(self.provider.reasoning_effort()),
                 Err(e) => crate::logging::error(&format!(
                     "Failed to restore session reasoning effort '{}': {}",
                     effort, e
@@ -1078,13 +1079,15 @@ impl Agent {
             }
         } else {
             self.reasoning_effort_user_override = false;
-            self.session.reasoning_effort = self.provider.reasoning_effort();
-            if let Some(effort) = self.session.reasoning_effort.clone()
+            self.session
+                .set_reasoning_effort(self.provider.reasoning_effort());
+            if let Some(effort) = self.session.reasoning_effort().map(str::to_owned)
                 && let Ok(clamped) = self.worker_effort(&effort)
                 && clamped != effort
                 && self.provider.set_reasoning_effort(&clamped).is_ok()
             {
-                self.session.reasoning_effort = self.provider.reasoning_effort();
+                self.session
+                    .set_reasoning_effort(self.provider.reasoning_effort());
             }
         }
         self.jarvis_default_effort_applied = false;
@@ -1092,8 +1095,8 @@ impl Agent {
         // (e.g. the swarm seed handler) can learn this session's effort without
         // taking the agent lock.
         crate::session_effort::record_session_effort(
-            &self.session.id,
-            self.session.reasoning_effort.as_deref(),
+            self.session.id(),
+            self.session.reasoning_effort(),
         );
     }
 
@@ -1114,8 +1117,8 @@ impl Agent {
         match self.provider.set_reasoning_effort("none") {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
-                self.session.reasoning_effort = current.clone();
-                crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
+                self.session.set_reasoning_effort(current.clone());
+                crate::session_effort::record_session_effort(self.session.id(), current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
             }
@@ -1133,16 +1136,16 @@ impl Agent {
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         let prev_model = self.provider.model();
         let effort = self.worker_effort(effort)?;
-        crate::cache_keepalive::invalidate(&self.session.id);
+        crate::cache_keepalive::invalidate(self.session.id());
         self.provider.set_reasoning_effort(&effort)?;
         self.reasoning_effort_user_override = true;
         // This choice supersedes any older one still waiting for a busy turn.
-        crate::session_effort::clear_pending_effort(&self.session.id);
+        crate::session_effort::clear_pending_effort(self.session.id());
         let current = self.provider.reasoning_effort();
-        self.session.reasoning_effort = current.clone();
+        self.session.set_reasoning_effort(current.clone());
         let new_model = self.provider.model();
         if new_model != prev_model {
-            self.session.model = Some(self.provider_model());
+            self.session.set_model(Some(self.provider_model()));
             let event = crate::provider::ProviderStateEvent::selected_model(
                 crate::provider::ProviderModelSelectionSource::User,
                 new_model,
@@ -1151,7 +1154,7 @@ impl Agent {
             self.refresh_compaction_budget();
         }
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
-        crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
+        crate::session_effort::record_session_effort(self.session.id(), current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");
         // Effort is explicit session state: persist it even before the first
         // visible message, like the model and title. `save()` skips that case,
@@ -1165,7 +1168,7 @@ impl Agent {
     /// governs the next provider request instead of waiting for the turn to
     /// end. Called at each request boundary.
     pub(crate) fn apply_pending_reasoning_effort(&mut self) {
-        let Some(effort) = crate::session_effort::take_pending_effort(&self.session.id) else {
+        let Some(effort) = crate::session_effort::take_pending_effort(self.session.id()) else {
             return;
         };
         match self.set_reasoning_effort(&effort) {
@@ -1182,10 +1185,11 @@ impl Agent {
     /// Persist a setting already applied through the live provider handle.
     /// Read the latest value rather than replaying a stale queued request.
     pub(crate) fn persist_current_reasoning_effort(&mut self) -> Result<()> {
-        self.session.reasoning_effort = self.provider.reasoning_effort();
+        self.session
+            .set_reasoning_effort(self.provider.reasoning_effort());
         crate::session_effort::record_session_effort(
-            &self.session.id,
-            self.session.reasoning_effort.as_deref(),
+            self.session.id(),
+            self.session.reasoning_effort(),
         );
         self.session.save_prepared()?;
         Ok(())
@@ -1197,18 +1201,18 @@ impl Agent {
     }
 
     pub fn subagent_model(&self) -> Option<String> {
-        self.session.subagent_model.clone()
+        self.session.subagent_model().map(str::to_owned)
     }
 
     pub fn set_subagent_model(&mut self, model: Option<String>) -> Result<()> {
-        self.session.subagent_model = model;
+        self.session.set_subagent_model(model);
         self.log_env_snapshot("set_subagent_model");
         self.session.save()?;
         Ok(())
     }
 
     pub fn session_provider_key(&self) -> Option<String> {
-        self.session.provider_key.clone()
+        self.session.provider_key().map(str::to_owned)
     }
 
     /// API method/runtime route used to select the active model (e.g.
@@ -1224,7 +1228,7 @@ impl Agent {
             };
             return Some(format!("{method}@{label}"));
         }
-        self.session.route_api_method.clone()
+        self.session.route_api_method().map(str::to_owned)
     }
 
     /// The credential the active provider will use for the next request, when
@@ -1236,7 +1240,7 @@ impl Agent {
     }
 
     pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
-        self.session.provider_key = provider_key;
+        self.session.set_provider_key(provider_key);
     }
 
     /// Persist the session immediately, including a fresh one with no
@@ -1257,7 +1261,7 @@ impl Agent {
             self.session.unmark_saved();
         }
         self.session.save()?;
-        Ok(self.session.save_label.clone())
+        Ok(self.session.save_label().map(str::to_owned))
     }
 
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {
@@ -1272,22 +1276,22 @@ impl Agent {
     }
 
     pub fn autoreview_enabled(&self) -> Option<bool> {
-        self.session.autoreview_enabled
+        self.session.autoreview_enabled()
     }
 
     pub fn set_autoreview_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.session.autoreview_enabled = Some(enabled);
+        self.session.set_autoreview_enabled(Some(enabled));
         self.log_env_snapshot("set_autoreview_enabled");
         self.session.save()?;
         Ok(())
     }
 
     pub fn autojudge_enabled(&self) -> Option<bool> {
-        self.session.autojudge_enabled
+        self.session.autojudge_enabled()
     }
 
     pub fn set_autojudge_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.session.autojudge_enabled = Some(enabled);
+        self.session.set_autojudge_enabled(Some(enabled));
         self.log_env_snapshot("set_autojudge_enabled");
         self.session.save()?;
         Ok(())
@@ -1295,19 +1299,20 @@ impl Agent {
 
     /// Set the working directory for this session
     pub fn set_working_dir(&mut self, dir: &str) {
-        if self.session.working_dir.as_deref() == Some(dir) {
+        if self.session.working_dir() == Some(dir) {
             return;
         }
-        if self.session.original_working_dir.is_none()
+        if self.session.original_working_dir().is_none()
             && self
                 .session
-                .messages
+                .messages()
                 .iter()
                 .any(|message| message.role == Role::User)
         {
-            self.session.original_working_dir = self.session.working_dir.clone();
+            self.session
+                .set_original_working_dir(self.session.working_dir().map(str::to_owned));
         }
-        self.session.working_dir = Some(dir.to_string());
+        self.session.set_working_dir(Some(dir.to_string()));
         self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");
@@ -1315,7 +1320,7 @@ impl Agent {
 
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
-        &self.session.messages
+        self.session.messages()
     }
 }
 

@@ -170,8 +170,8 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
 
     let project = tempfile::tempdir_in(home.root()).unwrap();
     let mut session = crate::session::Session::create(None, None);
-    session.working_dir = Some(project.path().to_string_lossy().into_owned());
-    session.system_prompt = Some("Synthetic Responses wire fixture".into());
+    session.set_working_dir(Some(project.path().to_string_lossy().into_owned()));
+    session.set_system_prompt(Some("Synthetic Responses wire fixture".into()));
     session.ensure_initial_session_context_message();
     let existing =
         crate::provider::openai_request::build_responses_input(session.provider_messages()).len();
@@ -182,7 +182,7 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
         ));
         session.add_message(message.role, message.content);
     }
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let registry = Registry::empty();
     registry
         .register(TOOL.into(), Arc::new(Lookup(image)))
@@ -221,7 +221,7 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
 
     let mut saved = crate::session::Session::load(&session_id).unwrap();
     assert_eq!(
-        saved.memory_injections.len(),
+        saved.memory_injections().len(),
         1,
         "recall card survives either policy"
     );

@@ -5,8 +5,8 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
     let _guard = rt.enter();
     app.is_remote = true;
     app.remote_session_id = Some("session_compacted_prompt_offset".into());
-    app.session.messages.clear();
-    app.session.compaction = None;
+    app.session.messages_mut_for_tests().clear();
+    app.session.set_compaction(None);
     for (marker, hidden) in [
         (
             "Earlier conversation compacted - 900 older historical messages hidden. Showing 64 of 964 compacted messages. Scroll to the top to load more. Hidden user prompts: 12.",
@@ -82,7 +82,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
         None,
         Some("resume me".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.set_model(Some("gpt-5.4".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
         attachment_data: None,
@@ -313,7 +313,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             );
         }
     }
-    let compacted_count = app.session.messages.len();
+    let compacted_count = app.session.messages().len();
     app.session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
@@ -321,7 +321,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             cache_control: None,
         }],
     );
-    app.session.compaction = Some(
+    app.session.set_compaction(Some(
         crate::session::StoredCompactionState {
             summary_text: "old prompts and responses".to_string(),
             plan_context: None,
@@ -332,7 +332,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             compacted_count,
         }
         .into(),
-    );
+    ));
 
     let (rendered_messages, _images, _compacted_info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);

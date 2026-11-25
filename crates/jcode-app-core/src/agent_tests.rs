@@ -159,11 +159,15 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
     crate::config::Config::invalidate_cache();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = Some("openai-oauth@work".into());
+    agent
+        .session
+        .set_route_api_method(Some("openai-oauth@work".into()));
     let error = agent.ensure_session_lease().unwrap_err().to_string();
     assert!(error.contains("Saved account 'work' could not be restored"));
-    agent.session.route_api_method = None;
-    agent.session.provider_key = Some("openai-oauth@personal".into());
+    agent.session.set_route_api_method(None);
+    agent
+        .session
+        .set_provider_key(Some("openai-oauth@personal".into()));
     assert!(
         agent
             .ensure_session_lease()
@@ -171,7 +175,7 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
             .to_string()
             .contains("personal")
     );
-    agent.session.provider_key = Some("openai-oauth".into());
+    agent.session.set_provider_key(Some("openai-oauth".into()));
     assert!(agent.ensure_session_lease().is_ok());
 }
 
@@ -278,10 +282,7 @@ async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
     }
     assert_eq!(agent.session_id(), jcode_id);
     let saved = Session::load(&jcode_id).unwrap();
-    assert_eq!(
-        saved.provider_session_id.as_deref(),
-        Some("provider-resume-handle")
-    );
+    assert_eq!(saved.provider_session_id(), Some("provider-resume-handle"));
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
@@ -367,7 +368,7 @@ fn message_text(message: &Message) -> &str {
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let agent = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -391,7 +392,7 @@ fn agent_drop_removes_its_configured_session_tool_policy() {
 fn stale_agent_drop_preserves_successor_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let first_session = Session::create(None, None);
-    let session_id = first_session.id.clone();
+    let session_id = first_session.id().to_owned();
     let first = Agent::new_with_session(
         provider.clone(),
         Registry::empty(),
@@ -399,7 +400,7 @@ fn stale_agent_drop_preserves_successor_session_tool_policy() {
         Some(HashSet::from(["bash".to_string()])),
     );
     let mut successor_session = Session::create(None, None);
-    successor_session.id.clone_from(&session_id);
+    successor_session.set_id_for_tests(session_id.clone());
     let successor = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -430,7 +431,7 @@ fn stale_agent_drop_preserves_successor_session_tool_policy() {
 fn agent_clear_moves_tool_policy_registration_to_new_session() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);
-    let previous_session_id = session.id.clone();
+    let previous_session_id = session.id().to_owned();
     let mut agent = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -439,7 +440,7 @@ fn agent_clear_moves_tool_policy_registration_to_new_session() {
     );
 
     agent.clear();
-    let new_session_id = agent.session.id.clone();
+    let new_session_id = agent.session.id().to_owned();
 
     assert_ne!(previous_session_id, new_session_id);
     assert_eq!(
@@ -1229,7 +1230,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
             .to_string()
             .contains("disabled in self-development mode")
     );
-    agent.session.is_canary = false;
+    agent.session.set_is_canary_for_tests(false);
     agent.unlock_tools();
     assert!(
         agent
@@ -1358,21 +1359,18 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let split = agent.build_system_prompt_split(Some("memory must not be appended"));
         assert_eq!(split.static_part, prompt);
         assert!(split.dynamic_part.is_empty());
-        assert_eq!(
-            Session::load(&id).unwrap().system_prompt.as_deref(),
-            Some(prompt)
-        );
+        assert_eq!(Session::load(&id).unwrap().system_prompt(), Some(prompt));
 
         agent.clear();
-        assert_eq!(agent.session.system_prompt, None);
+        assert_eq!(agent.session.system_prompt(), None);
         assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
         agent.restore_session(&id).unwrap();
         assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
 
         let mut other = Session::create(None, Some("plain session".into()));
         other.save().unwrap();
-        agent.restore_session(&other.id).unwrap();
-        assert_eq!(agent.session.system_prompt, None);
+        agent.restore_session(other.id()).unwrap();
+        assert_eq!(agent.session.system_prompt(), None);
         assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
         let loaded = Session::load(&id).unwrap();
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
@@ -1443,7 +1441,9 @@ fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
         serde_json::to_string(&agent.session).unwrap(),
         before_messages
     );
-    agent.session.system_prompt = Some("Custom system".into());
+    agent
+        .session
+        .set_system_prompt(Some("Custom system".into()));
     let split = agent.build_system_prompt_split(None);
     assert_eq!(split.static_part, "Custom system");
     assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
@@ -1495,19 +1495,21 @@ fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
         other.build_system_prompt_split(None).static_part,
         other_baseline
     );
-    assert!(agent.session.system_prompt.is_none());
+    assert!(agent.session.system_prompt().is_none());
     assert!(
         !serde_json::to_string(&agent.session)
             .unwrap()
             .contains(suffix)
     );
-    agent.session.system_prompt = Some("Explicit override".into());
+    agent
+        .session
+        .set_system_prompt(Some("Explicit override".into()));
     let split = agent.build_system_prompt_split(Some("do not add memory to override"));
     assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
     assert!(split.dynamic_part.is_empty());
-    agent.session.system_prompt = Some(String::new());
+    agent.session.set_system_prompt(Some(String::new()));
     assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
-    agent.session.system_prompt = None;
+    agent.session.set_system_prompt(None);
     crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
     assert_eq!(
         agent.build_system_prompt_split(None).static_part,
@@ -1558,7 +1560,7 @@ impl Provider for SwitchableDeferredProvider {
 fn transcript_texts(agent: &Agent) -> Vec<String> {
     agent
         .session
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {

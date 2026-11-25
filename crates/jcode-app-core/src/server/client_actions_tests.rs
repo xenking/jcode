@@ -151,9 +151,9 @@ fn clone_split_session_uses_persisted_session_state() {
         None,
         None,
     );
-    parent.working_dir = Some("/tmp/jcode-split-test".to_string());
-    parent.model = Some("gpt-test".to_string());
-    parent.system_prompt = Some("forked system prompt".into());
+    parent.set_working_dir(Some("/tmp/jcode-split-test".to_string()));
+    parent.set_model(Some("gpt-test".to_string()));
+    parent.set_system_prompt(Some("forked system prompt".into()));
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -161,7 +161,7 @@ fn clone_split_session_uses_persisted_session_state() {
             cache_control: None,
         }],
     );
-    parent.compaction = Some(
+    parent.set_compaction(Some(
         crate::session::StoredCompactionState {
             summary_text: "summary".to_string(),
             plan_context: None,
@@ -172,12 +172,12 @@ fn clone_split_session_uses_persisted_session_state() {
             compacted_count: 1,
         }
         .into(),
-    );
+    ));
     parent.save().expect("save parent");
 
     let mut unsaved_parent = parent.clone();
-    unsaved_parent.model = Some("unsaved-model".into());
-    unsaved_parent.system_prompt = Some("unsaved prompt".into());
+    unsaved_parent.set_model(Some("unsaved-model".into()));
+    unsaved_parent.set_system_prompt(Some("unsaved prompt".into()));
     unsaved_parent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -186,21 +186,21 @@ fn clone_split_session_uses_persisted_session_state() {
         }],
     );
     let (child_id, _child_name) =
-        clone_split_session(&parent.id, Some(&unsaved_parent)).expect("clone split");
+        clone_split_session(parent.id(), Some(&unsaved_parent)).expect("clone split");
     let child = crate::session::Session::load(&child_id).expect("load child");
 
-    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(child.system_prompt, parent.system_prompt);
+    assert_eq!(child.parent_id(), Some(parent.id()));
+    assert_eq!(child.system_prompt(), parent.system_prompt());
     assert_eq!(
-        child.messages.len(),
-        parent.messages.len() + 1,
+        child.messages().len(),
+        parent.messages().len() + 1,
         "fork should inherit the transcript plus one fork notice"
     );
     assert_eq!(
-        child.messages[0].content_preview(),
-        parent.messages[0].content_preview()
+        child.messages()[0].content_preview(),
+        parent.messages()[0].content_preview()
     );
-    let fork_notice = child.messages.last().expect("fork notice message");
+    let fork_notice = child.messages().last().expect("fork notice message");
     assert_eq!(
         fork_notice.display_role,
         Some(crate::session::StoredDisplayRole::System),
@@ -208,14 +208,14 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     let fork_notice_text = fork_notice.content_preview();
     assert!(
-        fork_notice_text.contains("forked") && fork_notice_text.contains(parent.id.as_str()),
+        fork_notice_text.contains("forked") && fork_notice_text.contains(parent.id()),
         "fork notice should mention the parent session: {fork_notice_text}"
     );
-    assert_eq!(child.compaction, parent.compaction);
-    assert_eq!(child.working_dir, parent.working_dir);
-    assert_eq!(child.model, parent.model);
-    assert_eq!(child.status, crate::session::SessionStatus::Closed);
-    assert_ne!(child.id, parent.id);
+    assert_eq!(child.compaction(), parent.compaction());
+    assert_eq!(child.working_dir(), parent.working_dir());
+    assert_eq!(child.model(), parent.model());
+    assert_eq!(*child.status(), crate::session::SessionStatus::Closed);
+    assert_ne!(child.id(), parent.id());
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -289,28 +289,28 @@ async fn split_empty_live_session_without_persisted_parent() {
     let parent = agent.lock().await.session_for_split().clone();
     assert_eq!(parent.visible_conversation_message_count(), 0);
     assert!(
-        !crate::session::session_exists(&parent.id),
+        !crate::session::session_exists(parent.id()),
         "regression requires an unsaved parent"
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    handle_split(17, &parent.id, &agent, &tx).await;
+    handle_split(17, parent.id(), &agent, &tx).await;
     let child = split_response(&mut rx, 17);
-    assert_ne!(child.id, parent.id);
-    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(child.working_dir, parent.working_dir);
-    assert_eq!(child.model, parent.model);
-    assert_eq!(child.status, crate::session::SessionStatus::Closed);
-    assert_eq!(child.messages.len(), parent.messages.len() + 1);
-    let notice = child.messages.last().unwrap();
+    assert_ne!(child.id(), parent.id());
+    assert_eq!(child.parent_id(), Some(parent.id()));
+    assert_eq!(child.working_dir(), parent.working_dir());
+    assert_eq!(child.model(), parent.model());
+    assert_eq!(*child.status(), crate::session::SessionStatus::Closed);
+    assert_eq!(child.messages().len(), parent.messages().len() + 1);
+    let notice = child.messages().last().unwrap();
     assert_eq!(
         notice.display_role,
         Some(crate::session::StoredDisplayRole::System)
     );
-    assert!(notice.content_preview().contains(&parent.id));
-    assert_eq!(agent.lock().await.session_id(), parent.id);
+    assert!(notice.content_preview().contains(parent.id()));
+    assert_eq!(agent.lock().await.session_id(), parent.id());
     assert!(
-        !crate::session::session_exists(&parent.id),
+        !crate::session::session_exists(parent.id()),
         "fork must not mutate/persist its parent"
     );
 }
@@ -341,25 +341,25 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
 
     timeout(
         Duration::from_millis(100),
-        handle_split(18, &parent.id, &agent, &tx),
+        handle_split(18, parent.id(), &agent, &tx),
     )
     .await
     .expect("split must not wait on the held streaming Agent lock");
     let child = split_response(&mut rx, 18);
-    assert_eq!(child.messages.len(), parent.messages.len() + 1);
+    assert_eq!(child.messages().len(), parent.messages().len() + 1);
     assert_eq!(
-        child.messages[0].content_preview(),
-        parent.messages[0].content_preview()
+        child.messages()[0].content_preview(),
+        parent.messages()[0].content_preview()
     );
     assert!(
         !child
-            .messages
+            .messages()
             .iter()
             .any(|m| m.content_preview().contains("unsaved streaming output"))
     );
     assert!(
         child
-            .messages
+            .messages()
             .last()
             .unwrap()
             .content_preview()
@@ -410,9 +410,9 @@ fn transfer_preserves_system_prompt_including_empty_override() {
     let _home = SplitTestHome::new();
     for prompt in [None, Some(""), Some("custom system prompt")] {
         let mut parent = crate::session::Session::create(None, None);
-        parent.system_prompt = prompt.map(str::to_string);
+        parent.set_system_prompt(prompt.map(str::to_string));
         crate::todo::save_todos(
-            &parent.id,
+            parent.id(),
             &[crate::todo::TodoItem {
                 id: "validate".into(),
                 content: "Validate source build".into(),
@@ -424,15 +424,15 @@ fn transfer_preserves_system_prompt_including_empty_override() {
             }],
         )
         .unwrap();
-        let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
+        let (child_id, _) = create_transfer_child_session(parent.id(), &parent, None)
             .expect("create transfer session");
         let child = crate::session::Session::load(&child_id).expect("load transfer session");
-        assert_eq!(child.system_prompt, parent.system_prompt);
+        assert_eq!(child.system_prompt(), parent.system_prompt());
         let child_todos = crate::todo::load_todos(&child_id).unwrap();
         assert_eq!(child_todos.len(), 1);
         assert!(child_todos[0].waiting_on.is_empty());
         assert_eq!(
-            crate::todo::load_todos(&parent.id).unwrap()[0].waiting_on,
+            crate::todo::load_todos(parent.id()).unwrap()[0].waiting_on,
             ["source-build"]
         );
     }
@@ -444,9 +444,9 @@ fn split_corrupt_persisted_parent_is_not_hidden_by_live_fallback() {
     let _home = SplitTestHome::new();
     let mut parent = crate::session::Session::create(None, Some("persisted parent".into()));
     parent.save().expect("create snapshot");
-    let path = crate::session::session_path(&parent.id).unwrap();
+    let path = crate::session::session_path(parent.id()).unwrap();
     std::fs::write(&path, b"invalid session JSON").unwrap();
-    assert!(clone_split_session(&parent.id, Some(&parent)).is_err());
+    assert!(clone_split_session(parent.id(), Some(&parent)).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"invalid session JSON");
 }
 
@@ -457,10 +457,10 @@ fn split_and_transfer_inherit_independent_ephemeral_environment() {
     let mut parent = crate::session::Session::create(None, None);
     parent.save().unwrap();
     let original = HashMap::from([("LIFECYCLE_SECRET".into(), "private-test-value".into())]);
-    crate::session_env::set_session_env(&parent.id, original.clone()).unwrap();
-    let (split_id, _) = clone_split_session(&parent.id, Some(&parent)).unwrap();
-    let (transfer_id, _) = create_transfer_child_session(&parent.id, &parent, None).unwrap();
-    crate::session_env::set_session_env(&parent.id, HashMap::new()).unwrap();
+    crate::session_env::set_session_env(parent.id(), original.clone()).unwrap();
+    let (split_id, _) = clone_split_session(parent.id(), Some(&parent)).unwrap();
+    let (transfer_id, _) = create_transfer_child_session(parent.id(), &parent, None).unwrap();
+    crate::session_env::set_session_env(parent.id(), HashMap::new()).unwrap();
     for child_id in [&split_id, &transfer_id] {
         assert_eq!(crate::session_env::session_env(child_id), original);
         let persisted =
@@ -654,7 +654,7 @@ async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale
             .any(|event| matches!(event, ServerEvent::Done { id } if *id == 99))
     );
     let loaded = crate::session::Session::load(&agent_session_id).expect("renamed session saved");
-    assert_eq!(loaded.custom_title.as_deref(), Some("Release planning"));
+    assert_eq!(loaded.custom_title(), Some("Release planning"));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -1014,7 +1014,7 @@ async fn resume_all_continues_interrupted_idle_live_session() {
     .expect("interrupted session should resume promptly");
     let saved = crate::session::Session::load(&session_id).unwrap();
     assert_eq!(
-        saved.messages.iter().filter(|message| message.role == Role::Assistant)
+        saved.messages().iter().filter(|message| message.role == Role::Assistant)
             .flat_map(|message| message.content.iter())
             .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text == "Continuing where I left off."))
             .count(),
@@ -1134,8 +1134,8 @@ async fn daemon_saved_flag_survives_later_session_writes() {
         .set_autoreview_enabled(true)
         .expect("later write");
     let loaded = crate::session::Session::load(&session_id).expect("load saved session");
-    assert!(loaded.saved);
-    assert_eq!(loaded.save_label.as_deref(), Some("investor catch up"));
+    assert!(loaded.is_saved());
+    assert_eq!(loaded.save_label(), Some("investor catch up"));
 
     agent
         .lock()
@@ -1143,8 +1143,8 @@ async fn daemon_saved_flag_survives_later_session_writes() {
         .set_session_saved(false, None)
         .expect("unsave session");
     let loaded = crate::session::Session::load(&session_id).expect("load unsaved session");
-    assert!(!loaded.saved);
-    assert!(loaded.save_label.is_none());
+    assert!(!loaded.is_saved());
+    assert!(loaded.save_label().is_none());
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

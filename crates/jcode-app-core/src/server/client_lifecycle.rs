@@ -45,10 +45,10 @@ use super::comm_sync::{
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
 use super::provider_control::{
-    handle_cancel_pending_model_change, handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
-    handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
-    handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
-    handle_set_route, handle_set_service_tier, handle_set_transport,
+    handle_cancel_pending_model_change, handle_cycle_model, handle_invalidate_anthropic_usage,
+    handle_invalidate_openai_usage, handle_notify_auth_changed, handle_refresh_models,
+    handle_set_compaction_mode, handle_set_context_cap, handle_set_model, handle_set_premium_mode,
+    handle_set_reasoning_effort, handle_set_route, handle_set_service_tier, handle_set_transport,
     handle_switch_anthropic_account, handle_switch_openai_account,
     try_available_models_catalog_offloaded,
 };
@@ -178,7 +178,8 @@ fn is_local_jcode_peer(_: &Stream) -> bool {
 fn queued_skill_working_dir(session_id: &str, initial_working_dir: &str) -> anyhow::Result<String> {
     match crate::session::Session::load(session_id) {
         Ok(session) => Ok(session
-            .working_dir
+            .working_dir()
+            .map(str::to_owned)
             .unwrap_or_else(|| initial_working_dir.to_owned())),
         // An untouched, newly attached session has no snapshot yet. Its validated
         // connection working directory remains authoritative until first save.

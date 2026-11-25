@@ -2,9 +2,9 @@ use super::*;
 
 fn legacy(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
     let mut messages = wire_messages(session, 0);
-    let fingerprint = wire_fingerprint(&messages, session.messages.len());
+    let fingerprint = wire_fingerprint(&messages, session.messages().len());
     if progress.wire_version == WIRE_VERSION
-        && progress.uploaded <= session.messages.len()
+        && progress.uploaded <= session.messages().len()
         && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded))
     {
         messages.retain(|message| message.seq >= progress.uploaded);
@@ -42,7 +42,7 @@ fn fixture() -> Session {
 fn progress(session: &Session) -> SessionProgress {
     SessionProgress {
         wire_version: WIRE_VERSION,
-        uploaded: session.messages.len(),
+        uploaded: session.messages().len(),
         fingerprint: Some(legacy(session, &SessionProgress::default()).1),
         ..Default::default()
     }
@@ -60,22 +60,24 @@ fn prefix_cache_matches_legacy_after_reload_append_edits_and_truncation() {
     check(&mut cache, &session, &uploaded);
     // Mobile sync reloads a new allocation from disk on each changed pass.
     session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-    session.custom_title = Some("metadata-only".into());
+    session.set_custom_title_for_tests(Some("metadata-only".into()));
     check(&mut cache, &session, &uploaded);
     session.add_message(Role::Assistant, vec![text("tail")]);
     check(&mut cache, &session, &uploaded);
     let uploaded = progress(&session);
     check(&mut cache, &session, &uploaded);
-    session.messages[0].content = vec![text("rewritten")].into();
+    session.messages_mut_for_tests()[0].content = vec![text("rewritten")].into();
     check(&mut cache, &session, &uploaded);
     let uploaded = progress(&session);
-    if let ContentBlock::ToolUse { input, .. } = &mut session.messages[1].content[1] {
+    if let ContentBlock::ToolUse { input, .. } = &mut session.messages_mut_for_tests()[1].content[1]
+    {
         *input = serde_json::json!({"command":"echo changed", "nested":[0.0]});
     }
     check(&mut cache, &session, &uploaded);
     let uploaded = progress(&session);
-    session.messages[2].timestamp = chrono::DateTime::from_timestamp(123, 0);
-    session.messages[2].display_role = Some(crate::session::StoredDisplayRole::System);
+    session.messages_mut_for_tests()[2].timestamp = chrono::DateTime::from_timestamp(123, 0);
+    session.messages_mut_for_tests()[2].display_role =
+        Some(crate::session::StoredDisplayRole::System);
     check(&mut cache, &session, &uploaded);
     session.truncate_messages(1);
     check(&mut cache, &session, &uploaded);
@@ -109,7 +111,7 @@ fn external_markdown_images_bypass_prefix_cache_including_missing_files() {
     assert!(cache.0.is_empty());
     check(&mut cache, &session, &progress(&session));
     assert!(cache.0.is_empty());
-    session.messages.pop();
+    session.messages_mut_for_tests().pop();
     session.add_message(
         Role::Assistant,
         vec![ContentBlock::ToolUse {
@@ -131,11 +133,18 @@ fn every_wire_metadata_and_tool_field_invalidates_the_prefix() {
         cache.messages(&session, &SessionProgress::default());
         let uploaded = progress(&session);
         match field {
-            0 => session.messages[0].role = Role::Assistant,
-            1 => session.messages[0].timestamp = chrono::DateTime::from_timestamp(1, 123),
-            2 => session.messages[0].display_role = Some(crate::session::StoredDisplayRole::System),
+            0 => session.messages_mut_for_tests()[0].role = Role::Assistant,
+            1 => {
+                session.messages_mut_for_tests()[0].timestamp =
+                    chrono::DateTime::from_timestamp(1, 123)
+            }
+            2 => {
+                session.messages_mut_for_tests()[0].display_role =
+                    Some(crate::session::StoredDisplayRole::System)
+            }
             3 | 4 => {
-                if let ContentBlock::ToolUse { id, name, .. } = &mut session.messages[1].content[1]
+                if let ContentBlock::ToolUse { id, name, .. } =
+                    &mut session.messages_mut_for_tests()[1].content[1]
                 {
                     if field == 3 {
                         *id = "new-id".into();
@@ -149,7 +158,7 @@ fn every_wire_metadata_and_tool_field_invalidates_the_prefix() {
                     tool_use_id,
                     content,
                     is_error,
-                } = &mut session.messages[2].content[0]
+                } = &mut session.messages_mut_for_tests()[2].content[0]
                 {
                     match field {
                         5 => *tool_use_id = "new-result-id".into(),
@@ -180,12 +189,14 @@ fn source_validation_distinguishes_json_spelling_and_inline_images() {
         }],
     );
     let mut first = SourceHasher::default();
-    assert!(first.extend(&session.messages, 0));
-    if let ContentBlock::Image { data, .. } = &mut session.messages.last_mut().unwrap().content[0] {
+    assert!(first.extend(session.messages(), 0));
+    if let ContentBlock::Image { data, .. } =
+        &mut session.messages_mut_for_tests().last_mut().unwrap().content[0]
+    {
         *data = "invalid-b".into();
     }
     let mut second = SourceHasher::default();
-    assert!(second.extend(&session.messages, 0));
+    assert!(second.extend(session.messages(), 0));
     assert_ne!(first.digest(), second.digest());
     let mut cache = PrefixCache::default();
     check(&mut cache, &session, &SessionProgress::default());
@@ -233,7 +244,7 @@ fn real_inline_image_replacement_invalidates_cached_prefix() {
     check(&mut cache, &session, &SessionProgress::default());
     let uploaded = progress(&session);
     check(&mut cache, &session, &uploaded);
-    session.messages.last_mut().unwrap().content = vec![image(255)].into();
+    session.messages_mut_for_tests().last_mut().unwrap().content = vec![image(255)].into();
     assert_ne!(progress(&session).fingerprint, uploaded.fingerprint);
     check(&mut cache, &session, &uploaded);
 }
@@ -254,13 +265,13 @@ fn bounded_validation_preserves_truncated_results_and_rejects_expensive_sources(
     check(&mut cache, &session, &SessionProgress::default());
     let uploaded = progress(&session);
     if let ContentBlock::ToolResult { content, .. } =
-        &mut session.messages.last_mut().unwrap().content[0]
+        &mut session.messages_mut_for_tests().last_mut().unwrap().content[0]
     {
         content.push_str("invisible tail");
     }
     check(&mut cache, &session, &uploaded);
     if let ContentBlock::ToolResult { content, .. } =
-        &mut session.messages.last_mut().unwrap().content[0]
+        &mut session.messages_mut_for_tests().last_mut().unwrap().content[0]
     {
         *content = "🦀".repeat(MAX_TOOL_RESULT_CHARS);
     }
@@ -281,15 +292,15 @@ fn cache_retains_only_bounded_session_metadata() {
     let mut cache = PrefixCache::default();
     for n in 0..MAX_SESSIONS + 10 {
         let mut session = fixture();
-        session.id = format!("session-{n}");
+        session.set_id_for_tests(format!("session-{n}"));
         check(&mut cache, &session, &SessionProgress::default());
         assert!(cache.0.len() <= MAX_SESSIONS);
     }
     assert!(cache.0.iter().all(|entry| entry.id != "session-0"));
     let mut session = fixture();
-    session.id = "x".repeat(129);
+    session.set_id_for_tests("x".repeat(129));
     check(&mut cache, &session, &SessionProgress::default());
-    assert!(cache.0.iter().all(|entry| entry.id != session.id));
+    assert!(cache.0.iter().all(|entry| entry.id != session.id()));
 }
 
 #[test]
@@ -385,7 +396,7 @@ fn benchmark_validated_mobile_prefix() {
             // Refill with exactly the successfully uploaded prefix, as a real
             // append does. Cache state never advances past stale progress.
             let mut prefix = session.clone();
-            prefix.messages.pop();
+            prefix.messages_mut_for_tests().pop();
             cache.messages(&prefix, &SessionProgress::default());
             let start = Instant::now();
             let old = black_box(legacy(black_box(&session), black_box(&uploaded)));

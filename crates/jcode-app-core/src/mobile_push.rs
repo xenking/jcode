@@ -283,7 +283,7 @@ fn lookup_session_working_dir(session_id: &str) -> Option<String> {
         return None;
     }
     match crate::session::Session::load_startup_stub(session_id) {
-        Ok(session) => session.working_dir,
+        Ok(session) => session.working_dir().map(str::to_owned),
         Err(error) => {
             crate::logging::info(&format!(
                 "Push session directory unavailable for {session_id}: {error}"

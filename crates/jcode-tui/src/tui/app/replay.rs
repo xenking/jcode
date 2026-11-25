@@ -92,7 +92,7 @@ pub(super) async fn run_replay(
         session_id: if app.is_remote {
             app.remote_session_id.clone()
         } else {
-            Some(app.session.id.clone())
+            Some(app.session.id().to_owned())
         },
     })
 }

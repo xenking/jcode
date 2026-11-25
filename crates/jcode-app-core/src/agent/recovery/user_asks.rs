@@ -14,7 +14,7 @@ impl Agent {
         has_attachment: bool,
     ) -> bool {
         if self.is_swarm_worker()
-            || self.session.agent_started
+            || self.session.is_agent_started()
             || !matches!(role, None | Some(StoredDisplayRole::JarvisUser))
             || !self.uses_user_ask_reports()
         {
@@ -30,48 +30,49 @@ impl Agent {
         } else {
             redacted.as_str()
         };
-        let number = self.session.user_asks.last_id + 1;
-        if let Err(error) = crate::todo::record_request(&self.session.id, number, preview) {
+        let number = self.session.user_asks().last_id + 1;
+        if let Err(error) = crate::todo::record_request(self.session.id(), number, preview) {
             logging::warn(&format!(
                 "Failed to record request #{number} for {}: {error}",
-                self.session.id
+                self.session.id()
             ));
             return false;
         }
-        self.session.user_asks.last_id = number;
+        self.session.set_last_user_ask_id(number);
         true
     }
 
     /// Undo requests numbered above `last_id`, for a message that was never
     /// persisted.
     pub(super) fn discard_user_asks_after(&mut self, last_id: u64) {
-        if self.session.user_asks.last_id == last_id {
+        if self.session.user_asks().last_id == last_id {
             return;
         }
-        if let Err(error) = crate::todo::discard_requests_after(&self.session.id, last_id) {
+        if let Err(error) = crate::todo::discard_requests_after(self.session.id(), last_id) {
             logging::warn(&format!(
                 "Failed to discard requests after #{last_id} for {}: {error}",
-                self.session.id
+                self.session.id()
             ));
         }
-        self.session.user_asks.last_id = last_id;
+        self.session.set_last_user_ask_id(last_id);
     }
 
     /// Sessions saved before requests were todos kept them in the session
     /// file. Move the open ones into the todo list, once.
     pub(super) fn migrate_legacy_user_asks(&mut self) {
-        if self.session.user_asks.legacy_open.is_empty() {
+        if self.session.user_asks().legacy_open.is_empty() {
             return;
         }
-        let legacy = std::mem::take(&mut self.session.user_asks.legacy_open);
+        let legacy = self.session.take_legacy_open_user_asks();
         if !self.is_swarm_worker() {
             for ask in &legacy {
                 if let Err(error) =
-                    crate::todo::record_request(&self.session.id, ask.id, &ask.preview)
+                    crate::todo::record_request(self.session.id(), ask.id, &ask.preview)
                 {
                     logging::warn(&format!(
                         "Failed to migrate request #{} for {}: {error}",
-                        ask.id, self.session.id
+                        ask.id,
+                        self.session.id()
                     ));
                 }
             }
@@ -79,7 +80,7 @@ impl Agent {
         if let Err(error) = self.session.save() {
             logging::warn(&format!(
                 "Failed to save migrated requests for {}: {error}",
-                self.session.id
+                self.session.id()
             ));
         }
     }
@@ -102,7 +103,7 @@ impl Agent {
         if self.is_swarm_worker() {
             return None;
         }
-        let todos = crate::todo::load_todos(&self.session.id).ok()?;
+        let todos = crate::todo::load_todos(self.session.id()).ok()?;
         let open: Vec<_> = crate::todo::open_requests(&todos).collect();
         if open.is_empty() {
             return None;

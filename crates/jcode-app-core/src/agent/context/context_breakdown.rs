@@ -56,12 +56,12 @@ impl Agent {
     ) -> ContextBreakdownSnapshot {
         let model = self.provider_model();
         let provider = self.provider.name();
-        let telemetry = session_telemetry::read_context(&self.session.id);
+        let telemetry = session_telemetry::read_context(self.session.id());
         let mut meter = self.context_policy().await;
         apply_occupancy(&mut meter, &self.session, telemetry.as_ref(), State::Live);
         if summary_only && meter.occupied_tokens.is_some() {
             return ContextBreakdownSnapshot {
-                breakdown: meter_only(Some(self.session.id.clone()), Some(model), meter),
+                breakdown: meter_only(Some(self.session.id().to_owned()), Some(model), meter),
                 compact: None,
             };
         }
@@ -91,7 +91,7 @@ impl Agent {
             crate::tool::sdk::custom(self.session_id(), name)
         });
         ContextBreakdownSnapshot {
-            breakdown: counts.finish(Some(self.session.id.clone()), Some(model), meter),
+            breakdown: counts.finish(Some(self.session.id().to_owned()), Some(model), meter),
             compact,
         }
     }
@@ -120,7 +120,7 @@ impl Agent {
             &mut meter,
             Some(self.provider.name()),
             Some(&self.provider_model()),
-            self.session.context_cap,
+            self.session.context_cap(),
             Some(self.provider_context_window()),
             mode,
         );
@@ -211,20 +211,18 @@ pub(crate) fn inspect_saved(
     summary_only: bool,
     include_snapcompact: bool,
 ) -> ContextBreakdown {
-    let model = session.model.as_deref();
-    let telemetry = session_telemetry::read_context(&session.id);
+    let model = session.model();
+    let telemetry = session_telemetry::read_context(session.id());
     let matching = telemetry
         .as_ref()
         .filter(|sample| sample.matches_session(session));
     let provider = matching
         .and_then(|sample| sample.serving_provider.as_deref())
         .or_else(|| {
-            model.and_then(|model| {
-                provider_for_model_with_hint(model, session.provider_key.as_deref())
-            })
+            model.and_then(|model| provider_for_model_with_hint(model, session.provider_key()))
         })
-        .or(session.provider_key.as_deref());
-    let cap = session.context_cap.filter(|n| *n > 0).map(|n| n as u64);
+        .or(session.provider_key());
+    let cap = session.context_cap().filter(|n| *n > 0).map(|n| n as u64);
     let historical_policy = matching.and_then(|sample| sample.context_policy.as_ref());
     let mut meter = historical_policy
         .filter(|policy| policy.session_cap_tokens == cap)
@@ -242,20 +240,24 @@ pub(crate) fn inspect_saved(
         });
     apply_occupancy(&mut meter, session, telemetry.as_ref(), State::Saved);
     if summary_only && meter.occupied_tokens.is_some() {
-        return meter_only(Some(session.id.clone()), session.model.clone(), meter);
+        return meter_only(
+            Some(session.id().to_owned()),
+            session.model().map(str::to_owned),
+            meter,
+        );
     }
     let past_request = meter.occupied_tokens.is_some()
-        || session.last_provider_request_at.is_some()
+        || session.last_provider_request_at().is_some()
         || session
-            .messages
+            .messages()
             .iter()
             .any(|message| message.role == Role::Assistant);
     let mut counts = Counts {
         include_snapcompact,
         ..Counts::default()
     };
-    let recorded = crate::session::load_prompt_inputs(&session.id)
-        .filter(|inputs| inputs.working_dir == session.working_dir);
+    let recorded = crate::session::load_prompt_inputs(session.id())
+        .filter(|inputs| inputs.working_dir == session.working_dir().map(str::to_owned));
     if let Some((inputs, snapshot)) = recorded
         .as_ref()
         .and_then(|inputs| Some((inputs, inputs.static_prompt.as_ref()?)))
@@ -267,9 +269,9 @@ pub(crate) fn inspect_saved(
         counts.prompt(&prompt, snapshot.skills_chars(&inputs.skills));
     } else if !past_request {
         let (prompt, skills_chars) = bootstrap_prompt(
-            session.working_dir.as_deref().map(Path::new),
-            session.is_canary,
-            session.system_prompt.as_deref(),
+            session.working_dir().map(Path::new),
+            session.is_canary(),
+            session.system_prompt(),
         );
         counts.prompt(&prompt, Some(skills_chars));
     }
@@ -290,7 +292,11 @@ pub(crate) fn inspect_saved(
     if let Some(tools) = super::tool_replay::saved_context_tools(session) {
         counts.tools(&tools, &projection.messages, |_| false);
     }
-    counts.finish(Some(session.id.clone()), session.model.clone(), meter)
+    counts.finish(
+        Some(session.id().to_owned()),
+        session.model().map(str::to_owned),
+        meter,
+    )
 }
 
 pub(crate) async fn inspect_draft(
@@ -446,13 +452,13 @@ fn apply_occupancy(
             )
         })
     } else {
-        session.messages.iter().rev().find_map(|message| {
+        session.messages().iter().rev().find_map(|message| {
             let tokens = message.token_usage.as_ref()?.prompt_tokens?;
             (tokens > 0).then_some((message.timestamp, tokens, Source::HistoricalReport))
         })
     };
     let compacted = session
-        .replay_events
+        .replay_events()
         .iter()
         .rev()
         .find_map(|event| match &event.kind {
@@ -518,7 +524,7 @@ impl Counts {
         snapcompact_known: bool,
     ) {
         let reminders: HashSet<_> = session
-            .messages
+            .messages()
             .iter()
             .filter_map(|message| {
                 if message.display_role != Some(StoredDisplayRole::System) {

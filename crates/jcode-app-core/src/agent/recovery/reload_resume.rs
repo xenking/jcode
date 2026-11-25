@@ -60,7 +60,7 @@ pub(crate) enum ResumeOutcome {
 
 fn tool_result_ids(session: &crate::session::Session) -> HashSet<&str> {
     session
-        .messages
+        .messages()
         .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
@@ -74,7 +74,7 @@ fn tool_result_ids(session: &crate::session::Session) -> HashSet<&str> {
 pub(crate) fn pending_tool_uses(session: &crate::session::Session) -> Vec<PendingToolUse> {
     let results = tool_result_ids(session);
     let mut pending = Vec::new();
-    for (message_index, message) in session.messages.iter().enumerate() {
+    for (message_index, message) in session.messages().iter().enumerate() {
         if message.role != Role::Assistant {
             continue;
         }
@@ -96,7 +96,7 @@ pub(crate) fn pending_tool_uses(session: &crate::session::Session) -> Vec<Pendin
 /// True when the last assistant message was cut off by a reload.
 pub(crate) fn ends_with_reload_marker(session: &crate::session::Session) -> bool {
     session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == Role::Assistant)
@@ -132,7 +132,7 @@ impl Agent {
     /// authoritative evidence that work was in flight. Without that evidence a
     /// finished turn is never re-prompted.
     pub(crate) fn reload_resume_plan(&self, durable_intent: bool) -> ResumePlan {
-        let Some(last) = last_turn_message_for_recovery(&self.session.messages) else {
+        let Some(last) = last_turn_message_for_recovery(self.session.messages()) else {
             return ResumePlan::Nothing;
         };
         // An unanswered ask owns the continuation even when other tools from
@@ -169,7 +169,7 @@ impl Agent {
         pending: &[PendingToolUse],
     ) -> Result<Vec<(String, String, String)>> {
         let background_note =
-            crate::tool::selfdev::persisted_background_tasks_note(&self.session.id);
+            crate::tool::selfdev::persisted_background_tasks_note(self.session.id());
         let mut repaired = Vec::new();
         let mut inserted = 0usize;
         let mut index = 0usize;
@@ -208,7 +208,7 @@ impl Agent {
             index = end;
         }
         if !repaired.is_empty() {
-            self.tool_output_scan_index = self.session.messages.len();
+            self.tool_output_scan_index = self.session.messages().len();
             self.persist_session_now()?;
         }
         Ok(repaired)
@@ -218,22 +218,7 @@ impl Agent {
     pub(super) fn strip_reload_interruption_marker(&mut self) -> Result<bool> {
         let Some(message) = self
             .session
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == Role::Assistant)
-        else {
-            return Ok(false);
-        };
-        let mut changed = false;
-        for block in message.content.iter_mut() {
-            if let ContentBlock::Text { text, .. } = block
-                && let Some(stripped) = text.strip_suffix(RELOAD_INTERRUPTED_MARKER)
-            {
-                *text = stripped.to_string();
-                changed = true;
-            }
-        }
+            .strip_reload_interruption_marker_from_last_assistant();
         if changed {
             self.persist_session_now()?;
         }
@@ -250,7 +235,7 @@ impl Agent {
         self.validate_tool_allowed(&tool.name)?;
         let shutdown = self.graceful_shutdown.clone();
         let ctx = ToolContext {
-            session_id: self.session.id.clone(),
+            session_id: self.session.id().to_owned(),
             message_id,
             tool_call_id: tool.id.clone(),
             working_dir: self.working_dir().map(std::path::PathBuf::from),
@@ -259,10 +244,10 @@ impl Agent {
             execution_mode: ToolExecutionMode::AgentTurn,
         };
         let _running =
-            crate::running_tool_registry::register(&self.session.id, &tool.id, &tool.name);
+            crate::running_tool_registry::register(self.session.id(), &tool.id, &tool.name);
         let started = Instant::now();
         let sole_rollout_wait = tool.name == crate::tool::rollout_wait::NAME
-            && self.session.messages[tool.message_index]
+            && self.session.messages()[tool.message_index]
                 .content
                 .iter()
                 .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))

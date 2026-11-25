@@ -244,7 +244,7 @@ fn resolve_resume_id_imports_raw_codex_session_ids() {
     assert_eq!(resolved, imported_id);
 
     let session = crate::session::Session::load(&resolved).expect("load imported session");
-    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages().len(), 2);
 
     crate::env::remove_var("JCODE_HOME");
 }

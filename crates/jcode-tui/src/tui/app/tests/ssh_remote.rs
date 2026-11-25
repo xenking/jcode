@@ -46,17 +46,17 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
                 cache_control: None,
             }],
         );
-        local.model = Some("gpt-5.4".into());
+        local.set_model(Some("gpt-5.4".into()));
         local.save().expect("save handoff source");
-        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &local.id);
-        let app = App::new_for_remote(Some(local.id.clone()));
+        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", local.id());
+        let app = App::new_for_remote(Some(local.id().to_owned()));
         assert!(app.display_messages().iter().any(|message| {
             message
                 .content
                 .contains("conversation before cloud handoff")
         }));
-        assert!(app.session.messages.is_empty());
-        assert!(app.session.working_dir.is_none());
+        assert!(app.session.messages().is_empty());
+        assert!(app.session.working_dir().is_none());
         assert!(app.remote_startup_phase.is_some());
         assert_eq!(
             app.effective_remote_provider_model().as_deref(),
@@ -81,10 +81,10 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
         );
         assert!(!frame_text.contains("loading session"), "{frame_text}");
 
-        let ordinary_resume = App::new_for_remote(Some(local.id.clone()));
+        let ordinary_resume = App::new_for_remote(Some(local.id().to_owned()));
         assert!(ordinary_resume.display_messages().is_empty());
         crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "another-session");
-        let mismatched = App::new_for_remote(Some(local.id));
+        let mismatched = App::new_for_remote(Some(local.id().to_owned()));
         assert!(mismatched.display_messages().is_empty());
     });
 }
@@ -101,9 +101,9 @@ fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
             }],
         );
         local.save().expect("save local collision");
-        let app = App::new_for_remote(Some(local.id.clone()));
+        let app = App::new_for_remote(Some(local.id().to_owned()));
         assert!(app.display_messages().is_empty());
-        assert_eq!(app.resume_session_id.as_deref(), Some(local.id.as_str()));
+        assert_eq!(app.resume_session_id.as_deref(), Some(local.id()));
         assert!(app.remote_session_id.is_none());
         assert!(!app.onboarding_welcome_active());
         assert!(app.suggestion_prompts().is_empty());
@@ -291,7 +291,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
 fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
     with_ssh_remote_test_home(|| {
         let mut app = App::new_for_remote(None);
-        app.session.model = Some("laptop-only-model".into());
+        app.session.set_model(Some("laptop-only-model".into()));
         assert!(app.effective_remote_provider_model().is_none());
         assert_eq!(app.remote_effort_identity(), (None, None));
         assert!(app.remote_reasoning_effort_hint().is_none());
@@ -380,7 +380,7 @@ fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
             app.remote_provider_model.as_deref(),
             Some("gemini-4-neon-high")
         );
-        assert_eq!(app.session.model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(app.session.model(), Some("gemini-4-neon-high"));
 
         // Non-effort Antigravity model exposes no reasoning efforts
         app.remote_provider_model = Some("gemini-3-flash".to_string());

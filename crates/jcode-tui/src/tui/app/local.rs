@@ -279,22 +279,22 @@ pub(super) fn handle_bus_event(
             message,
             open_picker,
         }) => {
-            if session_id != app.session.id {
+            if session_id != app.session.id() {
                 return false;
             }
             app.provider_session_id = None;
-            app.session.provider_session_id = None;
+            app.session.set_provider_session_id(None);
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
             app.update_context_limit_for_model(&model, None);
-            app.session.provider_key = provider_key.or_else(|| {
+            app.session.set_provider_key(provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,
                     app.provider.name(),
-                    app.session.provider_key.as_deref(),
+                    app.session.provider_key(),
                 )
-            });
-            app.session.model = Some(model.clone());
+            }));
+            app.session.set_model(Some(model.clone()));
             let _ = app.session.save();
             if !app.auth_catalog_refresh_pending {
                 app.push_display_message(crate::tui::DisplayMessage::system(message));
@@ -346,7 +346,7 @@ pub(super) fn handle_bus_event(
             true
         }
         Ok(BusEvent::SidePanelUpdated(update)) => {
-            if update.session_id == app.session.id {
+            if update.session_id == app.session.id() {
                 app.set_side_panel_snapshot(update.snapshot);
                 true
             } else {
@@ -354,7 +354,7 @@ pub(super) fn handle_bus_event(
             }
         }
         Ok(BusEvent::TodoUpdated(event)) => {
-            if event.session_id == app.session.id {
+            if event.session_id == app.session.id() {
                 app.update_terminal_title();
                 app.refresh_todos_view_now()
             } else {
@@ -406,7 +406,7 @@ pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
 }
 
 fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
-    if result.session_id != app.session.id {
+    if result.session_id != app.session.id() {
         return;
     }
 
@@ -502,7 +502,7 @@ fn apply_terminal_event(
 }
 
 fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted) {
-    if task.session_id == app.session.id {
+    if task.session_id == app.session.id() {
         let label = crate::message::background_task_display_label(
             &task.tool_name,
             task.display_name.as_deref(),
@@ -514,7 +514,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         };
         app.finish_background_task(task.task_id.clone(), label, status);
     }
-    if !task.notify || task.session_id != app.session.id {
+    if !task.notify || task.session_id != app.session.id() {
         return;
     }
 
@@ -556,7 +556,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
 }
 
 fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTaskStalled) {
-    if task.session_id != app.session.id {
+    if task.session_id != app.session.id() {
         return;
     }
 
@@ -625,7 +625,7 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
 }
 
 fn handle_background_task_progress(app: &mut App, event: BackgroundTaskProgressEvent) {
-    if event.session_id != app.session.id {
+    if event.session_id != app.session.id() {
         return;
     }
 
@@ -663,7 +663,7 @@ fn maybe_set_background_progress_notice(app: &mut App, notice: String) {
 }
 
 fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
-    if shell.session_id != app.session.id {
+    if shell.session_id != app.session.id() {
         return;
     }
 

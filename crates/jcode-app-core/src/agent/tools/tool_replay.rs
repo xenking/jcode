@@ -30,7 +30,7 @@ impl Agent {
             return None;
         }
         Some(Scope {
-            working_dir: self.session.working_dir.clone(),
+            working_dir: self.session.working_dir().map(str::to_owned),
             mcp_mode: self.mcp_tools_mode,
             native_deferred: self.native_deferred_mcp(),
             allowed: self
@@ -38,7 +38,7 @@ impl Agent {
                 .as_ref()
                 .map(|names| names.iter().cloned().collect()),
             disabled: self.disabled_tools.iter().cloned().collect(),
-            canary: self.session.is_canary,
+            canary: self.session.is_canary(),
             desktop_selfdev: self.is_desktop_selfdev(),
         })
     }
@@ -120,10 +120,11 @@ impl Agent {
 }
 
 pub(super) fn saved_context_tools(session: &Session) -> Option<Vec<ToolDefinition>> {
-    let path = tool_surface_path(&session.id).ok()?;
+    let path = tool_surface_path(session.id()).ok()?;
     let saved = crate::storage::read_json_sidecar::<ToolSurface>(&path).ok()?;
-    (saved.scope.working_dir == session.working_dir && saved.scope.canary == session.is_canary)
-        .then_some(saved.tools)
+    (saved.scope.working_dir == session.working_dir().map(str::to_owned)
+        && saved.scope.canary == session.is_canary())
+    .then_some(saved.tools)
 }
 
 fn tool_surface_path(session_id: &str) -> Result<std::path::PathBuf> {

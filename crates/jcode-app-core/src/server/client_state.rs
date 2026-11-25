@@ -255,8 +255,9 @@ async fn build_model_catalog(
                     let persisted = Session::load_for_remote_startup(&session_id)
                         .or_else(|_| Session::load_startup_stub(&session_id))
                         .ok();
-                    let persisted_model =
-                        persisted.as_ref().and_then(|session| session.model.clone());
+                    let persisted_model = persisted
+                        .as_ref()
+                        .and_then(|session| session.model().map(str::to_owned));
                     let mut model_routes = provider.model_routes();
                     crate::model_usage::enrich_routes(&mut model_routes);
                     (
@@ -280,9 +281,9 @@ async fn build_model_catalog(
                         ),
                         crate::session_effort::session_effort(&session_id)
                             .or_else(|| {
-                                persisted
-                                    .as_ref()
-                                    .and_then(|session| session.reasoning_effort.clone())
+                                persisted.as_ref().and_then(|session| {
+                                    session.reasoning_effort().map(str::to_owned)
+                                })
                             })
                             .or_else(|| provider.reasoning_effort()),
                         "fallback",
@@ -692,21 +693,21 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
 }
 
 fn session_interrupted_by_reload(session: &Session) -> bool {
-    let session_id = session.id.as_str();
-    let last = crate::agent::last_turn_message_for_recovery(&session.messages);
+    let session_id = session.id();
+    let last = crate::agent::last_turn_message_for_recovery(session.messages());
     let last_is_user = last.is_some_and(|message| message.role == Role::User);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
     let pending_turn =
         last_is_user || last.is_some_and(super::client_session::last_message_has_pending_tool);
-    let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
-        || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
-        || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
+    let interrupted = matches!(session.status(), SessionStatus::Crashed { .. })
+        || (matches!(session.status(), SessionStatus::Active) && pending_turn && marker_active)
+        || (matches!(session.status(), SessionStatus::Closed) && pending_turn && marker_active)
         || last.is_some_and(super::client_session::message_has_reload_interruption);
 
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
         session_id,
-        session.status.display(),
+        session.status().display(),
         last_is_user,
         pending_turn,
         marker_active,
@@ -770,18 +771,21 @@ async fn send_history_from_persisted_session(
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
     let provider_name = history_provider_name(&session, provider.as_ref());
-    let provider_model = session.model.clone().or_else(|| Some(provider.model()));
-    let subagent_model = session.subagent_model.clone();
-    let pinned_skill = session.pinned_skill.clone();
+    let provider_model = session
+        .model()
+        .map(str::to_owned)
+        .or_else(|| Some(provider.model()));
+    let subagent_model = session.subagent_model().map(str::to_owned);
+    let pinned_skill = session.pinned_skill().map(str::to_owned);
     let pinned_skills = Some(session.pinned_skill_names().to_vec());
-    let autoreview_enabled = session.autoreview_enabled;
-    let autojudge_enabled = session.autojudge_enabled;
-    let is_canary = session.is_canary;
+    let autoreview_enabled = session.autoreview_enabled();
+    let autojudge_enabled = session.autojudge_enabled();
+    let is_canary = session.is_canary();
     let reasoning_effort = session
-        .reasoning_effort
-        .clone()
+        .reasoning_effort()
+        .map(str::to_owned)
         .or_else(|| provider.reasoning_effort());
-    let agent_model_overrides = session.agent_model_overrides.clone();
+    let agent_model_overrides = session.agent_model_overrides().clone();
     let inferred_interrupted = was_interrupted
         .is_none()
         .then(|| session_interrupted_by_reload(&session));

@@ -46,7 +46,10 @@ struct AuthorizedWorkerModel {
     selection: WorkerModelApproval,
 }
 
+mod accessors;
 mod agent_models;
+mod inherit;
+pub use inherit::Inherit;
 mod catalog_activity;
 mod crash;
 pub use agent_models::AgentModelOverrides;
@@ -64,6 +67,8 @@ mod prewarm_store;
 mod prompt_inputs;
 mod render;
 mod storage_paths;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
@@ -92,9 +97,9 @@ pub use render::{
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;
+use storage_paths::estimate_json_bytes;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
-use storage_paths::estimate_json_bytes;
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
@@ -136,130 +141,130 @@ pub struct LegacyOpenUserAsk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub title: Option<String>,
+    id: String,
+    parent_id: Option<String>,
+    title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_title: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    custom_title: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
     /// Set at creation for autonomous runs that are not swarm workers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub agent_started: bool,
+    agent_started: bool,
     /// Immutable after the initial fork. Hidden is visibility, not provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     side_question_message_start: Option<usize>,
     #[serde(deserialize_with = "parallel_messages::deserialize")]
-    pub messages: Vec<StoredMessage>,
+    messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_skill: Option<String>,
+    pinned_skill: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_skills: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pinned_skill_arguments: std::collections::BTreeMap<String, String>,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_usage_turn_id: Option<String>,
+    model_usage_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "UserAskLedger::is_default")]
-    pub user_asks: UserAskLedger,
+    user_asks: UserAskLedger,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Shared with persistence metadata and session clones. Mutation must use
     /// Arc::make_mut so exported/redacted or forked views remain isolated.
-    pub compaction: Option<std::sync::Arc<StoredCompactionState>>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_session_id: Option<String>,
+    provider_session_id: Option<String>,
     /// Stable provider/profile key for session-source filtering (e.g. "openai",
     /// "opencode", "opencode-go").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_key: Option<String>,
+    provider_key: Option<String>,
     /// Model identifier for this session (e.g., "gpt-5.2-codex")
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    model: Option<String>,
     /// API method/runtime route used to select this model (e.g. "openrouter",
     /// "openai-compatible:nvidia-nim", "openai-api").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route_api_method: Option<String>,
+    route_api_method: Option<String>,
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed_selection: Option<StoredSpeedSelection>,
+    speed_selection: Option<StoredSpeedSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
+    worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     /// This session was spawned as a swarm worker, not a user-started session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_swarm_worker: bool,
+    is_swarm_worker: bool,
     /// Owner approval for one effective model and effort on this worker only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worker_model_approval: Option<AuthorizedWorkerModel>,
     /// Per-session context ceiling. Missing values follow the global cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_cap: Option<usize>,
+    context_cap: Option<usize>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_model: Option<String>,
+    subagent_model: Option<String>,
     /// Session worker routing. Missing keys follow saved global defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_model_overrides: AgentModelOverrides,
+    agent_model_overrides: AgentModelOverrides,
     /// Agent profile chosen when the session was created (see
     /// `jcode_base::agent_profile`). Re-applied from here on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_profile: Option<String>,
+    agent_profile: Option<String>,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub improve_mode: Option<SessionImproveMode>,
+    improve_mode: Option<SessionImproveMode>,
     /// Whether automatic end-of-turn review is enabled for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autoreview_enabled: Option<bool>,
+    autoreview_enabled: Option<bool>,
     /// Whether automatic end-of-turn judging is enabled for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autojudge_enabled: Option<bool>,
+    autojudge_enabled: Option<bool>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
-    pub is_canary: bool,
+    is_canary: bool,
     /// Build hash this session is testing (if canary)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub testing_build: Option<String>,
+    testing_build: Option<String>,
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
+    working_dir: Option<String>,
     /// First session directory, retained when the session moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_working_dir: Option<String>,
+    original_working_dir: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
     /// Session exit status - why it ended (if not active)
     #[serde(default)]
-    pub status: SessionStatus,
+    status: SessionStatus,
     /// PID of the process that last owned this session (for crash detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pid: Option<u32>,
     /// Last time the session was marked active
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_active_at: Option<DateTime<Utc>>,
+    last_active_at: Option<DateTime<Utc>>,
     /// Wall-clock time of the last provider request that wrote or refreshed the
     /// prompt cache. Persisted (unlike the compaction manager's in-memory
     /// clock) so the cold-cache shake still fires after a daemon reload, exec,
     /// or session resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_provider_request_at: Option<DateTime<Utc>>,
+    last_provider_request_at: Option<DateTime<Utc>>,
     /// Route at dispatch, not the latest selection (which can change between turns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_provider_cache_domain: Option<crate::kv_cache_monitor::RequestCacheDomain>,
+    last_provider_cache_domain: Option<crate::kv_cache_monitor::RequestCacheDomain>,
     /// Cache touch already handled by a completed cold-cache compaction.
     /// Unfinished work can be retried after reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
+    last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
-    pub is_debug: bool,
+    is_debug: bool,
     /// A hidden session is a `/btw` side-question fork: it lives on disk and
     /// can be resumed by id, but the session list skips it until the user
     /// promotes it to a real chat.
@@ -267,23 +272,23 @@ pub struct Session {
     pub hidden: bool,
     /// Whether this session has been saved/bookmarked by the user
     #[serde(default)]
-    pub saved: bool,
+    saved: bool,
     /// Optional user-provided label for saved sessions
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub save_label: Option<String>,
+    save_label: Option<String>,
     /// Environment snapshots for post-mortem debugging
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env_snapshots: Vec<EnvSnapshot>,
+    env_snapshots: Vec<EnvSnapshot>,
     /// Memory injection events (for replay visualization)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memory_injections: Vec<StoredMemoryInjection>,
+    memory_injections: Vec<StoredMemoryInjection>,
     /// Non-conversation UI/state events persisted for higher-fidelity replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub replay_events: Vec<StoredReplayEvent>,
+    replay_events: Vec<StoredReplayEvent>,
     /// Migration epoch of the machine move that delivered this copy
     /// (`jcode cloud move` / `return`). Zero for sessions that never moved.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub migration_epoch: u64,
+    migration_epoch: u64,
     #[serde(skip)]
     ephemeral: bool,
     #[serde(skip)]

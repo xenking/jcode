@@ -234,7 +234,7 @@ fn todo_alias_shows_card() {
 fn refresh_todo_card_updates_content_when_todos_change() {
     let _env_lock = crate::storage::lock_test_env();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     let todo = |content: &str, status: &str| crate::todo::TodoItem {
         lane_speed: None,
@@ -288,7 +288,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
 fn refresh_todo_card_updates_content_when_goal_scores_change() {
     let _env_lock = crate::storage::lock_test_env();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let todos = [crate::todo::TodoItem {
         lane_speed: None,
         lane_profile: None,
@@ -413,7 +413,7 @@ fn pinned_todos_payload_stays_empty_when_config_off() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin_guard = PinTodosEnvGuard::disable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", "pin me", "pending")]).unwrap();
 
     // display.pin_todos defaults to false: no payload, no redraw churn.
@@ -428,7 +428,7 @@ fn pinned_todos_render_before_resumed_server_history() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(
         &session_id,
         &[pinned_band_todo(
@@ -488,7 +488,7 @@ fn pinned_todos_session_switch_bypasses_previous_snapshot_and_throttle() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(
         &session_id,
         &[pinned_band_todo("new-task", "New session task", "pending")],
@@ -535,7 +535,7 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     // No todos yet: enabled but nothing to pin.
     app.refresh_pinned_todos_now();
@@ -561,7 +561,7 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
 fn session_todos_and_swarm_plan_are_not_info_widget_data() {
     let _env_lock = crate::storage::lock_test_env();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let content = "PLAN_INFO_MUST_NOT_APPEAR";
     crate::todo::save_todos(
         &session_id,
@@ -611,7 +611,7 @@ fn pinned_todos_are_omitted_from_info_widgets() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(
         &session_id,
         &[pinned_band_todo("t1", "only in pinned band", "pending")],
@@ -634,7 +634,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(
         &session_id,
         &[pinned_band_todo("pinned", "PINNED_ONLY", "in_progress")],
@@ -679,7 +679,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::todo::save_todos(
         &session_id,
         &[pinned_band_todo("t1", "pinned band item", "in_progress")],
@@ -762,7 +762,7 @@ fn pinned_todo_band_uses_full_width_on_wide_terminals() {
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let long_item = format!("wide pinned item {} END", "x".repeat(140));
     crate::todo::save_todos(
         &session_id,
@@ -983,7 +983,7 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let mut a = pinned_band_todo("a", "stage one alpha", "in_progress");
     a.stage = Some(1);
     a.group = Some("alpha lane".into());
@@ -1077,7 +1077,7 @@ fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
     item.stage = Some(1);
     item.group = Some("validation".into());
     item.assigned_to = Some("session_fox_1700000000".into());
-    crate::todo::save_todos(&app.session.id, &[item]).unwrap();
+    crate::todo::save_todos(app.session.id(), &[item]).unwrap();
     app.remote_swarm_members =
         vec![
         serde_json::from_value(serde_json::json!({
@@ -1117,7 +1117,7 @@ fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
         focused.contains('🦝'),
         "Focused worker navigation must remain available: {focused}"
     );
-    crate::todo::save_todos(&app.session.id, &[]).unwrap();
+    crate::todo::save_todos(app.session.id(), &[]).unwrap();
 }
 
 #[test]

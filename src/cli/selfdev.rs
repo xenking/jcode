@@ -115,7 +115,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
     let is_resume = resume_session.is_some();
     let session_id = if let Some(id) = resume_session {
         if let Ok(mut session) = session::Session::load(&id)
-            && !session.is_canary
+            && !session.is_canary()
         {
             session.set_canary("self-dev");
             let _ = session.save();
@@ -125,7 +125,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
         let mut session =
             session::Session::create(None, Some("Self-development session".to_string()));
         session.set_canary("self-dev");
-        session.id.clone()
+        session.id().to_owned()
     };
 
     crate::process_title::set_client_session_title(&session_id, true);

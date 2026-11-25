@@ -12,8 +12,7 @@ impl App {
         }
         let dir = self
             .session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_dir());
         self.commit_log_overlay = Some(load_commit_log(dir.as_deref()));

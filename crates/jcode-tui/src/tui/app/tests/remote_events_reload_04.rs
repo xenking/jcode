@@ -685,7 +685,7 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.set_model(Some("gpt-5.4".to_string()));
     session.save().expect("save remote session");
 
     let app = App::new_for_remote(Some(session_id.to_string()));
@@ -717,7 +717,7 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.set_model(Some("gpt-5.4".to_string()));
     session.save().expect("save remote session");
 
     let mut app = App::new_for_remote(Some(session_id.to_string()));
@@ -746,7 +746,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.set_model(Some("gpt-5.4".to_string()));
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
         attachment_data: None,
@@ -775,7 +775,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     // then calls `strip_transcript_for_remote_client()` to release the backing
     // transcript (the server is the source of truth for the live transcript).
     // So the stripped `session.messages` is expected to be empty here.
-    assert_eq!(app.session.messages.len(), 0);
+    assert_eq!(app.session.messages().len(), 0);
     assert_eq!(app.remote_session_id.as_deref(), Some(session_id));
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
 
@@ -957,7 +957,7 @@ fn test_remote_header_keeps_known_model_during_brief_loading_session_phase() {
     // hint), so a short LoadingSession phase must not flash "loading session…"
     // over it. That pre-settle churn is exactly what made spawns look unstable.
     let mut app = App::new_for_remote(None);
-    app.session.model = Some("claude-fable-5".to_string());
+    app.session.set_model(Some("claude-fable-5".to_string()));
     app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "claude-fable-5");
@@ -978,7 +978,7 @@ fn test_remote_effort_identity_falls_back_to_session_model_before_history() {
     // None, but the session stub already knows the model. Effort cycling must
     // work off that hint instead of reporting "not available".
     let mut app = App::new_for_remote(None);
-    app.session.model = Some("claude-fable-5".to_string());
+    app.session.set_model(Some("claude-fable-5".to_string()));
     assert!(app.remote_provider_name.is_none());
     assert!(app.remote_provider_model.is_none());
 
@@ -1256,7 +1256,7 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
     );
 
     app.remote_resolved_credential = None;
-    app.session.route_api_method = None;
+    app.session.set_route_api_method(None);
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1273,7 +1273,8 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = None;
 
-    app.session.route_api_method = Some("openai-api-key".to_string());
+    app.session
+        .set_route_api_method(Some("openai-api-key".to_string()));
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1284,7 +1285,8 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
         Some(crate::tui::info_widget::UsageProvider::CostBased)
     );
 
-    app.session.route_api_method = Some("openai-oauth".to_string());
+    app.session
+        .set_route_api_method(Some("openai-oauth".to_string()));
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1739,7 +1741,7 @@ fn test_debug_command_message_respects_queue_mode() {
     let mut app = create_test_app();
 
     // Test 1: When not processing, should submit directly
-    let initial_session_messages = app.session.messages.len();
+    let initial_session_messages = app.session.messages().len();
     app.is_processing = false;
     let result = app.handle_debug_command("message:hello");
     assert!(
@@ -1752,10 +1754,10 @@ fn test_debug_command_message_respects_queue_mode() {
     assert!(app.pending_turn);
     assert_eq!(app.messages.len(), 0);
     assert_eq!(app.display_messages.len(), 1);
-    assert_eq!(app.session.messages.len(), initial_session_messages + 1);
+    assert_eq!(app.session.messages().len(), initial_session_messages + 1);
     let submitted_message = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("submitted debug message should be stored");
     assert_eq!(submitted_message.role, crate::message::Role::User);
@@ -1766,7 +1768,7 @@ fn test_debug_command_message_respects_queue_mode() {
     app.pending_turn = false;
     app.messages.clear();
     app.display_messages.clear();
-    app.session.messages.clear();
+    app.session.messages_mut_for_tests().clear();
 
     // Test 2: When processing with queue_mode=true, should queue
     app.is_processing = true;
@@ -2205,7 +2207,7 @@ fn test_remote_btw_opens_a_side_card_instead_of_forking_a_chat() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
-        app.remote_session_id = Some(app.session.id.clone());
+        app.remote_session_id = Some(app.session.id().to_owned());
         app.input = "/btw what are we doing?".to_string();
         app.cursor_pos = app.input.len();
 
@@ -2326,7 +2328,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                 // a terminal credential failure.
                 app.auto_poke_default_on = true;
                 crate::todo::save_todos(
-                    &app.session.id,
+                    app.session.id(),
                     &[crate::todo::TodoItem {
                         id: "todo-1".to_string(),
                         content: "Finish work".to_string(),
@@ -2414,7 +2416,7 @@ fn test_local_rejected_refresh_token_stops_pokes_and_preserves_input() {
         app.auto_poke_default_on = true;
         app.last_submitted_input = Some("keep going".to_string());
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Finish work".to_string(),

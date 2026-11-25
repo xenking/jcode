@@ -14,7 +14,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -219,8 +219,8 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 Some(parent_id.clone()),
                 Some(title.to_string()),
             );
-            child.replace_messages(parent.messages.clone());
-            child.compaction = Some(
+            child.replace_messages(parent.messages().to_vec());
+            child.set_compaction(Some(
                 crate::session::StoredCompactionState {
                     summary_text: "stale compaction".to_string(),
                     plan_context: None,
@@ -231,7 +231,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                     compacted_count: 1,
                 }
                 .into(),
-            );
+            ));
             child.save().expect("save child session");
 
             super::commands::prepare_review_spawned_session(
@@ -245,7 +245,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
 
             let prepared = crate::session::Session::load(&child_id).expect("reload child session");
             let transcript = prepared
-                .messages
+                .messages()
                 .iter()
                 .flat_map(|msg| msg.content.iter())
                 .filter_map(|block| match block {
@@ -262,8 +262,8 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
             assert!(transcript.contains("git diff --stat"));
             assert!(!transcript.contains("SECRET_TOOL_OUTPUT_SHOULD_NOT_APPEAR"));
             assert!(!transcript.contains("hidden reasoning should never leak"));
-            assert_eq!(prepared.parent_id.as_deref(), Some(parent_id.as_str()));
-            assert!(prepared.compaction.is_none());
+            assert_eq!(prepared.parent_id(), Some(parent_id.as_str()));
+            assert!(prepared.compaction().is_none());
         }
     });
 }
@@ -278,30 +278,32 @@ fn test_queue_autojudge_remote_targets_original_non_judge_session() {
         root.save().expect("save root session");
 
         let mut review =
-            crate::session::Session::create(Some(root.id.clone()), Some("review".to_string()));
+            crate::session::Session::create(Some(root.id().to_owned()), Some("review".to_string()));
         review.save().expect("save review session");
 
-        let mut judge =
-            crate::session::Session::create(Some(review.id.clone()), Some("judge".to_string()));
+        let mut judge = crate::session::Session::create(
+            Some(review.id().to_owned()),
+            Some("judge".to_string()),
+        );
         judge.save().expect("save judge session");
 
         app.session = judge.clone();
-        app.remote_session_id = Some(judge.id.clone());
+        app.remote_session_id = Some(judge.id().to_owned());
         app.autojudge_enabled = true;
 
         super::commands::queue_autojudge_remote(&mut app);
 
         assert_eq!(
             app.pending_split_parent_session_id.as_deref(),
-            Some(root.id.as_str())
+            Some(root.id())
         );
         let startup = app
             .pending_split_startup_message
             .as_deref()
             .expect("autojudge startup message");
-        assert!(startup.contains(root.id.as_str()));
-        assert!(!startup.contains(review.id.as_str()));
-        assert!(!startup.contains(judge.id.as_str()));
+        assert!(startup.contains(root.id()));
+        assert!(!startup.contains(review.id()));
+        assert!(!startup.contains(judge.id()));
     });
 }
 
@@ -487,7 +489,7 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
             None,
             Some("spawn fresh".to_string()),
         );
-        session.model = Some("gpt-5.4".to_string());
+        session.set_model(Some("gpt-5.4".to_string()));
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
             attachment_data: None,
@@ -557,7 +559,7 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             None,
             Some("remote resume".to_string()),
         );
-        session.model = Some("gpt-5.4".to_string());
+        session.set_model(Some("gpt-5.4".to_string()));
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
             attachment_data: None,
@@ -583,8 +585,8 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             app.display_messages()[0].content,
             "persisted transcript should render once"
         );
-        assert!(app.session.messages.is_empty());
-        assert!(app.session.compaction.is_none());
+        assert!(app.session.messages().is_empty());
+        assert!(app.session.compaction().is_none());
     });
 }
 
@@ -616,7 +618,7 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
         crate::env::remove_var("JCODE_RELOAD_FAST_START");
         let loaded = crate::session::Session::load_for_remote_startup(session_id)
             .expect("load persisted DM");
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages().len(), 1);
         assert_eq!(crate::session::render_messages(&loaded).len(), 1);
         let app = App::new_for_remote_with_options(Some(session_id.to_string()), false);
         let message = app.display_messages().first().expect("restored DM");
@@ -1063,7 +1065,7 @@ fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
-                pasted_contents: Vec::new(),
+            pasted_contents: Vec::new(),
             raw_input: "hello after model switch".to_string(),
             expanded: "hello after model switch".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
@@ -1102,7 +1104,7 @@ fn test_remote_prompt_defers_while_post_login_model_setup_is_pending() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
-                pasted_contents: Vec::new(),
+            pasted_contents: Vec::new(),
             raw_input: "review my project".to_string(),
             expanded: "review my project".to_string(),
             images: Vec::new(),
@@ -1138,7 +1140,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
     app.is_remote = true;
     app.remote_model_switch_in_flight = true;
     app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
-                pasted_contents: Vec::new(),
+        pasted_contents: Vec::new(),
         raw_input: "please use the selected model".to_string(),
         expanded: "please use the selected model".to_string(),
         images: vec![("image/jpeg".to_string(), "def456".to_string())],

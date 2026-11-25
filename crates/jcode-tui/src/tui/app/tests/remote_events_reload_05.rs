@@ -293,7 +293,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         assert!(reloaded_app.todo_confidence_spike_challenged);
 
         crate::todo::save_todos(
-            &reloaded_app.session.id,
+            reloaded_app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Validate release result".to_string(),
@@ -314,7 +314,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &reloaded_app.session.id,
+            reloaded_app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -352,7 +352,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // A completed todo with confidence below the gate threshold keeps the
         // completion gate failing on every check.
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Ship the fix".to_string(),
@@ -371,7 +371,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // Isolate the confidence retry budget from the ownership gate, which
         // deliberately does not retry unchanged assessments.
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -418,7 +418,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         app.auto_poke_incomplete_todos = true;
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Ship the complete workflow".to_string(),
@@ -437,7 +437,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 group: Some("release".to_string()),
                 delivery_state: Some(crate::todo::DeliveryState::Integrated),
@@ -458,7 +458,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("complete workflow"));
 
-        let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
+        let saved = crate::todo::load_todos(app.session.id()).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
     });
 }
@@ -562,8 +562,8 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         app.todo_final_response_requested = false;
-        save_unfinished_ownership_fixture(&app.session.id);
-        let goals = crate::todo::load_goals(&app.session.id).unwrap();
+        save_unfinished_ownership_fixture(app.session.id());
+        let goals = crate::todo::load_goals(app.session.id()).unwrap();
         dispatch_ownership_followup(&mut app);
         for _ in 0..5 {
             assert!(!app.schedule_auto_poke_followup_if_needed());
@@ -572,7 +572,7 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(!app.todo_final_response_requested);
         assert!(app.queued_messages.is_empty());
-        assert_eq!(crate::todo::load_goals(&app.session.id).unwrap(), goals);
+        assert_eq!(crate::todo::load_goals(app.session.id()).unwrap(), goals);
     });
 }
 
@@ -582,14 +582,14 @@ fn ownership_gate_ignores_cosmetic_assessment_changes() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
         for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS + 1 {
-            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            let mut goals = crate::todo::load_goals(app.session.id()).unwrap();
             goals[0].stopping_evidence =
                 Some(format!("Checked available hardware, attempt {attempt}"));
             goals[0].feedback_loop = Some(format!("Read-back check wording revision {attempt}"));
-            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            crate::todo::save_goals(app.session.id(), &goals).unwrap();
             assert!(!app.schedule_auto_poke_followup_if_needed());
             assert_eq!(app.todo_completion_gate_attempts, 1);
             assert!(app.queued_messages.is_empty());
@@ -605,10 +605,10 @@ fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         let mut previous_message = None;
         for attempt in 0..=App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
-            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            let mut goals = crate::todo::load_goals(app.session.id()).unwrap();
             // Alternate a delivery gap with an iteration gap, not just wording.
             let delivery_gap = attempt % 2 == 0;
             goals[0].delivery_state = Some(if delivery_gap {
@@ -621,7 +621,7 @@ fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
             } else {
                 crate::todo::IterationMaturity::Improving
             });
-            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            crate::todo::save_goals(app.session.id(), &goals).unwrap();
             if attempt == App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
                 assert!(!app.schedule_auto_poke_followup_if_needed());
             } else {
@@ -656,11 +656,11 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                 app.auto_poke_default_on = false;
                 app.is_remote = remote_done;
                 let session_id = if remote_done {
-                    let id = format!("ownership-accepted-{}", app.session.id);
+                    let id = format!("ownership-accepted-{}", app.session.id());
                     app.remote_session_id = Some(id.clone());
                     id
                 } else {
-                    app.session.id.clone()
+                    app.session.id().to_owned()
                 };
                 save_unfinished_ownership_fixture(&session_id);
                 let mut goals = crate::todo::load_goals(&session_id).unwrap();
@@ -723,16 +723,16 @@ fn ownership_gate_rearms_after_reopened_work_or_explicit_poke() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
-        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        let mut todos = crate::todo::load_todos(app.session.id()).unwrap();
         todos[0].status = "in_progress".into();
-        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        crate::todo::save_todos(app.session.id(), &todos).unwrap();
         assert!(app.schedule_auto_poke_followup_if_needed());
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         todos[0].status = "completed".into();
-        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        crate::todo::save_todos(app.session.id(), &todos).unwrap();
         dispatch_ownership_followup(&mut app);
         assert!(!app.schedule_auto_poke_followup_if_needed());
         super::commands::disable_auto_poke(&mut app);
@@ -747,17 +747,20 @@ fn ownership_gate_survives_reload_and_is_scoped_to_session() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
-        app.save_input_for_reload(&app.session.id);
-        let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+        app.save_input_for_reload(app.session.id());
+        let restored = App::restore_input_for_reload(app.session.id()).unwrap();
         let mut reloaded = create_test_app();
-        reloaded.session.id = app.session.id.clone();
+        reloaded
+            .session
+            .set_id_for_tests(app.session.id().to_owned());
         reloaded.auto_poke_incomplete_todos = true;
         reloaded.apply_restored_reload_input(restored);
         assert!(!reloaded.schedule_auto_poke_followup_if_needed());
-        reloaded.session.id.push_str("-different-session");
-        save_unfinished_ownership_fixture(&reloaded.session.id);
+        let different_id = format!("{}-different-session", reloaded.session.id());
+        reloaded.session.set_id_for_tests(different_id);
+        save_unfinished_ownership_fixture(reloaded.session.id());
         dispatch_ownership_followup(&mut reloaded);
     });
 }
@@ -771,7 +774,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         app.is_remote = true;
-        app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id));
+        app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id()));
         app.auto_poke_incomplete_todos = true;
         save_unfinished_ownership_fixture(app.remote_session_id.as_deref().unwrap());
         for id in 42..45 {
@@ -875,7 +878,7 @@ fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
         app.auto_poke_incomplete_todos = true;
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Never-finishing task".to_string(),
@@ -956,7 +959,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         // Completed work with validated confidence satisfies the completion gate.
         // A stale observation must not delay the normal final-response handoff.
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Speed up the parser".to_string(),
@@ -977,7 +980,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -992,7 +995,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
 
         // A point that was flagged during the turn and never resolved.
         crate::todo::append_gate_observations(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::GateObservation {
                 kind: crate::todo::GateObservationKind::IntentUnderstanding,
                 group: None,
@@ -1021,7 +1024,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         }));
         // Discarded without delivering a review.
         assert!(
-            crate::todo::load_gate_observations(&app.session.id)
+            crate::todo::load_gate_observations(app.session.id())
                 .expect("reload")
                 .is_empty()
         );
@@ -1042,7 +1045,7 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "digest-opt-in".into(),
                 content: "Ship the fix".into(),
@@ -1058,7 +1061,7 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
             group: None,
             state: Some("partial".into()),
         }];
-        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        crate::todo::append_gate_observations(app.session.id(), &observations).unwrap();
         // /poke off still displays the completion report, but never sends a digest.
         app.auto_poke_incomplete_todos = false;
         app.auto_poke_default_on = false;
@@ -1074,14 +1077,14 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
         assert!(
-            crate::todo::load_gate_observations(&app.session.id)
+            crate::todo::load_gate_observations(app.session.id())
                 .unwrap()
                 .is_empty()
         );
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         // Repeated observations cannot buy another aggregate turn this cycle.
-        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        crate::todo::append_gate_observations(app.session.id(), &observations).unwrap();
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert_eq!(
             app.queued_messages,

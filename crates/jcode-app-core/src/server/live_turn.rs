@@ -595,9 +595,9 @@ mod durable_error_tests {
         // Loading as soon as Error arrives must already show the error. This
         // exercises the actual spawn path, not only the persistence helper.
         let loaded = Session::load(&session_id).unwrap();
-        assert_eq!(loaded.replay_events.len(), 1);
+        assert_eq!(loaded.replay_events().len(), 1);
         assert!(
-            !serde_json::to_string(&loaded.messages)
+            !serde_json::to_string(loaded.messages())
                 .unwrap()
                 .contains(FAILURE)
         );

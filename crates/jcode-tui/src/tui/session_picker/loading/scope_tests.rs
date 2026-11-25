@@ -250,8 +250,8 @@ fn hidden_debug_sessions_do_not_consume_default_resume_budget() {
             Some(format!("/tmp/regular-{idx:03}")),
             Some(format!("Regular {idx:03}")),
         );
-        session.is_debug = false;
-        session.is_canary = false;
+        session.set_debug(false);
+        session.set_is_canary_for_tests(false);
         push_message(&mut session, &format!("regular content {idx:03}"));
         session.save().expect("save regular session");
     }
@@ -265,7 +265,7 @@ fn hidden_debug_sessions_do_not_consume_default_resume_budget() {
             Some(format!("/tmp/debug-{idx:03}")),
             Some(format!("Debug {idx:03}")),
         );
-        session.is_debug = true;
+        session.set_debug(true);
         push_message(&mut session, &format!("debug content {idx:03}"));
         session.save().expect("save debug session");
     }

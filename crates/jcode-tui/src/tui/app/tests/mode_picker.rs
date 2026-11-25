@@ -31,7 +31,8 @@ fn mode_picker_rows(app: &mut App, input: &str) -> Vec<String> {
 fn mode_picker_lists_modes_before_skills_and_pinned_modes_first() {
     let mut app = create_test_app();
     let project = mode_picker_project();
-    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(project.path().to_string_lossy().into_owned()));
 
     assert_eq!(
         mode_picker_rows(&mut app, "/mode zz-"),
@@ -67,7 +68,8 @@ fn mode_picker_lists_modes_before_skills_and_pinned_modes_first() {
 fn mode_picker_rows_carry_live_description_mode_flag_and_pin_state() {
     let mut app = create_test_app();
     let project = mode_picker_project();
-    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(project.path().to_string_lossy().into_owned()));
     app.session.set_pinned_skill_names(vec!["zz-quiet".into()]);
 
     let quiet = app.skill_suggestion_info("/mode toggle zz-quiet").unwrap();
@@ -90,7 +92,8 @@ fn mode_picker_rows_carry_live_description_mode_flag_and_pin_state() {
 fn selecting_a_mode_picker_row_toggles_it_without_replacing_other_modes() {
     let mut app = create_test_app();
     let project = mode_picker_project();
-    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(project.path().to_string_lossy().into_owned()));
 
     for (input, expected) in [
         ("/mode toggle zz-quiet", vec!["zz-quiet"]),
@@ -107,7 +110,8 @@ fn selecting_a_mode_picker_row_toggles_it_without_replacing_other_modes() {
 fn skills_report_marks_modes_and_every_pinned_skill() {
     let mut app = create_test_app();
     let project = mode_picker_project();
-    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(project.path().to_string_lossy().into_owned()));
     app.session
         .set_pinned_skill_names(vec!["zz-quiet".into(), "zz-plain".into()]);
 
@@ -123,7 +127,8 @@ fn skills_report_marks_modes_and_every_pinned_skill() {
 fn a_skill_typed_in_full_is_submitted_as_typed_not_completed_to_a_toggle() {
     let mut app = create_test_app();
     let project = mode_picker_project();
-    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(project.path().to_string_lossy().into_owned()));
     app.session.set_pinned_skill_names(vec!["zz-quiet".into()]);
 
     assert_eq!(

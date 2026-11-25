@@ -779,7 +779,7 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
     // A todo group is a lane label, so it only names sessions that have no
     // generated title at all.
     let mut untitled = Session::load(session_id).expect("load session");
-    untitled.title = None;
+    untitled.set_title(None);
     untitled.save().expect("save untitled session");
     invalidate_session_list_cache();
 
@@ -972,7 +972,7 @@ fn load_sessions_preserves_snapshot_saved_when_journal_meta_omits_saved() {
     });
     session.save().expect("save saved session");
 
-    let snapshot = crate::session::session_path(&session.id).expect("session path");
+    let snapshot = crate::session::session_path(session.id()).expect("session path");
     let journal = crate::session::session_journal_path_from_snapshot(&snapshot);
     std::fs::write(
         journal,

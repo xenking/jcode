@@ -75,33 +75,33 @@ fn create_visible_spawn_session(
     };
 
     let mut session = Session::create(None, None);
-    session.is_swarm_worker = true;
+    session.set_is_swarm_worker(true);
     if let Some(worker) = prepared {
         session.set_worker_model_approval(worker.approval.clone());
-        session.speed_selection = worker.speed_selection.clone();
-        session.worker_speed = Some(worker.speed.clone());
+        session.set_speed_selection(worker.speed_selection.clone());
+        session.set_worker_speed(Some(worker.speed.clone()));
         // Stored before launch: the headed client restores the session and
         // re-applies the profile from it.
-        session.agent_profile = worker.profile.clone();
+        session.set_agent_profile(worker.profile.clone());
     }
-    session.working_dir = Some(cwd.display().to_string());
+    session.set_working_dir(Some(cwd.display().to_string()));
     if let Some(model) = model_override {
-        session.model = Some(model.to_string());
+        session.set_model(Some(model.to_string()));
     }
     if let Some(provider_key) = provider_key_override {
-        session.provider_key = Some(provider_key.to_string());
+        session.set_provider_key(Some(provider_key.to_string()));
     }
     if let Some(route_api_method) = route_api_method_override
         .map(str::trim)
         .filter(|route| !route.is_empty())
     {
-        session.route_api_method = Some(route_api_method.to_string());
+        session.set_route_api_method(Some(route_api_method.to_string()));
     }
     if let Some(effort) = effort_override.map(str::trim).filter(|e| !e.is_empty()) {
         // Persisted effort is restored (and validated against the resolved
         // provider/model) by `restore_reasoning_effort_from_session` when the
         // headed client attaches to this session.
-        session.reasoning_effort = Some(effort.to_string());
+        session.set_reasoning_effort(Some(effort.to_string()));
     }
     if selfdev_requested {
         session.set_canary("self-dev");
@@ -111,7 +111,7 @@ fn create_visible_spawn_session(
     // save gate from 783c979a0.
     session.save_prepared()?;
 
-    Ok((session.id.clone(), cwd))
+    Ok((session.id().to_owned(), cwd))
 }
 
 async fn resolve_spawn_working_dir(
@@ -151,8 +151,9 @@ async fn resolve_spawn_working_dir(
         return Ok(member_dir);
     }
     Ok(Session::load_startup_stub(req_session_id)?
-        .working_dir
-        .filter(|dir| !dir.trim().is_empty()))
+        .working_dir()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(str::to_owned))
 }
 
 /// Launch a headed window for `session_id`, exporting the given spawn context
@@ -209,14 +210,14 @@ fn inherit_visible_spawn_preferences(parent_id: &str, child_id: &str) -> anyhow:
         }
         Err(error) => return Err(error),
     };
-    if parent.agent_model_overrides.is_empty() && parent.pinned_skill.is_none() {
+    if parent.agent_model_overrides().is_empty() && parent.pinned_skill().is_none() {
         return Ok(());
     }
     // A startup stub deliberately refuses to overwrite the transcript. Load
     // the just-prepared child in full before updating its initial snapshot.
     let mut child = Session::load(child_id)?;
     child.inherit_pinned_skill(&parent);
-    child.agent_model_overrides = parent.agent_model_overrides;
+    child.set_agent_model_overrides(parent.agent_model_overrides().clone());
     child.save_prepared()
 }
 
@@ -1035,7 +1036,7 @@ pub(super) async fn handle_comm_spawn(
         Ok(new_session_id) => PersistedSwarmMutationResponse::Spawn {
             worker_speed: Session::load_startup_stub(&new_session_id)
                 .ok()
-                .and_then(|session| session.worker_speed),
+                .and_then(|session| session.worker_speed().cloned()),
             new_session_id,
         },
         Err(error) => PersistedSwarmMutationResponse::Error {

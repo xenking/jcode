@@ -147,10 +147,7 @@ async fn first_turn_publishes_a_session_renamed_event() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     agent.refresh_session_title(Some(&tx)).await;
 
-    assert_eq!(
-        agent.session.title.as_deref(),
-        Some("Fix flaky session titles")
-    );
+    assert_eq!(agent.session.title(), Some("Fix flaky session titles"));
     assert_eq!(*calls.lock().unwrap(), 1);
     let event = rx.try_recv().expect("title change is announced");
     match event {
@@ -159,7 +156,7 @@ async fn first_turn_publishes_a_session_renamed_event() {
             title,
             display_title,
         } => {
-            assert_eq!(session_id, agent.session.id);
+            assert_eq!(session_id, agent.session.id());
             assert_eq!(title.as_deref(), Some("Fix flaky session titles"));
             assert_eq!(display_title, "Fix flaky session titles");
         }
@@ -180,11 +177,11 @@ async fn a_manual_rename_blocks_generation_and_the_event() {
     agent.refresh_session_title(Some(&tx)).await;
 
     assert_eq!(
-        agent.session.title.as_deref(),
+        agent.session.title(),
         Some("fix the titles"),
         "the heuristic fallback stays until a model title exists"
     );
-    assert_eq!(agent.session.custom_title.as_deref(), Some("My session"));
+    assert_eq!(agent.session.custom_title(), Some("My session"));
     assert_eq!(*calls.lock().unwrap(), 0);
     assert!(rx.try_recv().is_err());
 }
@@ -196,13 +193,13 @@ async fn debug_sessions_never_spend_a_title_call() {
     agent
         .append_user_context_message("fix the titles", Vec::new(), None)
         .expect("append user message");
-    agent.session.is_debug = true;
+    agent.session.set_debug(true);
 
     agent.refresh_session_title(None).await;
 
     assert_eq!(*calls.lock().unwrap(), 0);
     // The heuristic first-prompt title remains; no model call happened.
-    assert_eq!(agent.session.title.as_deref(), Some("fix the titles"));
+    assert_eq!(agent.session.title(), Some("fix the titles"));
 }
 
 #[tokio::test]
@@ -226,7 +223,7 @@ async fn third_turn_refines_its_own_title_once() {
         .expect("first user message");
     let (tx, mut rx) = mpsc::unbounded_channel();
     agent.refresh_session_title(Some(&tx)).await;
-    assert_eq!(agent.session.title.as_deref(), Some("Fix old titles"));
+    assert_eq!(agent.session.title(), Some("Fix old titles"));
     assert!(rx.try_recv().is_ok());
 
     agent
@@ -243,10 +240,7 @@ async fn third_turn_refines_its_own_title_once() {
         .append_user_context_message("and the third turn settles the topic", Vec::new(), None)
         .expect("third user message");
     agent.refresh_session_title(Some(&tx)).await;
-    assert_eq!(
-        agent.session.title.as_deref(),
-        Some("Fix flaky session titles")
-    );
+    assert_eq!(agent.session.title(), Some("Fix flaky session titles"));
     assert_eq!(*calls.lock().unwrap(), 2);
     match rx.try_recv() {
         Ok(ServerEvent::SessionRenamed { title, .. }) => {

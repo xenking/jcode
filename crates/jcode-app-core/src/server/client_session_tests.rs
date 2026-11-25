@@ -245,7 +245,7 @@ fn build_test_agent(
 ) -> Agent {
     let mut session =
         crate::session::Session::create_with_id("session_test_reload".to_string(), None, None);
-    session.model = Some("mock".to_string());
+    session.set_model(Some("mock".to_string()));
     session.replace_messages(messages);
     Agent::new_with_session(provider, registry, session, None)
 }
@@ -257,7 +257,7 @@ fn build_test_agent_with_id(
     messages: Vec<crate::session::StoredMessage>,
 ) -> Agent {
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("mock".to_string());
+    session.set_model(Some("mock".to_string()));
     session.replace_messages(messages);
     Agent::new_with_session(provider, registry, session, None)
 }

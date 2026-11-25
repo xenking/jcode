@@ -9,7 +9,8 @@ fn skill_invocation_matches_a_multi_word_skill_name() {
         "---\nname: My Custom Skill\ndescription: Commit staged changes\n---\nUse it.\n",
     )
     .expect("write skill");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
     app.input = "/My Custom Skill".to_string();
     app.cursor_pos = app.input.len();
 

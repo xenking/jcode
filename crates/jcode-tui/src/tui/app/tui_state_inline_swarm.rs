@@ -16,7 +16,7 @@ impl App {
         let self_id = if self.is_remote {
             self.remote_session_id.as_deref()
         } else {
-            Some(self.session.id.as_str())
+            Some(self.session.id())
         };
         match self_id {
             Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),

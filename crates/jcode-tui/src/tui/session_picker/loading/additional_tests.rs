@@ -232,7 +232,7 @@ fn cloud_session_discovery_keeps_missing_snapshots_and_ignores_corrupt_leases() 
     // An empty local migration stub must remain selectable as well.
     let session = Session::create_with_id("session_missing_1770000000000".into(), None, None);
     storage::write_json(
-        &crate::session::session_path(&session.id).unwrap(),
+        &crate::session::session_path(session.id()).unwrap(),
         &session,
     )
     .expect("save empty local stub");

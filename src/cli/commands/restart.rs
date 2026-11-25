@@ -232,10 +232,10 @@ async fn capture_connected_restart_snapshot()
             continue;
         }
         sessions.push(crate::restart_snapshot::RestartSnapshotSession {
-            session_id: session.id.clone(),
+            session_id: session.id().to_owned(),
             display_name: session.display_name().to_string(),
-            working_dir: session.working_dir.clone().or(row.working_dir),
-            is_selfdev: session.is_canary,
+            working_dir: session.working_dir().map(str::to_owned).or(row.working_dir),
+            is_selfdev: session.is_canary(),
         });
     }
 

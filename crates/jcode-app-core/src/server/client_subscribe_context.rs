@@ -50,7 +50,7 @@ pub(super) async fn resolve_target_subscribe_working_dir(
         super::super::subscribe_working_dir::live_session_working_dir(&live, target, members).await
     } else {
         match crate::session::Session::load_startup_stub(target) {
-            Ok(session) => session.working_dir,
+            Ok(session) => session.working_dir().map(str::to_owned),
             Err(error)
                 if working_dir.is_some()
                     && error

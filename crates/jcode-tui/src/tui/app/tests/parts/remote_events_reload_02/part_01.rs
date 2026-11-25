@@ -7,7 +7,7 @@ fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -54,7 +54,7 @@ fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
         assert!(app.queued_messages().is_empty());
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
                     lane_speed: None,
@@ -196,7 +196,7 @@ fn test_remote_interrupted_does_not_schedule_client_poke() {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,

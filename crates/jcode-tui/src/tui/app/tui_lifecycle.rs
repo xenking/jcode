@@ -235,19 +235,19 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
             crate::mcp::McpConfig::default(),
         )));
-        if session.model.is_none() {
-            session.model = Some(provider.model());
+        if session.model().is_none() {
+            session.set_model(Some(provider.model()));
         }
-        if session.provider_key.is_none() {
-            session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        if session.provider_key().is_none() {
+            session.set_provider_key(crate::session::derive_session_provider_key(provider.name()));
         }
         let display = config().display.clone();
         let features = config().features.clone();
         let autoreview_enabled = session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(config().autoreview.enabled);
         let autojudge_enabled = session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(config().autojudge.enabled);
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
@@ -260,11 +260,11 @@ impl App {
         if let Some(controller) = runtime_memory_log.as_mut() {
             controller.defer_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new("startup", "client_started")
-                    .with_session_id(session.id.clone())
+                    .with_session_id(session.id().to_owned())
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
+        let improve_mode = session.improve_mode().map(|mode| match mode {
             crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
             crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
@@ -275,7 +275,7 @@ impl App {
         crate::telemetry::begin_session_with_parent(
             provider.name(),
             &provider.model(),
-            session.parent_id.clone(),
+            session.parent_id().map(str::to_owned),
             false,
         );
 
@@ -285,7 +285,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
-            active_skill: session.pinned_skill.clone(),
+            active_skill: session.pinned_skill().map(str::to_owned),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -754,16 +754,16 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.mark_active();
-        session.model = Some(provider.model());
-        session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        session.set_model(Some(provider.model()));
+        session.set_provider_key(crate::session::derive_session_provider_key(provider.name()));
         session.ensure_initial_session_context_message();
         let display = config().display.clone();
         let features = config().features.clone();
         let autoreview_enabled = session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(config().autoreview.enabled);
         let autojudge_enabled = session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(config().autojudge.enabled);
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
@@ -776,11 +776,11 @@ impl App {
         if let Some(controller) = runtime_memory_log.as_mut() {
             controller.defer_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new("startup", "client_started")
-                    .with_session_id(session.id.clone())
+                    .with_session_id(session.id().to_owned())
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
+        let improve_mode = session.improve_mode().map(|mode| match mode {
             crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
             crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
@@ -807,7 +807,7 @@ impl App {
         let (_, context_info) = crate::prompt::build_system_prompt_with_context(
             None,
             &available_skills,
-            session.is_canary,
+            session.is_canary(),
         );
         let t_prompt = t0.elapsed();
         crate::logging::info(&format!(
@@ -821,7 +821,7 @@ impl App {
         crate::telemetry::begin_session_with_parent(
             provider.name(),
             &provider.model(),
-            session.parent_id.clone(),
+            session.parent_id().map(str::to_owned),
             false,
         );
 
@@ -831,7 +831,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
-            active_skill: session.pinned_skill.clone(),
+            active_skill: session.pinned_skill().map(str::to_owned),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -1309,7 +1309,7 @@ impl App {
     /// Configure ambient mode: override system prompt and queue an initial message.
     pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
         self.ambient_system_prompt = Some(system_prompt);
-        crate::tool::ambient::register_ambient_session(self.session.id.clone());
+        crate::tool::ambient::register_ambient_session(self.session.id().to_owned());
         self.queued_messages.push(initial_message);
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
@@ -1474,11 +1474,8 @@ impl App {
         self.remote_session_id = Some(session_id.to_string());
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.
-        session.messages.shrink_to_fit();
-        session.env_snapshots.shrink_to_fit();
-        session.memory_injections.shrink_to_fit();
-        session.replay_events.shrink_to_fit();
-        self.active_skill = session.pinned_skill.clone();
+        session.shrink_transcript_buffers();
+        self.active_skill = session.pinned_skill().map(str::to_owned);
         self.session = session;
         // The full deserialized transcript (raw file + Session structs) was a
         // large transient; return the freed arena pages to the OS now instead
@@ -1486,13 +1483,13 @@ impl App {
         crate::process_memory::release_retained_heap("remote_startup_history_stripped");
         self.autoreview_enabled = self
             .session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(crate::config::config().autoreview.enabled);
         self.autojudge_enabled = self
             .session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(crate::config::config().autojudge.enabled);
-        if let Some(model) = self.session.model.clone() {
+        if let Some(model) = self.session.model().map(str::to_owned) {
             self.update_context_limit_for_model(&model, None);
         }
         self.follow_chat_bottom();

@@ -76,7 +76,7 @@ impl Agent {
         }
         let messages: Vec<_> = self
             .session
-            .messages
+            .messages()
             .iter()
             .map(|message| message.to_message())
             .collect();

@@ -132,7 +132,7 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 bail!("group member OAuth identity mismatch");
             }
         }
-        if let Some(lease) = storage::read_session_lease(&sess.id) {
+        if let Some(lease) = storage::read_session_lease(sess.id()) {
             if lease.epoch > member.manifest.epoch {
                 bail!("destination member has a newer migration epoch");
             }
@@ -168,8 +168,8 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 if member_mapped.root != repo.root {
                     bail!("group workspace mapping mismatch");
                 }
-                save_workspace_mapping(&sess.id, member.manifest.epoch, original, &member_mapped)?;
-                sess.working_dir = Some(member_mapped.working_dir);
+                save_workspace_mapping(sess.id(), member.manifest.epoch, original, &member_mapped)?;
+                sess.set_working_dir(Some(member_mapped.working_dir));
                 append_system_notice(
                     &mut sess,
                     &format!(
@@ -179,14 +179,14 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 );
             }
             if member.todos_sha256.is_none() {
-                let path = todo_file(&sess.id)?;
+                let path = todo_file(sess.id())?;
                 if path.exists() {
                     std::fs::remove_file(path)?;
                 }
             }
             install_session(&sess, &stage)?;
             storage::write_json_secret(
-                &transferred_accounts_path(&sess.id)?,
+                &transferred_accounts_path(sess.id())?,
                 &member.manifest.auth_accounts,
             )?;
         }

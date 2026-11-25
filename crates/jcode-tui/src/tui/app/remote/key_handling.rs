@@ -416,7 +416,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 crate::bus::UiActivity::catalog(
                     app.remote_session_id
                         .clone()
-                        .or_else(|| Some(app.session.id.clone())),
+                        .or_else(|| Some(app.session.id().to_owned())),
                     "Model List Refresh Started\n\nAsked the remote server to refresh the provider model catalog. Jcode will show the discovered model and route changes when the server responds.",
                     Some("Refreshing model list..."),
                 ),
@@ -475,7 +475,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     .remote_provider_model
                     .clone()
                     .unwrap_or_else(|| app.provider.model());
-                let summary = match app.session.subagent_model.as_deref() {
+                let summary = match app.session.subagent_model() {
                     Some(model) => format!("fixed {}", model),
                     None => format!("inherit current ({})", current_model),
                 };
@@ -491,7 +491,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     .clone()
                     .unwrap_or_else(|| app.provider.model());
                 remote.set_subagent_model(None).await?;
-                app.session.subagent_model = None;
+                app.session.set_subagent_model(None);
                 app.push_display_message(DisplayMessage::system(format!(
                     "Subagent model reset to inherit the current model ({}).",
                     current_model
@@ -500,7 +500,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             remote.set_subagent_model(Some(rest.to_string())).await?;
-            app.session.subagent_model = Some(rest.to_string());
+            app.session.set_subagent_model(Some(rest.to_string()));
             app.push_display_message(DisplayMessage::system(format!(
                 "Subagent model pinned to {} for this session.",
                 rest
@@ -1212,7 +1212,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
             }
             let name = app.session.display_name().to_string();
-            let msg = if let Some(ref lbl) = app.session.save_label {
+            let msg = if let Some(ref lbl) = app.session.save_label() {
                 format!(
                     "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
                     name, lbl,
@@ -1554,7 +1554,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let incomplete: Vec<_> = todos
                         .iter()
@@ -1565,7 +1565,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_improve());
@@ -1578,8 +1578,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.set_improve_mode(Some(
+                            app_mod::commands::session_improve_mode_for(mode),
+                        ));
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_improve_resume_prompt(mode, &incomplete);
@@ -1610,7 +1611,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let has_incomplete = todos
                         .iter()
@@ -1620,7 +1621,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_improve());
@@ -1634,7 +1635,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode = None;
+                        session.set_improve_mode(None);
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::improve_stop_prompt();
@@ -1665,8 +1666,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::ImproveCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::improve_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.set_improve_mode(Some(
+                            app_mod::commands::session_improve_mode_for(mode),
+                        ));
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =
@@ -1710,7 +1712,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let incomplete: Vec<_> = todos
                         .iter()
@@ -1721,7 +1723,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_refactor());
@@ -1734,8 +1736,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.set_improve_mode(Some(
+                            app_mod::commands::session_improve_mode_for(mode),
+                        ));
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_refactor_resume_prompt(mode, &incomplete);
@@ -1766,7 +1769,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let has_incomplete = todos
                         .iter()
@@ -1776,7 +1779,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_refactor());
@@ -1790,7 +1793,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode = None;
+                        session.set_improve_mode(None);
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::refactor_stop_prompt();
@@ -1821,8 +1824,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::RefactorCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::refactor_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.set_improve_mode(Some(
+                            app_mod::commands::session_improve_mode_for(mode),
+                        ));
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =

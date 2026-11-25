@@ -752,7 +752,7 @@ impl KvCacheMonitor {
     pub fn restore_checkpoint(&mut self, session: &crate::session::Session) {
         use crate::session::{CACHE_COLD_DIVIDER_METHOD, StoredReplayEventKind};
 
-        self.baseline = baseline_path(&session.id).ok().and_then(|path| {
+        self.baseline = baseline_path(session.id()).ok().and_then(|path| {
             CHECKPOINTS.inspect(&path, |pending| {
                 pending.or_else(|| {
                     let file = std::fs::File::open(&path).ok()?;
@@ -765,7 +765,7 @@ impl KvCacheMonitor {
         // The replay record is persisted with the rewritten transcript, even
         // when no request has since replaced the old cache checkpoint.
         self.checkpoint_predates_compaction = self.baseline.as_ref().is_some_and(|baseline| {
-            session.replay_events.iter().rev().any(|event| {
+            session.replay_events().iter().rev().any(|event| {
                 matches!(&event.kind, StoredReplayEventKind::Compaction { method, .. }
                     if method.as_deref() != Some(CACHE_COLD_DIVIDER_METHOD))
                     && SystemTime::from(event.timestamp) > baseline.completed_at

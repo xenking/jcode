@@ -46,7 +46,7 @@ fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
     }
     let _guard = crate::storage::lock_test_env();
     let mut session = crate::session::Session::create(None, None);
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let mut manager = CompactionManager::new();
     manager.restore_persisted_state(
         &crate::session::StoredCompactionState {
@@ -147,7 +147,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
         original_turn_count: 0,
         compacted_count: 0,
     };
-    session.compaction = Some(Arc::new(checkpoint.clone()));
+    session.set_compaction(Some(Arc::new(checkpoint.clone())));
     manager.restore_persisted_state(&checkpoint, 0);
     let mut todo = crate::todo::TodoItem {
         id: "audit".into(),
@@ -155,7 +155,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
         content: "Audit the ledger".into(),
         ..Default::default()
     };
-    crate::todo::save_todos(&session.id, std::slice::from_ref(&todo)).unwrap();
+    crate::todo::save_todos(session.id(), std::slice::from_ref(&todo)).unwrap();
     let request = |manager: &mut CompactionManager,
                    session: &mut crate::session::Session,
                    nudge: bool| {
@@ -214,11 +214,11 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     );
 
     session.save().unwrap();
-    let mut session = crate::session::Session::load(&session.id).unwrap();
+    let mut session = crate::session::Session::load(session.id()).unwrap();
     let mut manager = CompactionManager::new();
     manager.restore_persisted_state(
-        session.compaction.as_deref().unwrap(),
-        session.messages.len(),
+        session.compaction_state().unwrap(),
+        session.messages().len(),
     );
     let with_nudge = request(&mut manager, &mut session, true);
     assert_eq!(&with_nudge[..second.len()], second);
@@ -226,7 +226,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     assert_eq!(request(&mut manager, &mut session, false), second);
 
     todo.status = "completed".into();
-    crate::todo::save_todos(&session.id, &[todo]).unwrap();
+    crate::todo::save_todos(session.id(), &[todo]).unwrap();
     let completed = request(&mut manager, &mut session, false);
     assert!(completed.starts_with(&second));
     assert_eq!(completed.len(), second.len() + 1);
@@ -237,7 +237,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
             .contains("[x] Audit the ledger")
     );
 
-    crate::todo::save_todos(&session.id, &[]).unwrap();
+    crate::todo::save_todos(session.id(), &[]).unwrap();
     let cleared = request(&mut manager, &mut session, false);
     assert!(cleared.starts_with(&completed));
     assert_eq!(cleared.len(), completed.len() + 1);
@@ -250,7 +250,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     assert_eq!(request(&mut manager, &mut session, false), cleared);
 
     crate::todo::save_todos(
-        &session.id,
+        session.id(),
         &[crate::todo::TodoItem {
             id: "followup".into(),
             status: "pending".into(),
@@ -264,7 +264,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
         plan_context: None,
         ..checkpoint
     };
-    manager.restore_persisted_state(&new_checkpoint, session.messages.len());
+    manager.restore_persisted_state(&new_checkpoint, session.messages().len());
     let after_compaction = request(&mut manager, &mut session, false);
     assert!(
         after_compaction.last().unwrap()["content"][0]["text"]

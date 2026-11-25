@@ -631,7 +631,8 @@ fn test_alt_g_opens_and_closes_commit_log_overlay() {
             &format!("commit {n}"),
         ]);
     }
-    app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(repo.path().to_string_lossy().to_string()));
     let diff_mode_before = app.diff_mode;
 
     assert!(super::input::handle_navigation_shortcuts(
@@ -1019,7 +1020,8 @@ fn test_top_level_command_suggestions_include_project_local_skills() {
         "---\nname: optimization\ndescription: Project-local test skill\n---\n# Optimization\n",
     )
     .expect("write SKILL.md");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
     app.refresh_skills_snapshot();
 
     let suggestions = app.get_suggestions_for("/optim");
@@ -1159,7 +1161,7 @@ fn test_context_command_reports_session_context_snapshot() {
             }],
         };
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -1276,7 +1278,8 @@ fn test_goals_show_suggestions_include_goal_ids() {
     .expect("create goal");
 
     let mut app = create_test_app();
-    app.session.working_dir = Some(project.display().to_string());
+    app.session
+        .set_working_dir(Some(project.display().to_string()));
 
     let suggestions = app.get_suggestions_for("/goals show ");
     assert!(

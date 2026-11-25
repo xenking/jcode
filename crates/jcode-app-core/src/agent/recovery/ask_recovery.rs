@@ -66,11 +66,11 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
 
 impl Agent {
     pub(crate) fn interrupted_ask_tool_id(session: &crate::session::Session) -> Option<String> {
-        interrupted_ask(&session.messages).map(|ask| ask.id)
+        interrupted_ask(session.messages()).map(|ask| ask.id)
     }
 
     pub(super) fn has_interrupted_ask(&self) -> bool {
-        interrupted_ask(&self.session.messages).is_some()
+        interrupted_ask(self.session.messages()).is_some()
     }
 
     /// Replay an ask interrupted by reload before making another provider call.
@@ -81,7 +81,7 @@ impl Agent {
         event_tx: &crate::stream_batching::BatchingSender,
         turn: &crate::turn_cancel_registry::ActiveTurnGuard,
     ) -> Result<bool> {
-        while let Some(ask) = interrupted_ask(&self.session.messages) {
+        while let Some(ask) = interrupted_ask(self.session.messages()) {
             let result_index = match ask.result_index {
                 Some(index) => index,
                 None => {
@@ -93,12 +93,12 @@ impl Agent {
                         is_error: Some(true),
                     }]);
                     self.persist_session_now()?;
-                    self.session.messages.len() - 1
+                    self.session.messages().len() - 1
                 }
             };
             let ctx = ToolContext {
-                session_id: self.session.id.clone(),
-                message_id: self.session.id.clone(),
+                session_id: self.session.id().to_owned(),
+                message_id: self.session.id().to_owned(),
                 tool_call_id: ask.id.clone(),
                 working_dir: self.working_dir().map(PathBuf::from),
                 stdin_request_tx: self.stdin_request_tx.clone(),
@@ -146,7 +146,7 @@ impl Agent {
             {
                 *error = is_error.then_some(true);
             }
-            let mut messages = self.session.messages.clone();
+            let mut messages = self.session.messages().to_vec();
             let content = &mut messages[result_index].content;
             let index = content
                 .iter()
@@ -177,7 +177,7 @@ impl Agent {
             {
                 return Ok(false);
             }
-            let stored = &self.session.messages[result_index];
+            let stored = &self.session.messages()[result_index];
             label_session_images(
                 &self.session,
                 &stored.id,
@@ -213,7 +213,7 @@ impl Agent {
             if !side_pane_images.is_empty()
                 && event_tx
                     .send(ServerEvent::SidePaneImages {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         images: side_pane_images,
                     })
                     .is_err()
@@ -308,7 +308,7 @@ mod tests {
                 cache_control: None,
             }],
         );
-        let bytes = serde_json::to_vec(&session.messages).unwrap();
+        let bytes = serde_json::to_vec(session.messages()).unwrap();
         let restored: Vec<StoredMessage> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             interrupted_ask(&restored),
@@ -332,7 +332,7 @@ mod tests {
                 thought_signature: None,
             }],
         );
-        let ask = interrupted_ask(&session.messages)
+        let ask = interrupted_ask(session.messages())
             .expect("unanswered ask must never become a model continuation");
         assert_eq!(ask.id, "original-ask");
         assert_eq!(ask.result_index, None);
@@ -369,7 +369,7 @@ mod tests {
                 }],
             );
             assert!(
-                interrupted_ask(&session.messages).is_none(),
+                interrupted_ask(session.messages()).is_none(),
                 "new user input supersedes the old unanswered ask"
             );
         }
@@ -403,7 +403,7 @@ mod tests {
                 is_error: None,
             }],
         );
-        assert!(interrupted_ask(&session.messages).is_none());
+        assert!(interrupted_ask(session.messages()).is_none());
     }
 
     #[tokio::test]
@@ -459,8 +459,8 @@ mod tests {
         );
         drop(agent);
         let reloaded = Session::load(session_id).unwrap();
-        assert!(interrupted_ask(&reloaded.messages).is_none());
-        assert!(reloaded.messages.iter().flat_map(|message| message.content.iter()).any(|block| matches!(block,
+        assert!(interrupted_ask(reloaded.messages()).is_none());
+        assert!(reloaded.messages().iter().flat_map(|message| message.content.iter()).any(|block| matches!(block,
             ContentBlock::ToolResult { tool_use_id, content, is_error } if tool_use_id == "ask-call" && content.contains("B") && content.contains("reason") && !is_error.unwrap_or(false)
         )));
     }
@@ -521,7 +521,7 @@ mod tests {
             result.is_err(),
             "test provider intentionally fails after the answer"
         );
-        assert!(interrupted_ask(&Session::load(session_id).unwrap().messages).is_none());
+        assert!(interrupted_ask(&Session::load(session_id).unwrap().messages()).is_none());
     }
 
     #[tokio::test]
@@ -644,7 +644,7 @@ mod tests {
             assert!(!result.unwrap());
             let restored = Session::load(session_id).unwrap();
             assert_eq!(
-                interrupted_ask(&restored.messages).is_some(),
+                interrupted_ask(restored.messages()).is_some(),
                 remains_pending
             );
             if remains_pending {
@@ -703,7 +703,7 @@ mod tests {
         };
         let (result, ()) = tokio::join!(agent.resume_interrupted_ask(&events, &guard), answer);
         assert!(result.unwrap());
-        assert!(interrupted_ask(&Session::load(session_id).unwrap().messages).is_none());
+        assert!(interrupted_ask(&Session::load(session_id).unwrap().messages()).is_none());
     }
 }
 

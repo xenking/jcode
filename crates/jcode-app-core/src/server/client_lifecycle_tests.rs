@@ -333,9 +333,9 @@ fn queued_skill_validation_does_not_fallback_after_session_read_error() {
     let _lock = crate::storage::lock_test_env();
     let _home = IsolatedReloadRecoveryEnv::new();
     let session = crate::session::Session::create(None, None);
-    let path = crate::session::session_path(&session.id).unwrap();
+    let path = crate::session::session_path(session.id()).unwrap();
     std::fs::create_dir_all(path).unwrap();
-    assert!(queued_skill_working_dir(&session.id, "/wrong-project").is_err());
+    assert!(queued_skill_working_dir(session.id(), "/wrong-project").is_err());
 }
 
 struct IsolatedReloadRecoveryEnv {
@@ -489,11 +489,11 @@ async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
     .await
     .unwrap();
     let persisted = crate::session::Session::load(&session_id).unwrap();
-    let reminder = persisted.messages.iter().position(|message| {
+    let reminder = persisted.messages().iter().position(|message| {
         message.display_role == Some(crate::session::StoredDisplayRole::System)
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Be concise.")))
     }).expect("skill reminder in journal");
-    assert!(persisted.messages.iter().skip(reminder + 1).any(|message| {
+    assert!(persisted.messages().iter().skip(reminder + 1).any(|message| {
         matches!(message.role, crate::message::Role::User) && message.display_role.is_none()
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "fix this please"))
     }));
@@ -721,7 +721,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.model = Some("never-ending-stream".to_string());
+        session.set_model(Some("never-ending-stream".to_string()));
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -1155,7 +1155,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id("session_guard".to_string(), None, None);
-        session.model = Some("panic-on-fork".to_string());
+        session.set_model(Some("panic-on-fork".to_string()));
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -1243,7 +1243,7 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
     let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider(Arc::clone(&resume)));
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("fanout-stream".to_string());
+    session.set_model(Some("fanout-stream".to_string()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1565,7 +1565,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.model = Some("complete-immediately".into());
+    session.set_model(Some("complete-immediately".into()));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1745,7 +1745,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let persisted = crate::session::Session::load(session_id).unwrap();
     for expected in ["first turn", "acceptance back on laptop"] {
         assert!(
-            persisted.messages.iter().any(|message| {
+            persisted.messages().iter().any(|message| {
                 message.content.iter().any(
                     |block| matches!(block, ContentBlock::Text { text, .. } if text == expected),
                 )
@@ -1894,7 +1894,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.model = Some("complete-immediately".to_string());
+        session.set_model(Some("complete-immediately".to_string()));
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -2124,7 +2124,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
         ] {
             let mut session =
                 crate::session::Session::create_with_id(session_id.to_string(), None, None);
-            session.model = Some("panic-on-fork".to_string());
+            session.set_model(Some("panic-on-fork".to_string()));
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 Arc::clone(&provider),
                 registry.clone(),

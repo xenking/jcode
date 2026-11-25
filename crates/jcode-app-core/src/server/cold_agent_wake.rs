@@ -123,39 +123,41 @@ pub(super) async fn assess(
     let target = recipient.to_owned();
     tokio::task::spawn_blocking(move || {
         let stored = crate::session::Session::load(&target).ok();
-        let model = roster_model.or_else(|| stored.as_ref()?.model.clone())?;
+        let model = roster_model.or_else(|| stored.as_ref()?.model().map(str::to_owned))?;
         let limit = effective_limit.or_else(|| {
             crate::provider::models::context_limit_for_model(&model).map(|limit| limit as u64)
         })?;
         let cap = stored
             .as_ref()
-            .and_then(|session| session.context_cap)
+            .and_then(|session| session.context_cap())
             .map(|cap| cap as u64);
         let limit = cap.map_or(limit, |cap| cap.min(limit));
-        let provider = stored.as_ref().and_then(|session| {
-            session
-                .route_api_method
-                .as_deref()
-                .or(session.provider_key.as_deref())
-        });
+        let provider = stored
+            .as_ref()
+            .and_then(|session| session.route_api_method().or(session.provider_key()));
         let expires_at_ms = stored.as_ref().and_then(|session| {
             let ttl = crate::provider::cache_ttl_for_provider_model(provider?, Some(&model))?;
             let ttl = chrono::TimeDelta::try_seconds(ttl.try_into().ok()?)?;
             session
-                .last_provider_request_at?
+                .last_provider_request_at()?
                 .checked_add_signed(ttl)
                 .map(|time| time.timestamp_millis())
         });
         let tokens = use_sample.or_else(|| {
-            stored.as_ref()?.messages.iter().rev().find_map(|message| {
-                let usage = message.token_usage.as_ref()?;
-                Some(
-                    usage
-                        .prompt_tokens
-                        .unwrap_or(usage.input_tokens)
-                        .saturating_add(usage.output_tokens),
-                )
-            })
+            stored
+                .as_ref()?
+                .messages()
+                .iter()
+                .rev()
+                .find_map(|message| {
+                    let usage = message.token_usage.as_ref()?;
+                    Some(
+                        usage
+                            .prompt_tokens
+                            .unwrap_or(usage.input_tokens)
+                            .saturating_add(usage.output_tokens),
+                    )
+                })
         })?;
         Risk::assess(
             &target,

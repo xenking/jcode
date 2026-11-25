@@ -212,9 +212,8 @@ impl CloudAccount {
 
 /// Never infer OAuth from a bare provider name: it may actually use an API key.
 fn oauth_selection(sess: &session::Session) -> Result<Option<(TransferProvider, Option<&str>)>> {
-    let route = sess.route_api_method.as_deref().or_else(|| {
-        sess.model
-            .as_deref()
+    let route = sess.route_api_method().or_else(|| {
+        sess.model()
             .and_then(|model| model.split_once(':').map(|(route, _)| route))
     });
     let Some(route) = route else { return Ok(None) };
@@ -681,16 +680,16 @@ pub(crate) fn run_move(
             });
             if let Some(account) = &auth_account {
                 // Pin an implicit OAuth route to the exact account being transferred.
-                sess.route_api_method = Some(account.route());
+                sess.set_route_api_method(Some(account.route()));
             }
             let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
                 .map(|lease| lease.epoch)
                 .unwrap_or(0)
-                .max(sess.migration_epoch)
+                .max(sess.migration_epoch())
                 + 1;
             let working_dir = sess
-                .working_dir
+                .working_dir()
                 .clone()
                 .map(PathBuf::from)
                 .or_else(|| std::env::current_dir().ok())
@@ -723,7 +722,7 @@ pub(crate) fn run_move(
 
             // The shipped transcript: current conversation plus a hidden notice that
             // tells the agent where it now runs and what did not come along.
-            sess.migration_epoch = epoch;
+            sess.set_migration_epoch(epoch);
             let dangling = dangling_tool_use_ids(&sess);
             append_arrival(&mut sess, &dangling, &host, &arrival_notice(&manifest));
             let session_json = serde_json::to_vec(&sess)?;
@@ -901,11 +900,11 @@ pub(crate) fn run_move(
     if verify.session_id != session_id || verify.epoch != epoch {
         bail!("cloud host staged the wrong session/epoch: {verify:?}");
     }
-    if verify.messages != sess.messages.len() {
+    if verify.messages != sess.messages().len() {
         bail!(
             "cloud transcript has {} messages, expected {}",
             verify.messages,
-            sess.messages.len()
+            sess.messages().len()
         );
     }
     if let Some(repo) = &repo
@@ -1073,7 +1072,8 @@ pub(crate) fn run_return(
     };
     let local_working_dir = session::Session::load(&session_id)
         .context("local session is missing; cannot safely restore its original working directory")?
-        .working_dir;
+        .working_dir()
+        .map(str::to_owned);
     let epoch = lease.epoch + 1;
 
     // ---- export (cloud stops owning at `epoch`) --------------------------
@@ -1193,8 +1193,8 @@ pub(crate) fn run_return(
     // ---- conversation: install the cloud transcript ----------------------
     step("session", "installing the cloud transcript locally");
     let mut sess: session::Session = read_json(&stage.join("session.json"))?;
-    sess.migration_epoch = epoch;
-    sess.working_dir = local_working_dir;
+    sess.set_migration_epoch(epoch);
+    sess.set_working_dir(local_working_dir);
     let merge_note = match &merge {
         MergeOutcome::Conflicts { files, .. } => format!(
             " Git merge of the cloud work into the local checkout left conflicts in: {}. Resolve them (the cloud side is `{SNAPSHOT_REF_PREFIX}/{session_id}/cloud`) before continuing.",
@@ -1221,7 +1221,7 @@ pub(crate) fn run_return(
         session_id: session_id.clone(),
         host,
         epoch,
-        messages: sess.messages.len(),
+        messages: sess.messages().len(),
         merge,
         members: Vec::new(),
     };
@@ -1410,7 +1410,7 @@ pub(crate) fn run_receive() -> Result<()> {
     let report = ReceiveReport {
         session_id: manifest.session_id,
         epoch: manifest.epoch,
-        messages: sess.messages.len(),
+        messages: sess.messages().len(),
         snapshot,
         repo_root: mapped.map(|r| r.root),
     };
@@ -1449,7 +1449,7 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         let repo: RepoManifest = read_json(&dir.join("mapped-repo.json"))?;
         _workspace_lock = Some(lock_portable_repo(&repo)?);
         validate_staged_workspace(&repo, &[session_id.to_owned()])?;
-        sess.working_dir = Some(repo.working_dir.clone());
+        sess.set_working_dir(Some(repo.working_dir.clone()));
         save_workspace_mapping(
             session_id,
             epoch,
@@ -1475,7 +1475,7 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     } else {
         manifest.repo.clone()
     };
-    if sess.migration_epoch != epoch {
+    if sess.migration_epoch() != epoch {
         bail!("staged transcript epoch mismatch");
     }
     if let Some(account) = &manifest.auth_account {
@@ -1570,7 +1570,7 @@ fn export_return_archive(
             .tempdir()?;
         let stage = staging.path();
         let working_dir = sess
-            .working_dir
+            .working_dir()
             .clone()
             .map(PathBuf::from)
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
@@ -2785,7 +2785,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
-            sess.migration_epoch = epoch;
+            sess.set_migration_epoch(epoch);
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
             // Cancellation is serialized with export. Discard the old snapshot
@@ -2847,7 +2847,7 @@ fn resolve_session_id(session_ref: Option<&str>) -> Result<String> {
 }
 
 fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
-    let path = session::session_path(&sess.id)?;
+    let path = session::session_path(sess.id())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -2858,7 +2858,7 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     storage::write_json(&path, sess)?;
     let todos = stage.join("todos.json");
     if todos.is_file() {
-        let dest = todo_file(&sess.id)?;
+        let dest = todo_file(sess.id())?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2869,7 +2869,7 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     }
     let memory = stage.join("project_memory.json");
     if memory.is_file()
-        && let Some(dir) = sess.working_dir.as_deref()
+        && let Some(dir) = sess.working_dir()
     {
         let dest = crate::memory::project_memory_file(Path::new(dir))?;
         if !dest.exists() {

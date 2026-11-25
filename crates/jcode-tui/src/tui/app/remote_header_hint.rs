@@ -126,10 +126,10 @@ impl App {
         let session_provider = self
             .resume_session_id
             .as_ref()
-            .and_then(|_| self.session.provider_key.clone());
+            .and_then(|_| self.session.provider_key().map(str::to_owned));
         let configured_provider = session_provider
             .or_else(|| self.configured_remote_provider_hint())
-            .or_else(|| self.session.provider_key.clone());
+            .or_else(|| self.session.provider_key().map(str::to_owned));
         let qualified;
         let model = if jcode_provider_core::selection::explicit_model_provider_prefix(model.trim())
             .is_some()

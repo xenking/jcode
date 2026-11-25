@@ -25,13 +25,13 @@ pub(super) fn profile_tool_selection(base: &ToolSelection, profile: Option<&str>
 
 impl Agent {
     pub(crate) fn agent_profile(&self) -> Option<&str> {
-        self.session.agent_profile.as_deref()
+        self.session.agent_profile()
     }
 
     /// New root sessions (no parent, not a worker) take `agents.root_profile`.
     /// Workers get their profile from the spawn instead.
     pub(super) fn apply_root_profile_default(&mut self) {
-        if self.session.parent_id.is_some() || self.session.is_swarm_worker {
+        if self.session.parent_id().is_some() || self.session.is_swarm_worker() {
             return;
         }
         let Some(name) = crate::config::config().agents.root_profile.clone() else {
@@ -56,10 +56,10 @@ impl Agent {
             crate::agent_profile::resolve_profile(name, &crate::config::config().agents)
                 .map_err(anyhow::Error::msg)?;
         }
-        if self.session.agent_profile == profile {
+        if self.session.agent_profile() == profile.as_deref() {
             return Ok(());
         }
-        self.session.agent_profile = profile;
+        self.session.set_agent_profile(profile);
         self.refresh_profile_tool_policy();
         Ok(())
     }
@@ -73,7 +73,7 @@ impl Agent {
         self.allowed_tools = allowed;
         self.disabled_tools = disabled;
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
-            &self.session.id,
+            self.session.id(),
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
         );

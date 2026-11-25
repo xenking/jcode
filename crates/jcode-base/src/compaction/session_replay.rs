@@ -10,14 +10,14 @@ impl CompactionManager {
         supports_image_input: bool,
         accepts_native: bool,
     ) -> CompactionReplay {
-        let session_id = session.id.clone();
+        let session_id = session.id().to_owned();
         let (checkpoint_changed, warn_missing_native_summary, mut appended_plan_update) =
             self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
         if let Some(message) = &mut appended_plan_update {
             self.append_plan_update(session, message);
         }
         let retained =
-            replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
+            replay::retained_checkpoint_messages(&session.messages(), self.compacted_count);
         let projection = self.project_messages(
             session.provider_messages(),
             supports_image_input,
@@ -41,9 +41,9 @@ impl CompactionManager {
         accepts_native: bool,
     ) -> CompactionReplay {
         let (checkpoint_changed, warn_missing_native_summary, mut appended_plan_update) =
-            self.prepare_checkpoint(&session.id, all_messages, accepts_native);
-        let retained = if all_messages.len() == session.messages.len() {
-            replay::retained_checkpoint_messages(&session.messages, self.compacted_count)
+            self.prepare_checkpoint(session.id(), all_messages, accepts_native);
+        let retained = if all_messages.len() == session.messages().len() {
+            replay::retained_checkpoint_messages(&session.messages(), self.compacted_count)
         } else {
             Vec::new()
         };
@@ -69,7 +69,10 @@ impl CompactionManager {
             message.content.clone(),
             Some(crate::session::StoredDisplayRole::System),
         );
-        message.timestamp = session.messages.last().and_then(|stored| stored.timestamp);
+        message.timestamp = session
+            .messages()
+            .last()
+            .and_then(|stored| stored.timestamp);
         self.notify_message_added_with(message);
     }
 
@@ -83,7 +86,7 @@ impl CompactionManager {
         accepts_native: bool,
     ) -> CompactionProjection {
         let retained =
-            replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
+            replay::retained_checkpoint_messages(&session.messages(), self.compacted_count);
         self.project_messages(all_messages, supports_image_input, accepts_native, retained)
     }
 

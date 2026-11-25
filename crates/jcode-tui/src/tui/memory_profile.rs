@@ -59,7 +59,7 @@ pub fn build_transcript_memory_profile(
 
     serde_json::json!({
         "canonical_transcript": {
-            "message_count": session.messages.len(),
+            "message_count": session.messages().len(),
             "json_bytes": canonical_transcript_json_bytes,
         },
         "session_provider_cache": {

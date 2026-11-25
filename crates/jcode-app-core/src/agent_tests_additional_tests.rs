@@ -3,11 +3,12 @@ use super::*;
 #[tokio::test]
 async fn working_directory_moves_preserve_first_active_session_origin() {
     let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    agent.session.messages.clear();
-    agent.session.working_dir = Some("/daemon".into());
+    agent.session.messages_mut_for_tests().clear();
+    agent.session.set_working_dir(Some("/daemon".into()));
     agent.set_working_dir("/projects/start");
     assert_eq!(
-        agent.session.original_working_dir, None,
+        agent.session.original_working_dir(),
+        None,
         "initial subscription is not a move"
     );
     agent.session.add_message(
@@ -20,13 +21,13 @@ async fn working_directory_moves_preserve_first_active_session_origin() {
     agent.set_working_dir("/projects/second");
     agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
     assert_eq!(
-        agent.session.original_working_dir.as_deref(),
+        agent.session.original_working_dir(),
         Some("/projects/start")
     );
     assert_eq!(agent.working_dir(), Some("/projects/third"));
     agent.set_working_dir("/projects/start");
     assert_eq!(
-        agent.session.original_working_dir.as_deref(),
+        agent.session.original_working_dir(),
         Some("/projects/start")
     );
 }
@@ -50,18 +51,15 @@ async fn saved_account_observed_binding_is_persisted() {
     crate::config::Config::invalidate_cache();
     let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = None;
+    agent.session.set_route_api_method(None);
     agent.session.save_prepared().unwrap();
     agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@work")
-    );
-    let saved = crate::session::Session::load(&agent.session.id).unwrap();
-    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
-    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
+    assert_eq!(agent.session.route_api_method(), Some("openai-oauth@work"));
+    let saved = crate::session::Session::load(agent.session.id()).unwrap();
+    assert_eq!(saved.route_api_method(), Some("openai-oauth@work"));
+    assert_eq!(saved.provider_key(), Some("openai-oauth"));
     agent.sync_bound_account_route();
-    assert_eq!(agent.session.route_api_method, saved.route_api_method);
+    assert_eq!(agent.session.route_api_method(), saved.route_api_method());
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
     agent.record_failed_account_route("429 rate limit reached");
@@ -77,10 +75,12 @@ async fn saved_account_observed_binding_is_persisted() {
         .is_none()
     );
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
+    agent
+        .session
+        .set_route_api_method(Some("openai-oauth@personal".to_string()));
     agent.sync_bound_account_route();
     assert_eq!(
-        agent.session.route_api_method.as_deref(),
+        agent.session.route_api_method(),
         Some("openai-oauth@personal")
     );
     assert!(

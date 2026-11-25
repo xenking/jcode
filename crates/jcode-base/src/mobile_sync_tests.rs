@@ -523,7 +523,7 @@ fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
 #[test]
 fn wire_messages_keep_visible_text_and_skip_hidden() {
     let mut session = Session::create_with_id("s1".into(), None, None);
-    session.messages = vec![
+    session.replace_messages(vec![
         msg(
             Role::User,
             vec![ContentBlock::Text {
@@ -560,7 +560,7 @@ fn wire_messages_keep_visible_text_and_skip_hidden() {
                 is_error: None,
             }],
         ),
-    ];
+    ]);
     let wire = wire_messages(&session, 0);
     assert_eq!(
         wire.iter().map(|m| m.seq).collect::<Vec<_>>(),
@@ -590,7 +590,7 @@ fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
         input: serde_json::json!({"command":"ls"}),
         thought_signature: Some("private signature".into()),
     };
-    session.messages = vec![
+    session.replace_messages(vec![
         msg(Role::User, vec![text_block("go".into())]),
         msg(
             Role::Assistant,
@@ -623,7 +623,7 @@ fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
             ],
         ),
         msg(Role::Assistant, vec![text_block("**done**".into())]),
-    ];
+    ]);
     let actual = serde_json::to_value(wire_messages(&session, 0)).unwrap();
     // Same fixture as mobile's structured_sync_matches_cloud_history_tool_phases.
     let expected = serde_json::json!([
@@ -639,7 +639,7 @@ fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
     ]);
     assert_eq!(actual, expected);
     assert!(!actual.to_string().contains("private"));
-    session.messages[3].content = vec![ContentBlock::ToolResult {
+    session.messages_mut_for_tests()[3].content = vec![ContentBlock::ToolResult {
         tool_use_id: "a".into(),
         content: "failed".into(),
         is_error: Some(true),
@@ -663,7 +663,7 @@ fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
         thought_signature: None,
     };
     let mut session = Session::create_with_id("tool-bounds".into(), None, None);
-    session.messages = vec![msg(Role::Assistant, vec![call("a".into(), huge)])];
+    session.replace_messages(vec![msg(Role::Assistant, vec![call("a".into(), huge)])]);
     let wire = wire_messages(&session, 0);
     assert_eq!(wire[0].tool_calls[0].input, preview);
     for blocks in [
@@ -682,7 +682,7 @@ fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
             })
             .collect(),
     ] {
-        session.messages[0].content = blocks.into();
+        session.messages_mut_for_tests()[0].content = blocks.into();
         let wire = wire_messages(&session, 0);
         assert_eq!(
             wire[0].display_text, None,
@@ -691,7 +691,7 @@ fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
         assert!(wire[0].tool_calls.is_empty() && wire[0].tool_results.is_empty());
         assert!(!wire[0].text.is_empty());
     }
-    session.messages[0].content = vec![ContentBlock::ToolResult {
+    session.messages_mut_for_tests()[0].content = vec![ContentBlock::ToolResult {
         tool_use_id: "a".into(),
         content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
         is_error: Some(true),
@@ -735,7 +735,7 @@ async fn structured_wire_version_replays_unchanged_snapshots_once() {
         ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
     ]);
     let mut session = Session::create_with_id("schema-replay".into(), None, None);
-    session.messages = vec![msg(
+    session.replace_messages(vec![msg(
         Role::Assistant,
         vec![ContentBlock::ToolUse {
             id: "call-read".into(),
@@ -743,7 +743,7 @@ async fn structured_wire_version_replays_unchanged_snapshots_once() {
             input: serde_json::json!({"path":"README.md"}),
             thought_signature: None,
         }],
-    )];
+    )]);
     session.save().unwrap();
     DIRTY_SESSIONS.lock().unwrap().clear();
     let path = home.path().join("sessions/schema-replay.json");
@@ -763,10 +763,10 @@ async fn structured_wire_version_replays_unchanged_snapshots_once() {
     .unwrap();
     commit_progress(
         load_state().generation,
-        &BTreeMap::from([(session.id.clone(), progress)]),
+        &BTreeMap::from([(session.id().to_owned(), progress)]),
     )
     .unwrap();
-    assert_eq!(load_state().sessions[&session.id].revision, Some(revision));
+    assert_eq!(load_state().sessions[session.id()].revision, Some(revision));
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut bytes = Vec::new();
@@ -814,8 +814,8 @@ async fn structured_wire_version_replays_unchanged_snapshots_once() {
     assert_eq!(report.sessions_uploaded, 1);
     let listener = server.await.unwrap();
     let state = load_state();
-    assert_eq!(state.sessions[&session.id].wire_version, WIRE_VERSION);
-    assert_eq!(state.sessions[&session.id].revision, Some(revision));
+    assert_eq!(state.sessions[session.id()].wire_version, WIRE_VERSION);
+    assert_eq!(state.sessions[session.id()].revision, Some(revision));
     assert_eq!(session_revision(&path), revision);
     assert_eq!(sync_once(&client).await.unwrap(), SyncReport::default());
     assert!(
@@ -835,9 +835,9 @@ fn structured_input_changes_invalidate_synced_fingerprint_without_changing_legac
         input: serde_json::json!({"intent":"inspect file","limit":limit}),
         thought_signature: None,
     };
-    session.messages = vec![msg(Role::Assistant, vec![call(10)])];
+    session.replace_messages(vec![msg(Role::Assistant, vec![call(10)])]);
     let before = wire_messages(&session, 0);
-    session.messages[0].content = vec![call(20)].into();
+    session.messages_mut_for_tests()[0].content = vec![call(20)].into();
     let after = wire_messages(&session, 0);
     assert_eq!(before[0].text, after[0].text);
     assert_ne!(wire_fingerprint(&before, 1), wire_fingerprint(&after, 1));
@@ -855,7 +855,7 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         out
     }
     session
-        .messages
+        .messages()
         .iter()
         .enumerate()
         .skip(start)
@@ -953,12 +953,12 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
         ] {
             let value = unit.repeat(size);
             session
-                .messages
+                .messages_mut_for_tests()
                 .push(msg(Role::User, vec![text_block(value.clone())]));
             session
-                .messages
+                .messages_mut_for_tests()
                 .push(msg(Role::Assistant, vec![result_block(value.clone())]));
-            session.messages.push(msg(
+            session.messages_mut_for_tests().push(msg(
                 Role::Assistant,
                 vec![
                     text_block(value.clone()),
@@ -975,7 +975,7 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
             ));
         }
     }
-    session.messages.push(msg(
+    session.messages_mut_for_tests().push(msg(
         Role::User,
         vec![
             text_block(" \n\u{2003}<system-reminder>private".into()),
@@ -986,9 +986,9 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
         ],
     ));
     session
-        .messages
+        .messages_mut_for_tests()
         .push(msg(Role::User, vec![result_block(String::new())]));
-    session.messages.push(msg(
+    session.messages_mut_for_tests().push(msg(
         Role::User,
         vec![result_block(String::new()), result_block(String::new())],
     ));
@@ -1001,7 +1001,7 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
             serde_json::json!({"file_path": "file"}),
             serde_json::json!({"query": "query"}),
         ] {
-            session.messages.push(msg(
+            session.messages_mut_for_tests().push(msg(
                 Role::Assistant,
                 vec![ContentBlock::ToolUse {
                     id: "t".into(),
@@ -1012,10 +1012,18 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
             ));
         }
     }
-    session.messages[3].display_role = Some(crate::session::StoredDisplayRole::System);
-    session.messages[6].display_role = Some(crate::session::StoredDisplayRole::BackgroundTask);
-    session.messages[1].timestamp = Some(chrono::Utc::now());
-    for start in [0, 1, 3, session.messages.len(), session.messages.len() + 1] {
+    session.messages_mut_for_tests()[3].display_role =
+        Some(crate::session::StoredDisplayRole::System);
+    session.messages_mut_for_tests()[6].display_role =
+        Some(crate::session::StoredDisplayRole::BackgroundTask);
+    session.messages_mut_for_tests()[1].timestamp = Some(chrono::Utc::now());
+    for start in [
+        0,
+        1,
+        3,
+        session.messages().len(),
+        session.messages().len() + 1,
+    ] {
         let expected = old_wire_messages(&session, start);
         let mut actual = wire_messages(&session, start);
         // New metadata is additive. The independent oracle still verifies every
@@ -1026,7 +1034,7 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
             message.tool_results.clear();
         }
         assert_eq!(actual, expected, "start={start}");
-        for end in [0, 1, session.messages.len() / 2, session.messages.len()] {
+        for end in [0, 1, session.messages().len() / 2, session.messages().len()] {
             assert_eq!(
                 wire_fingerprint(&actual, end),
                 wire_fingerprint(&expected, end)
@@ -1099,7 +1107,9 @@ fn benchmark_bounded_wire_conversion() {
                 .map(|_| text_block(unit.repeat(size)))
                 .collect::<Vec<_>>();
             content.push(result_block("tool output".repeat(1_000)));
-            session.messages.push(msg(Role::Assistant, content));
+            session
+                .messages_mut_for_tests()
+                .push(msg(Role::Assistant, content));
         }
         assert_eq!(wire_messages(&session, 0), old_wire_messages(&session, 0));
         let iterations = if label == "typical" { 100 } else { 5 };
@@ -1151,7 +1161,7 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     let appended = incremental_messages(&session, &progress).0;
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].seq, 2);
-    session.messages[0].content = vec![ContentBlock::Text {
+    session.messages_mut_for_tests()[0].content = vec![ContentBlock::Text {
         text: "rewritten".into(),
         cache_control: None,
     }]

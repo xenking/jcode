@@ -40,6 +40,7 @@ use super::{App, DisplayMessage, LocalRewindUndoSnapshot, ProcessingStatus};
 use crate::bus::{Bus, BusEvent, GitStatusCompleted, ManualToolCompleted, ToolEvent, ToolStatus};
 use crate::id;
 use crate::message::{ContentBlock, Message, Role};
+use crate::session::Inherit;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -249,7 +250,7 @@ fn handle_transcript_command(app: &mut App, trimmed: &str) -> bool {
         }
     };
 
-    if !app.is_remote && app.session.id == session_id {
+    if !app.is_remote && app.session.id() == session_id {
         let _ = app.session.save();
     }
 
@@ -846,9 +847,9 @@ pub(super) fn active_session_id(app: &App) -> String {
     if app.is_remote {
         app.remote_session_id
             .clone()
-            .unwrap_or_else(|| app.session.id.clone())
+            .unwrap_or_else(|| app.session.id().to_owned())
     } else {
-        app.session.id.clone()
+        app.session.id().to_owned()
     }
 }
 
@@ -934,10 +935,7 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
-    app.session
-        .working_dir
-        .as_deref()
-        .map(std::path::PathBuf::from)
+    app.session.working_dir().map(std::path::PathBuf::from)
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
@@ -1260,7 +1258,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
             return true;
         }
     };
-    let path = match ensure_swarm_prompt_edit_path(app.session.working_dir.as_deref(), &jcode_dir) {
+    let path = match ensure_swarm_prompt_edit_path(app.session.working_dir(), &jcode_dir) {
         Ok(path) => path,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(

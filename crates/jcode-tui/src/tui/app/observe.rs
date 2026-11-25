@@ -20,7 +20,7 @@ impl App {
         {
             return set.clone();
         }
-        let working_dir = self.session.working_dir.as_deref();
+        let working_dir = self.session.working_dir();
         let set: std::collections::HashSet<std::path::PathBuf> = self
             .display_messages
             .iter()

@@ -4,7 +4,7 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
     if is_refresh_model_list_command(trimmed) {
         let session_id = app
             .active_client_session_id()
-            .unwrap_or(app.session.id.as_str())
+            .unwrap_or(app.session.id())
             .to_string();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
@@ -126,7 +126,7 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
             Ok(()) => {
                 let new_model = app.provider.model();
                 if new_model != prev_model {
-                    app.session.model = Some(new_model);
+                    app.session.set_model(Some(new_model));
                     app.invalidate_model_picker_cache();
                     crate::tui::ui::prepare::invalidate_header_prep_cache();
                 }

@@ -438,7 +438,7 @@ async fn ensure_client_swarm_member(
                     client_session_id
                 ));
                 crate::session::Session::load_startup_stub(client_session_id)
-                    .map(|session| (session.working_dir.map(PathBuf::from), session.short_name))
+                    .map(|session| (session.working_dir().map(PathBuf::from), session.short_name))
                     .unwrap_or((None, None))
             }
         };
@@ -896,7 +896,7 @@ pub(super) async fn handle_subscribe(
                             crate::logging::warn(&format!("Failed to load MCP session fallback for {client_session_id}: {error}"));
                             None
                         })
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
+                        .and_then(|session| session.working_dir().map(PathBuf::from))
                 }),
         };
         registry
@@ -1502,7 +1502,7 @@ pub(super) async fn handle_resume_session(
                         ));
                         None
                     })
-                    .map(|session| session.is_canary)
+                    .map(|session| session.is_canary())
             })
             .unwrap_or(false);
         if is_canary {

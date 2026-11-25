@@ -1903,16 +1903,16 @@ pub(super) async fn run_swarm_task(
         Some(session_id),
         Some(format!("{} (@{} swarm)", description, subagent_type)),
     );
-    session.agent_started = true;
-    let child_session_id = session.id.clone();
-    session.model = Some(coordinator_model);
+    session.set_agent_started(true);
+    let child_session_id = session.id().to_owned();
+    session.set_model(Some(coordinator_model));
     // Inherit the coordinator's exact auth identity so the forked worker keeps
     // the same provider/auth route (OAuth vs API, openai-compatible profile)
     // instead of silently falling back to the config default on persistence.
-    session.provider_key = provider_key;
-    session.route_api_method = route;
+    session.set_provider_key(provider_key);
+    session.set_route_api_method(route);
     if let Some(dir) = working_dir {
-        session.working_dir = Some(dir.display().to_string());
+        session.set_working_dir(Some(dir.display().to_string()));
     }
     session.save()?;
 

@@ -34,12 +34,13 @@ impl Agent {
         if let Err(err) = self.session.save() {
             logging::error(&format!(
                 "Failed to persist resumed session state for {}: {}",
-                self.session.id, err
+                self.session.id(),
+                err
             ));
         }
         logging::info(&format!(
             "[TIMING] restore_session deferred save: session={}, save={}ms",
-            self.session.id,
+            self.session.id(),
             start.elapsed().as_millis()
         ));
     }
@@ -55,18 +56,18 @@ impl Agent {
         let load_start = Instant::now();
         let mut session = Session::load_for_resume(session_id)?;
         if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
+            session.set_working_dir(Some(working_dir.to_string()));
             session.refresh_initial_session_context_message();
         }
         let load_ms = load_start.elapsed().as_millis();
         logging::info(&format!(
             "Restoring session '{}' with {} messages, provider_session_id: {:?}, status: {}",
             session_id,
-            session.messages.len(),
-            session.provider_session_id,
-            session.status.display()
+            session.messages().len(),
+            session.provider_session_id(),
+            session.status().display()
         ));
-        let previous_status = session.status.clone();
+        let previous_status = session.status().clone();
 
         let assign_start = Instant::now();
         // A failed load must leave the current Agent and its concurrency lease
@@ -74,12 +75,12 @@ impl Agent {
         self.mark_closed_for_replacement();
         let close_ms = assign_start.elapsed().as_millis();
         // Restore provider_session_id for Claude CLI session resume
-        self.provider_session_id = session.provider_session_id.clone();
+        self.provider_session_id = session.provider_session_id().map(str::to_owned);
         let replaced_session = std::mem::replace(&mut self.session, session);
         drop(replaced_session);
         let swap_ms = assign_start.elapsed().as_millis() - close_ms;
         let lap = Instant::now();
-        self.provider.set_session_id(&self.session.id);
+        self.provider.set_session_id(self.session.id());
         let provider_ms = lap.elapsed().as_millis();
         let lap = Instant::now();
         if !self.adopt_recorded_prompt_inputs() {
@@ -119,7 +120,7 @@ impl Agent {
         logging::info(&format!(
             "restore_session: loaded session {} with {} messages, calling seed_compaction",
             session_id,
-            self.session.messages.len()
+            self.session.messages().len()
         ));
         let compaction_start = Instant::now();
         self.seed_compaction_from_session();
@@ -143,7 +144,7 @@ impl Agent {
         logging::info(&format!(
             "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms, cpu={:.0}ms",
             session_id,
-            self.session.messages.len(),
+            self.session.messages().len(),
             restored_soft_interrupts,
             load_ms,
             assign_ms,
@@ -158,7 +159,7 @@ impl Agent {
         ));
         logging::info(&format!(
             "Session restored: {} messages in session",
-            self.session.messages.len()
+            self.session.messages().len()
         ));
         Ok(previous_status)
     }

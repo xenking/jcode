@@ -19,10 +19,10 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
                 cache_control: None,
             }],
         );
-        let parent_message_count = app.session.messages.len();
+        let parent_message_count = app.session.messages().len();
         let parent_ids: Vec<String> = app
             .session
-            .messages
+            .messages()
             .iter()
             .map(|message| message.id.clone())
             .collect();
@@ -59,22 +59,23 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
             "the question is the last message"
         );
         assert!(
-            request.messages.iter().any(|message| message.content.iter().any(
-                |block| matches!(block, ContentBlock::Text { text, .. }
-                    if text.contains("we decided to keep the socket"))
-            )),
+            request.messages.iter().any(|message| message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text, .. }
+                    if text.contains("we decided to keep the socket")))),
             "the forked context carries the conversation"
         );
 
         // The parent session is untouched: same rows, same ids, no save.
         assert_eq!(
-            app.session.messages.len(),
+            app.session.messages().len(),
             parent_message_count,
             "a side question appends nothing to the session"
         );
         assert_eq!(
             app.session
-                .messages
+                .messages()
                 .iter()
                 .map(|message| message.id.clone())
                 .collect::<Vec<_>>(),
@@ -86,12 +87,12 @@ fn btw_card_is_a_hidden_fork_of_the_conversation_with_no_tools() {
 #[test]
 fn btw_stream_paints_the_answer_in_the_card_not_the_transcript() {
     let mut app = create_test_app();
-    let transcript_before = app.session.messages.len() + app.display_messages().len();
+    let transcript_before = app.session.messages().len() + app.display_messages().len();
 
     assert!(app.start_btw("why is the socket hot?".to_string()));
-    assert!(!app.apply_btw_stream_event(StreamEvent::TextDelta(
-        "Because the listener ".to_string()
-    )));
+    assert!(
+        !app.apply_btw_stream_event(StreamEvent::TextDelta("Because the listener ".to_string()))
+    );
     assert!(!app.apply_btw_stream_event(StreamEvent::TextDelta(
         "keeps a copy per client.".to_string()
     )));
@@ -113,7 +114,7 @@ fn btw_stream_paints_the_answer_in_the_card_not_the_transcript() {
         view.lines
     );
     assert_eq!(
-        app.session.messages.len() + app.display_messages().len(),
+        app.session.messages().len() + app.display_messages().len(),
         transcript_before,
         "streaming an answer posts no transcript row"
     );
@@ -128,7 +129,10 @@ fn btw_stream_paints_the_answer_in_the_card_not_the_transcript() {
         .as_ref()
         .and_then(|view| view.status.clone())
         .expect("status line");
-    assert!(status.contains("ctrl+p"), "status offers the fork: {status}");
+    assert!(
+        status.contains("ctrl+p"),
+        "status offers the fork: {status}"
+    );
     assert!(status.contains("esc"), "status offers close: {status}");
 }
 
@@ -249,24 +253,27 @@ fn btw_hidden_child_session_carries_the_context_but_stays_off_the_list() {
             }],
         );
 
-        let child_id = app.create_btw_child_session().expect("hidden child session");
+        let child_id = app
+            .create_btw_child_session()
+            .expect("hidden child session");
         let child = Session::load(&child_id).expect("child session file");
 
         assert!(child.hidden, "a side-question fork is hidden");
         assert_eq!(
-            child.parent_id.as_deref(),
-            Some(app.session.id.as_str()),
+            child.parent_id(),
+            Some(app.session.id()),
             "the fork points at the conversation it came from"
         );
         assert!(
-            child.provider_session_id.is_none(),
+            child.provider_session_id().is_none(),
             "the parent's provider session must not be reused"
         );
         assert!(
-            child.messages.iter().any(|message| message.content.iter().any(
-                |block| matches!(block, ContentBlock::Text { text, .. }
-                    if text.contains("the listener keeps one socket"))
-            )),
+            child.messages().iter().any(|message| message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text, .. }
+                    if text.contains("the listener keeps one socket")))),
             "the hidden fork carries the conversation as context"
         );
         assert!(
@@ -290,7 +297,9 @@ fn btw_promote_unhides_the_hidden_fork_instead_of_asking_again() {
                 cache_control: None,
             }],
         );
-        let child_id = app.create_btw_child_session().expect("hidden child session");
+        let child_id = app
+            .create_btw_child_session()
+            .expect("hidden child session");
         app.start_btw("promote the hidden fork".to_string());
         app.btw = Some(crate::tui::app::btw::BtwCard {
             question: "promote the hidden fork".to_string(),
@@ -357,7 +366,9 @@ fn btw_history_reopens_without_a_turn_and_queues_follow_up_in_the_same_child() {
         assert_eq!(app.btw_card().unwrap().question, "one more?");
         assert!(app.pending_btw_turn);
         assert_eq!(
-            Session::list_side_questions(&app.session.id).unwrap().len(),
+            Session::list_side_questions(app.session.id())
+                .unwrap()
+                .len(),
             1
         );
     });
@@ -366,7 +377,7 @@ fn btw_history_reopens_without_a_turn_and_queues_follow_up_in_the_same_child() {
 #[test]
 fn btw_server_deltas_stream_into_the_card_and_end_the_turn() {
     let mut app = create_test_app();
-    let parent_messages_before = app.session.messages.len();
+    let parent_messages_before = app.session.messages().len();
     app.btw = Some(crate::tui::app::btw::BtwCard {
         question: "why?".to_string(),
         child: Some("child-session".to_string()),
@@ -375,12 +386,16 @@ fn btw_server_deltas_stream_into_the_card_and_end_the_turn() {
     });
     app.sync_btw_card();
 
-    assert!(!app.apply_btw_server_event(crate::protocol::ServerEvent::TextDelta {
-        text: "Because the daemon ".to_string()
-    }));
-    assert!(!app.apply_btw_server_event(crate::protocol::ServerEvent::TextDelta {
-        text: "forks the session.".to_string()
-    }));
+    assert!(
+        !app.apply_btw_server_event(crate::protocol::ServerEvent::TextDelta {
+            text: "Because the daemon ".to_string()
+        })
+    );
+    assert!(
+        !app.apply_btw_server_event(crate::protocol::ServerEvent::TextDelta {
+            text: "forks the session.".to_string()
+        })
+    );
     assert_eq!(
         app.btw_card().expect("card").answer,
         "Because the daemon forks the session."
@@ -397,7 +412,7 @@ fn btw_server_deltas_stream_into_the_card_and_end_the_turn() {
     assert!(app.apply_btw_server_event(crate::protocol::ServerEvent::Done { id: 7 }));
     assert!(!app.btw_card().expect("card").streaming);
     assert_eq!(
-        app.session.messages.len(),
+        app.session.messages().len(),
         parent_messages_before,
         "the parent stays untouched"
     );
@@ -408,7 +423,7 @@ fn btw_on_a_daemon_session_opens_a_card_with_a_hidden_fork() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
-        app.remote_session_id = Some(app.session.id.clone());
+        app.remote_session_id = Some(app.session.id().to_owned());
         app.session.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -464,23 +479,23 @@ fn btw_server_turn_events_are_unwrapped_into_the_card() {
         event: Box::new(event),
     };
 
-    assert!(!app.apply_btw_server_event(wrapped(
-        crate::protocol::ServerEvent::TextDelta {
+    assert!(
+        !app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::TextDelta {
             text: "It rides in a turn_event.".to_string(),
-        }
-    )));
+        }))
+    );
     assert_eq!(
         app.btw_card().expect("card").answer,
         "It rides in a turn_event.",
         "turn_event-scoped deltas must reach the card"
     );
 
-    assert!(!app.apply_btw_server_event(wrapped(
-        crate::protocol::ServerEvent::MessageEnd { stop_reason: None }
-    )));
-    assert!(app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::Done {
-        id: 9
-    })));
+    assert!(
+        !app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::MessageEnd {
+            stop_reason: None
+        }))
+    );
+    assert!(app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::Done { id: 9 })));
     assert!(!app.btw_card().expect("card").streaming);
 }
 
@@ -489,14 +504,16 @@ fn btw_remote_child_copies_the_conversation_the_user_is_looking_at() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
-        app.remote_session_id = Some(app.session.id.clone());
+        app.remote_session_id = Some(app.session.id().to_owned());
         app.push_display_message(DisplayMessage::user("Reply with exactly: ready"));
         app.push_display_message(DisplayMessage::assistant("ready"));
 
-        let child_id = app.create_btw_child_session().expect("hidden child session");
+        let child_id = app
+            .create_btw_child_session()
+            .expect("hidden child session");
         let child = Session::load(&child_id).expect("child session file");
         let transcript = child
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {

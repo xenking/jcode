@@ -1371,25 +1371,29 @@ fn test_transfer_command_queues_pause_while_processing_locally() {
 fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_context_only() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session.working_dir = Some("/tmp".to_string());
-        app.session.model = Some("test-model".to_string());
-        app.session.provider_key = Some("test-provider".to_string());
-        app.session.system_prompt = Some("custom transfer prompt".to_string());
-        app.session.messages.push(crate::session::StoredMessage {
-            codemode: None,
-            attachment_data: None,
-            id: "msg-1".to_string(),
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "full transcript should not be copied".to_string(),
-                cache_control: None,
-            }]
-            .into(),
-            display_role: None,
-            timestamp: None,
-            tool_duration_ms: None,
-            token_usage: None,
-        });
+        app.session.set_working_dir(Some("/tmp".to_string()));
+        app.session.set_model(Some("test-model".to_string()));
+        app.session
+            .set_provider_key(Some("test-provider".to_string()));
+        app.session
+            .set_system_prompt(Some("custom transfer prompt".to_string()));
+        app.session
+            .messages_mut_for_tests()
+            .push(crate::session::StoredMessage {
+                codemode: None,
+                attachment_data: None,
+                id: "msg-1".to_string(),
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "full transcript should not be copied".to_string(),
+                    cache_control: None,
+                }]
+                .into(),
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
         let transfer_compaction = crate::session::StoredCompactionState {
             summary_text: "Compacted handoff summary".to_string(),
             plan_context: None,
@@ -1400,7 +1404,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             compacted_count: 0,
         };
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -1426,7 +1430,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         .expect("save todos");
 
         let (child_id, _) = super::commands::create_transfer_session_from_parent(
-            &app.session.id,
+            app.session.id(),
             &app.session,
             Some(transfer_compaction.clone()),
         )
@@ -1434,30 +1438,30 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         let child = crate::session::Session::load(&child_id).expect("load child session");
         let child_todos = crate::todo::load_todos(&child_id).expect("load child todos");
 
-        assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
-        assert!(child.messages.is_empty());
-        assert_eq!(child.compaction.as_deref(), Some(&transfer_compaction));
-        assert_eq!(child.model.as_deref(), Some("test-model"));
-        assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
-        assert_eq!(child.system_prompt, app.session.system_prompt);
-        assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
+        assert_eq!(child.parent_id(), Some(app.session.id()));
+        assert!(child.messages().is_empty());
+        assert_eq!(child.compaction_state(), Some(&transfer_compaction));
+        assert_eq!(child.model(), Some("test-model"));
+        assert_eq!(child.provider_key(), Some("test-provider"));
+        assert_eq!(child.system_prompt(), app.session.system_prompt());
+        assert_eq!(child.working_dir(), Some("/tmp"));
         assert_eq!(child_todos.len(), 1);
         assert_eq!(child_todos[0].content, "Carry this forward");
         assert!(child_todos[0].waiting_on.is_empty());
         assert_eq!(
-            crate::todo::load_todos(&app.session.id).unwrap()[0].waiting_on,
+            crate::todo::load_todos(app.session.id()).unwrap()[0].waiting_on,
             ["parent-build-task"]
         );
         for prompt in [None, Some("")] {
-            app.session.system_prompt = prompt.map(str::to_string);
+            app.session.set_system_prompt(prompt.map(str::to_string));
             let (child_id, _) = super::commands::create_transfer_session_from_parent(
-                &app.session.id,
+                app.session.id(),
                 &app.session,
                 None,
             )
             .expect("create transfer session with optional prompt");
             let child = crate::session::Session::load(&child_id).expect("load child session");
-            assert_eq!(child.system_prompt, app.session.system_prompt);
+            assert_eq!(child.system_prompt(), app.session.system_prompt());
         }
     });
 }
@@ -1746,7 +1750,8 @@ fn test_retrieve_pending_message_with_alt_and_super_up() {
             app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
                 .unwrap();
         }
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.queued_count(), 1, "modifier {modifier:?}");
         assert!(app.input().is_empty(), "modifier {modifier:?}");
@@ -2088,7 +2093,7 @@ fn test_send_action_submits_bang_commands_while_processing() {
 fn test_handle_input_shell_completed_renders_markdown_blocks() {
     let mut app = create_test_app();
     let event = BusEvent::InputShellCompleted(InputShellCompleted {
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         result: crate::message::InputShellResult {
             command: "ls -la".to_string(),
             cwd: Some("/tmp/project".to_string()),
@@ -2256,20 +2261,16 @@ fn select_picker_entry(app: &mut App, matches: impl Fn(&crate::tui::PickerEntry)
         .inline_interactive_state
         .as_ref()
         .expect("picker should be open");
-    let index = picker
-        .entries
-        .iter()
-        .position(matches)
-        .unwrap_or_else(|| {
-            panic!(
-                "no row matched in {:?}",
-                picker
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.name.clone(), entry.effort.clone()))
-                    .collect::<Vec<_>>()
-            )
-        });
+    let index = picker.entries.iter().position(matches).unwrap_or_else(|| {
+        panic!(
+            "no row matched in {:?}",
+            picker
+                .entries
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.effort.clone()))
+                .collect::<Vec<_>>()
+        )
+    });
     let filtered = picker
         .filtered
         .iter()

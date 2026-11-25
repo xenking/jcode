@@ -88,7 +88,7 @@ impl App {
                     // local HTTP refresh with this machine's credentials.
                     return Some(remote_oauth_widget_usage_for_route(
                         crate::tui::info_widget::UsageProvider::Anthropic,
-                        self.session.route_api_method.as_deref(),
+                        self.session.route_api_method(),
                         self.remote_provider_oauth_account_label.as_deref(),
                         false,
                         output_tps,
@@ -138,7 +138,7 @@ impl App {
                     // credentials and can show a different account's windows.
                     return Some(remote_oauth_widget_usage_for_route(
                         crate::tui::info_widget::UsageProvider::OpenAI,
-                        self.session.route_api_method.as_deref(),
+                        self.session.route_api_method(),
                         self.remote_provider_oauth_account_label.as_deref(),
                         self.usage_reset.openai_quota_rejected,
                         output_tps,

@@ -202,8 +202,8 @@ fn validate(group: &Group, stage: &Path) -> Result<()> {
         }
         let directory = stage.join("members").join(&manifest.session_id);
         let sess: session::Session = read_json(&directory.join("session.json"))?;
-        if sess.id != manifest.session_id
-            || sess.migration_epoch != manifest.epoch
+        if sess.id() != manifest.session_id
+            || sess.migration_epoch() != manifest.epoch
             || digest(&directory.join("session.json"))? != member.session_sha256
         {
             bail!(

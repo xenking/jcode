@@ -42,7 +42,7 @@ impl Agent {
     }
 
     pub fn message_count(&self) -> usize {
-        self.session.messages.len()
+        self.session.messages().len()
     }
 
     /// Number of model-visible conversation messages (excludes the immutable
@@ -64,12 +64,12 @@ impl Agent {
     }
 
     pub fn last_message_role(&self) -> Option<Role> {
-        self.session.messages.last().map(|m| m.role.clone())
+        self.session.messages().last().map(|m| m.role.clone())
     }
 
     /// Get the text content of the last message (first Text block)
     pub fn last_message_text(&self) -> Option<&str> {
-        self.session.messages.last().and_then(|m| {
+        self.session.messages().last().and_then(|m| {
             m.content.iter().find_map(|block| {
                 if let ContentBlock::Text { text, .. } = block {
                     Some(text.as_str())
@@ -84,7 +84,7 @@ impl Agent {
     /// This is a independent method so it can be called before spawning async tasks
     pub fn build_transcript_for_extraction(&self) -> String {
         let mut transcript = String::new();
-        for msg in &self.session.messages {
+        for msg in self.session.messages() {
             let role = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -129,7 +129,7 @@ impl Agent {
 
     pub fn last_assistant_text(&self) -> Option<String> {
         self.session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|msg| msg.role == Role::Assistant)
@@ -151,7 +151,7 @@ impl Agent {
     /// Latest non-empty assistant text added at or after `start_index`.
     pub fn latest_assistant_text_after(&self, start_index: usize) -> Option<String> {
         self.session
-            .messages
+            .messages()
             .iter()
             .enumerate()
             .rev()
@@ -177,14 +177,14 @@ impl Agent {
     /// Tail of the latest non-empty assistant text response at or after `start_index`.
     /// Earlier commentary, tool activity, reasoning, and results are excluded.
     pub fn recent_assistant_output_tail_after(&self, start_index: usize) -> Option<String> {
-        assistant_output_tail_after(&self.session.messages, start_index)
+        assistant_output_tail_after(self.session.messages(), start_index)
     }
 
     /// The final visible assistant prose of this turn (its answer), used for
     /// notification previews. Tool calls and reasoning are excluded.
     pub fn final_assistant_text_after(&self, start_index: usize) -> Option<String> {
         self.session
-            .messages
+            .messages()
             .iter()
             .skip(start_index)
             .rev()
@@ -269,28 +269,28 @@ impl Agent {
     /// session's route metadata is rewritten to match, so swarm workers and
     /// later resumes inherit the route this session actually runs on.
     pub(crate) fn restore_session_model_from_session(&mut self) {
-        let Some(model) = self.session.model.clone() else {
-            self.session.model = Some(self.provider_model());
+        let Some(model) = self.session.model().map(str::to_owned) else {
+            self.session.set_model(Some(self.provider_model()));
             return;
         };
         match crate::provider::restore_session_model(
             self.provider.as_ref(),
             &model,
-            self.session.provider_key.as_deref(),
-            self.session.route_api_method.as_deref(),
+            self.session.provider_key(),
+            self.session.route_api_method(),
         ) {
             Ok(restore) => {
                 if let Some(healed) = restore.healed_route {
                     logging::warn(&format!(
                         "Session {} route healed: '{}' -> '{}' (provider_key {:?} -> {:?})",
-                        self.session.id,
+                        self.session.id(),
                         healed.stale_request,
                         restore.request,
-                        self.session.provider_key,
+                        self.session.provider_key(),
                         healed.provider_key,
                     ));
-                    self.session.provider_key = healed.provider_key;
-                    self.session.route_api_method = healed.route_api_method;
+                    self.session.set_provider_key(healed.provider_key);
+                    self.session.set_route_api_method(healed.route_api_method);
                 }
                 self.reconcile_explicit_provider_pin_route();
             }
@@ -309,9 +309,11 @@ impl Agent {
             .explicit_provider_pin_for_current_model()
             .is_some()
         {
-            self.session.model = Some(self.provider_model());
-            self.session.provider_key = Some("openrouter".to_string());
-            self.session.route_api_method = Some("openrouter".to_string());
+            self.session.select_route(
+                self.provider_model(),
+                "openrouter".to_string(),
+                "openrouter".to_string(),
+            );
         }
     }
 

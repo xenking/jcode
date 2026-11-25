@@ -1078,7 +1078,8 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
         "---\nname: late-skill\ndescription: Added after startup\n---\n# Late skill\n",
     )
     .expect("write SKILL.md");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
 
     // Project-local skills are a session overlay composed at read time, so
     // the new skill is available immediately (issue #457).
@@ -1111,7 +1112,8 @@ fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
         "---\nname: pinned-probe\ndescription: Mode test\n---\nPINNED_MODE_BODY\n",
     )
     .unwrap();
-    app.session.working_dir = Some(temp.path().to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().into_owned()));
     for command in ["/mode pinned-probe", "/mode"] {
         app.input = command.into();
         app.submit_input();
@@ -1132,11 +1134,11 @@ fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
                 .contains("pinned-probe")
         );
     }
-    let announcements = app.session.messages.len();
+    let announcements = app.session.messages().len();
     app.input = "/mode pinned-probe".into();
     app.submit_input();
     assert_eq!(
-        app.session.messages.len(),
+        app.session.messages().len(),
         announcements,
         "re-pinning is idempotent"
     );
@@ -1170,7 +1172,8 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
         "---\nname: image-skill\ndescription: Image attachment regression skill\n---\nUse it.\n",
     )
     .expect("write skill");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
     app.pending_images = vec![("image/png".to_string(), "ZmFrZSBwbmcgYnl0ZXM=".to_string())];
     app.input = "/image-skill describe this screenshot".to_string();
     app.cursor_pos = app.input.len();
@@ -1185,7 +1188,7 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
     );
     let submitted = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("submitted session message");
     assert_eq!(submitted.role, Role::User);
@@ -1213,16 +1216,17 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
 fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
     app.input = "/definitely-not-a-real-skill".to_string();
     app.cursor_pos = app.input.len();
-    let session_messages_before = app.session.messages.len();
+    let session_messages_before = app.session.messages().len();
 
     app.submit_input();
 
     assert!(!app.is_processing, "unknown skill must not start a turn");
     assert_eq!(
-        app.session.messages.len(),
+        app.session.messages().len(),
         session_messages_before,
         "no message should be sent to the model"
     );
@@ -1237,7 +1241,8 @@ fn endorsed_but_not_installed_skill_invocation_surfaces_install_hint() {
     let mut app = create_test_app();
     // Empty working dir so no endorsed skill is actually installed there.
     let temp = tempfile::tempdir().expect("tempdir");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.session
+        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
 
     let endorsed = crate::skill::endorsed_skills()
         .iter()
@@ -1248,13 +1253,13 @@ fn endorsed_but_not_installed_skill_invocation_surfaces_install_hint() {
 
     app.input = format!("/{}", endorsed.name);
     app.cursor_pos = app.input.len();
-    let session_messages_before = app.session.messages.len();
+    let session_messages_before = app.session.messages().len();
 
     app.submit_input();
 
     assert!(!app.is_processing, "missing skill must not start a turn");
     assert_eq!(
-        app.session.messages.len(),
+        app.session.messages().len(),
         session_messages_before,
         "no message should be sent to the model"
     );
@@ -1406,10 +1411,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
         assert!(app.remote_sessions.is_empty());
         assert_eq!(app.remote_client_count, None);
         assert_eq!(app.remote_total_tokens, None);
-        assert_ne!(
-            app.session.subagent_model.as_deref(),
-            Some("stale-subagent")
-        );
+        assert_ne!(app.session.subagent_model(), Some("stale-subagent"));
         let content = app.display_messages().last().unwrap().content.clone();
         assert!(
             content.contains("Reloading the server before applying remote session state"),
@@ -1611,10 +1613,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
     assert_eq!(remote.session_id(), None);
     assert!(app.remote_skills.is_empty());
     assert!(app.remote_sessions.is_empty());
-    assert_ne!(
-        app.session.subagent_model.as_deref(),
-        Some("ancient-subagent")
-    );
+    assert_ne!(app.session.subagent_model(), Some("ancient-subagent"));
     let content = app.display_messages().last().unwrap().content.clone();
     assert!(
         content.contains("older release") && content.contains("jcode server stop"),

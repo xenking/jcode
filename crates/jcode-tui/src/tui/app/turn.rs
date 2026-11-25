@@ -821,7 +821,7 @@ impl App {
                                         // Account for any observed failed-attempt usage, then
                                         // clear its response model before the next attempt.
                                         crate::telemetry::record_simple_completion_usage(
-                                            Some(&self.session.id), &provider_name, &model_at_request_start,
+                                            Some(self.session.id()), &provider_name, &model_at_request_start,
                                             crate::telemetry::UsageSource::Agent,
                                             std::mem::take(&mut call_usage),
                                         );
@@ -1141,7 +1141,7 @@ impl App {
                                             session_id: self.session_id().to_string(),
                                             message_id: self.session_id().to_string(),
                                             tool_call_id: request_id.clone(),
-                                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                                            working_dir: self.session.working_dir().map(PathBuf::from),
                                             stdin_request_tx: None,
                                             graceful_shutdown_signal: None,
                                             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
@@ -1226,7 +1226,7 @@ impl App {
             // Record before the interleave early-continue: an interrupted call
             // still consumed whatever the provider reported.
             crate::telemetry::record_simple_completion_usage(
-                Some(&self.session.id),
+                Some(self.session.id()),
                 &provider_name,
                 &model_at_request_start,
                 crate::telemetry::UsageSource::Agent,
@@ -1367,13 +1367,13 @@ impl App {
 
                 let message_id = assistant_message_id
                     .clone()
-                    .unwrap_or_else(|| self.session.id.clone());
+                    .unwrap_or_else(|| self.session.id().to_owned());
 
                 // Check if SDK already executed this tool
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // Use SDK result
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         message_id: message_id.clone(),
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
@@ -1430,17 +1430,17 @@ impl App {
 
                 // Execute locally
                 let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
-                    working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                    working_dir: self.session.working_dir().map(PathBuf::from),
                     stdin_request_tx: None,
                     graceful_shutdown_signal: None,
                     execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
@@ -1565,7 +1565,7 @@ impl App {
                             let mut needs_redraw = false;
                             match bus_event {
                                 Ok(BusEvent::SubagentStatus(status)) => {
-                                    if status.session_id == self.session.id {
+                                    if status.session_id == self.session.id() {
                                         let display = if let Some(model) = &status.model {
                                             format!("{} · {}", status.status, model)
                                         } else {
@@ -1576,13 +1576,13 @@ impl App {
                                     }
                                 }
                                 Ok(BusEvent::BatchProgress(progress)) => {
-                                    if progress.session_id == self.session.id {
+                                    if progress.session_id == self.session.id() {
                                         self.batch_progress = Some(progress);
                                         needs_redraw = true;
                                     }
                                 }
                                 Ok(BusEvent::SidePanelUpdated(update)) => {
-                                    if update.session_id == self.session.id {
+                                    if update.session_id == self.session.id() {
                                         self.set_side_panel_snapshot(update.snapshot);
                                         needs_redraw = true;
                                     }
@@ -1613,7 +1613,7 @@ impl App {
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1625,7 +1625,7 @@ impl App {
                     }
                     Err(e) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),

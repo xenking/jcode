@@ -39,7 +39,7 @@ fn recovery_log_snapshot_correlates_state_without_payloads() {
     app.rate_limit_pending_message = None;
     app.current_message_id = None;
     let fallback = app.recovery_log_fields("no_pending");
-    assert!(fallback.contains(&("session_id", app.session.id.clone())));
+    assert!(fallback.contains(&("session_id", app.session.id().to_owned())));
     assert!(fallback.contains(&("request_id", "none".into())));
     assert!(fallback.contains(&("pending", "false".into())));
 }

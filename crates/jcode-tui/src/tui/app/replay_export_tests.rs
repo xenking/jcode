@@ -86,7 +86,7 @@ async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
         }],
     );
     let mut app = App::new_for_replay_silent(session);
-    assert!(app.session.messages.is_empty());
+    assert!(app.session.messages().is_empty());
     assert!(app.display_messages.is_empty());
     assert!(!app.auto_poke_incomplete_todos);
     let widget = app.info_widget_data();
@@ -182,7 +182,7 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
         crate::session::Session::create_with_id("historical_export_test".into(), None, None);
     let live: Vec<crate::todo::TodoItem> =
         serde_json::from_value(json!([todo("TODAY_ONLY_TASK")])).unwrap();
-    crate::todo::save_todos(&session.id, &live).unwrap();
+    crate::todo::save_todos(session.id(), &live).unwrap();
     let timeline = vec![
         TimelineEvent {
             t: 0,
@@ -248,6 +248,6 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             .is_err()
     );
     // Export must not mutate the user's current todo files.
-    assert_eq!(crate::todo::load_todos(&session.id).unwrap(), live);
+    assert_eq!(crate::todo::load_todos(session.id()).unwrap(), live);
     println!("HISTORICAL_EXPORT_VERIFIED");
 }

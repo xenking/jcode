@@ -83,7 +83,7 @@ fn test_remote_done_settles_visible_timer_without_client_poke() {
         remote.mark_history_loaded();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -145,7 +145,7 @@ fn test_remote_done_leaves_confidence_spike_challenge_to_daemon() {
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -174,7 +174,7 @@ fn test_remote_done_leaves_confidence_spike_challenge_to_daemon() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -208,7 +208,7 @@ fn test_remote_done_leaves_completion_confidence_gate_to_daemon() {
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -234,7 +234,7 @@ fn test_remote_done_leaves_completion_confidence_gate_to_daemon() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -267,7 +267,7 @@ fn test_remote_poke_status_and_off_update_state() {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -339,7 +339,7 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.is_remote = true;
-    app.session.messages.clear();
+    app.session.messages_mut_for_tests().clear();
     app.push_display_message(DisplayMessage::user("hello"));
     app.push_display_message(DisplayMessage::assistant("hi\nthere"));
 
@@ -503,7 +503,7 @@ fn test_remote_done_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             app.auto_poke_incomplete_todos = true;
             app.auto_poke_default_on = false;
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
                     id: "validated-result".into(),
                     content: "Validate the requested result".into(),
@@ -519,7 +519,7 @@ fn test_remote_done_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             )
             .unwrap();
             // Missing goal metadata is not unfinished ownership work either.
-            crate::todo::save_goals(&app.session.id, &[]).unwrap();
+            crate::todo::save_goals(app.session.id(), &[]).unwrap();
             for id in 42..44 {
                 app.is_processing = true;
                 app.status = ProcessingStatus::Streaming;

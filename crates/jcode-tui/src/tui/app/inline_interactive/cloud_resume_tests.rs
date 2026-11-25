@@ -9,7 +9,7 @@ impl Drop for LeaseGuard {
 }
 
 fn cloud_target(app: &App) -> (ResumeTarget, LeaseGuard) {
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     crate::storage::write_session_lease(&crate::storage::SessionLease {
         session_id: session_id.clone(),
         epoch: 1,
@@ -36,7 +36,7 @@ fn cloud_resume_current_session_hands_off_instead_of_using_local_copy() {
     assert_eq!(
         app.cloud_handoff_requested,
         Some(CloudHandoff::RemoteResume {
-            session_id: app.session.id.clone(),
+            session_id: app.session.id().to_owned(),
             host: "cloud-test-host".into(),
             working_dir: Some("/remote/project with spaces".into()),
         })
@@ -86,7 +86,7 @@ fn cloud_resume_new_terminal_uses_ssh_without_local_socket() {
     );
     assert!(
         args.windows(2)
-            .any(|pair| pair == ["--resume", app.session.id.as_str()])
+            .any(|pair| pair == ["--resume", app.session.id()])
     );
     assert!(
         !args
@@ -113,7 +113,7 @@ fn cloud_resume_terminal_spawn_fallback_still_hands_off_remotely() {
 fn cloud_resume_unmigrated_target_retains_local_socket() {
     let app = crate::tui::app::tests::create_test_app();
     let target = ResumeTarget::JcodeSession {
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
     };
     let (_, args, _) =
         super::super::helpers::build_resume_command(&target, Some("/local/daemon.sock"));

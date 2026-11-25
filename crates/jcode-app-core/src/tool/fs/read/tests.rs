@@ -194,7 +194,7 @@ async fn reads_session_image_by_stable_id_and_ordinal() {
     let id = session.session_images()[0].image_id.clone();
     session.save().unwrap();
     let mut ctx = make_ctx(std::env::temp_dir());
-    ctx.session_id = session.id.clone();
+    ctx.session_id = session.id().to_owned();
     for selector in [id.as_str(), "1"] {
         let output = ReadTool::new()
             .execute(

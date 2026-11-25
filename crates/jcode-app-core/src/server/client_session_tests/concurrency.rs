@@ -190,7 +190,7 @@ async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
     let registry = Registry::new(provider.clone()).await;
     let mut persisted = crate::session::Session::create(None, Some("Cold resume race".into()));
     persisted.save()?;
-    let target_id = persisted.id.clone();
+    let target_id = persisted.id().to_owned();
     let first = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
         provider.clone(),
         registry.clone(),
@@ -368,7 +368,7 @@ async fn resume_of_a_turn_cut_by_daemon_death_schedules_recovery() -> Result<()>
         }],
     );
     persisted.save()?;
-    let target_id = persisted.id.clone();
+    let target_id = persisted.id().to_owned();
     let source = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
         provider.clone(),
         registry.clone(),
@@ -418,7 +418,7 @@ async fn resume_of_a_finished_turn_schedules_nothing() -> Result<()> {
         }],
     );
     persisted.save()?;
-    let target_id = persisted.id.clone();
+    let target_id = persisted.id().to_owned();
     let source = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
         provider.clone(),
         registry.clone(),

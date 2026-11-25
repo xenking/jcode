@@ -8,11 +8,7 @@ impl App {
     ) {
         let name = &skill.name;
         let names = vec![name.clone()];
-        let project = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let project = self.session.working_dir().map(std::path::Path::new);
         let previous_arguments = self.session.pinned_skill_arguments(name);
         let previous = skill.render_prompt(previous_arguments, project);
         let prompt = skill.render_prompt(arguments.unwrap_or(previous_arguments), project);
@@ -33,7 +29,7 @@ impl App {
         if self.is_remote {
             return;
         }
-        self.active_skill = self.session.pinned_skill.clone();
+        self.active_skill = self.session.pinned_skill().map(str::to_owned);
         let skills = self.current_skills_snapshot();
         let rendered = crate::session::Session::render_pinned_skill_announcement(
             self.session.pinned_skill_names(),
@@ -41,10 +37,7 @@ impl App {
                 skills.get(name).map(|skill| {
                     skill.render_prompt(
                         self.session.pinned_skill_arguments(name),
-                        self.session
-                            .working_dir
-                            .as_deref()
-                            .map(std::path::Path::new),
+                        self.session.working_dir().map(std::path::Path::new),
                     )
                 })
             },

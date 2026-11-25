@@ -268,11 +268,16 @@ async fn keyed_tool_streaming_emits_each_name_before_args_and_executes_once() {
     }
     assert_eq!(executions, ["a", "b"]);
     for id in ["a", "b"] {
-        assert!(agent.session.messages.iter().flat_map(|m| &m.content).any(
-            |block| matches!(block,
+        assert!(
+            agent
+                .session
+                .messages()
+                .iter()
+                .flat_map(|m| &m.content)
+                .any(|block| matches!(block,
             ContentBlock::ToolUse { id: actual, thought_signature: Some(signature), .. }
-                if actual == id && signature == &format!("signature-{id}"))
-        ));
+                if actual == id && signature == &format!("signature-{id}")))
+        );
     }
 }
 
@@ -375,7 +380,7 @@ async fn native_citation_corrections_preserve_earlier_text_and_native_replay() {
         }
         let assistant = agent
             .session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|message| message.role == Role::Assistant)
@@ -433,7 +438,7 @@ async fn retry_after_native_citation_correction_discards_the_entire_attempt() {
         }
         let assistant = agent
             .session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|message| message.role == Role::Assistant)

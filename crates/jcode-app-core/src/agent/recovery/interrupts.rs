@@ -107,7 +107,7 @@ impl Agent {
 
         let receipts = self
             .session
-            .messages
+            .messages()
             .iter()
             .filter_map(|message| message.id.strip_prefix("queued:"))
             .map(serde_json::from_str::<Vec<String>>)
@@ -344,11 +344,11 @@ impl Agent {
             "allowed_tools": self.allowed_tools,
             "disabled_tools": self.disabled_tools,
             "session": {
-                "id": self.session.id,
-                "is_canary": self.session.is_canary,
-                "model": self.session.model,
-                "working_dir": self.session.working_dir,
-                "message_count": self.session.messages.len(),
+                "id": self.session.id(),
+                "is_canary": self.session.is_canary(),
+                "model": self.session.model(),
+                "working_dir": self.session.working_dir(),
+                "message_count": self.session.messages().len(),
             },
             "interrupts": {
                 "soft_interrupt_count": self.soft_interrupt_count(),
@@ -463,10 +463,10 @@ impl Agent {
             }
         };
         let previous_queue = queue.clone();
-        let initial_message_count = self.session.messages.len();
+        let initial_message_count = self.session.messages().len();
         let initial_active_skill = self.active_skill.clone();
         let initial_pinned_skills = self.session.pinned_skill_names().to_vec();
-        let initial_ask_id = self.session.user_asks.last_id;
+        let initial_ask_id = self.session.user_asks().last_id;
         let messages: Vec<SoftInterruptMessage> = {
             if queue.is_empty() {
                 return Vec::new();
@@ -537,7 +537,7 @@ impl Agent {
                 ));
             }
             let image_ids_event =
-                agent.user_image_ids_event(agent.session.messages.len() - 1, &content);
+                agent.user_image_ids_event(agent.session.messages().len() - 1, &content);
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,

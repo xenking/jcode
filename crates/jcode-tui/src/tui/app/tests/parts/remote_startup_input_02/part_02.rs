@@ -9,7 +9,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
         ] {
             let succeeded = status == BackgroundTaskStatus::Completed;
             let mut app = create_test_app();
-            let initial_message_count = app.session.messages.len();
+            let initial_message_count = app.session.messages().len();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let started = "**Background task started** `silent-task` · `silent work`";
             let notification = |message: String| crate::protocol::ServerEvent::Notification {
@@ -25,7 +25,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
             if remote_client {
                 app.handle_server_event(notification(started.into()), &mut remote);
             } else {
-                let session_id = app.session.id.clone();
+                let session_id = app.session.id().to_owned();
                 super::local::handle_bus_event(
                     &mut app,
                     Ok(BusEvent::UiActivity(crate::bus::UiActivity::background(
@@ -44,7 +44,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
                 task_id: "silent-task".into(),
                 tool_name: "bash".into(),
                 display_name: Some("silent work".into()),
-                session_id: app.session.id.clone(),
+                session_id: app.session.id().to_owned(),
                 status,
                 exit_code: Some(0),
                 output_preview: "done".into(),
@@ -77,7 +77,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
             );
             assert_eq!(row.completed_at.is_some(), succeeded);
             assert!(app.display_messages().is_empty());
-            assert_eq!(app.session.messages.len(), initial_message_count);
+            assert_eq!(app.session.messages().len(), initial_message_count);
             assert!(!app.pending_turn);
             assert!(!app.is_processing());
         }
@@ -91,7 +91,7 @@ fn test_handle_background_task_completed_adds_delivery_transcript_card() {
         task_id: "bg123".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
         output_preview: "[stderr] one\n[stdout] two\n".to_string(),
@@ -125,7 +125,7 @@ fn test_local_stalled_background_injection_adds_transcript_entry() {
         task_id: "stalled-delivery".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         stall_wake_seconds: 30,
         running_secs: 45.0,
         output_tail: "waiting for output".to_string(),
@@ -151,7 +151,7 @@ fn test_handle_background_task_completed_with_wake_starts_pending_turn() {
         task_id: "bgwake".to_string(),
         tool_name: "selfdev-build".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
         output_preview: "done\n".to_string(),
@@ -178,7 +178,7 @@ fn test_handle_background_task_progress_updates_status_notice() {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
             percent: Some(42.0),
@@ -215,7 +215,7 @@ fn test_handle_background_task_progress_updates_status_notice() {
 fn test_background_task_started_activity_creates_running_row_without_card() {
     let mut app = create_test_app();
     let event = BusEvent::UiActivity(crate::bus::UiActivity::background(
-        Some(app.session.id.clone()),
+        Some(app.session.id().to_owned()),
         "**Background task started** `bgstarted` · `cargo test`\n\nJcode is running this in the background. Progress, checkpoints, and completion will appear here.",
         Some("Background task started · cargo test"),
     ));
@@ -242,7 +242,7 @@ fn test_handle_background_task_progress_debounces_identical_notice_updates() {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
             percent: Some(42.0),
@@ -262,7 +262,7 @@ fn test_handle_background_task_progress_debounces_identical_notice_updates() {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,
-        session_id: app.session.id.clone(),
+        session_id: app.session.id().to_owned(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
             percent: Some(42.0),
@@ -287,7 +287,7 @@ fn test_handle_background_task_progress_debounces_identical_notice_updates() {
 #[test]
 fn test_handle_background_task_progress_updates_existing_compact_row() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     for (percent, message) in [(42.0, "Running tests"), (75.0, "Packaging artifacts")] {
         super::local::handle_bus_event(

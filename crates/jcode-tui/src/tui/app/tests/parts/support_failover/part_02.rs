@@ -216,7 +216,8 @@ fn test_local_quota_failure_records_only_exhausted_account_cooldown() {
             "openai-otter",
         ));
         let mut app = create_test_app();
-        app.session.route_api_method = Some("openai-oauth@openai-otter".into());
+        app.session
+            .set_route_api_method(Some("openai-oauth@openai-otter".into()));
         app.offer_fallback_after_error("429 usage limit reached; quota exhausted");
         let exhausted = crate::provider::models::provider_unavailability_detail_for_account_label(
             "openai",
@@ -983,7 +984,8 @@ fn create_dual_method_test_app() -> (App, StdArc<StdMutex<Option<String>>>) {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     // The active route is the (broken) API key.
-    app.session.route_api_method = Some("claude-api".to_string());
+    app.session
+        .set_route_api_method(Some("claude-api".to_string()));
     (app, applied)
 }
 
@@ -1041,7 +1043,8 @@ fn test_apply_fallback_offer_no_offer_is_noop() {
 fn test_fallback_uses_live_local_credential_over_stale_route() {
     with_temp_jcode_home(|| {
         let (mut app, _) = create_dual_method_test_app();
-        app.session.route_api_method = Some("claude-oauth".to_string());
+        app.session
+            .set_route_api_method(Some("claude-oauth".to_string()));
 
         assert_eq!(
             app.current_route_api_method().as_deref(),
@@ -1096,7 +1099,8 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
         ] {
             app.remote_resolved_credential = Some(credential);
             // Stale bookkeeping must not make the live route look like an alternative.
-            app.session.route_api_method = Some(alternative.to_string());
+            app.session
+                .set_route_api_method(Some(alternative.to_string()));
             assert_eq!(
                 app.current_route_api_method().as_deref(),
                 Some(active_method)
@@ -1113,7 +1117,7 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
 
             // With no historical selection, the reported credential still lets
             // us offer a genuine same-model alternative instead of excluding both.
-            app.session.route_api_method = None;
+            app.session.set_route_api_method(None);
             assert_eq!(
                 app.current_route_api_method().as_deref(),
                 Some(active_method)
@@ -1121,7 +1125,8 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
         }
 
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
-        app.session.route_api_method = Some("openai-oauth".to_string());
+        app.session
+            .set_route_api_method(Some("openai-oauth".to_string()));
         app.remote_model_options
             .retain(|route| route.api_method == "openai-api");
         app.clear_pending_fallback_offer();
@@ -1140,13 +1145,14 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
         app.is_remote = true;
         app.remote_provider_name = Some("OpenAI".to_string());
         app.remote_resolved_credential = None;
-        app.session.route_api_method = Some("openai-api-key".to_string());
+        app.session
+            .set_route_api_method(Some("openai-api-key".to_string()));
         assert_eq!(
             app.current_route_api_method().as_deref(),
             Some("openai-api-key")
         );
 
-        app.session.route_api_method = None;
+        app.session.set_route_api_method(None);
         assert_eq!(app.current_route_api_method(), None);
     });
 }
@@ -1163,7 +1169,8 @@ fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
             );
             let (mut app, active_provider) = create_switchable_test_app(initial_provider);
             // Deliberately stale metadata must not override runtime identity.
-            app.session.route_api_method = Some("claude-oauth@stale-account".into());
+            app.session
+                .set_route_api_method(Some("claude-oauth@stale-account".into()));
             let prompt = crate::provider::ProviderFailoverPrompt {
                 from_provider: "stale-provider".into(),
                 from_label: "Previous account".into(),

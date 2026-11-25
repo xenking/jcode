@@ -54,7 +54,8 @@ fn remote_exact_failover_on(
     app.is_remote = true;
     app.remote_provider_name = Some("Anthropic".into());
     app.remote_provider_model = Some(model.into());
-    app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+    app.session
+        .set_route_api_method(Some("claude-oauth@claude-otter".into()));
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     let mut target = openai_oauth_route("gpt-5.4");
     target.api_method = "openai-oauth@openai-fox".into();
@@ -105,9 +106,16 @@ fn remote_oauth_rejection_requires_manual_model_change_even_with_countdown_enabl
         assert!(app.pending_provider_failover.is_none());
         assert!(app.pending_automatic_failover_route.is_none());
         assert!(app.pending_fallback_resend.is_none());
-        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
         assert_eq!(app.input, "hi");
-        assert!(app.display_messages().iter().any(|msg| msg.content.contains("Use /model to switch")));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Use /model to switch"))
+        );
     });
 }
 
@@ -426,7 +434,7 @@ fn test_remote_manual_fallback_waits_for_request_dispatch() {
         assert!(app.apply_pending_fallback_offer());
         assert!(app.pending_route_selection.is_some());
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
@@ -616,7 +624,7 @@ fn test_automatic_failover_refuses_opus_target_and_skips_ranked_opus() {
                 .iter()
                 .any(|message| message.content.contains("failover_excluded_models"))
         );
-        app.session.route_api_method = Some("claude-api".into());
+        app.session.set_route_api_method(Some("claude-api".into()));
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut opus = claude_oauth_route("claude-opus-5-5");
         opus.api_method = "claude-oauth@claude-otter".into();
@@ -673,7 +681,7 @@ fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         app.automatic_failover_targets.clear();
-        app.session.route_api_method = Some("claude-api".into());
+        app.session.set_route_api_method(Some("claude-api".into()));
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut opus = claude_oauth_route("claude-opus-5-5");
         opus.api_method = "claude-oauth@claude-otter".into();
@@ -731,7 +739,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         // Discard the fixture's staged switch before testing a fresh error.
         app.automatic_failover_targets.clear();
-        app.session.route_api_method = Some("claude-api".into());
+        app.session.set_route_api_method(Some("claude-api".into()));
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut preferred = claude_oauth_route("claude-sonnet-4");
         preferred.api_method = "claude-oauth@claude-otter".into();
@@ -825,7 +833,8 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
         app.automatic_failover_targets.clear();
         app.remote_provider_name = Some("OpenAI".into());
         app.remote_provider_model = Some("gpt-5.4".into());
-        app.session.route_api_method = Some("openai-oauth@openai-otter".into());
+        app.session
+            .set_route_api_method(Some("openai-oauth@openai-otter".into()));
         let mut exhausted_sibling = openai_oauth_route("gpt-5.2");
         exhausted_sibling.api_method = "openai-oauth@openai-otter".into();
         app.remote_model_options.insert(0, exhausted_sibling);
@@ -861,12 +870,13 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
-        app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+        app.session
+            .set_route_api_method(Some("claude-oauth@claude-otter".into()));
         app.pending_provider_failover.as_mut().unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         app.maybe_progress_provider_failover_countdown();
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         app.remote_model_switch_in_flight = true;
@@ -909,7 +919,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
             &mut remote,
         );
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         assert_eq!(
@@ -1382,7 +1392,8 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
             app.is_remote = true;
             app.remote_provider_name = Some("Antigravity".into());
             app.remote_provider_model = Some("gemini-4-neon-low".into());
-            app.session.route_api_method = initial_route_api_method.clone();
+            app.session
+                .set_route_api_method(initial_route_api_method.clone());
             app.remote_model_options = vec![
                 crate::provider::ModelRoute {
                     reasoning_efforts: None,
@@ -1554,9 +1565,15 @@ fn remote_queued_model_switch_waits_for_the_turn_then_announces_the_switch() {
             app.queued_model_switch,
             Some((7, "gpt-6.2-sol".to_string()))
         );
-        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
         let queued = app.display_messages().last().unwrap().content.clone();
-        assert!(queued.contains("queued") && queued.contains("claude-opus-5-5"), "{queued}");
+        assert!(
+            queued.contains("queued") && queued.contains("claude-opus-5-5"),
+            "{queued}"
+        );
 
         app.handle_server_event(
             crate::protocol::ServerEvent::ModelChanged {
@@ -1574,10 +1591,11 @@ fn remote_queued_model_switch_waits_for_the_turn_then_announces_the_switch() {
         );
         assert_eq!(app.queued_model_switch, None);
         assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-6.2-sol"));
-        assert!(app
-            .display_messages()
-            .iter()
-            .any(|msg| msg.content.contains("Switched to model: gpt-6.2-sol")));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Switched to model: gpt-6.2-sol"))
+        );
     });
 }
 
@@ -1606,12 +1624,16 @@ fn remote_queued_model_switch_can_be_cancelled() {
             &mut remote,
         );
         assert_eq!(app.queued_model_switch, None);
-        assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
-        assert!(app
-            .display_messages()
-            .last()
-            .unwrap()
-            .content
-            .contains("cancelled"));
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("cancelled")
+        );
     });
 }

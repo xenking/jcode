@@ -2266,8 +2266,8 @@ mod tests {
                 // A worker spawned before this allowlist existed still runs on
                 // fable. Its server-initiated turns must stay inside the list
                 // instead of turning into an unrestricted session.
-                session.model = Some("claude-fable-5".into());
-                session.is_swarm_worker = true;
+                session.set_model(Some("claude-fable-5".into()));
+                session.set_is_swarm_worker(true);
                 let worker = Agent::new_with_session(
                     Arc::clone(&provider),
                     crate::tool::Registry::new(Arc::clone(&provider)).await,
@@ -2279,7 +2279,7 @@ mod tests {
                     None,
                     None,
                 );
-                user_session.model = Some("claude-fable-5".into());
+                user_session.set_model(Some("claude-fable-5".into()));
                 let user = Agent::new_with_session(
                     Arc::clone(&provider),
                     crate::tool::Registry::new(Arc::clone(&provider)).await,
@@ -2362,7 +2362,7 @@ mod tests {
                     let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
                     let mut session =
                         crate::session::Session::create_with_id(id.into(), None, None);
-                    session.provider_key = Some("test".into());
+                    session.set_provider_key(Some("test".into()));
                     let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
                     if worker {
                         agent.mark_swarm_worker().unwrap();

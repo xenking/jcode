@@ -55,7 +55,7 @@ pub(super) async fn handle_workspace_command(
         .remote_session_id
         .as_deref()
         .or(app.resume_session_id.as_deref())
-        .or(Some(app.session.id.as_str()));
+        .or(Some(app.session.id()));
 
     match trimmed {
         "/workspace" | "/workspace status" => {

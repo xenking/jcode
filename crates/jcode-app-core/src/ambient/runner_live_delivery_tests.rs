@@ -41,14 +41,14 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             };
             let mut session = Session::create(None, Some("live schedule regression".to_string()));
-            session.working_dir = Some(temp.path().display().to_string());
+            session.set_working_dir(Some(temp.path().display().to_string()));
             assert!(session.ensure_initial_session_context_message());
             session.save().expect("save target session");
             let subscribe_id = attached
                 .subscribe_with_info(
                     Some(temp.path().display().to_string()),
                     Some(false),
-                    Some(session.id.clone()),
+                    Some(session.id().to_owned()),
                     false,
                     false,
                 )
@@ -64,9 +64,9 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 context: "Report scheduled live output".to_string(),
                 priority: Priority::Normal,
                 target: ScheduleTarget::Session {
-                    session_id: session.id.clone(),
+                    session_id: session.id().to_owned(),
                 },
-                created_by_session: session.id.clone(),
+                created_by_session: session.id().to_owned(),
                 created_at: chrono::Utc::now(),
                 working_dir: Some(temp.path().display().to_string()),
                 task_description: None,

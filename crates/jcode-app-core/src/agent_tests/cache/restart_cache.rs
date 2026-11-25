@@ -127,7 +127,7 @@ async fn restore_wire(dialect: Dialect, case: &str) {
     agent.session.ensure_initial_session_context_message();
     append_text(&mut agent, Role::User, "Retain this exact user text.");
     append_text(&mut agent, Role::Assistant, "Archived answer.");
-    let cutoff = agent.session.messages.len();
+    let cutoff = agent.session.messages().len();
     append_text(&mut agent, Role::User, "Still active.");
     if deferred {
         agent.add_message(
@@ -159,27 +159,31 @@ async fn restore_wire(dialect: Dialect, case: &str) {
         agent.add_message(Role::User, blocks);
     }
     if matches!(case, "summary" | "legacy_plan" | "snapcompact" | "native") {
-        agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
-            summary_text: "Saved summary.".into(),
-            plan_context: Some(if case == "legacy_plan" {
-                "[>] Retain the plan".into()
-            } else {
-                "<system-reminder>\n[>] Retain the plan\n</system-reminder>".into()
-            }),
-            openai_encrypted_content: (case == "native").then(|| "opaque-compaction".into()),
-            snapcompact: (case == "snapcompact").then(|| jcode_message_types::SnapcompactArchive {
-                source: "Retain this exact user text.".into(),
-                pages: vec!["cG5n".into()],
-                index: String::new(),
-                decisions: "Active decision.".into(),
-                deferred_decisions: "Late decision for the next checkpoint.".into(),
-                page_ranges: vec![],
-                render_key: String::new(),
-            }),
-            covers_up_to_turn: cutoff,
-            original_turn_count: cutoff,
-            compacted_count: cutoff,
-        }));
+        agent
+            .session
+            .set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
+                summary_text: "Saved summary.".into(),
+                plan_context: Some(if case == "legacy_plan" {
+                    "[>] Retain the plan".into()
+                } else {
+                    "<system-reminder>\n[>] Retain the plan\n</system-reminder>".into()
+                }),
+                openai_encrypted_content: (case == "native").then(|| "opaque-compaction".into()),
+                snapcompact: (case == "snapcompact").then(|| {
+                    jcode_message_types::SnapcompactArchive {
+                        source: "Retain this exact user text.".into(),
+                        pages: vec!["cG5n".into()],
+                        index: String::new(),
+                        decisions: "Active decision.".into(),
+                        deferred_decisions: "Late decision for the next checkpoint.".into(),
+                        page_ranges: vec![],
+                        render_key: String::new(),
+                    }
+                }),
+                covers_up_to_turn: cutoff,
+                original_turn_count: cutoff,
+                compacted_count: cutoff,
+            })));
         agent.seed_compaction_from_session();
     }
     let before = request(&mut agent, dialect).await;
@@ -511,7 +515,7 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
         None,
     );
     agent.session.save().unwrap();
-    let id = agent.session.id.clone();
+    let id = agent.session.id().to_owned();
     drop(agent);
 
     let mut restored = Agent::new(Arc::new(Dialect::Anthropic), Registry::empty());

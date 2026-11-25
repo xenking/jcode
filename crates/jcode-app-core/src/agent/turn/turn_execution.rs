@@ -11,7 +11,7 @@ impl Agent {
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
         let _turn = self.claim_server_turn()?;
         let _runtime_activity =
-            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         self.record_user_ask(None, user_message, false);
@@ -30,7 +30,7 @@ impl Agent {
         }
         self.session.save()?;
         if trace_enabled() {
-            eprintln!("[trace] session_id {}", self.session.id);
+            eprintln!("[trace] session_id {}", self.session.id());
         }
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -57,7 +57,7 @@ impl Agent {
     ) -> Result<String> {
         let _turn = self.claim_server_turn()?;
         let _runtime_activity =
-            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         self.record_user_ask(display_role, user_message, false);
@@ -77,7 +77,7 @@ impl Agent {
         }
         self.session.save()?;
         if trace_enabled() {
-            eprintln!("[trace] session_id {}", self.session.id);
+            eprintln!("[trace] session_id {}", self.session.id());
         }
         let start_message_index = self.message_count();
         let result = self.run_turn(false).await;
@@ -143,9 +143,9 @@ impl Agent {
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
-            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
         // Inject any pending notifications before the user message
-        let alert_start = self.session.messages.len();
+        let alert_start = self.session.messages().len();
         let alerts = self.take_alerts();
         for alert in alerts {
             let alert_text = format!(
@@ -186,11 +186,11 @@ impl Agent {
                 false,
             ),
         };
-        let announcement_start = self.session.messages.len();
+        let announcement_start = self.session.messages().len();
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         self.emit_context_messages_since(announcement_start, &event_tx);
-        let input_start = self.session.messages.len();
+        let input_start = self.session.messages().len();
         if !resuming_ask {
             let queued_items = queued_client_id
                 .as_ref()
@@ -218,7 +218,7 @@ impl Agent {
                 lease.identity(),
                 queued_client_id.as_deref(),
                 || {
-                    let previous_ask_id = self.session.user_asks.last_id;
+                    let previous_ask_id = self.session.user_asks().last_id;
                     if !continues_turn && !has_queued_skills {
                         if queued_items.is_empty() {
                             self.record_user_ask(
@@ -241,7 +241,7 @@ impl Agent {
                         }
                     }
                     let result = if has_queued_skills {
-                        let previous_count = self.session.messages.len();
+                        let previous_count = self.session.messages().len();
                         let previous_skill = self.active_skill.clone();
                         let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
                         let result = (|| {
@@ -366,7 +366,7 @@ impl Agent {
         // invalidated the whole cached conversation on that turn and again on
         // the next turn when it disappeared.
         if let Some(reminder) = system_reminder {
-            let reminder_start = self.session.messages.len();
+            let reminder_start = self.session.messages().len();
             self.append_turn_system_reminder(&reminder)?;
             self.emit_context_messages_since(reminder_start, &event_tx);
         }
@@ -379,11 +379,11 @@ impl Agent {
         if self.session.migration_lease_block().is_none()
             && crate::turn_activity::global()
                 .snapshot()
-                .session(&self.session.id)
+                .session(self.session.id())
                 .is_some_and(|activity| activity.checkpoint_pending)
         {
             self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(&self.session.id);
+            crate::turn_activity::global().checkpointed(self.session.id());
         }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
@@ -417,11 +417,11 @@ impl Agent {
         if self.session.migration_lease_block().is_none()
             && crate::turn_activity::global()
                 .snapshot()
-                .session(&self.session.id)
+                .session(self.session.id())
                 .is_some_and(|activity| activity.checkpoint_pending)
         {
             self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(&self.session.id);
+            crate::turn_activity::global().checkpointed(self.session.id());
         }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
@@ -438,7 +438,7 @@ impl Agent {
         start: usize,
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
     ) {
-        for message in &self.session.messages[start..] {
+        for message in &self.session.messages()[start..] {
             let content = message
                 .content
                 .iter()
@@ -472,7 +472,7 @@ impl Agent {
             {
                 logging::debug(&format!(
                     "Context message receiver disconnected for session {}",
-                    self.session.id
+                    self.session.id()
                 ));
                 break;
             }
@@ -602,7 +602,7 @@ impl Agent {
             return;
         }
         let mut event = crate::hooks::HookEvent::new("turn_start")
-            .session_id(self.session.id.clone())
+            .session_id(self.session.id().to_owned())
             .field("MODEL", self.provider_model())
             .field("SOURCE", source.to_string());
         if let Some(cwd) = self.working_dir() {
@@ -625,7 +625,7 @@ impl Agent {
         }
         let status = if result.is_ok() { "ok" } else { "error" };
         let mut event = crate::hooks::HookEvent::new("turn_end")
-            .session_id(self.session.id.clone())
+            .session_id(self.session.id().to_owned())
             .field("STATUS", status)
             .field("DURATION_MS", started_at.elapsed().as_millis().to_string())
             .field("MODEL", self.provider_model());
@@ -637,7 +637,7 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
-        if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
+        if let Some(usage) = turn_token_usage_after(self.session.messages(), start_message_index) {
             if let Some(value) = usage.prompt_tokens {
                 event = event.field("PROMPT_TOKENS", value.to_string());
             }
@@ -660,7 +660,7 @@ impl Agent {
     }
 
     pub fn set_canary(&mut self, build_hash: &str) {
-        if !self.session.is_canary {
+        if !self.session.is_canary() {
             // Self-dev changes the tool surface, including hiding bundled docs.
             self.unlock_tools();
         }
@@ -673,7 +673,7 @@ impl Agent {
     /// Set a persisted custom system prompt override (also used by ambient mode).
     /// When set, this replaces the normal system prompt entirely.
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.session.system_prompt = Some(prompt.to_string());
+        self.session.set_system_prompt(Some(prompt.to_string()));
         self.persist_session_best_effort("system prompt override");
     }
 
@@ -698,8 +698,8 @@ impl Agent {
     /// `tool_definitions`, this does not pin the tool snapshot or consume the
     /// one-shot late-MCP-discovery check before the first real turn.
     pub(crate) async fn prewarm_provider(&self) {
-        self.provider.set_session_id(&self.session.id);
-        if self.session.is_canary {
+        self.provider.set_session_id(self.session.id());
+        if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
         let tools = match &self.locked_tools {

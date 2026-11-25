@@ -165,7 +165,7 @@ fn summarize(messages: &[Message]) -> Vec<String> {
 }
 
 fn session_has_synthetic_user_prompt(session: &crate::session::Session) -> bool {
-    session.messages.iter().any(|message| {
+    session.messages().iter().any(|message| {
         message.role == Role::User
             && message.content.iter().any(|block| match block {
                 ContentBlock::Text { text, .. } => {
@@ -185,8 +185,8 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     assert!(crate::config::config().features.persist_memory_injections);
     let mut session = crate::session::Session::create(None, None);
     let project = tempfile::tempdir().unwrap();
-    session.working_dir = Some(project.path().to_string_lossy().into_owned());
-    let id = session.id.clone();
+    session.set_working_dir(Some(project.path().to_string_lossy().into_owned()));
+    let id = session.id().to_owned();
     let capture = ScriptedProvider::default();
     capture.push_reply(vec![
         StreamEvent::ToolUseStart {
@@ -280,7 +280,7 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     }
     let stored = resumed
         .session
-        .messages
+        .messages()
         .iter()
         .find(|message| {
             message
@@ -290,7 +290,7 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
         })
         .expect("memory recall in the journal");
     assert_eq!(stored.display_role, Some(StoredDisplayRole::System));
-    assert_eq!(resumed.session.memory_injections.len(), 1);
+    assert_eq!(resumed.session.memory_injections().len(), 1);
     let rendered = crate::session::render_messages(&resumed.session);
     assert_eq!(
         rendered.iter().filter(|row| row.role == "memory").count(),
@@ -336,7 +336,7 @@ async fn reload_resume_compacts_over_budget_context_before_inference() {
         compaction_enabled: true,
         ..Default::default()
     };
-    let full_count = session.messages.len();
+    let full_count = session.messages().len();
     let mut agent =
         Agent::new_with_session(Arc::new(capture.clone()), Registry::empty(), session, None);
     let lease = agent.claim_server_turn().unwrap();
@@ -389,7 +389,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             "---\nname: reload-probe\ndescription: reload fixture\n---\nRetain this skill across reload.\n",
         )
         .unwrap();
-        session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+        session.set_working_dir(Some(home._home.path().to_string_lossy().into_owned()));
         session.add_message(
             Role::User,
             Message::user("Archived prompt").content.to_vec(),
@@ -398,8 +398,8 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             Role::Assistant,
             Message::assistant_text("Archived answer").content.to_vec(),
         );
-        let cutoff = session.messages.len();
-        session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+        let cutoff = session.messages().len();
+        session.set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
             summary_text: "Retain the archived summary".into(),
             plan_context: None,
             openai_encrypted_content: None,
@@ -407,7 +407,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             covers_up_to_turn: cutoff,
             original_turn_count: cutoff,
             compacted_count: cutoff,
-        }));
+        })));
     }
     session.add_message(
         Role::User,
@@ -417,7 +417,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
         }],
     );
     session.save().unwrap();
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
 
     let capture = ScriptedProvider::default();
     let provider: Arc<dyn Provider> = Arc::new(capture.clone());
@@ -556,7 +556,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
         !session_has_synthetic_user_prompt(&persisted),
         "no synthetic user prompt may be persisted"
     );
-    assert!(persisted.messages.iter().flat_map(|m| m.content.iter()).any(
+    assert!(persisted.messages().iter().flat_map(|m| m.content.iter()).any(
         |block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call-1")
     ));
 }
@@ -611,8 +611,11 @@ async fn reload_replays_pending_wait_before_contacting_the_provider() {
                 thought_signature: None,
             }],
         );
-        session.messages.last_mut().unwrap().timestamp =
-            Some(chrono::Utc::now() - chrono::Duration::seconds(50));
+        session
+            .messages_mut_for_tests()
+            .last_mut()
+            .unwrap()
+            .timestamp = Some(chrono::Utc::now() - chrono::Duration::seconds(50));
         session.save().unwrap();
         let capture = ScriptedProvider::default();
         let registry = Registry::empty();
@@ -661,7 +664,7 @@ async fn reload_mid_stream_continues_without_a_user_message() {
         }],
     );
     session.save().unwrap();
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
 
     let capture = ScriptedProvider::default();
     capture.push_reply(text_reply("violets are blue"));
@@ -707,7 +710,7 @@ async fn reload_mid_stream_continues_without_a_user_message() {
     assert!(!has_synthetic_user_prompt(&request));
     let saved = crate::session::Session::load(&session_id).unwrap();
     assert!(
-        !saved.messages.iter().any(|message| message.role == Role::User
+        !saved.messages().iter().any(|message| message.role == Role::User
             && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.ends_with("Continue.")))),
         "the nudge is request-only, never persisted"
     );
@@ -759,7 +762,7 @@ async fn reload_preserves_queued_prompts() {
         }],
     );
     session.save().unwrap();
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let queued = jcode_agent_runtime::SoftInterruptMessage {
         content: "also run the tests".to_string(),
         system_reminder: None,
@@ -833,10 +836,10 @@ async fn reload_while_idle_injects_nothing() {
         }],
     );
     session.save().unwrap();
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let before = crate::session::Session::load(&session_id)
         .unwrap()
-        .messages
+        .messages()
         .len();
 
     let capture = ScriptedProvider::default();
@@ -858,6 +861,6 @@ async fn reload_while_idle_injects_nothing() {
     assert_eq!(outcome, ResumeOutcome::NothingToResume);
     assert!(capture.requests().is_empty(), "no model turn may run");
     let after = crate::session::Session::load(&session_id).unwrap();
-    assert_eq!(after.messages.len(), before);
+    assert_eq!(after.messages().len(), before);
     assert!(!session_has_synthetic_user_prompt(&after));
 }

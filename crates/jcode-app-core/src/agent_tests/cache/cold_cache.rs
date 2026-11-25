@@ -169,7 +169,7 @@ fn shake_dividers(agent: &Agent) -> Vec<String> {
 fn compaction_dividers(agent: &Agent) -> Vec<String> {
     agent
         .session
-        .replay_events
+        .replay_events()
         .iter()
         .filter_map(|record| match &record.kind {
             crate::session::StoredReplayEventKind::Compaction {
@@ -191,7 +191,7 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
     let compaction = agent.registry.compaction();
     let mut manager = compaction.write().await;
     manager.note_provider_response(now, None);
-    agent.session.last_provider_request_at = Some(now.into());
+    agent.session.set_last_provider_request_at(Some(now.into()));
     let snapshot = serde_json::to_value(agent.session.provider_messages()).unwrap();
     let busy = agent
         .shake_tools(ShakeToolsAction::Preview, now)
@@ -333,7 +333,7 @@ async fn manual_snapcompact_preview_matches_apply_without_writing_the_session() 
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ArchivePreviewProvider { explicit: false });
     let (_home, mut agent, _) = fixture_with_provider(300, 160_000, 9_000, provider.clone()).await;
-    agent.session.context_cap = Some(1_000_000);
+    agent.session.set_context_cap(Some(1_000_000));
     let original = serde_json::to_vec(&agent.session).unwrap();
     let before = agent.inspect_context_breakdown(false, true).await;
     assert_eq!(
@@ -346,7 +346,7 @@ async fn manual_snapcompact_preview_matches_apply_without_writing_the_session() 
         .compact_measurement
         .expect("local Snapcompact preview");
     assert_eq!(serde_json::to_vec(&agent.session).unwrap(), original);
-    assert!(agent.session.compaction.is_none());
+    assert!(agent.session.compaction().is_none());
 
     agent.provider = Arc::new(ArchivePreviewProvider { explicit: true });
     let explicit = agent
@@ -360,7 +360,7 @@ async fn manual_snapcompact_preview_matches_apply_without_writing_the_session() 
     );
     assert_eq!(explicit.compact_measurement, None);
     let mut copy = agent.session.clone();
-    copy.id = "session_snapcompact_apply_copy".into();
+    copy.set_id_for_tests("session_snapcompact_apply_copy".into());
     let mut apply = Agent::new_with_session(provider, Registry::empty(), copy, None);
     let (message, started) = apply.request_manual_compaction();
     assert!(started, "{message}");
@@ -409,7 +409,7 @@ async fn text_only_manual_compaction_preview_leaves_provider_savings_unknown() {
         Some(ContextActionStatus::SavingsUnknown)
     );
     assert_eq!(forecast.compact_measurement, None);
-    assert!(agent.session.compaction.is_none());
+    assert!(agent.session.compaction().is_none());
 }
 
 #[tokio::test]
@@ -422,7 +422,9 @@ async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
         .write()
         .await
         .note_provider_response(response, None);
-    agent.session.last_provider_request_at = Some(response.into());
+    agent
+        .session
+        .set_last_provider_request_at(Some(response.into()));
     assert!(
         agent
             .idle_cache_expiry_at(response + Duration::from_secs(299))
@@ -451,7 +453,7 @@ async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
     agent.session = Session::load(agent.session_id()).unwrap();
     agent.seed_compaction_from_session();
     assert_eq!(
-        agent.session.last_cache_expiry_compaction_for,
+        agent.session.last_cache_expiry_compaction_for(),
         Some(response.into())
     );
     assert!(
@@ -489,7 +491,9 @@ async fn prompt_arriving_during_idle_fold_joins_it_without_shaking() {
         .write()
         .await
         .note_provider_response(response, None);
-    agent.session.last_provider_request_at = Some(response.into());
+    agent
+        .session
+        .set_last_provider_request_at(Some(response.into()));
     let (started, event) = agent.idle_cache_expiry_at(now);
     assert!(
         started && event.is_none(),
@@ -592,7 +596,7 @@ async fn daemon_cold_cache_shake_alone_avoids_background_compaction() {
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
     // The shake reports its own divider, but it must not start an LLM summary.
     assert!(event.is_none(), "a shake is not a background compaction");
-    assert!(agent.session.compaction.is_none());
+    assert!(agent.session.compaction().is_none());
     assert!(
         shake_dividers(&agent).contains(&"shake_cache_expiry".to_string()),
         "the shake divider must be persisted: {:?}",
@@ -617,7 +621,9 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 1_000, 20_000).await;
     // The reloaded process only has the session file to go on.
-    agent.session.last_provider_request_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+    agent
+        .session
+        .set_last_provider_request_at(Some(chrono::Utc::now() - chrono::Duration::hours(2)));
     agent.seed_compaction_from_session();
 
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
@@ -635,7 +641,7 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
     );
     let divider = agent
         .session
-        .replay_events
+        .replay_events()
         .iter()
         .find_map(|record| match &record.kind {
             crate::session::StoredReplayEventKind::Compaction {
@@ -659,11 +665,11 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
 async fn restored_cold_cache_clock_falls_back_to_the_last_assistant_message() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, _) = fixture(0, 1_000, 20_000).await;
-    agent.session.last_provider_request_at = None;
+    agent.session.set_last_provider_request_at(None);
     let stale = chrono::Utc::now() - chrono::Duration::hours(2);
     let last_assistant = agent
         .session
-        .messages
+        .messages_mut_for_tests()
         .iter_mut()
         .rev()
         .find(|message| matches!(message.role, Role::Assistant))
@@ -774,13 +780,13 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
                 .to_vec(),
         );
     }
-    let cutoff = agent.session.messages.len();
+    let cutoff = agent.session.messages().len();
     agent.add_message(
         Role::User,
         Message::user("Continue the approved plan").content.to_vec(),
     );
     crate::todo::save_todos(
-        &agent.session.id,
+        agent.session.id(),
         &[
             crate::todo::TodoItem {
                 content: "Set up fixtures".into(),
@@ -805,13 +811,13 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         original_turn_count: cutoff,
         compacted_count: cutoff,
     };
-    agent.session.compaction = Some(Arc::new(state.clone()));
+    agent.session.set_compaction(Some(Arc::new(state.clone())));
     agent
         .registry
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&state, &agent.session.messages);
+        .restore_persisted_stored_state_with(&state, agent.session.messages());
     let (outgoing, _) = agent.messages_for_provider(None).await.unwrap();
     let wire = anthropic_wire(&outgoing);
     let texts: Vec<_> = wire
@@ -848,7 +854,7 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
     assert!(!texts.contains(&"Not user-authored: background-only note"));
     assert!(!wire.to_string().contains("opaque-checkpoint"));
 
-    let persisted = agent.session.compaction.as_ref().unwrap();
+    let persisted = agent.session.compaction().unwrap();
     assert!(persisted.summary_text.contains("src/important.rs"));
     assert_eq!(
         persisted.openai_encrypted_content.as_deref(),
@@ -860,11 +866,11 @@ async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallbac
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&restored, &agent.session.messages);
+        .restore_persisted_stored_state_with(&restored, agent.session.messages());
     let (after_reload, _) = agent.messages_for_provider(None).await.unwrap();
     assert_eq!(anthropic_wire(&after_reload), wire);
 
-    crate::todo::save_todos(&agent.session.id, &[]).unwrap();
+    crate::todo::save_todos(agent.session.id(), &[]).unwrap();
     let (after_clear, _) = agent.messages_for_provider(None).await.unwrap();
     let mut after_clear = anthropic_wire(&after_clear);
     let latest = after_clear.as_array_mut().unwrap().last_mut().unwrap();
@@ -895,13 +901,13 @@ async fn compaction_missing_native_summary_warns_once_without_dropping_live_cont
         original_turn_count: 500,
         compacted_count: 0,
     };
-    agent.session.compaction = Some(Arc::new(state.clone()));
+    agent.session.set_compaction(Some(Arc::new(state.clone())));
     agent
         .registry
         .compaction()
         .write()
         .await
-        .restore_persisted_stored_state_with(&state, &agent.session.messages);
+        .restore_persisted_stored_state_with(&state, agent.session.messages());
     for _ in 0..2 {
         let (messages, _) = agent.messages_for_provider(None).await.unwrap();
         let wire = anthropic_wire(&messages).to_string();
@@ -909,7 +915,7 @@ async fn compaction_missing_native_summary_warns_once_without_dropping_live_cont
         assert!(wire.contains("cold-user-turn"));
         assert!(!wire.contains("opaque-without-source"));
     }
-    assert_eq!(agent.session.replay_events.iter().filter(|event| {
+    assert_eq!(agent.session.replay_events().iter().filter(|event| {
         matches!(&event.kind, crate::session::StoredReplayEventKind::DisplayMessage { content, .. } if content.contains("Earlier context may be incomplete"))
     }).count(), 1);
 }
@@ -971,7 +977,7 @@ async fn a_cold_cache_does_not_shake_for_a_few_percent() {
     );
     let methods: Vec<_> = agent
         .session
-        .replay_events
+        .replay_events()
         .iter()
         .filter_map(|record| match &record.kind {
             crate::session::StoredReplayEventKind::Compaction { method, .. } => method.clone(),
@@ -997,7 +1003,7 @@ async fn a_cold_cache_does_not_shake_for_a_few_percent() {
     agent.messages_for_provider(None).await.unwrap();
     let stored = agent
         .session
-        .replay_events
+        .replay_events()
         .iter()
         .filter(|record| {
             matches!(
@@ -1020,7 +1026,9 @@ async fn the_cold_cache_notice_reports_the_whole_prompt_after_a_restart() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 100_000, 1_200).await;
     let last_request = before as u64 + 40_000;
-    agent.session.last_provider_cache_domain = Some(agent.request_cache_domain());
+    agent
+        .session
+        .set_last_provider_cache_domain(Some(agent.request_cache_domain()));
     agent.kv_cache_monitor.begin_request(
         crate::kv_cache_monitor::RequestRoute::default(),
         crate::kv_cache_monitor::RequestSignature::default(),

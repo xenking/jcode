@@ -246,7 +246,7 @@ fn load_session_messages(session_id: &str) -> Option<Vec<Message>> {
     let session = Session::load(session_id).ok()?;
     Some(
         session
-            .messages
+            .messages()
             .into_iter()
             .map(|msg| msg.to_message())
             .collect(),

@@ -195,7 +195,7 @@ pub fn install_panic_hook() {
 
             if std::env::var_os("JCODE_SSH_REMOTE").is_none()
                 && let Ok(mut session) = session::Session::load(&session_id)
-                && should_record_panic_as_crash(&session.status)
+                && should_record_panic_as_crash(session.status())
             {
                 session.mark_crashed(Some(format!("Panic: {}", info)));
                 let _ = session.save();
@@ -213,7 +213,7 @@ pub fn mark_current_session_crashed(message: String) {
             telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Signal);
         }
         if let Ok(mut session) = session::Session::load(&session_id)
-            && matches!(session.status, session::SessionStatus::Active)
+            && matches!(session.status(), session::SessionStatus::Active)
         {
             session.mark_crashed(Some(message));
             let _ = session.save();

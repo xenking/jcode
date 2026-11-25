@@ -227,7 +227,10 @@ fn login_welcome_kind_shows_import_checkbox_list() {
         };
     }
     match app.onboarding_welcome_kind() {
-        OnboardingWelcomeKind::Login { import: Some(prompt), .. } => {
+        OnboardingWelcomeKind::Login {
+            import: Some(prompt),
+            ..
+        } => {
             assert_eq!(prompt.rows.len(), 2);
             assert_eq!(prompt.rows[0].provider_summary, "OpenAI/Codex");
             assert_eq!(prompt.rows[0].source_name, "Codex auth.json");
@@ -254,7 +257,10 @@ fn import_review_collects_checked_logins() {
     // The default is the summary screen with Import preselected.
     assert!(!review.choosing);
     assert!(review.continue_focused);
-    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Continue);
+    assert_eq!(
+        review.summary_pill,
+        crate::tui::app::onboarding_flow::SummaryPill::Continue
+    );
     assert_eq!(review.total(), 3);
     // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
@@ -455,14 +461,17 @@ fn import_review_decision_timer_counts_down_and_times_out() {
     use crate::external_auth::ExternalAuthReviewCandidate;
     use crate::tui::app::onboarding_flow::{DECISION_TIMEOUT, ImportReview};
 
-    let mut review =
-        ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("Cursor", "Cursor")]).unwrap();
+    let mut review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+        "Cursor", "Cursor",
+    )])
+    .unwrap();
     // Fresh review: a full timeout's worth of seconds remain and it hasn't
     // timed out yet.
     assert!(review.seconds_remaining() <= DECISION_TIMEOUT.as_secs());
     assert!(!review.timed_out());
     // Force the clock past the timeout.
-    review.shown_at = std::time::Instant::now() - (DECISION_TIMEOUT + std::time::Duration::from_secs(1));
+    review.shown_at =
+        std::time::Instant::now() - (DECISION_TIMEOUT + std::time::Duration::from_secs(1));
     assert_eq!(review.seconds_remaining(), 0);
     assert!(review.timed_out());
 }
@@ -507,7 +516,9 @@ fn pending_login_entry_is_not_intercepted_by_onboarding_login_phase() {
         // Simulate having chosen OpenRouter: the picker closed and a pending
         // API-key login prompt is now active.
         app.inline_interactive_state = None;
-        app.start_login_provider(crate::provider_catalog::resolve_login_provider("openrouter").unwrap());
+        app.start_login_provider(
+            crate::provider_catalog::resolve_login_provider("openrouter").unwrap(),
+        );
         assert!(app.pending_login.is_some());
         assert!(app.inline_interactive_state.is_none());
 
@@ -555,14 +566,18 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
         // are no longer swallowed.
         let key = "sk-or-key-no-loop";
         for ch in key.chars() {
-            app.handle_key(KeyCode::Char(ch), KeyModifiers::NONE).unwrap();
+            app.handle_key(KeyCode::Char(ch), KeyModifiers::NONE)
+                .unwrap();
             // The picker must never re-open while typing.
             assert!(
                 app.inline_interactive_state.is_none(),
                 "picker re-opened while typing '{ch}'"
             );
         }
-        assert_eq!(app.input, key, "every typed character must reach the input buffer");
+        assert_eq!(
+            app.input, key,
+            "every typed character must reach the input buffer"
+        );
 
         // Pressing Enter submits the key to the pending-login handler instead of
         // re-opening the provider picker (the old loop).
@@ -575,14 +590,19 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
             app.inline_interactive_state.is_none(),
             "Enter must not re-open the provider picker"
         );
-        assert!(app.input.is_empty(), "input buffer should clear after submit");
+        assert!(
+            app.input.is_empty(),
+            "input buffer should clear after submit"
+        );
 
         // Crucially: the key must actually be *persisted*, not just "not loop".
         // It is written to $JCODE_HOME/config/jcode/openrouter.env, which is
         // where the provider resolves it from at request time. It must not be
         // copied into the process env, where it would shadow later edits of the
         // file and leak into child processes (#1386).
-        let env_file = crate::storage::app_config_dir().unwrap().join("openrouter.env");
+        let env_file = crate::storage::app_config_dir()
+            .unwrap()
+            .join("openrouter.env");
         let contents = std::fs::read_to_string(&env_file)
             .unwrap_or_else(|e| panic!("openrouter.env should exist at {env_file:?}: {e}"));
         assert!(
@@ -616,9 +636,10 @@ fn import_failure_resets_login_to_manual_prompt() {
         app.begin_onboarding_flow_at_login();
         // Simulate the walkthrough having approved a candidate and kicked off an
         // import (the per-candidate sub-state is cleared once the import spawns).
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("Cursor", "Cursor")])
-                .unwrap();
+        let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "Cursor", "Cursor",
+        )])
+        .unwrap();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login {
                 import: Some(review),
@@ -846,7 +867,7 @@ fn startup_check_skips_selfdev_canary_session() {
         // Self-dev / canary sessions (e.g. the niri `jcode self-dev` hotkey) take
         // a launch path that never bumps `launch_count`, so without this guard the
         // new-user heuristic would re-onboard on every spawn.
-        app.session.is_canary = true;
+        app.session.set_is_canary_for_tests(true);
 
         app.maybe_begin_onboarding_flow_on_startup();
 
@@ -861,7 +882,7 @@ fn startup_check_skips_selfdev_canary_session() {
 #[test]
 fn model_validation_success_appends_single_ready_line() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let before = app.display_messages().len();
 
     let consumed = app.handle_onboarding_model_validated(crate::bus::OnboardingModelValidated {
@@ -876,7 +897,10 @@ fn model_validation_success_appends_single_ready_line() {
     let messages = app.display_messages();
     assert_eq!(messages.len(), before + 1, "exactly one summary block");
     let line = &messages.last().unwrap().content;
-    assert!(line.contains("Ready to use"), "has a ready section: {line:?}");
+    assert!(
+        line.contains("Ready to use"),
+        "has a ready section: {line:?}"
+    );
     assert!(
         line.contains("GPT-5.5 (low) (default)"),
         "names the default model: {line:?}"
@@ -890,7 +914,7 @@ fn model_validation_success_appends_single_ready_line() {
 #[test]
 fn model_validation_failure_appends_single_warning_line_with_detail() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     let before = app.display_messages().len();
 
     let consumed = app.handle_onboarding_model_validated(crate::bus::OnboardingModelValidated {
@@ -913,7 +937,10 @@ fn model_validation_failure_appends_single_warning_line_with_detail() {
         line.contains("Claude Opus 4.8 (default)"),
         "names the default model: {line:?}"
     );
-    assert!(line.contains("timed out after 30s"), "includes detail: {line:?}");
+    assert!(
+        line.contains("timed out after 30s"),
+        "includes detail: {line:?}"
+    );
     assert!(line.contains("/model"), "offers a way out: {line:?}");
     assert!(
         line.contains('\u{2715}'),
@@ -924,7 +951,7 @@ fn model_validation_failure_appends_single_warning_line_with_detail() {
 #[test]
 fn model_validation_auth_failure_offers_login_fix() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     let consumed = app.handle_onboarding_model_validated(crate::bus::OnboardingModelValidated {
         session_id,
@@ -942,7 +969,10 @@ fn model_validation_auth_failure_offers_login_fix() {
     let line = &messages.last().unwrap().content;
     // Auth failures should point the user at /login to re-authenticate, while
     // still offering /model as an alternative.
-    assert!(line.contains("/login"), "auth failure offers /login: {line:?}");
+    assert!(
+        line.contains("/login"),
+        "auth failure offers /login: {line:?}"
+    );
     assert!(line.contains("/model"), "still offers /model: {line:?}");
 }
 
@@ -977,7 +1007,7 @@ fn remote_post_login_validation_waits_for_catalog_refresh() {
         // armed to wait for the catalog generation to advance past 3.
         app.remote_model_catalog_generation = 3;
         app.onboarding_pending_model_validation = Some(
-            OnboardingPendingValidation::awaiting_catalog_refresh(app.session.id.clone(), 3),
+            OnboardingPendingValidation::awaiting_catalog_refresh(app.session.id().to_owned(), 3),
         );
 
         // Catalog hasn't refreshed yet (generation unchanged): not ready to fire.
@@ -998,7 +1028,7 @@ fn local_post_import_validation_waits_for_model_activation() {
         app.is_remote = false;
         app.auth_catalog_refresh_pending = true;
         app.onboarding_pending_model_validation = Some(
-            OnboardingPendingValidation::awaiting_catalog_refresh(app.session.id.clone(), 0),
+            OnboardingPendingValidation::awaiting_catalog_refresh(app.session.id().to_owned(), 0),
         );
 
         assert!(
@@ -1026,11 +1056,8 @@ fn startup_check_skips_user_with_established_session_history() {
             .join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         for i in 0..10 {
-            std::fs::write(
-                sessions_dir.join(format!("session_test_{i:02}.json")),
-                "{}",
-            )
-            .expect("write session file");
+            std::fs::write(sessions_dir.join(format!("session_test_{i:02}.json")), "{}")
+                .expect("write session file");
         }
 
         let mut app = create_test_app();
@@ -1336,9 +1363,10 @@ fn import_failure_reason_is_cleaned_and_capitalized() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         // Must be in the Login phase for the failure handler to apply.
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("Cursor", "Cursor")])
-                .unwrap();
+        let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "Cursor", "Cursor",
+        )])
+        .unwrap();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login {
                 import: Some(review),
@@ -1346,7 +1374,8 @@ fn import_failure_reason_is_cleaned_and_capitalized() {
         }
         // A multi-line markdown failure message with marker noise and a
         // lowercase first word, mimicking the importer's render_markdown output.
-        let raw = "**Logins imported**\n\nthe token has expired\n- \u{2715} Cursor (from Cursor): bad";
+        let raw =
+            "**Logins imported**\n\nthe token has expired\n- \u{2715} Cursor (from Cursor): bad";
         app.onboarding_handle_login_failed(Some(raw.to_string()));
         let shown = app
             .onboarding_import_error
@@ -1355,7 +1384,10 @@ fn import_failure_reason_is_cleaned_and_capitalized() {
         // Markdown bold headers and the "Logins imported" line are stripped; the
         // first meaningful line is kept, marker trimmed, first letter uppercased.
         assert!(!shown.contains("**"), "markdown bold stripped: {shown}");
-        assert!(!shown.contains('\u{2715}'), "marker glyph stripped: {shown}");
+        assert!(
+            !shown.contains('\u{2715}'),
+            "marker glyph stripped: {shown}"
+        );
         assert!(
             shown.starts_with("The token has expired"),
             "first meaningful line kept + capitalized: {shown}"
@@ -1391,16 +1423,31 @@ fn import_failure_h_key_prepares_agent_repair_brief() {
             .find(|m| m.content.contains("Agent repair brief"))
             .map(|m| m.content.clone())
             .expect("repair brief message");
-        assert!(brief.contains("jcode auth-test --provider openai --json"), "{brief}");
+        assert!(
+            brief.contains("jcode auth-test --provider openai --json"),
+            "{brief}"
+        );
         assert!(brief.contains("--api-key-stdin"), "{brief}");
-        assert!(brief.contains("the saved credential was rejected"), "{brief}");
+        assert!(
+            brief.contains("the saved credential was rejected"),
+            "{brief}"
+        );
         // The brief was also persisted to a stable path a helper agent can read.
-        let brief_path = crate::tui::app::onboarding_repair::repair_brief_path()
-            .expect("repair brief path");
-        assert!(brief_path.exists(), "brief file should be written: {brief_path:?}");
+        let brief_path =
+            crate::tui::app::onboarding_repair::repair_brief_path().expect("repair brief path");
+        assert!(
+            brief_path.exists(),
+            "brief file should be written: {brief_path:?}"
+        );
         let on_disk = std::fs::read_to_string(&brief_path).expect("read brief file");
-        assert!(on_disk.contains("jcode auth-test --provider openai --json"), "{on_disk}");
-        assert!(brief.contains(&brief_path.display().to_string()), "brief cites its own path");
+        assert!(
+            on_disk.contains("jcode auth-test --provider openai --json"),
+            "{on_disk}"
+        );
+        assert!(
+            brief.contains(&brief_path.display().to_string()),
+            "brief cites its own path"
+        );
         // Staying on the recovery screen, Enter still opens the provider picker.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         assert!(app.inline_interactive_state.is_some());
@@ -1476,7 +1523,11 @@ fn local_claude_login_keeps_the_selected_model_and_offers_manual_switch() {
             message: "Claude login complete".into(),
         });
         assert_eq!(app.provider.model(), "gpt-5.1");
-        assert!(app.display_messages().iter().any(|message| message.content.contains("Use /model to switch")));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("Use /model to switch"))
+        );
     });
 }
 
@@ -1489,11 +1540,8 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
         let legacy_auth = crate::auth::codex::legacy_auth_file_path().expect("legacy auth path");
         std::fs::create_dir_all(legacy_auth.parent().expect("legacy auth parent"))
             .expect("create legacy auth dir");
-        std::fs::write(
-            legacy_auth,
-            r#"{"OPENAI_API_KEY":"sk-onboarding-test"}"#,
-        )
-        .expect("seed importable Codex key");
+        std::fs::write(legacy_auth, r#"{"OPENAI_API_KEY":"sk-onboarding-test"}"#)
+            .expect("seed importable Codex key");
         crate::auth::AuthStatus::invalidate_cache();
 
         // App construction performs synchronous runtime-backed setup, so build
@@ -1546,9 +1594,8 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
                 app.onboarding_phase(),
                 Some(OnboardingPhase::StartChoice { .. })
             ));
-            let (model, provider_key) = tokio::time::timeout(
-                std::time::Duration::from_secs(4),
-                async {
+            let (model, provider_key) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
                     loop {
                         match bus_rx.recv().await {
                             Ok(crate::bus::BusEvent::ProviderModelActivated {
@@ -1562,10 +1609,9 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
                             _ => {}
                         }
                     }
-                },
-            )
-            .await
-            .expect("strongest model activation event");
+                })
+                .await
+                .expect("strongest model activation event");
 
             assert_eq!(model, jcode_provider_core::DEFAULT_OPENAI_MODEL);
             assert_eq!(provider_key.as_deref(), Some("openai-api"));
@@ -1624,11 +1670,6 @@ fn import_summary_choose_pill_opens_checkbox_list() {
 
 include!("onboarding_recent_project_tests.rs");
 
-
-
-
-
-
 #[test]
 fn starting_recent_project_review_queues_remote_turn_without_stuck_sending() {
     let mut app = onboarding_test_app();
@@ -1650,26 +1691,26 @@ fn starting_recent_project_review_queues_remote_turn_without_stuck_sending() {
         "remote review must stay idle until the remote queue dispatches"
     );
     assert!(app.input.is_empty());
-    assert_eq!(
-        app.queued_messages,
-        vec![expected]
-    );
+    assert_eq!(app.queued_messages, vec![expected]);
 }
 
 #[test]
 fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     let mut app = onboarding_test_app();
     app.is_remote = true;
-    app.session.working_dir = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
+    app.session
+        .set_working_dir(dirs::home_dir().map(|path| path.to_string_lossy().into_owned()));
 
     app.onboarding_start_recent_project_review();
 
     assert!(!app.pending_turn);
     assert!(app.queued_messages.is_empty());
     assert!(!app.onboarding_flow_active());
-    assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
-        notice.contains("No active Git repository found")
-    }));
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(notice, _)| { notice.contains("No active Git repository found") })
+    );
 }
 
 include!("onboarding_flow_telemetry.rs");

@@ -68,9 +68,10 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
         // populate with project skills. Use an empty explicit project here.
         let project = home.join("empty-project");
         std::fs::create_dir_all(&project).unwrap();
-        app.session.working_dir = Some(project.to_string_lossy().into_owned());
+        app.session
+            .set_working_dir(Some(project.to_string_lossy().into_owned()));
         assert!(app.remote_skills.is_empty());
-        assert!(app.session.messages.is_empty());
+        assert!(app.session.messages().is_empty());
         assert_eq!(
             startup_skill_commands(&mut app, "/"),
             vec!["/startup-global"]
@@ -96,8 +97,12 @@ fn skill_startup_minimal_clients_keep_project_overlays_separate() {
         write_startup_skill(&b, "startup-project-b");
         let mut first = App::new_for_remote_with_options(None, false);
         let mut second = App::new_for_remote_with_options(None, false);
-        first.session.working_dir = Some(a.to_string_lossy().into_owned());
-        second.session.working_dir = Some(b.to_string_lossy().into_owned());
+        first
+            .session
+            .set_working_dir(Some(a.to_string_lossy().into_owned()));
+        second
+            .session
+            .set_working_dir(Some(b.to_string_lossy().into_owned()));
         assert_eq!(
             startup_skill_commands(&mut first, "/"),
             vec!["/startup-global", "/startup-project-a"]

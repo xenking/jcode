@@ -658,7 +658,7 @@ fn test_catchup_next_queues_resume_for_attention_session() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
-        app.remote_session_id = Some(app.session.id.clone());
+        app.remote_session_id = Some(app.session.id().to_owned());
 
         let mut target = Session::create(None, Some("catchup target".to_string()));
         target.add_message(
@@ -685,7 +685,7 @@ fn test_catchup_next_queues_resume_for_attention_session() {
             .pending_catchup_resume
             .clone()
             .expect("missing pending catchup resume");
-        assert_eq!(pending.target_session_id, target.id);
+        assert_eq!(pending.target_session_id, target.id());
         assert_eq!(pending.source_session_id, app.remote_session_id);
         assert_eq!(pending.queue_position, Some((1, 1)));
         assert!(pending.show_brief);
@@ -724,7 +724,7 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
         let mut app = create_test_app();
         app.side_panel = test_side_panel_snapshot("plan", "Plan");
 
-        let source_session_id = app.session.id.clone();
+        let source_session_id = app.session.id().to_owned();
         let mut target = Session::create(None, Some("catchup brief".to_string()));
         target.add_message(
             crate::message::Role::User,
@@ -742,7 +742,7 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
         );
         target.mark_closed();
         target.save().expect("save catchup brief session");
-        let target_id = target.id.clone();
+        let target_id = target.id().to_owned();
 
         app.begin_in_flight_catchup_resume(PendingCatchupResume {
             target_session_id: target_id.clone(),
@@ -767,8 +767,8 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
         let persisted = Session::load(&target_id).expect("reload catchup target");
         assert!(!crate::catchup::needs_catchup(
             &target_id,
-            persisted.updated_at,
-            &persisted.status
+            persisted.updated_at(),
+            persisted.status()
         ));
     });
 }
@@ -792,11 +792,11 @@ fn test_catchup_brief_reveals_side_panel_the_user_hid() {
         );
         target.mark_closed();
         target.save().expect("save catchup session");
-        let target_id = target.id.clone();
+        let target_id = target.id().to_owned();
 
         app.begin_in_flight_catchup_resume(PendingCatchupResume {
             target_session_id: target_id.clone(),
-            source_session_id: Some(app.session.id.clone()),
+            source_session_id: Some(app.session.id().to_owned()),
             queue_position: None,
             show_brief: true,
         });
@@ -878,8 +878,8 @@ fn test_save_command_bookmarks_session_with_memory_enabled() {
     app.input = "/save quick-label".to_string();
     app.submit_input();
 
-    assert!(app.session.saved);
-    assert_eq!(app.session.save_label.as_deref(), Some("quick-label"));
+    assert!(app.session.is_saved());
+    assert_eq!(app.session.save_label(), Some("quick-label"));
     let msg = app
         .display_messages()
         .last()
@@ -914,7 +914,8 @@ fn test_goals_command_opens_overview_in_side_panel() {
     .expect("create goal");
 
     let mut app = create_test_app();
-    app.session.working_dir = Some(project.display().to_string());
+    app.session
+        .set_working_dir(Some(project.display().to_string()));
     app.input = "/goals".to_string();
     app.submit_input();
 
@@ -952,7 +953,7 @@ fn test_mission_and_goal_commands_are_disabled() {
         "/mission must not queue prompts"
     );
     assert!(
-        crate::mission::load(&app.session.id)
+        crate::mission::load(app.session.id())
             .expect("load mission")
             .is_none(),
         "/mission must not create a mission"
@@ -970,7 +971,7 @@ fn test_mission_and_goal_commands_are_disabled() {
         "/goal must not queue prompts"
     );
     assert!(
-        crate::mission::load(&app.session.id)
+        crate::mission::load(app.session.id())
             .expect("load mission")
             .is_none(),
         "/goal must not create a mission"
@@ -993,12 +994,13 @@ fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let mut app = create_test_app();
-    app.session.working_dir = Some(project.display().to_string());
+    app.session
+        .set_working_dir(Some(project.display().to_string()));
     app.input = "/goals".to_string();
     app.submit_input();
 
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("goals"));
-    let mission = crate::mission::load(&app.session.id).expect("load mission");
+    let mission = crate::mission::load(app.session.id()).expect("load mission");
     assert!(
         mission.is_none(),
         "/goals should not create a mission named `s`"
@@ -1068,7 +1070,7 @@ fn test_btw_command_asks_in_a_side_card_instead_of_forking() {
 }
 
 fn app_message_count(app: &App) -> usize {
-    app.session.messages.len() + app.display_messages().len()
+    app.session.messages().len() + app.display_messages().len()
 }
 
 #[test]
@@ -1168,9 +1170,9 @@ fn submit_git_command_and_wait_for_response(app: &mut App, command: &str) {
     let expected_session_id = if app.is_remote {
         app.remote_session_id
             .clone()
-            .unwrap_or_else(|| app.session.id.clone())
+            .unwrap_or_else(|| app.session.id().to_owned())
     } else {
-        app.session.id.clone()
+        app.session.id().to_owned()
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -1218,7 +1220,7 @@ fn test_observe_command_enables_transient_page_without_persisting() {
                 .contains("Waiting for the next tool call or tool result")
         );
 
-        let persisted = crate::side_panel::snapshot_for_session(&app.session.id)
+        let persisted = crate::side_panel::snapshot_for_session(app.session.id())
             .expect("load persisted side panel");
         assert!(persisted.pages.is_empty());
         assert!(persisted.focused_page_id.is_none());
@@ -1247,7 +1249,7 @@ fn test_splitview_command_enables_transient_page_without_persisting() {
         );
         assert!(page.content.contains("Mirror of the current chat"));
 
-        let persisted = crate::side_panel::snapshot_for_session(&app.session.id)
+        let persisted = crate::side_panel::snapshot_for_session(app.session.id())
             .expect("load persisted side panel");
         assert!(persisted.pages.is_empty());
         assert!(persisted.focused_page_id.is_none());
@@ -1453,7 +1455,8 @@ fn test_goals_show_command_focuses_goal_page() {
     .expect("create goal");
 
     let mut app = create_test_app();
-    app.session.working_dir = Some(project.display().to_string());
+    app.session
+        .set_working_dir(Some(project.display().to_string()));
     app.input = format!("/goals show {}", goal.id);
     app.submit_input();
 
@@ -1484,7 +1487,8 @@ fn test_initiatives_commands_reopen_a_closed_side_panel() {
         .expect("create goal");
 
         let mut app = create_test_app();
-        app.session.working_dir = Some(project.path().display().to_string());
+        app.session
+            .set_working_dir(Some(project.path().display().to_string()));
         app.side_panel = test_side_panel_snapshot("plan", "Plan");
         for command in [
             "/initiatives".to_string(),

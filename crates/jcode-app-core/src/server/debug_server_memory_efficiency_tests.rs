@@ -145,7 +145,7 @@ fn populated_agent(index: usize) -> Agent {
             }],
         );
     }
-    session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+    session.set_compaction(Some(Arc::new(crate::session::StoredCompactionState {
         summary_text: "summary\n\"界".repeat(128),
         plan_context: None,
         openai_encrypted_content: Some("encrypted".repeat(1024).into()),
@@ -153,7 +153,7 @@ fn populated_agent(index: usize) -> Agent {
         original_turn_count: 8,
         compacted_count: 2,
         snapcompact: None,
-    }));
+    })));
     Agent::new_with_session(
         Arc::new(NoRequests),
         crate::tool::Registry::empty(),

@@ -93,8 +93,7 @@ pub(crate) fn run_migrate(
     let mut repo_root: Option<PathBuf> = None;
     for sess in &sessions {
         let working_dir = sess
-            .working_dir
-            .as_deref()
+            .working_dir()
             .context("group member has no working directory")?;
         let root = PathBuf::from(git(
             Path::new(working_dir),
@@ -129,16 +128,16 @@ pub(crate) fn run_migrate(
             label: credentials.label().to_string(),
         });
         if let Some(account) = &auth_account {
-            sess.route_api_method = Some(account.route());
+            sess.set_route_api_method(Some(account.route()));
         }
         let epoch = selected.epoch;
-        if selected.session_id != sess.id {
+        if selected.session_id != sess.id() {
             bail!("selected session order mismatch");
         }
         group.members.push(Member {
             manifest: MoveManifest {
                 format_version: FORMAT_VERSION,
-                session_id: sess.id.clone(),
+                session_id: sess.id().to_owned(),
                 epoch,
                 source_host: local_host_label(),
                 target_host: host.clone(),
@@ -155,7 +154,7 @@ pub(crate) fn run_migrate(
                     })
                     .collect::<Result<_>>()?,
                 toolchain_hints: toolchain_hints(repo_root.as_deref()),
-                not_transferred: describe_local_only_state(&sess.id),
+                not_transferred: describe_local_only_state(sess.id()),
                 mcp_servers: configured_mcp_servers(),
                 auth_account,
                 auth_accounts: accounts.clone(),
@@ -202,22 +201,22 @@ pub(crate) fn run_migrate(
         for (sess, member) in sessions.iter_mut().zip(&mut journal.group.members) {
             let mut member_repo = repo.clone();
             member_repo.working_dir = sess
-                .working_dir
-                .clone()
+                .working_dir()
+                .map(str::to_owned)
                 .context("missing member working directory")?;
             member.manifest.repo = Some(member_repo);
             if let Some(account) = &member.manifest.auth_account {
-                sess.route_api_method = Some(account.route());
+                sess.set_route_api_method(Some(account.route()));
             }
-            sess.migration_epoch = member.manifest.epoch;
+            sess.set_migration_epoch(member.manifest.epoch);
             let dangling = dangling_tool_use_ids(sess);
             let notice = group_arrival_notice(&member.manifest, &journal.group.coordinator, &ids);
             append_arrival(sess, &dangling, &host, &notice);
-            let member_dir = stage.join("members").join(&sess.id);
+            let member_dir = stage.join("members").join(sess.id());
             std::fs::create_dir_all(&member_dir)?;
             storage::write_json(&member_dir.join("session.json"), sess)?;
             member.session_sha256 = digest(&member_dir.join("session.json"))?;
-            copy_if_exists(&todo_file(&sess.id)?, &member_dir.join("todos.json"))?;
+            copy_if_exists(&todo_file(sess.id())?, &member_dir.join("todos.json"))?;
             member.todos_sha256 = member_dir
                 .join("todos.json")
                 .exists()

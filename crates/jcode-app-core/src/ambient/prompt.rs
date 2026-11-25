@@ -232,21 +232,21 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
         {
             loaded += 1;
             // Skip debug sessions
-            if session.is_debug {
+            if session.is_debug() {
                 continue;
             }
             // Only include sessions updated after cutoff
-            if session.updated_at < cutoff {
+            if session.updated_at() < cutoff {
                 continue;
             }
-            let duration = (session.updated_at - session.created_at)
+            let duration = (session.updated_at() - session.created_at())
                 .num_seconds()
                 .max(0);
-            let extraction = if session.messages.is_empty() {
+            let extraction = if session.messages().is_empty() {
                 "no messages"
             } else {
                 // Heuristic: if session closed normally, assume extracted
-                match &session.status {
+                match session.status() {
                     crate::session::SessionStatus::Closed => "extracted",
                     crate::session::SessionStatus::Crashed { .. } => "missed",
                     crate::session::SessionStatus::Active => "in progress",
@@ -254,8 +254,8 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
                 }
             };
             recent.push(RecentSessionInfo {
-                id: session.id.clone(),
-                status: session.status.display().to_string(),
+                id: session.id().to_owned(),
+                status: session.status().display().to_string(),
                 topic: session.display_title().map(ToOwned::to_owned),
                 duration_secs: duration,
                 extraction_status: extraction.to_string(),

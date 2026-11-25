@@ -181,7 +181,7 @@ fn test_terminal_file_drop_submits_as_user_input_instead_of_a_skill() {
     );
     let submitted = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("submitted file path message");
     assert!(matches!(
@@ -223,7 +223,7 @@ fn test_terminal_file_drop_with_followup_text_stays_normal_input() {
     );
     let submitted = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("submitted file prompt message");
     assert!(matches!(
@@ -495,8 +495,8 @@ fn test_restore_session_adds_reload_message() {
             cache_control: None,
         }],
     );
-    session.provider_session_id = Some("fake-uuid".to_string());
-    let session_id = session.id.clone();
+    session.set_provider_session_id(Some("fake-uuid".to_string()));
+    let session_id = session.id().to_owned();
     session.save().unwrap();
 
     // Restore the session
@@ -542,7 +542,7 @@ fn test_restore_session_with_selfdev_reload_tool_result_leaves_continuation_to_d
             is_error: Some(false),
         }],
     );
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     session.save().unwrap();
 
     app.restore_session(&session_id);
@@ -571,7 +571,7 @@ fn test_system_reminder_goes_to_transcript_not_system_prompt() {
     let after = app.build_system_prompt_split(None);
     assert_eq!(before.static_part, after.static_part);
     assert_eq!(before.dynamic_part, after.dynamic_part);
-    let last = app.session.messages.last().expect("reminder message");
+    let last = app.session.messages().last().expect("reminder message");
     assert_eq!(
         last.display_role,
         Some(crate::session::StoredDisplayRole::System)
@@ -583,34 +583,33 @@ fn test_system_reminder_goes_to_transcript_not_system_prompt() {
     assert!(text.starts_with("<system-reminder>"));
     assert!(text.contains("Continue where you left off."));
 
-    let count = app.session.messages.len();
+    let count = app.session.messages().len();
     app.append_turn_system_reminder(Some("   ".to_string()));
     app.append_turn_system_reminder(None);
-    assert_eq!(app.session.messages.len(), count);
+    assert_eq!(app.session.messages().len(), count);
 }
 
 #[test]
 fn test_recover_session_without_tools_preserves_debug_and_canary_flags() {
     let mut app = create_test_app();
-    app.session.is_debug = true;
-    app.session.is_canary = true;
-    app.session.testing_build = Some("self-dev".to_string());
-    app.session.working_dir = Some("/tmp/jcode-test".to_string());
-    let old_session_id = app.session.id.clone();
+    app.session.set_debug(true);
+    app.session.set_is_canary_for_tests(true);
+    app.session
+        .set_testing_build_for_tests(Some("self-dev".to_string()));
+    app.session
+        .set_working_dir(Some("/tmp/jcode-test".to_string()));
+    let old_session_id = app.session.id().to_owned();
 
     app.recover_session_without_tools();
 
-    assert_ne!(app.session.id, old_session_id);
-    assert_eq!(
-        app.session.parent_id.as_deref(),
-        Some(old_session_id.as_str())
-    );
-    assert!(app.session.is_debug);
-    assert!(app.session.is_canary);
-    assert_eq!(app.session.testing_build.as_deref(), Some("self-dev"));
-    assert_eq!(app.session.working_dir.as_deref(), Some("/tmp/jcode-test"));
+    assert_ne!(app.session.id(), old_session_id);
+    assert_eq!(app.session.parent_id(), Some(old_session_id.as_str()));
+    assert!(app.session.is_debug());
+    assert!(app.session.is_canary());
+    assert_eq!(app.session.testing_build(), Some("self-dev"));
+    assert_eq!(app.session.working_dir(), Some("/tmp/jcode-test"));
 
-    let _ = std::fs::remove_file(crate::session::session_path(&app.session.id).unwrap());
+    let _ = std::fs::remove_file(crate::session::session_path(app.session.id()).unwrap());
 }
 
 #[test]
@@ -680,7 +679,7 @@ fn test_reload_requests_exit_when_newer_binary() {
 #[test]
 fn test_background_update_ready_reloads_immediately_when_idle() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
         session_id: session_id.clone(),
@@ -695,7 +694,7 @@ fn test_background_update_ready_reloads_immediately_when_idle() {
 #[test]
 fn test_background_update_ready_waits_for_turn_to_finish() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     app.is_processing = true;
 
     app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
@@ -723,7 +722,7 @@ fn test_background_update_ready_waits_for_turn_to_finish() {
 #[test]
 fn test_background_update_ready_waits_for_typing_to_go_idle() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     app.note_client_interaction();
 
     app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
@@ -748,7 +747,7 @@ fn test_background_update_ready_waits_for_typing_to_go_idle() {
 #[test]
 fn test_background_rebuild_status_uses_compact_rebuild_card() {
     let mut app = create_test_app();
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
 
     app.handle_session_update_status(SessionUpdateStatus::Status {
         session_id,
@@ -1005,7 +1004,8 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
 
     let repo = create_jcode_repo_fixture();
     let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().display().to_string());
+    app.session
+        .set_working_dir(Some(repo.path().display().to_string()));
 
     app.input = "/selfdev fix the markdown renderer".to_string();
     app.submit_input();

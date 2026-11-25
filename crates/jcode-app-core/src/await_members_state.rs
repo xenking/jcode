@@ -93,7 +93,7 @@ pub(super) fn remember_terminal_swarm_departure(swarm_id: &str, session_id: &str
     if stopped_member(swarm_id, session_id).is_none()
         && Session::load_startup_stub(session_id).is_ok_and(|session| {
             matches!(
-                session.status,
+                session.status(),
                 SessionStatus::Closed | SessionStatus::Crashed { .. } | SessionStatus::Error { .. }
             )
         })

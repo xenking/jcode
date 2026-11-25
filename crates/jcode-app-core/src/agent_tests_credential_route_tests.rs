@@ -85,9 +85,9 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         None,
         None,
     );
-    stale.model = Some("claude-sonnet-5".to_string());
-    stale.provider_key = Some("anthropic-api".to_string());
-    stale.route_api_method = None;
+    stale.set_model(Some("claude-sonnet-5".to_string()));
+    stale.set_provider_key(Some("anthropic-api".to_string()));
+    stale.set_route_api_method(None);
     stale.save_prepared().expect("persist stale session");
 
     let provider = Arc::new(OAuthOnlyClaudeProvider::default());
@@ -119,13 +119,13 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
 
     // What a swarm spawn reads when the coordinator is mid-turn.
     let persisted = crate::session::Session::load("session_stale_api_key_route").unwrap();
-    assert_eq!(persisted.provider_key.as_deref(), Some("claude-oauth"));
-    assert_eq!(persisted.route_api_method.as_deref(), Some("claude-oauth"));
+    assert_eq!(persisted.provider_key(), Some("claude-oauth"));
+    assert_eq!(persisted.route_api_method(), Some("claude-oauth"));
     assert_eq!(
         crate::provider::MultiProvider::model_switch_request_for_session_route(
             "claude-sonnet-5",
-            persisted.provider_key.as_deref(),
-            persisted.route_api_method.as_deref(),
+            persisted.provider_key(),
+            persisted.route_api_method(),
         ),
         "claude-oauth:claude-sonnet-5",
         "workers inheriting the healed session must target the live credential"

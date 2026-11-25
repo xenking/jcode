@@ -2,7 +2,7 @@
 fn test_improve_mode_persists_in_session_file() {
     with_temp_jcode_home(|| {
         let mut session = crate::session::Session::create(None, None);
-        session.improve_mode = Some(crate::session::SessionImproveMode::ImprovePlan);
+        session.set_improve_mode(Some(crate::session::SessionImproveMode::ImprovePlan));
         // Untouched sessions are not persisted (783c979a0); give it a real turn.
         session.add_message(
             crate::message::Role::User,
@@ -11,12 +11,12 @@ fn test_improve_mode_persists_in_session_file() {
                 cache_control: None,
             }],
         );
-        let session_id = session.id.clone();
+        let session_id = session.id().to_owned();
         session.save().expect("save session");
 
         let loaded = crate::session::Session::load(&session_id).expect("load session");
         assert_eq!(
-            loaded.improve_mode,
+            loaded.improve_mode(),
             Some(crate::session::SessionImproveMode::ImprovePlan)
         );
     });
@@ -30,14 +30,14 @@ fn test_refactor_command_starts_refactor_loop() {
 
     assert_eq!(app.improve_mode, Some(ImproveMode::RefactorRun));
     assert_eq!(
-        app.session.improve_mode,
+        app.session.improve_mode(),
         Some(crate::session::SessionImproveMode::RefactorRun)
     );
     assert!(app.is_processing());
 
     let msg = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("missing refactor prompt");
     assert!(matches!(
@@ -64,7 +64,7 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
     assert_eq!(app.improve_mode, None);
     assert!(app.is_processing());
 
-    let msg = app.session.messages.last().expect("missing plan prompt");
+    let msg = app.session.messages().last().expect("missing plan prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -95,7 +95,7 @@ fn test_plan_command_without_goal_plans_current_focus() {
     assert_eq!(app.improve_mode, None);
     assert!(app.is_processing());
 
-    let msg = app.session.messages.last().expect("missing plan prompt");
+    let msg = app.session.messages().last().expect("missing plan prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -112,14 +112,14 @@ fn test_refactor_plan_command_is_plan_only_and_accepts_focus() {
 
     assert_eq!(app.improve_mode, Some(ImproveMode::RefactorPlan));
     assert_eq!(
-        app.session.improve_mode,
+        app.session.improve_mode(),
         Some(crate::session::SessionImproveMode::RefactorPlan)
     );
     assert!(app.is_processing());
 
     let msg = app
         .session
-        .messages
+        .messages()
         .last()
         .expect("missing refactor plan prompt");
     assert!(matches!(
@@ -136,7 +136,7 @@ fn test_refactor_status_summarizes_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
                     lane_speed: None,
@@ -206,10 +206,11 @@ fn test_refactor_status_summarizes_current_todos() {
 fn test_refactor_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session.improve_mode = Some(crate::session::SessionImproveMode::RefactorRun);
+        app.session
+            .set_improve_mode(Some(crate::session::SessionImproveMode::RefactorRun));
         app.session.save().expect("save session");
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,
@@ -239,14 +240,14 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
 
         assert_eq!(app.improve_mode, Some(ImproveMode::RefactorRun));
         assert_eq!(
-            app.session.improve_mode,
+            app.session.improve_mode(),
             Some(crate::session::SessionImproveMode::RefactorRun)
         );
         assert!(app.is_processing());
 
         let msg = app
             .session
-            .messages
+            .messages()
             .last()
             .expect("missing refactor resume prompt");
         assert!(matches!(
@@ -262,14 +263,15 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
 fn test_fix_resets_provider_session() {
     let mut app = create_test_app();
     app.provider_session_id = Some("provider-session".to_string());
-    app.session.provider_session_id = Some("provider-session".to_string());
+    app.session
+        .set_provider_session_id(Some("provider-session".to_string()));
     app.last_stream_error = Some("Stream error: context window exceeded".to_string());
 
     app.input = "/fix".to_string();
     app.submit_input();
 
     assert!(app.provider_session_id.is_none());
-    assert!(app.session.provider_session_id.is_none());
+    assert!(app.session.provider_session_id().is_none());
 
     let msg = app
         .display_messages()

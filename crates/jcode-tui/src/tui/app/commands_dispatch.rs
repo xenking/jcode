@@ -578,10 +578,10 @@ mod tests {
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         app.push_display_message(super::super::DisplayMessage::user("visible remote message"));
-        let session_id = app.session.id.clone();
+        let session_id = app.session.id().to_owned();
         assert!(super::dispatch_local_command(&mut app, "/cls"));
         assert!(app.display_messages.is_empty());
-        assert_eq!(app.session.id, session_id);
+        assert_eq!(app.session.id(), session_id);
         assert!(!app.pending_turn);
         assert!(app.queued_messages.is_empty());
     }

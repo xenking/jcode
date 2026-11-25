@@ -490,7 +490,6 @@ impl EnvRestoreGuard {
                 .collect(),
         )
     }
-
 }
 
 impl Drop for EnvRestoreGuard {
@@ -678,7 +677,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(app.pending_provider_failover.is_none());
         assert!(app.pending_turn);
         assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
-        assert_eq!(app.session.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(app.session.model(), Some("gpt-5.4"));
         // Cause, switch and retry collapse into one line.
         let added = &app.display_messages[before..];
         assert_eq!(added.len(), 1, "{added:?}");
@@ -689,7 +688,11 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             "{}",
             added[0].content
         );
-        assert!(added[0].content.contains(". Retrying. "), "{}", added[0].content);
+        assert!(
+            added[0].content.contains(". Retrying. "),
+            "{}",
+            added[0].content
+        );
         assert!(added[0].content.contains("OAuth usage exhausted"));
         assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");

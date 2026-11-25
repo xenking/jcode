@@ -240,7 +240,7 @@ fn derive_visual_state(
             WorkspaceSessionVisualState::Idle
         };
     }
-    match Session::load(session_id).map(|session| session.status) {
+    match Session::load(session_id).map(|session| session.status().clone()) {
         Ok(SessionStatus::Closed | SessionStatus::Reloaded | SessionStatus::Compacted) => {
             WorkspaceSessionVisualState::Completed
         }

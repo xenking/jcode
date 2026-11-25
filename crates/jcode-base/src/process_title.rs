@@ -61,9 +61,10 @@ pub fn terminal_display_title_for_id(session_id: &str) -> Option<String> {
         .ok()
         .and_then(|session| {
             session
-                .custom_title
+                .custom_title()
                 .filter(|title| !title.trim().is_empty())
-                .or(session.title)
+                .or(session.title())
+                .map(str::to_owned)
                 .or_else(|| crate::todo::load_session_title(session_id))
         })
 }
@@ -263,7 +264,7 @@ mod tests {
         // A todo group is a lane label ("resume title sync"), so it only names
         // sessions that have no generated title at all.
         let mut untitled = crate::session::Session::load(session_id).expect("load session");
-        untitled.title = None;
+        untitled.set_title(None);
         untitled.save().expect("save untitled session");
         assert_eq!(
             terminal_session_label_for_id(session_id),

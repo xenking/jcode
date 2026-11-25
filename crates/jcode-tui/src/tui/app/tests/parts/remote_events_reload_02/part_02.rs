@@ -304,7 +304,8 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.provider_session_id = Some("provider-session".to_string());
-    app.session.provider_session_id = Some("provider-session".to_string());
+    app.session
+        .set_provider_session_id(Some("provider-session".to_string()));
     app.context_warning_shown = true;
 
     app.handle_server_event(
@@ -325,7 +326,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     );
 
     assert!(app.provider_session_id.is_none());
-    assert!(app.session.provider_session_id.is_none());
+    assert!(app.session.provider_session_id().is_none());
     assert!(!app.context_warning_shown);
     assert_eq!(app.status_notice(), Some("Context compacted".to_string()));
 

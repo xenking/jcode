@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn history_provider_name_from_session(
     session: &crate::session::Session,
 ) -> Option<String> {
-    let key = session.provider_key.as_deref()?.trim();
+    let key = session.provider_key()?.trim();
     if key.is_empty() {
         return None;
     }

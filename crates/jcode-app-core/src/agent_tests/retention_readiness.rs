@@ -291,7 +291,8 @@ async fn retention_readiness_scorecard() {
     let mut d0 = Agent::new(provider.clone(), registry.clone());
     d0.session
         .rename_title(Some("Retention cohort project".to_string()));
-    d0.session.working_dir = Some("/synthetic/retention-project".to_string());
+    d0.session
+        .set_working_dir(Some("/synthetic/retention-project".to_string()));
     d0.session.record_memory_injection(
         "cohort preference".to_string(),
         "Prefer deterministic validation".to_string(),
@@ -326,10 +327,9 @@ async fn retention_readiness_scorecard() {
     // durable, the process-like rehydrate must work, and one retry must produce
     // value that depends on BOTH earlier sessions.
     let persisted_d1 = Session::load(&session_id).expect("load D1 session");
-    let d1_message_count = persisted_d1.messages.len();
-    let title_preserved = persisted_d1.custom_title.as_deref() == Some("Retention cohort project");
-    let working_dir_preserved =
-        persisted_d1.working_dir.as_deref() == Some("/synthetic/retention-project");
+    let d1_message_count = persisted_d1.messages().len();
+    let title_preserved = persisted_d1.custom_title() == Some("Retention cohort project");
+    let working_dir_preserved = persisted_d1.working_dir() == Some("/synthetic/retention-project");
     let memory_marker_preserved = persisted_d1
         .injected_memory_ids()
         .iter()
@@ -343,8 +343,8 @@ async fn retention_readiness_scorecard() {
     drop(d7);
 
     let after_failure = Session::load(&session_id).expect("session survives outage");
-    let history_preserved_after_failure = after_failure.messages.len() > d1_message_count
-        && after_failure.messages.iter().any(|stored| {
+    let history_preserved_after_failure = after_failure.messages().len() > d1_message_count
+        && after_failure.messages().iter().any(|stored| {
             message_text(&stored.to_message()).contains("D7_RECOVER finish the longitudinal task")
         });
     let recovered_provider: std::sync::Arc<dyn Provider> =

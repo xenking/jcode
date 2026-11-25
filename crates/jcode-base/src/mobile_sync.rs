@@ -1034,7 +1034,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 continue;
             }
         };
-        if session.is_debug || session.messages.is_empty() {
+        if session.is_debug() || session.messages().is_empty() {
             failures.sessions.remove(&id);
             upload_timing.outcome = "skipped_empty_or_debug";
             updates.insert(
@@ -1050,7 +1050,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             continue;
         }
         let (messages, fingerprint) = incremental_messages(&session, &progress);
-        let title = session.custom_title.as_deref().or(session.title.as_deref());
+        let title = session.custom_title().or(session.title());
         let mut ok = true;
         // Always send at least one request so metadata (title, updated_at) refreshes.
         let chunks: Vec<&[WireMessage]> = if messages.is_empty() {
@@ -1068,10 +1068,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 title,
                 source,
                 host: host.clone(),
-                cwd: session.working_dir.as_deref(),
-                model: session.model.as_deref(),
-                created_at: session.created_at.to_rfc3339(),
-                updated_at: session.updated_at.to_rfc3339(),
+                cwd: session.working_dir(),
+                model: session.model(),
+                created_at: session.created_at().to_rfc3339(),
+                updated_at: session.updated_at().to_rfc3339(),
                 messages: chunk,
             };
             if upload(client, &api_base, &api_key, &id, &body)
@@ -1093,7 +1093,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                 id,
                 SessionProgress {
                     wire_version: WIRE_VERSION,
-                    uploaded: session.messages.len(),
+                    uploaded: session.messages().len(),
                     mtime_ms: mtime,
                     revision: Some(revision),
                     fingerprint: Some(fingerprint),

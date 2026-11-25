@@ -388,13 +388,14 @@ pub(super) fn build_refactor_resume_prompt(
 
 fn current_mode_for(app: &App, predicate: impl Fn(ImproveMode) -> bool) -> Option<ImproveMode> {
     app.improve_mode
-        .or_else(|| app.session.improve_mode.map(restore_improve_mode))
+        .or_else(|| app.session.improve_mode().map(restore_improve_mode))
         .filter(|mode| predicate(*mode))
 }
 
 fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
     app.improve_mode = mode;
-    app.session.improve_mode = mode.map(session_improve_mode_for);
+    app.session
+        .set_improve_mode(mode.map(session_improve_mode_for));
     let _ = app.session.save();
 }
 

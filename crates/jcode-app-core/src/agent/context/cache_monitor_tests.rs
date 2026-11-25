@@ -90,7 +90,7 @@ async fn request_usage_counts_completed_calls_not_stream_snapshots() {
                 cache_read_input,
                 cache_creation_input,
             } => {
-                assert_eq!(session_id, agent.session.id);
+                assert_eq!(session_id, agent.session.id());
                 assert!(!request_id.is_empty());
                 assert_eq!(provider, "openai");
                 assert_eq!(model, "served-model");
@@ -344,7 +344,9 @@ async fn run_account_turns(switch_account: bool) -> Vec<ServerEvent> {
         if index == 1 && switch_account {
             // Same as an accepted failover route: rebind runtime and session.
             *account.lock().unwrap() = "claude-otter".into();
-            agent.session.route_api_method = Some("claude-oauth@claude-otter".into());
+            agent
+                .session
+                .set_route_api_method(Some("claude-oauth@claude-otter".into()));
         }
         agent.add_message(
             Role::User,
@@ -390,7 +392,9 @@ async fn cold_route_switch_compacts_when_only_the_oauth_account_changes() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     agent.run_turn_streaming_mpsc(tx.clone()).await.unwrap();
     *account.lock().unwrap() = "claude-otter".into();
-    agent.session.route_api_method = Some("claude-oauth@claude-otter".into());
+    agent
+        .session
+        .set_route_api_method(Some("claude-oauth@claude-otter".into()));
     agent.reset_provider_session();
     agent.add_message(Role::User, Message::user("continue").content.to_vec());
     agent.run_turn_streaming_mpsc(tx).await.unwrap();

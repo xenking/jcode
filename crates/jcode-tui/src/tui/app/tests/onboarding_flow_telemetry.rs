@@ -9,9 +9,11 @@ fn telemetry_page_is_informational_and_returns_to_summary() {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-                .unwrap();
+        let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "OpenAI/Codex",
+            "Codex auth.json",
+        )])
+        .unwrap();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login {
                 import: Some(review),
@@ -34,9 +36,12 @@ fn telemetry_page_is_informational_and_returns_to_summary() {
             other => panic!("expected import summary, got {other:?}"),
         }
         assert!(!crate::telemetry::is_enabled());
-        let marker = std::path::Path::new(&std::env::var_os("JCODE_HOME").unwrap())
-            .join("no_telemetry");
-        assert!(!marker.exists(), "the page must not persist any telemetry state");
+        let marker =
+            std::path::Path::new(&std::env::var_os("JCODE_HOME").unwrap()).join("no_telemetry");
+        assert!(
+            !marker.exists(),
+            "the page must not persist any telemetry state"
+        );
     });
 }
 
@@ -84,10 +89,7 @@ fn start_choice_prefetches_recent_project_so_enter_does_not_block() {
     assert_eq!(
         app.onboarding_recent_project_path(),
         crate::import::repo_ranking::resolve_git_root(std::path::Path::new(
-            app.session
-                .working_dir
-                .as_deref()
-                .expect("test session working dir")
+            app.session.working_dir().expect("test session working dir")
         ))
     );
 }

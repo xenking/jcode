@@ -12,7 +12,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
         let mut app = create_test_app();
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 lane_speed: None,
                 lane_profile: None,

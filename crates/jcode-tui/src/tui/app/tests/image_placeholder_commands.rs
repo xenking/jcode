@@ -154,7 +154,7 @@ fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
         app.pending_images.is_empty(),
         "submitting must consume pending images"
     );
-    let submitted = app.session.messages.last().expect("submitted message");
+    let submitted = app.session.messages().last().expect("submitted message");
     assert!(
         matches!(submitted.content.first(), Some(ContentBlock::Image { .. })),
         "image block must be attached"
@@ -163,10 +163,14 @@ fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
     assert_eq!(images.len(), 1);
     assert_eq!(prompt, "[image 1] describe this");
     let expected_prompt = format!("[#{}] describe this", images[0].image_id);
-    assert!(matches!(
-        submitted.content.last(),
-        Some(ContentBlock::Text { text, .. }) if text == &expected_prompt
-    ), "submitted content: {:?}", submitted.content);
+    assert!(
+        matches!(
+            submitted.content.last(),
+            Some(ContentBlock::Text { text, .. }) if text == &expected_prompt
+        ),
+        "submitted content: {:?}",
+        submitted.content
+    );
 }
 
 #[test]

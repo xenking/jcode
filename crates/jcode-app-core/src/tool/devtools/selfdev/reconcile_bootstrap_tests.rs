@@ -22,7 +22,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
             task_id: "racing-task-not-in-live-map".to_string(),
             tool_name: "selfdev-build".to_string(),
             display_name: Some("selfdev build".to_string()),
-            session_id: session.id.clone(),
+            session_id: session.id().to_owned(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
             error: None,
@@ -47,7 +47,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
     let request = BuildRequest {
         request_id: "racing-request".to_string(),
         background_task_id: Some("racing-task-not-in-live-map".to_string()),
-        session_id: session.id.clone(),
+        session_id: session.id().to_owned(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Racing Build".to_string()),
         release_notes: None,

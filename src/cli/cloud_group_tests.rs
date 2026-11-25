@@ -20,8 +20,8 @@ fn fixture() -> (tempfile::TempDir, Group) {
         let member_dir = stage.path().join("members").join(id);
         std::fs::create_dir_all(&member_dir).unwrap();
         let mut session = session::Session::create_with_id(id.into(), None, None);
-        session.migration_epoch = 4;
-        session.working_dir = Some(repo.root.clone());
+        session.set_migration_epoch(4);
+        session.set_working_dir(Some(repo.root.clone()));
         storage::write_json(&member_dir.join("session.json"), &session).unwrap();
         std::fs::write(
             member_dir.join("todos.json"),

@@ -11,7 +11,7 @@ impl Agent {
         if self.is_swarm_worker() {
             return;
         }
-        self.provider.set_session_id(&self.session.id);
+        self.provider.set_session_id(self.session.id());
         let tools = self.tool_definitions_for_debug().await;
         let split_prompt = self.build_system_prompt_split(None);
         self.provider

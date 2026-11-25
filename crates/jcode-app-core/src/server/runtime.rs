@@ -547,11 +547,11 @@ mod tests {
             let mut peer = BufReader::new(peer);
             let request = if session_bound {
                 let mut session = crate::session::Session::create(None, None);
-                session.working_dir = Some(home.path().to_string_lossy().into_owned());
+                session.set_working_dir(Some(home.path().to_string_lossy().into_owned()));
                 session.save_prepared().unwrap();
                 serde_json::json!({
-                    "type": "subscribe", "id": 1, "working_dir": session.working_dir,
-                    "target_session_id": session.id,
+                    "type": "subscribe", "id": 1, "working_dir": session.working_dir(),
+                    "target_session_id": session.id(),
                 })
             } else {
                 serde_json::json!({"type": "ping", "id": 1})
@@ -635,14 +635,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (_home, _runtime, runtime) = isolated_runtime(home.path());
         let mut session = crate::session::Session::create(None, None);
-        session.working_dir = Some(home.path().to_string_lossy().into_owned());
+        session.set_working_dir(Some(home.path().to_string_lossy().into_owned()));
         session.save_prepared().unwrap();
-        let target = runtime.sessions.reserve(&session.id).await;
+        let target = runtime.sessions.reserve(session.id()).await;
         let baseline = *runtime.client_count.read().await;
         let (mut peer, mut handler) = counted_client_pair(&runtime).await;
         let request = serde_json::json!({
-            "type": "subscribe", "id": 1, "target_session_id": session.id,
-            "working_dir": session.working_dir,
+            "type": "subscribe", "id": 1, "target_session_id": session.id(),
+            "working_dir": session.working_dir(),
         });
         let mut requests = format!("{request}\n");
         if pipelined {
