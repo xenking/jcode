@@ -91,7 +91,7 @@ impl IdleUnload {
             return 0;
         }
         let ids = {
-            let Ok(sessions) = self.sessions.try_read() else {
+            let Some(sessions) = self.sessions.try_snapshot() else {
                 return 0;
             };
             since.retain(|id, _| sessions.contains_key(id));
@@ -124,7 +124,7 @@ impl IdleUnload {
             return false;
         };
         let handle = {
-            let Ok(sessions) = self.sessions.try_read() else {
+            let Some(sessions) = self.sessions.try_snapshot() else {
                 return false;
             };
             sessions.get(id).cloned()

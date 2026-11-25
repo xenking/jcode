@@ -362,12 +362,10 @@ fn replace_after_delivery_checkpoint(
     })
 }
 
-type SessionIndex = std::collections::HashMap<String, Arc<Mutex<crate::agent::Agent>>>;
-
 fn checkpoint_sessions(
     sessions: &super::SessionAgents,
 ) -> Result<(
-    tokio::sync::RwLockReadGuard<'_, SessionIndex>,
+    super::session_manager::SessionIndexFence<'_>,
     Vec<tokio::sync::OwnedMutexGuard<crate::agent::Agent>>,
 )> {
     ensure!(
@@ -375,7 +373,7 @@ fn checkpoint_sessions(
         "session-local SDK tool restrictions/callbacks must be reconfigured before an automatic upgrade can proceed"
     );
     let activity = crate::turn_activity::global().snapshot();
-    let index = sessions.try_read().context("session index is changing")?;
+    let index = sessions.try_freeze().context("session index is changing")?;
     let mut agents = Vec::with_capacity(index.len());
     for (session_id, agent) in index.iter() {
         ensure!(

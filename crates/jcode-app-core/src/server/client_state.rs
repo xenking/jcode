@@ -73,7 +73,7 @@ pub(super) async fn handle_get_state(
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
     let session_count = {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         sessions_guard.len()
     };
 
@@ -747,7 +747,7 @@ async fn send_history_from_persisted_session(
             if error
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                && sessions.read().await.contains_key(session_id) =>
+                && sessions.contains(session_id).await =>
         {
             // Fresh sessions intentionally have no transcript on disk until
             // their first visible message. Metadata prefetch (or another
@@ -808,7 +808,7 @@ async fn send_history_from_persisted_session(
     );
 
     let (all_sessions, current_client_count) = {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         let mut all: Vec<String> = sessions_guard.keys().cloned().collect();
         all.sort();
         let count = *client_count.read().await;
@@ -1134,7 +1134,7 @@ async fn send_history_with_guard(
 
     let (all_sessions, current_client_count) = {
         let sessions_snapshot_start = Instant::now();
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         let all: Vec<String> = sessions_guard.keys().cloned().collect();
         let count = *client_count.read().await;
         let sessions_snapshot_ms = sessions_snapshot_start.elapsed().as_millis();

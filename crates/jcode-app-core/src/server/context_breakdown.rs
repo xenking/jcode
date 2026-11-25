@@ -17,7 +17,7 @@ pub(super) async fn reply(
         {
             return error(id, "invalid session ID");
         }
-        let live = sessions.read().await.get(&session_id).cloned();
+        let live = sessions.get(&session_id).await;
         if let Some(agent) = live.as_ref().and_then(|agent| agent.try_lock().ok()) {
             let snapshot = agent
                 .snapshot_context_breakdown(summary_only, include_snapcompact)

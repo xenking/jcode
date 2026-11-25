@@ -937,7 +937,7 @@ pub(super) async fn handle_comm_assign_role(
                             .map(|member| (member.event_tx.is_closed(), member.is_headless))
                             .unwrap_or((true, false))
                     };
-                    let not_in_sessions = !sessions.read().await.contains_key(coord_id);
+                    let not_in_sessions = !sessions.contains(coord_id).await;
                     coord_is_headless
                         || (!sessions.is_idle_unloaded(coord_id)
                             && (channel_closed || not_in_sessions))

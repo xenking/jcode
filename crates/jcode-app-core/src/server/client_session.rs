@@ -1266,7 +1266,7 @@ async fn claim_live_target_agent(
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) -> Option<Arc<Mutex<Agent>>> {
     let mut connections = client_connections.write().await;
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     let target = sessions_guard.get(session_id).cloned()?;
     let info = connections.get_mut(client_connection_id)?;
     crate::session::clear_window_closed(session_id);

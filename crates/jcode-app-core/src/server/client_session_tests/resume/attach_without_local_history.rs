@@ -165,7 +165,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         Some(target_session_id)
     );
     drop(connections);
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     assert!(Arc::ptr_eq(
         sessions_guard
             .get(target_session_id)

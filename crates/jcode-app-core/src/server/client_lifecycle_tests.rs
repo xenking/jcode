@@ -348,7 +348,6 @@ struct IsolatedReloadRecoveryEnv {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_fetches_complete_background_output_through_runtime() {
-    use crate::server::runtime::ServerRuntime;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let daemon_socket = home._runtime.path().join("bg-daemon.sock");
@@ -358,7 +357,7 @@ async fn desktop_fetches_complete_background_output_through_runtime() {
         daemon_socket.clone(),
         home._runtime.path().join("bg-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon =
         runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
     let mut bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
@@ -398,7 +397,6 @@ async fn desktop_fetches_complete_background_output_through_runtime() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
-    use crate::server::runtime::ServerRuntime;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let project = tempfile::tempdir().unwrap();
@@ -416,7 +414,7 @@ async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
         daemon_socket.clone(),
         home._runtime.path().join("skill-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon =
         runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
     let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
@@ -2352,7 +2350,7 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         "lightweight control request should not register a live client session"
     );
     assert!(
-        sessions.read().await.is_empty(),
+        sessions.ids().await.is_empty(),
         "lightweight control request should not allocate a live agent session"
     );
 }

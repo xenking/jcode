@@ -174,7 +174,7 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
         socket.clone(),
         sockets.path().join("debug.sock"),
     );
-    let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let accept = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -209,13 +209,7 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
         .expect("attachment should finish");
     }
 
-    let agent = server
-        .sessions
-        .read()
-        .await
-        .get(target.id())
-        .cloned()
-        .unwrap();
+    let agent = server.handles.sessions.get(target.id()).await.unwrap();
     let cwd = agent
         .lock()
         .await

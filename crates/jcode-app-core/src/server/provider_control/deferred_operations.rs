@@ -103,7 +103,7 @@ pub(super) async fn auth_refresh_targets(
     push_unique(&mut handles, Arc::clone(current_provider));
 
     let agents: Vec<Arc<Mutex<Agent>>> = {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         sessions_guard.values().cloned().collect()
     };
 

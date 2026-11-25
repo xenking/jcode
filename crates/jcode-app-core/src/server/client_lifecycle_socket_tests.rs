@@ -12,7 +12,6 @@ mod idle_unload_tests;
 #[cfg(unix)]
 #[tokio::test]
 async fn queue_mutations_survive_daemon_restart_over_socket() {
-    use crate::server::runtime::ServerRuntime;
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -55,7 +54,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         socket.clone(),
         home._runtime.path().join("mutations-debug-1.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -68,7 +67,15 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     )
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
-    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    let session_id = server
+        .handles
+        .sessions
+        .snapshot()
+        .await
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     send(
         &mut writer,
         json!({"type":"message","id":2,"content":"busy"}),
@@ -174,7 +181,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         socket2.clone(),
         home._runtime.path().join("mutations-debug-2.sock"),
     );
-    let runtime2 = ServerRuntime::from_server(&server2);
+    let runtime2 = server2.runtime();
     let handle2 =
         runtime2.spawn_main_accept_loop(crate::transport::Listener::bind(&socket2).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket2)
@@ -230,7 +237,7 @@ async fn daemon_accepts_queue_immediately_after_turn_done() {
         socket.clone(),
         home._runtime.path().join("turn-done-race-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -315,7 +322,7 @@ async fn after_yield_queue_runs_when_a_server_owned_turn_yields() {
         socket.clone(),
         home._runtime.path().join("wake-yield-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -351,22 +358,30 @@ async fn after_yield_queue_runs_when_a_server_owned_turn_yields() {
     )
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
-    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    let session_id = server
+        .handles
+        .sessions
+        .snapshot()
+        .await
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
 
     // A wake turn the daemon starts on its own, like a swarm report.
     let swarm = crate::server::live_turn::LiveTurnSwarmContext::new(
-        &server.swarm_state.members,
-        &server.swarm_state.swarms_by_id,
-        &server.event_history,
-        &server.event_counter,
-        &server.swarm_event_tx,
+        &server.handles.swarm_state.members,
+        &server.handles.swarm_state.swarms_by_id,
+        &server.handles.event_history,
+        &server.handles.event_counter,
+        &server.handles.swarm_event_tx,
     );
     assert!(
         crate::server::live_turn::run_live_turn_if_idle(
             &session_id,
             "worker reported",
             None,
-            &server.sessions,
+            &server.handles.sessions,
             swarm,
         )
         .await
@@ -443,7 +458,7 @@ async fn daemon_delivers_switched_steer_before_ordered_followups() {
         socket.clone(),
         home._runtime.path().join("order-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -592,7 +607,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
         socket.clone(),
         home._runtime.path().join("debug-1.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -628,7 +643,15 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     )
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
-    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    let session_id = server
+        .handles
+        .sessions
+        .snapshot()
+        .await
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     send(
         &mut writer,
         json!({"type":"message","id":2,"content":"first"}),
@@ -684,7 +707,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
         socket2.clone(),
         home._runtime.path().join("debug-2.sock"),
     );
-    let runtime2 = ServerRuntime::from_server(&server2);
+    let runtime2 = server2.runtime();
     let handle2 =
         runtime2.spawn_main_accept_loop(crate::transport::Listener::bind(&socket2).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket2)
@@ -777,7 +800,7 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
             socket.clone(),
             home._runtime.path().join(format!("{mode}-debug.sock")),
         );
-        let runtime = ServerRuntime::from_server(&server);
+        let runtime = server.runtime();
         let handle =
             runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
         let stream = crate::transport::Stream::connect(&socket).await.unwrap();
@@ -832,7 +855,15 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
         until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         if mode == "interrupt" {
-            let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+            let session_id = server
+                .handles
+                .sessions
+                .snapshot()
+                .await
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
             let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket)
                 .await
                 .unwrap()
@@ -889,7 +920,15 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
                 .any(|s| s.contains("Modes skill instructions")),
             "{mode}: {messages:?}"
         );
-        let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+        let session_id = server
+            .handles
+            .sessions
+            .snapshot()
+            .await
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         let journal = crate::session::Session::load(&session_id).unwrap();
         let skill = journal
             .iter_messages()
@@ -993,7 +1032,7 @@ async fn attachments_reach_the_provider_over_daemon_socket() {
         socket.clone(),
         home._runtime.path().join("attachments-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -1124,9 +1163,9 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
         socket.clone(),
         home._runtime.path().join("pinned-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = reload_recovery::RecoveryOwner::new(&server);
+    let recovery = reload_recovery::RecoveryOwner::new(&server.handles);
 
     for (role, content, should_resume) in [
         (
@@ -1212,7 +1251,14 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
         .await
         .expect("resume did not finish");
 
-        let agent = server.sessions.read().await.get(&id).unwrap().clone();
+        let agent = server
+            .handles
+            .sessions
+            .snapshot()
+            .await
+            .get(&id)
+            .unwrap()
+            .clone();
         {
             let agent = agent.lock().await;
             let last = agent.last_message().unwrap();
@@ -1701,7 +1747,7 @@ async fn sdk_socket_cancel_workflow(
     );
     {
         // A stored todo change pushes to the attached client without polling.
-        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let session_id = sessions.snapshot().await.keys().next().unwrap().clone();
         let todos: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
             {"id":"pushed","content":"Pushed without a poll","priority":"high","status":"in_progress"}
         ]))
@@ -1736,7 +1782,7 @@ async fn sdk_socket_cancel_workflow(
         );
     }
     if catalog_failure {
-        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let session_id = sessions.snapshot().await.keys().next().unwrap().clone();
         terminal_provider
             .catalog_revision
             .fetch_add(1, Ordering::SeqCst);
@@ -1772,7 +1818,7 @@ async fn sdk_socket_cancel_workflow(
         terminal_provider
             .churn_catalog
             .store(false, Ordering::SeqCst);
-        assert!(sessions.read().await.contains_key(&session_id));
+        assert!(sessions.contains(&session_id).await);
         assert!(
             client_connections
                 .read()
@@ -1794,10 +1840,10 @@ async fn sdk_socket_cancel_workflow(
         .await;
     }
     if identity_capability {
-        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let session_id = sessions.snapshot().await.keys().next().unwrap().clone();
         let tool_started = Arc::new(tokio::sync::Notify::new());
         if queued_test == Some("force_stop_tool") {
-            let agent = sessions.read().await.get(&session_id).unwrap().clone();
+            let agent = sessions.snapshot().await.get(&session_id).unwrap().clone();
             let registry = agent.lock().await.registry();
             registry
                 .register(
@@ -1887,7 +1933,7 @@ async fn sdk_socket_cancel_workflow(
                 )
                 .await;
                 tool_started.notified().await;
-                let agent = sessions.read().await.get(&session_id).unwrap().clone();
+                let agent = sessions.snapshot().await.get(&session_id).unwrap().clone();
                 assert!(agent.try_lock().is_err(), "turn must hold the agent lock");
             }
             let start = Instant::now();
@@ -2437,7 +2483,7 @@ async fn sdk_socket_cancel_workflow(
     }
     // A catalog/startup task can hold the Agent without an active turn. Tool
     // registration must wait for that work, not return a spurious busy error.
-    let startup_agent = sessions.read().await.values().next().unwrap().clone();
+    let startup_agent = sessions.snapshot().await.values().next().unwrap().clone();
     let startup_guard = startup_agent.lock_owned().await;
     let release_startup = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2519,7 +2565,7 @@ async fn sdk_socket_cancel_workflow(
     })
     .await;
 
-    let session_a = sessions.read().await.keys().next().unwrap().clone();
+    let session_a = sessions.snapshot().await.keys().next().unwrap().clone();
     let (observer_task, observer_stream) = connect();
     let (observer_reader, mut observer_writer) = observer_stream.into_split();
     let mut observer_reader = BufReader::new(observer_reader);

@@ -102,7 +102,7 @@ async fn reclaim_idle_caches(
         return 0;
     }
     // Never queue behind an active turn, roster change or session operation.
-    let Ok(sessions) = sessions.try_read() else {
+    let Some(sessions) = sessions.try_snapshot() else {
         return 0;
     };
     let Ok(members) = members.try_read() else {

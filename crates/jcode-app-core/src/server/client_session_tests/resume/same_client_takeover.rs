@@ -168,7 +168,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         Some((target_session_id, Some(shared_instance_id)))
     );
     drop(connections);
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     assert!(Arc::ptr_eq(
         sessions_guard
             .get(target_session_id)

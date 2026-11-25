@@ -6,15 +6,15 @@ impl Server {
     pub(super) async fn recover_headless_sessions_on_startup(
         &self,
     ) -> reload_recovery::RecoveryPass {
-        let recovery = reload_recovery::RecoveryOwner::new(self);
+        let recovery = reload_recovery::RecoveryOwner::new(&self.handles);
         // Migrate legacy snapshots into the same durable owner. An existing
         // record, including Stop/superseded tombstones, is authoritative.
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
             .filter(|state| state.pid == std::process::id())
             .map(|state| state.request_id);
         let candidates = {
-            let coordinators = self.swarm_state.coordinators.read().await.clone();
-            let members = self.swarm_state.members.read().await;
+            let coordinators = self.handles.swarm_state.coordinators.read().await.clone();
+            let members = self.handles.swarm_state.members.read().await;
             members
                 .values()
                 .filter(|member| !crate::turn_activity::session_is_stopped(&member.session_id))
@@ -65,8 +65,8 @@ impl Server {
                 continue;
             };
             let (owner_live, headless) = {
-                let coordinators = self.swarm_state.coordinators.read().await.clone();
-                let members = self.swarm_state.members.read().await;
+                let coordinators = self.handles.swarm_state.coordinators.read().await.clone();
+                let members = self.handles.swarm_state.members.read().await;
                 let Some(member) = members.get(&session_id) else {
                     continue;
                 };

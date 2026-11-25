@@ -330,7 +330,7 @@ async fn handle_with_gate(
                 "swarm changed while preparing transfer; retry"
             );
             let mut agents = Vec::new();
-            let live = sessions.read().await;
+            let live = sessions.snapshot().await;
             for id in &ids {
                 if let Some(agent) = live.get(id) {
                     agents.push(
@@ -652,7 +652,7 @@ async fn validate_destination(
     // Refuse to replace a live destination copy, including an idle one.
     ensure!(
         sessions
-            .read()
+            .snapshot()
             .await
             .keys()
             .all(|id| !ids.contains(id.as_str())),

@@ -1020,7 +1020,7 @@ pub(super) async fn handle_resume_all_sessions(
 
     for session_id in live_session_ids {
         let agent = {
-            let guard = sessions.read().await;
+            let guard = sessions.snapshot().await;
             guard.get(&session_id).cloned()
         };
         let Some(agent) = agent else {

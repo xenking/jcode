@@ -153,7 +153,7 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
     assert!(Arc::ptr_eq(&rejected_agent, &agent));
     assert_eq!(client_session_id, old_session_id);
     assert!(Arc::ptr_eq(
-        sessions.read().await.get(old_session_id).unwrap(),
+        sessions.snapshot().await.get(old_session_id).unwrap(),
         &agent
     ));
     assert!(shutdown_signals.read().await.contains_key(old_session_id));
@@ -210,13 +210,13 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
         "clear must create a new runtime Arc"
     );
     assert!(Arc::ptr_eq(
-        sessions.read().await.get(&client_session_id).unwrap(),
+        sessions.snapshot().await.get(&client_session_id).unwrap(),
         &agent
     ));
     assert_eq!(old_agent.lock().await.session_id(), old_session_id);
     if shared_source {
         assert!(Arc::ptr_eq(
-            sessions.read().await.get(old_session_id).unwrap(),
+            sessions.snapshot().await.get(old_session_id).unwrap(),
             &old_agent
         ));
         assert_eq!(crate::session_env::session_env(old_session_id), session_env);

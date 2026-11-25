@@ -198,7 +198,7 @@ impl Fixture {
         // by claim_live_target_agent, then register the real event attachment.
         let mut connections = self.connections.write().await;
         assert!(Arc::ptr_eq(
-            self.sessions.read().await.get(&self.id).unwrap(),
+            self.sessions.snapshot().await.get(&self.id).unwrap(),
             &self.agent
         ));
         connections.insert("successor".into(), connection("successor", &self.id));
@@ -268,7 +268,7 @@ async fn continued_idle_coordinator_survives_disconnect_without_reconnect_grace(
             fixture.id
         );
         assert!(Arc::ptr_eq(
-            fixture.sessions.read().await.get(&fixture.id).unwrap(),
+            fixture.sessions.snapshot().await.get(&fixture.id).unwrap(),
             &fixture.agent
         ));
         let members = fixture.members.read().await;
@@ -308,7 +308,7 @@ async fn continued_turn_remains_live_after_owner_finishes() {
             .await
             .is_none()
     );
-    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.sessions.contains(&fixture.id).await);
     assert_eq!(fixture.members.read().await[&fixture.id].status, "ready");
     assert!(!matches!(
         fixture.agent.lock().await.session_for_split().status(),
@@ -334,7 +334,7 @@ async fn unsaved_idle_session_retains_same_agent_for_reattachment() {
         fixture.attach_successor().await;
     });
     assert!(Arc::ptr_eq(
-        fixture.sessions.read().await.get(&fixture.id).unwrap(),
+        fixture.sessions.snapshot().await.get(&fixture.id).unwrap(),
         &fixture.agent
     ));
     assert!(fixture.connections.read().await.contains_key("successor"));
@@ -354,7 +354,7 @@ async fn unsaved_idle_session_expires_without_persisting_or_leaking() {
         .await
         .unwrap();
     assert!(start.elapsed() >= grace);
-    assert!(!fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(!fixture.sessions.contains(&fixture.id).await);
     assert!(!fixture.members.read().await.contains_key(&fixture.id));
     assert!(fixture.connections.read().await.is_empty());
     assert!(!crate::session::session_exists(&fixture.id));
@@ -375,7 +375,7 @@ async fn unsaved_idle_session_without_swarm_member_still_expires() {
     )
     .await
     .unwrap();
-    assert!(!fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(!fixture.sessions.contains(&fixture.id).await);
     assert!(fixture.connections.read().await.is_empty());
 }
 
@@ -400,7 +400,7 @@ async fn old_grace_cannot_remove_successor_that_already_detached_again() {
     });
     assert!(fixture.connections.read().await.is_empty());
     assert!(
-        fixture.sessions.read().await.contains_key(&fixture.id),
+        fixture.sessions.contains(&fixture.id).await,
         "successor owns its own grace/cleanup"
     );
     assert!(fixture.members.read().await.contains_key(&fixture.id));
@@ -417,7 +417,7 @@ async fn persisted_idle_session_does_not_wait_for_reconnect_grace() {
     )
     .await
     .unwrap();
-    assert!(fixture.sessions.read().await.is_empty());
+    assert!(fixture.sessions.ids().await.is_empty());
     assert!(crate::session::session_exists(&fixture.id));
 }
 
@@ -433,7 +433,7 @@ async fn interrupted_session_does_not_wait_for_reconnect_grace() {
     )
     .await
     .unwrap();
-    assert!(fixture.sessions.read().await.is_empty());
+    assert!(fixture.sessions.ids().await.is_empty());
     assert!(matches!(
         fixture.agent.lock().await.session_for_split().status(),
         SessionStatus::Crashed { .. }
@@ -457,7 +457,7 @@ async fn busy_successor_retains_owner_task_and_completion_receiver() {
         .await
         .expect("successor returns ownership to lifecycle continuation");
     assert!(!task.as_ref().unwrap().is_finished());
-    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.sessions.contains(&fixture.id).await);
     assert!(fixture.connections.read().await.contains_key("successor"));
     assert!(!fixture.connections.read().await.contains_key("original"));
     writer.abort();
@@ -465,7 +465,7 @@ async fn busy_successor_retains_owner_task_and_completion_receiver() {
     task.take().unwrap().await.expect("owner was not cancelled");
     assert_eq!(completions.recv().await, Some("completed"));
     fixture.cleanup(false, Duration::ZERO).await;
-    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.sessions.contains(&fixture.id).await);
 }
 
 #[tokio::test]
@@ -492,7 +492,7 @@ async fn busy_without_successor_aborts_owner_and_marks_crashed() {
             .unwrap()
             .is_err()
     );
-    assert!(fixture.sessions.read().await.is_empty());
+    assert!(fixture.sessions.ids().await.is_empty());
     assert!(matches!(
         fixture.agent.lock().await.session_for_split().status(),
         SessionStatus::Crashed { .. }
@@ -534,7 +534,7 @@ async fn viewer_disconnect_keeps_headless_worker_alive() {
     drop(turn_guard);
     assert!(
         Arc::ptr_eq(
-            fixture.sessions.read().await.get(&fixture.id).unwrap(),
+            fixture.sessions.snapshot().await.get(&fixture.id).unwrap(),
             &fixture.agent
         ),
         "worker agent stays published"
@@ -573,7 +573,7 @@ async fn disconnect_keeps_server_owned_turn_published() {
     assert!(
         fixture
             .sessions
-            .read()
+            .snapshot()
             .await
             .get(&fixture.id)
             .is_some_and(|agent| Arc::ptr_eq(agent, &fixture.agent)),

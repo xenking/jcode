@@ -143,7 +143,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
     );
 
     assert_eq!(client_session_id, target_session_id);
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     let mapped_agent = sessions_guard
         .get(target_session_id)
         .ok_or_else(|| anyhow!("existing live session should remain mapped"))?;

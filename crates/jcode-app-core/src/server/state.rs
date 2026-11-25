@@ -1707,7 +1707,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
     }
 
     let queue = {
-        let guard = sessions.read().await;
+        let guard = sessions.snapshot().await;
         guard.get(session_id).and_then(|agent| {
             agent
                 .try_lock()
@@ -1726,7 +1726,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
         queued
     } else {
         let session_exists = {
-            let guard = sessions.read().await;
+            let guard = sessions.snapshot().await;
             guard.contains_key(session_id)
         } || crate::session::session_exists(session_id);
 

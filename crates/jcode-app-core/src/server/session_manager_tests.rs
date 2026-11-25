@@ -125,7 +125,7 @@ async fn failed_or_cancelled_factory_releases_reservation() -> Result<()> {
     .await??;
     assert!(Arc::ptr_eq(
         &owner,
-        manager.read().await.get("target").unwrap()
+        manager.snapshot().await.get("target").unwrap()
     ));
     Ok(())
 }
@@ -151,7 +151,7 @@ async fn publication_never_overwrites_even_after_removal() -> Result<()> {
             .is_err()
     );
     assert!(Arc::ptr_eq(
-        manager.read().await.get("target").unwrap(),
+        manager.snapshot().await.get("target").unwrap(),
         &original
     ));
     let removed = manager.remove("target").await.unwrap();
@@ -217,11 +217,11 @@ async fn rejected_rekey_keeps_both_original_owners() -> Result<()> {
             .is_err()
     );
     assert!(Arc::ptr_eq(
-        manager.read().await.get("first").unwrap(),
+        manager.snapshot().await.get("first").unwrap(),
         &first
     ));
     assert!(Arc::ptr_eq(
-        manager.read().await.get("second").unwrap(),
+        manager.snapshot().await.get("second").unwrap(),
         &second
     ));
     let updated = Arc::try_unwrap(agent("new").await)
@@ -235,15 +235,15 @@ async fn rejected_rekey_keeps_both_original_owners() -> Result<()> {
             .await
             .is_err()
     );
-    assert!(manager.read().await.contains_key("first"));
+    assert!(manager.snapshot().await.contains_key("first"));
     manager
         .reserve("new")
         .await
         .publish_rekeyed(Some("first"), Arc::clone(&first))
         .await?;
-    assert!(!manager.read().await.contains_key("first"));
+    assert!(!manager.snapshot().await.contains_key("first"));
     assert!(Arc::ptr_eq(
-        manager.read().await.get("new").unwrap(),
+        manager.snapshot().await.get("new").unwrap(),
         &first
     ));
     assert!(manager.reserve("first").await.ensure_vacant().is_ok());
@@ -265,7 +265,7 @@ async fn publication_rejects_wrong_session_identity() -> Result<()> {
             .await
             .is_err()
     );
-    assert!(manager.read().await.is_empty());
+    assert!(manager.snapshot().await.is_empty());
     assert!(manager.turn_observer("wrong").is_none());
     Ok(())
 }

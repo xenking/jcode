@@ -492,7 +492,7 @@ impl RelayClient {
         ));
 
         let live_agent = {
-            let guard = sessions.read().await;
+            let guard = sessions.snapshot().await;
             guard.contains_key(&self.config.session_id)
         };
         let queue = {
@@ -1168,7 +1168,7 @@ async fn wait_for_live_session(
 ) -> Result<()> {
     let started = Instant::now();
     loop {
-        if sessions.read().await.contains_key(session_id) {
+        if sessions.contains(session_id).await {
             return Ok(());
         }
         if started.elapsed() >= timeout {
@@ -1189,7 +1189,7 @@ async fn deliver_to_session(
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Result<String> {
     let agent = {
-        let guard = sessions.read().await;
+        let guard = sessions.snapshot().await;
         guard.get(session_id).cloned()
     };
     let Some(agent) = agent else {
@@ -1222,7 +1222,7 @@ async fn deliver_to_launched_session(
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Result<String> {
     let agent = {
-        let guard = sessions.read().await;
+        let guard = sessions.snapshot().await;
         guard.get(session_id).cloned()
     };
     let Some(agent) = agent else {

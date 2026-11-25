@@ -941,7 +941,10 @@ pub(super) async fn cancel_processing_message(
 }
 
 /// Remember the agent's current catalog as already delivered to this client.
-pub(super) async fn record_available_models(agent: &Arc<Mutex<Agent>>, last: &mut PublishedCatalog) {
+pub(super) async fn record_available_models(
+    agent: &Arc<Mutex<Agent>>,
+    last: &mut PublishedCatalog,
+) {
     if let Some(catalog) = try_available_models_catalog_offloaded(agent).await {
         last.record(&catalog);
     }

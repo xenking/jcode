@@ -419,7 +419,7 @@ pub(super) async fn handle_debug_client(
 
             Request::GetState { id } => {
                 let current_session_id = session_id.read().await.clone();
-                let sessions = sessions.read().await;
+                let sessions = sessions.snapshot().await;
                 let message_count = sessions.len();
 
                 let event = ServerEvent::State {

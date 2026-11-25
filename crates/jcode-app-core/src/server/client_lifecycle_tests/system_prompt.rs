@@ -177,7 +177,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         // A fresh attaching connection must receive State while the existing
         // agent is busy, even if its queue registry entry is absent.
         {
-            let target = sessions.read().await.get(&parent_id).cloned().unwrap();
+            let target = sessions.get(&parent_id).await.unwrap();
             let _busy = target.lock().await;
             soft_interrupt_queues.write().await.remove(&parent_id);
             let (observer_task, observer_stream) = connect();
@@ -269,7 +269,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
             Some(prompt)
         );
         // This attachment restores a persisted fork, rather than a live Agent.
-        let original_runtime = sessions.read().await[&parent_id].clone();
+        let original_runtime = sessions.snapshot().await[&parent_id].clone();
         send(
             &mut client_writer,
             json!({"type":"subscribe","id":107,
@@ -281,7 +281,7 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         })
         .await;
         let (retained_source, fork_runtime) = {
-            let registry = sessions.read().await;
+            let registry = sessions.snapshot().await;
             (registry[&parent_id].clone(), registry[&child_id].clone())
         };
         assert!(

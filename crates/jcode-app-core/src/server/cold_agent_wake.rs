@@ -111,7 +111,7 @@ pub(super) async fn assess(
     sessions: &super::SessionAgents,
     roster_model: Option<String>,
 ) -> Option<Risk> {
-    let agent = sessions.read().await.get(recipient).cloned();
+    let agent = sessions.get(recipient).await;
     let asleep = agent.is_none();
     let use_sample = crate::session_metrics::token_totals(recipient).map(|(tokens, _)| tokens);
     let effective_limit = agent.as_ref().and_then(|agent| {

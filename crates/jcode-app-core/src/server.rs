@@ -47,6 +47,7 @@ mod debug_swarm_write;
 mod debug_testers;
 use crate::durable_state;
 mod group_transfer;
+mod handles;
 mod headless;
 pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTransferSession};
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
@@ -195,7 +196,7 @@ fn reload_marker_policy(socket_path: &std::path::Path) -> reload_state::ForeignM
 }
 
 async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmState) -> bool {
-    let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
+    let live_sessions: HashSet<String> = sessions.ids().await;
     swarm_state
         .members
         .read()
@@ -228,7 +229,7 @@ pub(super) async fn set_live_session_env(
     session_id: &str,
     env: HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let sessions = sessions.read().await;
+    let sessions = sessions.snapshot().await;
     if !sessions.contains_key(session_id) {
         anyhow::bail!("Session is no longer active");
     }
@@ -256,7 +257,7 @@ async fn prune_expired_terminal_swarm_members(
         return 0;
     }
 
-    let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
+    let live_sessions: HashSet<String> = sessions.ids().await;
     let mut pruned = 0usize;
     for session_id in candidates {
         // Do not race a lazy restore or eviction of this member.
@@ -265,7 +266,7 @@ async fn prune_expired_terminal_swarm_members(
         };
         // A session can be resumed between candidate collection and removal.
         // Never collect a member that currently has a live agent runtime.
-        if live_sessions.contains(&session_id) || sessions.read().await.contains_key(&session_id) {
+        if live_sessions.contains(&session_id) || sessions.contains(&session_id).await {
             continue;
         }
         let removed_swarm_id = {
@@ -649,61 +650,10 @@ pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
 /// Server state
 pub struct Server {
-    provider: Arc<dyn Provider>,
+    handles: handles::ServerHandles,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
     gateway_config_override: Option<crate::gateway::GatewayConfig>,
-    /// Server identity for multi-server support
-    identity: ServerIdentity,
-    /// Broadcast channel for streaming events to all subscribers
-    event_tx: broadcast::Sender<ServerEvent>,
-    /// Active sessions (session_id -> Agent)
-    sessions: SessionAgents,
-    /// Current processing state
-    is_processing: Arc<RwLock<bool>>,
-    /// Session ID for the default session
-    session_id: Arc<RwLock<String>>,
-    /// Number of connected clients
-    client_count: Arc<RwLock<usize>>,
-    temporary_client_activity: Option<tokio::sync::watch::Sender<bool>>,
-    /// Connected client mapping (client_id -> session_id)
-    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-    /// File-touch tracking service (forward path index + reverse session index)
-    file_touch: FileTouchService,
-    /// Shared ownership of core swarm coordination state.
-    swarm_state: SwarmState,
-    /// Shared context by swarm (swarm_id -> key -> SharedContext)
-    shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-    /// Active and available TUI debug channels (request_id, command)
-    client_debug_state: Arc<RwLock<ClientDebugState>>,
-    /// Channel to receive client debug responses from TUI (request_id, response)
-    client_debug_response_tx: broadcast::Sender<(u64, String)>,
-    /// Background debug jobs (async debug commands)
-    debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
-    /// Channel subscriptions (swarm_id -> channel -> session_ids)
-    channel_subscriptions: ChannelSubscriptions,
-    /// Reverse index for channel subscriptions: session_id -> swarm_id -> channels
-    channel_subscriptions_by_session: ChannelSubscriptions,
-    /// Event history for real-time event subscription (ring buffer)
-    event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    /// Counter for event IDs
-    event_counter: Arc<std::sync::atomic::AtomicU64>,
-    /// Broadcast channel for swarm event subscriptions (debug socket subscribers)
-    swarm_event_tx: broadcast::Sender<SwarmEvent>,
-    /// Ambient mode runner handle (None if ambient is disabled)
-    ambient_runner: Option<AmbientRunnerHandle>,
-    /// Shared MCP server pool (processes shared across sessions), initialized lazily.
-    mcp_pool: Arc<OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
-    /// Graceful shutdown signals by session_id (stored outside agent mutex so they
-    /// can be signaled without locking the agent during active tool execution)
-    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    /// Soft interrupt queues by session_id (stored outside agent mutex so swarm/debug
-    /// notifications can be enqueued while an agent is actively processing)
-    soft_interrupt_queues: SessionInterruptQueues,
-    /// Persisted communicate await_members wait registry.
-    await_members_runtime: AwaitMembersRuntime,
-    /// Persisted dedupe registry for mutating swarm coordinator operations.
-    swarm_mutation_runtime: SwarmMutationRuntime,
     live_before_restart: HashSet<String>,
     running_before_restart: HashSet<String>,
     swarm_restore_completed_at: Instant,
@@ -769,41 +719,43 @@ impl Server {
         let swarm_restore_completed_at = Instant::now();
 
         Self {
-            provider,
+            handles: handles::ServerHandles {
+                provider,
+                identity,
+                event_tx,
+                sessions: Arc::new(SessionManager::new()),
+                is_processing: Arc::new(RwLock::new(false)),
+                session_id: Arc::new(RwLock::new(String::new())),
+                client_count: Arc::new(RwLock::new(0)),
+                temporary_client_activity: lifecycle::temporary_server_enabled()
+                    .then(|| tokio::sync::watch::channel(false).0),
+                client_connections: Arc::new(RwLock::new(HashMap::new())),
+                file_touch: FileTouchService::new(),
+                swarm_state: SwarmState::new(
+                    restored_swarm_members,
+                    restored_swarms_by_id,
+                    restored_swarm_plans,
+                    restored_swarm_coordinators,
+                ),
+                shared_context: Arc::new(RwLock::new(HashMap::new())),
+                client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
+                client_debug_response_tx,
+                debug_jobs: Arc::new(RwLock::new(HashMap::new())),
+                channel_subscriptions: Arc::new(RwLock::new(HashMap::new())),
+                channel_subscriptions_by_session: Arc::new(RwLock::new(HashMap::new())),
+                event_history: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+                event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                swarm_event_tx: broadcast::channel(256).0,
+                ambient_runner,
+                mcp_pool: Arc::new(OnceCell::new()),
+                shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
+                soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
+                await_members_runtime: AwaitMembersRuntime::default(),
+                swarm_mutation_runtime: SwarmMutationRuntime::default(),
+            },
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
             gateway_config_override: None,
-            identity,
-            event_tx,
-            sessions: Arc::new(SessionManager::new()),
-            is_processing: Arc::new(RwLock::new(false)),
-            session_id: Arc::new(RwLock::new(String::new())),
-            client_count: Arc::new(RwLock::new(0)),
-            temporary_client_activity: lifecycle::temporary_server_enabled()
-                .then(|| tokio::sync::watch::channel(false).0),
-            client_connections: Arc::new(RwLock::new(HashMap::new())),
-            file_touch: FileTouchService::new(),
-            swarm_state: SwarmState::new(
-                restored_swarm_members,
-                restored_swarms_by_id,
-                restored_swarm_plans,
-                restored_swarm_coordinators,
-            ),
-            shared_context: Arc::new(RwLock::new(HashMap::new())),
-            client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
-            client_debug_response_tx,
-            debug_jobs: Arc::new(RwLock::new(HashMap::new())),
-            channel_subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            channel_subscriptions_by_session: Arc::new(RwLock::new(HashMap::new())),
-            event_history: Arc::new(RwLock::new(std::collections::VecDeque::new())),
-            event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            swarm_event_tx: broadcast::channel(256).0,
-            ambient_runner,
-            mcp_pool: Arc::new(OnceCell::new()),
-            shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
-            soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
-            await_members_runtime: AwaitMembersRuntime::default(),
-            swarm_mutation_runtime: SwarmMutationRuntime::default(),
             live_before_restart,
             running_before_restart,
             swarm_restore_completed_at,
@@ -828,22 +780,22 @@ impl Server {
 
     /// Get the server identity
     pub fn identity(&self) -> &ServerIdentity {
-        &self.identity
+        &self.handles.identity
     }
 
     fn runtime(&self) -> ServerRuntime {
-        ServerRuntime::from_server(self)
+        ServerRuntime::from_handles(self.handles.clone())
     }
 
     fn build_registry_info(&self) -> crate::registry::ServerInfo {
         crate::registry::ServerInfo {
-            id: self.identity.id.clone(),
-            name: self.identity.name.clone(),
-            icon: self.identity.icon.clone(),
+            id: self.handles.identity.id.clone(),
+            name: self.handles.identity.name.clone(),
+            icon: self.handles.identity.icon.clone(),
             socket: self.socket_path.clone(),
             debug_socket: self.debug_socket_path.clone(),
-            git_hash: self.identity.git_hash.clone(),
-            version: self.identity.version.clone(),
+            git_hash: self.handles.identity.git_hash.clone(),
+            version: self.handles.identity.version.clone(),
             pid: std::process::id(),
             started_at: chrono::Utc::now().to_rfc3339(),
             sessions: Vec::new(),
@@ -851,7 +803,7 @@ impl Server {
     }
 
     fn spawn_registry_prewarm(&self) {
-        let registry_warm_provider = Arc::clone(&self.provider);
+        let registry_warm_provider = Arc::clone(&self.handles.provider);
         tokio::spawn(async move {
             let start = Instant::now();
             let provider = registry_warm_provider.fork();
@@ -874,29 +826,31 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
-        self.sessions
-            .revive
-            .get_or_init(|| worker_revive::WorkerReviveContext {
-                provider: Arc::clone(&self.provider),
-                members: Arc::clone(&self.swarm_state.members),
-                mcp_pool: Arc::clone(&self.mcp_pool),
-                shutdown_signals: Arc::clone(&self.shutdown_signals),
-                soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+        self.handles
+            .sessions
+            .install_revive(|| worker_revive::WorkerReviveContext {
+                provider: Arc::clone(&self.handles.provider),
+                members: Arc::clone(&self.handles.swarm_state.members),
+                mcp_pool: Arc::clone(&self.handles.mcp_pool),
+                shutdown_signals: Arc::clone(&self.handles.shutdown_signals),
+                soft_interrupt_queues: Arc::clone(&self.handles.soft_interrupt_queues),
             });
         lane_dispatch::register_context(lane_dispatch::LaneDispatchContext {
-            provider: Arc::clone(&self.provider),
-            sessions: Arc::clone(&self.sessions),
-            global_session_id: Arc::clone(&self.session_id),
-            swarm_state: self.swarm_state.clone(),
-            channel_subscriptions: Arc::clone(&self.channel_subscriptions),
-            channel_subscriptions_by_session: Arc::clone(&self.channel_subscriptions_by_session),
-            event_history: Arc::clone(&self.event_history),
-            event_counter: Arc::clone(&self.event_counter),
-            swarm_event_tx: self.swarm_event_tx.clone(),
-            mcp_pool: Arc::clone(&self.mcp_pool),
-            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
-            swarm_mutation_runtime: self.swarm_mutation_runtime.clone(),
-            client_connections: Arc::clone(&self.client_connections),
+            provider: Arc::clone(&self.handles.provider),
+            sessions: Arc::clone(&self.handles.sessions),
+            global_session_id: Arc::clone(&self.handles.session_id),
+            swarm_state: self.handles.swarm_state.clone(),
+            channel_subscriptions: Arc::clone(&self.handles.channel_subscriptions),
+            channel_subscriptions_by_session: Arc::clone(
+                &self.handles.channel_subscriptions_by_session,
+            ),
+            event_history: Arc::clone(&self.handles.event_history),
+            event_counter: Arc::clone(&self.handles.event_counter),
+            swarm_event_tx: self.handles.swarm_event_tx.clone(),
+            mcp_pool: Arc::clone(&self.handles.mcp_pool),
+            soft_interrupt_queues: Arc::clone(&self.handles.soft_interrupt_queues),
+            swarm_mutation_runtime: self.handles.swarm_mutation_runtime.clone(),
+            client_connections: Arc::clone(&self.handles.client_connections),
         });
         lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
         let temporary_server = lifecycle::temporary_server_enabled();
@@ -934,15 +888,16 @@ impl Server {
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
         let recovery = self.recover_headless_sessions_on_startup().await;
-        reload_recovery::RecoveryOwner::new(self).spawn(runtime.cancellation_token(), recovery);
+        reload_recovery::RecoveryOwner::new(&self.handles)
+            .spawn(runtime.cancellation_token(), recovery);
 
         // Keep interrupted workers busy while recovery admits their turns.
         // Reconcile the roster before evaluating persisted awaits.
         comm_await::resume_background_awaits(
-            &self.swarm_state.members,
-            &self.swarm_state.swarms_by_id,
-            &self.swarm_event_tx,
-            &self.await_members_runtime,
+            &self.handles.swarm_state.members,
+            &self.handles.swarm_state.swarms_by_id,
+            &self.handles.swarm_event_tx,
+            &self.handles.await_members_runtime,
         )
         .await;
 
@@ -1007,10 +962,10 @@ impl Server {
         // Spawn reload monitor (event-driven via in-process channel).
         // In the unified server design, self-dev sessions share the main server,
         // so the shared server must always listen for reload signals.
-        let signal_sessions = Arc::clone(&self.sessions);
-        let signal_swarm_state = self.swarm_state.clone();
-        let signal_shutdown_signals = Arc::clone(&self.shutdown_signals);
-        let signal_swarm_event_tx = self.swarm_event_tx.clone();
+        let signal_sessions = Arc::clone(&self.handles.sessions);
+        let signal_swarm_state = self.handles.swarm_state.clone();
+        let signal_shutdown_signals = Arc::clone(&self.handles.shutdown_signals);
+        let signal_swarm_event_tx = self.handles.swarm_event_tx.clone();
         tokio::spawn(async move {
             await_reload_signal(
                 signal_sessions,
@@ -1026,8 +981,8 @@ impl Server {
         // recorded turns without waiting for a client to attach.
         #[cfg(unix)]
         {
-            let sigterm_server_name = self.identity.name.clone();
-            let sigterm_swarm_state = self.swarm_state.clone();
+            let sigterm_server_name = self.handles.identity.name.clone();
+            let sigterm_swarm_state = self.handles.swarm_state.clone();
             tokio::spawn(async move {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
@@ -1052,17 +1007,17 @@ impl Server {
         }
 
         // Spawn the bus monitor for swarm coordination
-        let monitor_file_touch = self.file_touch.clone();
-        let monitor_swarm_members = Arc::clone(&self.swarm_state.members);
-        let monitor_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-        let monitor_swarm_plans = Arc::clone(&self.swarm_state.plans);
-        let monitor_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
-        let monitor_shared_context = Arc::clone(&self.shared_context);
-        let monitor_sessions = Arc::clone(&self.sessions);
-        let monitor_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
-        let monitor_event_history = Arc::clone(&self.event_history);
-        let monitor_event_counter = Arc::clone(&self.event_counter);
-        let monitor_swarm_event_tx = self.swarm_event_tx.clone();
+        let monitor_file_touch = self.handles.file_touch.clone();
+        let monitor_swarm_members = Arc::clone(&self.handles.swarm_state.members);
+        let monitor_swarms_by_id = Arc::clone(&self.handles.swarm_state.swarms_by_id);
+        let monitor_swarm_plans = Arc::clone(&self.handles.swarm_state.plans);
+        let monitor_swarm_coordinators = Arc::clone(&self.handles.swarm_state.coordinators);
+        let monitor_shared_context = Arc::clone(&self.handles.shared_context);
+        let monitor_sessions = Arc::clone(&self.handles.sessions);
+        let monitor_soft_interrupt_queues = Arc::clone(&self.handles.soft_interrupt_queues);
+        let monitor_event_history = Arc::clone(&self.handles.event_history);
+        let monitor_event_counter = Arc::clone(&self.handles.event_counter);
+        let monitor_swarm_event_tx = self.handles.swarm_event_tx.clone();
         tokio::spawn(async move {
             Self::monitor_bus(
                 monitor_receiver,
@@ -1081,10 +1036,10 @@ impl Server {
             .await;
         });
 
-        let stale_swarm_members = Arc::clone(&self.swarm_state.members);
-        let stale_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-        let stale_swarm_plans = Arc::clone(&self.swarm_state.plans);
-        let stale_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
+        let stale_swarm_members = Arc::clone(&self.handles.swarm_state.members);
+        let stale_swarms_by_id = Arc::clone(&self.handles.swarm_state.swarms_by_id);
+        let stale_swarm_plans = Arc::clone(&self.handles.swarm_state.plans);
+        let stale_swarm_coordinators = Arc::clone(&self.handles.swarm_state.coordinators);
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(crate::server::swarm::swarm_task_sweep_interval());
@@ -1102,16 +1057,16 @@ impl Server {
         });
 
         tokio::spawn(swarm::monitor_wait_status(
-            Arc::clone(&self.swarm_state.members),
-            Arc::clone(&self.swarm_state.swarms_by_id),
+            Arc::clone(&self.handles.swarm_state.members),
+            Arc::clone(&self.handles.swarm_state.swarms_by_id),
         ));
 
         // Stalled-worker watchdog (#1703): flag running workers that went
         // silent with no tool in flight and notify their owner once.
         if let Some(stall_after) = swarm_watchdog::stall_after() {
-            let wd_swarm_state = self.swarm_state.clone();
-            let wd_sessions = Arc::clone(&self.sessions);
-            let wd_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
+            let wd_swarm_state = self.handles.swarm_state.clone();
+            let wd_sessions = Arc::clone(&self.handles.sessions);
+            let wd_soft_interrupt_queues = Arc::clone(&self.handles.soft_interrupt_queues);
             tokio::spawn(async move {
                 let mut interval =
                     tokio::time::interval(swarm_watchdog::sweep_interval(stall_after));
@@ -1128,12 +1083,12 @@ impl Server {
             });
         }
 
-        let gc_sessions = Arc::clone(&self.sessions);
-        let gc_swarm_state = self.swarm_state.clone();
-        let gc_channel_subscriptions = Arc::clone(&self.channel_subscriptions);
+        let gc_sessions = Arc::clone(&self.handles.sessions);
+        let gc_swarm_state = self.handles.swarm_state.clone();
+        let gc_channel_subscriptions = Arc::clone(&self.handles.channel_subscriptions);
         let gc_channel_subscriptions_by_session =
-            Arc::clone(&self.channel_subscriptions_by_session);
-        let gc_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
+            Arc::clone(&self.handles.channel_subscriptions_by_session);
+        let gc_soft_interrupt_queues = Arc::clone(&self.handles.soft_interrupt_queues);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(swarm::swarm_terminal_member_gc_interval());
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1163,14 +1118,14 @@ impl Server {
         // Keep the machine awake while any session is actively streaming/processing.
         // This watches the same "running" member signal Waybar surfaces as
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
-        Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));
+        Self::spawn_power_inhibitor(Arc::clone(&self.handles.swarm_state.members));
 
         idle_hibernation::spawn(idle_unload::IdleUnload {
-            sessions: Arc::clone(&self.sessions),
-            swarm: self.swarm_state.clone(),
-            connections: Arc::clone(&self.client_connections),
-            queues: Arc::clone(&self.soft_interrupt_queues),
-            shutdown: Arc::clone(&self.shutdown_signals),
+            sessions: Arc::clone(&self.handles.sessions),
+            swarm: self.handles.swarm_state.clone(),
+            connections: Arc::clone(&self.handles.client_connections),
+            queues: Arc::clone(&self.handles.soft_interrupt_queues),
+            shutdown: Arc::clone(&self.handles.shutdown_signals),
         });
 
         // Upload transcripts for the iOS app when the user enabled mobile sync.
@@ -1180,17 +1135,17 @@ impl Server {
         // On the user's own computer, take messages the phone sends to
         // sessions running here (only while mobile sync is enabled).
         mobile_local::spawn(mobile_local::DaemonSessions {
-            sessions: Arc::clone(&self.sessions),
-            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            sessions: Arc::clone(&self.handles.sessions),
+            soft_interrupt_queues: Arc::clone(&self.handles.soft_interrupt_queues),
             swarm: live_turn::LiveTurnSwarmContext::new(
-                &self.swarm_state.members,
-                &self.swarm_state.swarms_by_id,
-                &self.event_history,
-                &self.event_counter,
-                &self.swarm_event_tx,
+                &self.handles.swarm_state.members,
+                &self.handles.swarm_state.swarms_by_id,
+                &self.handles.event_history,
+                &self.handles.event_counter,
+                &self.handles.swarm_event_tx,
             ),
         });
-        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.swarm_state.members));
+        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.handles.swarm_state.members));
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -1200,9 +1155,9 @@ impl Server {
         }
 
         // Spawn the background ambient/schedule loop.
-        if let Some(ref runner) = self.ambient_runner {
+        if let Some(ref runner) = self.handles.ambient_runner {
             let ambient_handle = runner.clone();
-            let ambient_provider = Arc::clone(&self.provider);
+            let ambient_provider = Arc::clone(&self.handles.provider);
             crate::logging::info("Starting ambient/schedule background loop");
             tokio::spawn(async move {
                 ambient_handle.run_loop(ambient_provider).await;
@@ -1214,10 +1169,10 @@ impl Server {
         // session id, and reply-enabled flag before it makes any outbound calls.
         jade_relay::spawn_if_configured(
             &crate::config::config().safety,
-            Arc::clone(&self.sessions),
-            Arc::clone(&self.soft_interrupt_queues),
-            Arc::clone(&self.shutdown_signals),
-            Arc::clone(&self.swarm_state.members),
+            Arc::clone(&self.handles.sessions),
+            Arc::clone(&self.handles.soft_interrupt_queues),
+            Arc::clone(&self.handles.shutdown_signals),
+            Arc::clone(&self.handles.swarm_state.members),
         );
 
         // Spawn embedding idle monitor so the model can be unloaded when this
@@ -1269,9 +1224,9 @@ impl Server {
         }
 
         if crate::runtime_memory_log::server_logging_enabled() {
-            let log_identity = self.identity.clone();
-            let log_sessions = Arc::clone(&self.sessions);
-            let log_client_count = Arc::clone(&self.client_count);
+            let log_identity = self.handles.identity.clone();
+            let log_sessions = Arc::clone(&self.handles.sessions);
+            let log_client_count = Arc::clone(&self.handles.client_count);
             let (memory_event_tx, mut memory_event_rx) = mpsc::unbounded_channel();
             crate::runtime_memory_log::install_event_sink(memory_event_tx);
             tokio::spawn(async move {
@@ -1551,15 +1506,16 @@ impl Server {
 
         if let Some(policy) = temporary_server_policy {
             lifecycle::spawn_temporary_lifecycle_monitor(
-                self.temporary_client_activity
+                self.handles
+                    .temporary_client_activity
                     .as_ref()
                     .expect("temporary server client tracker")
                     .subscribe(),
-                Arc::clone(&self.sessions),
-                self.swarm_state.clone(),
+                Arc::clone(&self.handles.sessions),
+                self.handles.swarm_state.clone(),
                 self.socket_path.clone(),
                 self.debug_socket_path.clone(),
-                self.identity.name.clone(),
+                self.handles.identity.name.clone(),
                 policy,
             );
         } else if lifecycle::persistent_server_enabled() {
@@ -1567,10 +1523,10 @@ impl Server {
         } else if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
         } else {
-            let idle_client_count = Arc::clone(&self.client_count);
-            let idle_sessions = Arc::clone(&self.sessions);
-            let idle_swarm_state = self.swarm_state.clone();
-            let idle_server_name = self.identity.name.clone();
+            let idle_client_count = Arc::clone(&self.handles.client_count);
+            let idle_sessions = Arc::clone(&self.handles.sessions);
+            let idle_swarm_state = self.handles.swarm_state.clone();
+            let idle_server_name = self.handles.identity.name.clone();
             tokio::spawn(async move {
                 let mut idle_since: Option<std::time::Instant> = None;
                 let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -1617,7 +1573,7 @@ impl Server {
     }
 
     fn spawn_registry_metadata_publisher(&self, registry_info: crate::registry::ServerInfo) {
-        let registry_identity = self.identity.display_name();
+        let registry_identity = self.handles.identity.display_name();
         tokio::spawn(async move {
             let hash_path = format!("{}.hash", registry_info.socket.display());
             if let Err(error) = std::fs::write(&hash_path, jcode_build_meta::git_hash()) {
@@ -2278,16 +2234,16 @@ impl Server {
         let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
         // chmod changes the socket's ctime, which is part of the startup hint
         // generation guard. Capture only after the listener is finalized.
-        account_usage::initialize_startup_snapshot(&self.socket_path, &self.identity.id);
+        account_usage::initialize_startup_snapshot(&self.socket_path, &self.handles.identity.id);
 
         // Set logging context for this server
-        crate::logging::set_server(&self.identity.name);
+        crate::logging::set_server(&self.handles.identity.name);
 
         // Log server identity
         crate::logging::info(&format!(
             "Server {} starting ({})",
-            self.identity.display_name(),
-            self.identity.version
+            self.handles.identity.display_name(),
+            self.handles.identity.version
         ));
         crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
         crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));

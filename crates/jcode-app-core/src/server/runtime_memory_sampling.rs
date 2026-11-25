@@ -87,7 +87,7 @@ pub(super) async fn capture_runtime_memory_attribution_sample(
     )
     .await;
 
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     let live_count = sessions_guard.len();
     let mut sampled_count = 0usize;
     let mut contended_count = 0usize;

@@ -41,7 +41,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
     };
 
     if cmd == "swarm" || cmd == "swarm_status" || cmd == "swarm:members" {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         let members = swarm_members.read().await;
         let mut out: Vec<serde_json::Value> = Vec::new();
         for member in members.values() {
@@ -724,7 +724,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
         if target_session.is_empty() {
             return Err(anyhow::anyhow!("swarm:session requires a session_id"));
         }
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         let members = swarm_members.read().await;
 
         let output = if let Some(agent_arc) = sessions_guard.get(target_session) {
@@ -768,7 +768,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
     }
 
     if cmd == "swarm:interrupts" {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         let members = swarm_members.read().await;
         let mut out: Vec<serde_json::Value> = Vec::new();
 

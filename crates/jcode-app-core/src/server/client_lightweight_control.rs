@@ -259,7 +259,7 @@ async fn ensure_lightweight_swarm_member(
     // A session hosted by this server owns its membership through
     // Subscribe. If it has none, that is deliberate (for example swarm was
     // disabled for it), so do not grant membership behind its back.
-    if sessions.read().await.contains_key(session_id) {
+    if sessions.contains(session_id).await {
         return;
     }
 

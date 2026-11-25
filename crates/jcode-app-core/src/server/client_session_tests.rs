@@ -373,7 +373,7 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
         let removed = cleanup.await.expect("cleanup task should complete");
         assert_ne!(claimed, removed, "exactly one transition must win");
         assert_eq!(
-            sessions.read().await.contains_key(&target_id),
+            sessions.contains(&target_id).await,
             claimed,
             "a successful claim must keep its target registered"
         );

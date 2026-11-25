@@ -75,7 +75,6 @@ async fn second_socket_can_disable_auto_poke_during_a_continuation() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_compact_acknowledges_before_active_turn_releases_agent() {
-    use crate::server::runtime::ServerRuntime;
     use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient};
 
     let _lock = crate::storage::lock_test_env();
@@ -92,7 +91,7 @@ async fn desktop_compact_acknowledges_before_active_turn_releases_agent() {
         daemon_socket.clone(),
         home._runtime.path().join("compact-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon =
         runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
     let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
@@ -243,7 +242,7 @@ async fn continuation_socket_workflow(disable_from_observer: bool) {
     )
     .await;
     while !matches!(receive(&mut reader).await, ServerEvent::Done { id: 1 }) {}
-    let session_id = sessions.read().await.keys().next().unwrap().clone();
+    let session_id = sessions.snapshot().await.keys().next().unwrap().clone();
     let mut observer = if disable_from_observer {
         let (task, mut reader, mut writer) = connect();
         send(&mut writer, json!({"type":"subscribe","id":10,"target_session_id":session_id,"working_dir":home._home.path()})).await;

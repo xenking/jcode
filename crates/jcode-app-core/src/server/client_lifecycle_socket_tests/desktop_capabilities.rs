@@ -84,7 +84,7 @@ pub(super) async fn assert_desktop_capability_contract(
         if let Some(previous) = previous.replace(catalog.clone()) {
             assert_eq!(previous, catalog);
         }
-        let agent = sessions.read().await.values().next().unwrap().clone();
+        let agent = sessions.snapshot().await.values().next().unwrap().clone();
         let agent = agent.lock().await;
         for (name, input, supported) in [
             ("user_response", json!({"content":"# Hello"}), capability),

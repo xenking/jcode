@@ -44,7 +44,7 @@ impl DaemonSessions {
     async fn live(&self) -> Vec<LiveSession> {
         let agents: Vec<_> = self
             .sessions
-            .read()
+            .snapshot()
             .await
             .iter()
             .map(|(id, agent)| (id.clone(), Arc::clone(agent)))
@@ -73,7 +73,7 @@ impl DaemonSessions {
         text: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        if !self.sessions.read().await.contains_key(session_id) {
+        if !self.sessions.contains(session_id).await {
             anyhow::bail!("that session is no longer running on this computer");
         }
         let deadline = tokio::time::Instant::now() + IDLE_START_WAIT;

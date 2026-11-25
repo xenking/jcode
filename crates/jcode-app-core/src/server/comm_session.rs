@@ -145,7 +145,7 @@ async fn resolve_spawn_working_dir(
     }
 
     if let Some(agent_dir) = {
-        let agent_sessions = sessions.read().await;
+        let agent_sessions = sessions.snapshot().await;
         agent_sessions.get(req_session_id).and_then(|agent| {
             agent
                 .try_lock()
@@ -425,7 +425,6 @@ async fn register_visible_spawned_member(
 /// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
 #[path = "spawn_policy.rs"]
 mod spawn_policy;
-use spawn_policy::inherit_coordinator_selection;
 pub(super) use spawn_policy::{
     is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
 };
@@ -552,7 +551,7 @@ pub(super) async fn spawn_swarm_agent(
     .await;
     let configured_swarm_model =
         if requested_model.is_none() && !failover.fallbacks.is_empty() {
-            let routes = match sessions.read().await.get(req_session_id).cloned() {
+            let routes = match sessions.get(req_session_id).await {
                 Some(agent) => agent
                     .try_lock()
                     .map(|guard| guard.model_routes())
@@ -836,7 +835,7 @@ pub(super) async fn spawn_swarm_agent(
         .await;
 
         let agent_arc = {
-            let agent_sessions = sessions.read().await;
+            let agent_sessions = sessions.snapshot().await;
             agent_sessions.get(&new_session_id).cloned()
         };
         if let Some(agent_arc) = agent_arc {
@@ -1098,7 +1097,7 @@ pub(super) async fn handle_comm_list_models(
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
 
     let agent = {
-        let agent_sessions = sessions.read().await;
+        let agent_sessions = sessions.snapshot().await;
         agent_sessions.get(req_session_id).cloned()
     };
     let model_routes = match agent.as_ref().and_then(|agent| agent.try_lock().ok()) {

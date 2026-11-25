@@ -1,6 +1,6 @@
 use super::client_lifecycle::handle_client;
 use super::debug::{ClientConnectionInfo, ClientDebugState, handle_debug_client};
-use super::debug_jobs::DebugJob;
+use super::handles::ServerHandles;
 use super::util::get_shared_mcp_pool;
 use super::{
     AwaitMembersRuntime, FileTouchService, ServerIdentity, SessionInterruptQueues, SharedContext,
@@ -92,34 +92,7 @@ fn log_task_completion(result: Result<(), tokio::task::JoinError>) {
 
 #[derive(Clone)]
 pub(super) struct ServerRuntime {
-    sessions: crate::server::SessionAgents,
-    event_tx: broadcast::Sender<ServerEvent>,
-    provider: Arc<dyn Provider>,
-    is_processing: Arc<RwLock<bool>>,
-    session_id: Arc<RwLock<String>>,
-    client_count: Arc<RwLock<usize>>,
-    temporary_client_activity: Option<tokio::sync::watch::Sender<bool>>,
-    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-    swarm_state: SwarmState,
-    shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-    file_touch: FileTouchService,
-    channel_subscriptions: ChannelSubscriptions,
-    channel_subscriptions_by_session: ChannelSubscriptions,
-    client_debug_state: Arc<RwLock<ClientDebugState>>,
-    client_debug_response_tx: broadcast::Sender<(u64, String)>,
-    debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
-    event_history: Arc<RwLock<VecDeque<SwarmEvent>>>,
-    event_counter: Arc<AtomicU64>,
-    swarm_event_tx: broadcast::Sender<SwarmEvent>,
-    server_name: String,
-    server_icon: String,
-    server_identity: ServerIdentity,
-    ambient_runner: Option<AmbientRunnerHandle>,
-    mcp_pool: Arc<OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
-    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    soft_interrupt_queues: SessionInterruptQueues,
-    await_members_runtime: AwaitMembersRuntime,
-    swarm_mutation_runtime: SwarmMutationRuntime,
+    handles: ServerHandles,
     tasks: Arc<RuntimeTaskScope>,
 }
 
@@ -127,36 +100,10 @@ impl ServerRuntime {
     pub(super) fn cancellation_token(&self) -> CancellationToken {
         self.tasks.child_token()
     }
-    pub(super) fn from_server(server: &super::Server) -> Self {
+
+    pub(super) fn from_handles(handles: ServerHandles) -> Self {
         Self {
-            sessions: Arc::clone(&server.sessions),
-            event_tx: server.event_tx.clone(),
-            provider: Arc::clone(&server.provider),
-            is_processing: Arc::clone(&server.is_processing),
-            session_id: Arc::clone(&server.session_id),
-            client_count: Arc::clone(&server.client_count),
-            temporary_client_activity: server.temporary_client_activity.clone(),
-            client_connections: Arc::clone(&server.client_connections),
-            swarm_state: server.swarm_state.clone(),
-            shared_context: Arc::clone(&server.shared_context),
-            file_touch: server.file_touch.clone(),
-            channel_subscriptions: Arc::clone(&server.channel_subscriptions),
-            channel_subscriptions_by_session: Arc::clone(&server.channel_subscriptions_by_session),
-            client_debug_state: Arc::clone(&server.client_debug_state),
-            client_debug_response_tx: server.client_debug_response_tx.clone(),
-            debug_jobs: Arc::clone(&server.debug_jobs),
-            event_history: Arc::clone(&server.event_history),
-            event_counter: Arc::clone(&server.event_counter),
-            swarm_event_tx: server.swarm_event_tx.clone(),
-            server_name: server.identity.name.clone(),
-            server_icon: server.identity.icon.clone(),
-            server_identity: server.identity.clone(),
-            ambient_runner: server.ambient_runner.clone(),
-            mcp_pool: Arc::clone(&server.mcp_pool),
-            shutdown_signals: Arc::clone(&server.shutdown_signals),
-            soft_interrupt_queues: Arc::clone(&server.soft_interrupt_queues),
-            await_members_runtime: server.await_members_runtime.clone(),
-            swarm_mutation_runtime: server.swarm_mutation_runtime.clone(),
+            handles,
             tasks: Arc::new(RuntimeTaskScope::default()),
         }
     }
@@ -324,10 +271,10 @@ impl ServerRuntime {
 
     async fn increment_client_count(&self) {
         {
-            let mut count = self.client_count.write().await;
+            let mut count = self.handles.client_count.write().await;
             *count += 1;
             if *count == 1
-                && let Some(activity) = &self.temporary_client_activity
+                && let Some(activity) = &self.handles.temporary_client_activity
             {
                 activity.send_replace(true);
             }
@@ -342,10 +289,10 @@ impl ServerRuntime {
 
     async fn decrement_client_count(&self) {
         {
-            let mut count = self.client_count.write().await;
+            let mut count = self.handles.client_count.write().await;
             *count -= 1;
             if *count == 0
-                && let Some(activity) = &self.temporary_client_activity
+                && let Some(activity) = &self.handles.temporary_client_activity
             {
                 activity.send_replace(false);
             }
@@ -368,36 +315,36 @@ impl ServerRuntime {
         let mut session_bound = false;
         let result = {
             let client = async {
-                let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
+                let mcp_pool = get_shared_mcp_pool(&self.handles.mcp_pool).await;
                 handle_client(
                     stream,
-                    Arc::clone(&self.sessions),
-                    self.event_tx.clone(),
-                    Arc::clone(&self.provider),
-                    Arc::clone(&self.is_processing),
-                    Arc::clone(&self.session_id),
-                    Arc::clone(&self.client_count),
-                    Arc::clone(&self.client_connections),
-                    Arc::clone(&self.swarm_state.members),
-                    Arc::clone(&self.swarm_state.swarms_by_id),
-                    Arc::clone(&self.shared_context),
-                    Arc::clone(&self.swarm_state.plans),
-                    Arc::clone(&self.swarm_state.coordinators),
-                    self.file_touch.clone(),
-                    Arc::clone(&self.channel_subscriptions),
-                    Arc::clone(&self.channel_subscriptions_by_session),
-                    Arc::clone(&self.client_debug_state),
-                    self.client_debug_response_tx.clone(),
-                    Arc::clone(&self.event_history),
-                    Arc::clone(&self.event_counter),
-                    self.swarm_event_tx.clone(),
-                    self.server_name.clone(),
-                    self.server_icon.clone(),
+                    Arc::clone(&self.handles.sessions),
+                    self.handles.event_tx.clone(),
+                    Arc::clone(&self.handles.provider),
+                    Arc::clone(&self.handles.is_processing),
+                    Arc::clone(&self.handles.session_id),
+                    Arc::clone(&self.handles.client_count),
+                    Arc::clone(&self.handles.client_connections),
+                    Arc::clone(&self.handles.swarm_state.members),
+                    Arc::clone(&self.handles.swarm_state.swarms_by_id),
+                    Arc::clone(&self.handles.shared_context),
+                    Arc::clone(&self.handles.swarm_state.plans),
+                    Arc::clone(&self.handles.swarm_state.coordinators),
+                    self.handles.file_touch.clone(),
+                    Arc::clone(&self.handles.channel_subscriptions),
+                    Arc::clone(&self.handles.channel_subscriptions_by_session),
+                    Arc::clone(&self.handles.client_debug_state),
+                    self.handles.client_debug_response_tx.clone(),
+                    Arc::clone(&self.handles.event_history),
+                    Arc::clone(&self.handles.event_counter),
+                    self.handles.swarm_event_tx.clone(),
+                    self.handles.identity.name.clone(),
+                    self.handles.identity.icon.clone(),
                     mcp_pool,
-                    Arc::clone(&self.shutdown_signals),
-                    Arc::clone(&self.soft_interrupt_queues),
-                    self.await_members_runtime.clone(),
-                    self.swarm_mutation_runtime.clone(),
+                    Arc::clone(&self.handles.shutdown_signals),
+                    Arc::clone(&self.handles.soft_interrupt_queues),
+                    self.handles.await_members_runtime.clone(),
+                    self.handles.swarm_mutation_runtime.clone(),
                     nudge_ambient.then_some(&mut session_bound),
                 )
                 .await
@@ -413,7 +360,7 @@ impl ServerRuntime {
 
         if session_bound
             && result.is_some()
-            && let Some(ref runner) = self.ambient_runner
+            && let Some(ref runner) = self.handles.ambient_runner
         {
             runner.session_disconnected();
         }
@@ -430,34 +377,34 @@ impl ServerRuntime {
         cancellation: CancellationToken,
     ) {
         let client = async {
-            let mcp_pool = Some(get_shared_mcp_pool(&self.mcp_pool).await);
+            let mcp_pool = Some(get_shared_mcp_pool(&self.handles.mcp_pool).await);
             handle_debug_client(
                 stream,
-                Arc::clone(&self.sessions),
-                Arc::clone(&self.is_processing),
-                Arc::clone(&self.session_id),
-                Arc::clone(&self.provider),
-                Arc::clone(&self.client_connections),
-                Arc::clone(&self.swarm_state.members),
-                Arc::clone(&self.swarm_state.swarms_by_id),
-                Arc::clone(&self.shared_context),
-                Arc::clone(&self.swarm_state.plans),
-                Arc::clone(&self.swarm_state.coordinators),
-                self.file_touch.clone(),
-                Arc::clone(&self.channel_subscriptions),
-                Arc::clone(&self.channel_subscriptions_by_session),
-                Arc::clone(&self.client_debug_state),
-                self.client_debug_response_tx.clone(),
-                Arc::clone(&self.debug_jobs),
-                Arc::clone(&self.event_history),
-                Arc::clone(&self.event_counter),
-                self.swarm_event_tx.clone(),
-                self.server_identity.clone(),
+                Arc::clone(&self.handles.sessions),
+                Arc::clone(&self.handles.is_processing),
+                Arc::clone(&self.handles.session_id),
+                Arc::clone(&self.handles.provider),
+                Arc::clone(&self.handles.client_connections),
+                Arc::clone(&self.handles.swarm_state.members),
+                Arc::clone(&self.handles.swarm_state.swarms_by_id),
+                Arc::clone(&self.handles.shared_context),
+                Arc::clone(&self.handles.swarm_state.plans),
+                Arc::clone(&self.handles.swarm_state.coordinators),
+                self.handles.file_touch.clone(),
+                Arc::clone(&self.handles.channel_subscriptions),
+                Arc::clone(&self.handles.channel_subscriptions_by_session),
+                Arc::clone(&self.handles.client_debug_state),
+                self.handles.client_debug_response_tx.clone(),
+                Arc::clone(&self.handles.debug_jobs),
+                Arc::clone(&self.handles.event_history),
+                Arc::clone(&self.handles.event_counter),
+                self.handles.swarm_event_tx.clone(),
+                self.handles.identity.clone(),
                 server_start_time,
-                self.ambient_runner.clone(),
+                self.handles.ambient_runner.clone(),
                 mcp_pool,
-                Arc::clone(&self.shutdown_signals),
-                Arc::clone(&self.soft_interrupt_queues),
+                Arc::clone(&self.handles.shutdown_signals),
+                Arc::clone(&self.handles.soft_interrupt_queues),
             )
             .await
         };
@@ -538,7 +485,7 @@ mod tests {
         let _env = crate::storage::lock_test_env();
         let home = tempfile::tempdir().unwrap();
         let (_home, _runtime, runtime) = isolated_runtime(home.path());
-        let runner = runtime.ambient_runner.as_ref().unwrap();
+        let runner = runtime.handles.ambient_runner.as_ref().unwrap();
         for session_bound in [false, true] {
             let (peer, stream) = tokio::net::UnixStream::pair().unwrap();
             runtime.increment_client_count().await;
@@ -574,7 +521,7 @@ mod tests {
             let reply = serde_json::from_str::<serde_json::Value>(&line).unwrap();
             assert_ne!(reply["type"], "error", "{reply}");
             assert_eq!(
-                !runtime.client_connections.read().await.is_empty(),
+                !runtime.handles.client_connections.read().await.is_empty(),
                 session_bound
             );
             drop(peer);
@@ -600,8 +547,8 @@ mod tests {
         let _env = crate::storage::lock_test_env();
         let home = tempfile::tempdir().unwrap();
         let (_home, _runtime, runtime) = isolated_runtime(home.path());
-        let members = runtime.swarm_state.members.write().await;
-        let baseline = *runtime.client_count.read().await;
+        let members = runtime.handles.swarm_state.members.write().await;
+        let baseline = *runtime.handles.client_count.read().await;
         let (mut peer, mut handler) = counted_client_pair(&runtime).await;
         peer.write_all(b"{\"type\":\"ping\",\"id\":1}\n")
             .await
@@ -614,7 +561,7 @@ mod tests {
         .await;
         drop(peer);
         let disconnected = tokio::time::timeout(Duration::from_secs(2), &mut handler).await;
-        let count = *runtime.client_count.read().await;
+        let count = *runtime.handles.client_count.read().await;
         drop(members);
         if disconnected.is_err() {
             handler.abort();
@@ -647,8 +594,8 @@ mod tests {
             ..session.workspace()
         });
         session.save_prepared().unwrap();
-        let target = runtime.sessions.reserve(session.id()).await;
-        let baseline = *runtime.client_count.read().await;
+        let target = runtime.handles.sessions.reserve(session.id()).await;
+        let baseline = *runtime.handles.client_count.read().await;
         let (mut peer, mut handler) = counted_client_pair(&runtime).await;
         let request = serde_json::json!({
             "type": "subscribe", "id": 1, "target_session_id": session.id(),
@@ -674,7 +621,7 @@ mod tests {
             Duration::from_secs(2)
         };
         let disconnected = tokio::time::timeout(bound, &mut handler).await;
-        let count = *runtime.client_count.read().await;
+        let count = *runtime.handles.client_count.read().await;
         drop(target);
         if disconnected.is_err() {
             handler.abort();
@@ -684,8 +631,8 @@ mod tests {
             .expect("the waiting Subscribe must finish within its bound")
             .unwrap();
         assert_eq!(count, baseline);
-        assert!(runtime.client_connections.read().await.is_empty());
-        assert!(runtime.sessions.read().await.is_empty());
+        assert!(runtime.handles.client_connections.read().await.is_empty());
+        assert!(runtime.handles.sessions.ids().await.is_empty());
     }
 
     #[cfg(unix)]
@@ -697,11 +644,7 @@ mod tests {
         let home_guard = ScopedEnvVar::set("JCODE_HOME", home);
         let runtime_guard = ScopedEnvVar::set("JCODE_RUNTIME_DIR", home.join("runtime"));
         let server = crate::server::Server::new(Arc::new(StreamingMockProvider::default()));
-        (
-            home_guard,
-            runtime_guard,
-            super::ServerRuntime::from_server(&server),
-        )
+        (home_guard, runtime_guard, server.runtime())
     }
 
     #[cfg(unix)]

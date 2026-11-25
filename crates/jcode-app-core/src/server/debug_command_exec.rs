@@ -52,7 +52,7 @@ pub(super) async fn resolve_debug_session(
         if let Some(agent) = super::worker_revive::live_or_revived_agent(&id, sessions).await {
             return Ok((id, agent));
         }
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         anyhow::bail!(
             "Unknown session_id '{}'. Live sessions: {}",
             id,
@@ -61,7 +61,7 @@ pub(super) async fn resolve_debug_session(
     }
 
     let id = default_debug_session_id(sessions, session_id).await?;
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
         anyhow::anyhow!(
             "Session '{}' ended while resolving the debug target. Live sessions: {}",
@@ -85,7 +85,7 @@ pub(super) async fn default_debug_session_id(
     session_id: &Arc<RwLock<String>>,
 ) -> Result<String> {
     let current = session_id.read().await.clone();
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     if !current.is_empty() && sessions_guard.contains_key(&current) {
         return Ok(current);
     }

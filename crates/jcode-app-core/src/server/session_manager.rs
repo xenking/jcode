@@ -25,7 +25,7 @@ pub(crate) struct SessionManager {
     observers: StdMutex<HashMap<String, crate::agent::TurnObserver>>,
     unloaded: StdMutex<HashSet<String>>,
     idle_eviction_count: AtomicU64,
-    pub(super) revive: OnceLock<super::worker_revive::WorkerReviveContext>,
+    revive: OnceLock<super::worker_revive::WorkerReviveContext>,
 }
 
 #[cfg(test)]
@@ -45,14 +45,49 @@ impl SessionManager {
             .cloned()
     }
 
-    pub(super) async fn read(&self) -> RwLockReadGuard<'_, AgentMap> {
-        self.agents.read().await
+    pub(super) async fn get(&self, session_id: &str) -> Option<AgentHandle> {
+        self.agents.read().await.get(session_id).cloned()
     }
 
-    pub(super) fn try_read(
+    pub(super) async fn contains(&self, session_id: &str) -> bool {
+        self.agents.read().await.contains_key(session_id)
+    }
+
+    pub(super) async fn ids(&self) -> HashSet<String> {
+        self.agents.read().await.keys().cloned().collect()
+    }
+
+    pub(super) async fn handles(&self) -> Vec<AgentHandle> {
+        self.agents.read().await.values().cloned().collect()
+    }
+
+    /// A point-in-time copy of the live runtimes. Holding it does not block
+    /// publication or removal.
+    pub(super) async fn snapshot(&self) -> AgentMap {
+        self.agents.read().await.clone()
+    }
+
+    /// Like [`Self::snapshot`] but gives up instead of waiting behind a writer.
+    pub(super) fn try_snapshot(&self) -> Option<AgentMap> {
+        self.agents.try_read().ok().map(|agents| agents.clone())
+    }
+
+    /// Freeze the session index: no runtime can be published or removed while
+    /// the returned fence is alive. Gives up instead of waiting behind a writer.
+    pub(super) fn try_freeze(&self) -> Option<SessionIndexFence<'_>> {
+        self.agents.try_read().ok().map(SessionIndexFence)
+    }
+
+    /// Publish the context idle workers are revived with. The first call wins.
+    pub(super) fn install_revive(
         &self,
-    ) -> std::result::Result<RwLockReadGuard<'_, AgentMap>, tokio::sync::TryLockError> {
-        self.agents.try_read()
+        init: impl FnOnce() -> super::worker_revive::WorkerReviveContext,
+    ) {
+        self.revive.get_or_init(init);
+    }
+
+    pub(super) fn revive_context(&self) -> Option<&super::worker_revive::WorkerReviveContext> {
+        self.revive.get()
     }
 
     /// Acquire before any connection, registry or agent guard. Cancellation
@@ -205,6 +240,19 @@ impl SessionManager {
     #[cfg(test)]
     pub(super) async fn write_for_test(&self) -> tokio::sync::RwLockWriteGuard<'_, AgentMap> {
         self.agents.write().await
+    }
+}
+
+/// A read fence over the live-runtime index. See [`SessionManager::try_freeze`].
+pub(super) struct SessionIndexFence<'a>(RwLockReadGuard<'a, AgentMap>);
+
+impl SessionIndexFence<'_> {
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &AgentHandle)> {
+        self.0.iter()
     }
 }
 

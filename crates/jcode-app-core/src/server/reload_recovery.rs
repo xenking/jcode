@@ -903,18 +903,18 @@ enum RecoveryAdmission {
 }
 
 impl RecoveryOwner {
-    pub(super) fn new(server: &super::Server) -> Self {
+    pub(super) fn new(handles: &super::handles::ServerHandles) -> Self {
         install_recovery_gate();
         Self {
-            provider: Arc::clone(&server.provider),
-            sessions: Arc::clone(&server.sessions),
-            mcp_pool: Arc::clone(&server.mcp_pool),
-            shutdown_signals: Arc::clone(&server.shutdown_signals),
-            queues: Arc::clone(&server.soft_interrupt_queues),
-            swarm: server.swarm_state.clone(),
-            history: Arc::clone(&server.event_history),
-            counter: Arc::clone(&server.event_counter),
-            events: server.swarm_event_tx.clone(),
+            provider: Arc::clone(&handles.provider),
+            sessions: Arc::clone(&handles.sessions),
+            mcp_pool: Arc::clone(&handles.mcp_pool),
+            shutdown_signals: Arc::clone(&handles.shutdown_signals),
+            queues: Arc::clone(&handles.soft_interrupt_queues),
+            swarm: handles.swarm_state.clone(),
+            history: Arc::clone(&handles.event_history),
+            counter: Arc::clone(&handles.event_counter),
+            events: handles.swarm_event_tx.clone(),
         }
     }
 
@@ -1134,8 +1134,7 @@ impl RecoveryOwner {
             cancel(session_id)?;
             return Ok(RecoveryAdmission::Deferred);
         }
-        if !crate::session::session_exists(session_id)
-            && !self.sessions.read().await.contains_key(session_id)
+        if !crate::session::session_exists(session_id) && !self.sessions.contains(session_id).await
         {
             // The session was never persisted, so there is nothing to resume and
             // retrying would fail on every sweep forever.
@@ -1707,7 +1706,7 @@ mod tests {
             home._temp.path().join("server.sock"),
             home._temp.path().join("debug.sock"),
         );
-        let owner = RecoveryOwner::new(&server);
+        let owner = RecoveryOwner::new(&server.handles);
         let work = owner.reconcile_once().await;
         assert!(work.tasks.is_empty());
         assert!(
@@ -1747,7 +1746,7 @@ mod tests {
             home._temp.path().join("debug.sock"),
         );
         let stop = tokio_util::sync::CancellationToken::new();
-        let owner = RecoveryOwner::new(&server);
+        let owner = RecoveryOwner::new(&server.handles);
         let work = owner.reconcile_once().await;
         owner.spawn(stop.clone(), work);
         tokio::time::sleep(Duration::from_secs(1)).await;

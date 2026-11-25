@@ -151,7 +151,7 @@ async fn swarm_summary_reads_a_busy_runtime_without_waiting() {
     let requester = "session-summary-requester";
     let provider: Arc<dyn Provider> = Arc::new(NoRequests);
     let server = Server::new(Arc::clone(&provider));
-    let sessions = Arc::clone(&server.sessions);
+    let sessions = Arc::clone(&server.handles.sessions);
     let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
     let caller_tools = registry.clone();
     let session = crate::session::Session::create_with_id(target.to_string(), None, None);
@@ -166,7 +166,7 @@ async fn swarm_summary_reads_a_busy_runtime_without_waiting() {
     let outsider = "session-summary-other-swarm";
     let mut other_swarm = swarm_member(outsider, "agent", false).0;
     other_swarm.swarm_id = Some("other".into());
-    let members = Arc::clone(&server.swarm_state.members);
+    let members = Arc::clone(&server.handles.swarm_state.members);
     members.write().await.extend(HashMap::from([
         (target.into(), swarm_member(target, "agent", true).0),
         (
@@ -242,7 +242,7 @@ async fn swarm_summary_reads_a_busy_runtime_without_waiting() {
         tool_calls, snapshot: Some(CommToolCallSnapshot::Unavailable), ..
     } if tool_calls.is_empty())
     );
-    assert!(!sessions.read().await.contains_key(unavailable));
+    assert!(!sessions.contains(unavailable).await);
 
     request(outsider, target, None).await.unwrap();
     assert!(

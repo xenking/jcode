@@ -139,7 +139,7 @@ async fn removing_server_session_clears_active_pid_marker() {
 
     assert!(Arc::ptr_eq(&removed.unwrap(), &agent));
     assert!(crate::session_env::session_env(session_id).is_empty());
-    assert!(!sessions.read().await.contains_key(session_id));
+    assert!(!sessions.contains(session_id).await);
     assert!(
         !crate::storage::active_session_ids()
             .iter()

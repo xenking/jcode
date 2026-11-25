@@ -77,7 +77,7 @@ async fn connected_session_snapshot(
         connections.values().map(|c| c.session_id.clone()).collect()
     };
     let connected_agents = {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = sessions.snapshot().await;
         sessions_guard
             .iter()
             .filter(|(session_id, _)| connected_sessions.contains(*session_id))
@@ -287,7 +287,7 @@ pub(super) async fn maybe_handle_server_state_command(
 
     if cmd == "info" || cmd == "server:info" {
         let uptime_secs = server_start_time.elapsed().as_secs();
-        let live_session_ids: HashSet<String> = sessions.read().await.keys().cloned().collect();
+        let live_session_ids: HashSet<String> = sessions.ids().await;
         let session_count = live_session_ids.len();
         let spawned_swarm_agent_count = {
             let members = swarm_members.read().await;
@@ -488,7 +488,7 @@ async fn build_server_memory_incident_payload(
         .allocator_retained_resident_estimate_bytes
         .unwrap_or(0);
 
-    let live_session_ids: HashSet<String> = sessions.read().await.keys().cloned().collect();
+    let live_session_ids: HashSet<String> = sessions.ids().await;
     let connected_clients = client_connections.read().await.len();
     let members = swarm_members.read().await;
     let total_member_count = members.len();
@@ -726,7 +726,7 @@ async fn build_server_memory_payload(
         crate::tool::session_search_index::cache_memory_stats();
     let embedding_model_available = crate::embedding::is_model_available();
 
-    let sessions_guard = sessions.read().await;
+    let sessions_guard = sessions.snapshot().await;
     let mut locked_session_profiles: Vec<serde_json::Value> = Vec::new();
     let mut session_json_bytes = 0u64;
     let mut session_payload_text_bytes = 0u64;

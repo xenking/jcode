@@ -283,7 +283,7 @@ async fn import_preserves_unrelated_state_and_plan_without_starting_agents() {
         "import must not activate before transport commits"
     );
     assert!(
-        agents.read().await.is_empty(),
+        agents.ids().await.is_empty(),
         "import must not auto-resume any session"
     );
     assert_eq!(state.members.read().await["worker"].status, "stopped");
@@ -417,7 +417,7 @@ async fn reserve_fences_before_install_and_import_keeps_members_blocked() {
     .await
     .unwrap();
     assert!(session.migration_lease_block().is_some());
-    assert!(sessions.read().await.is_empty());
+    assert!(sessions.ids().await.is_empty());
     assert_eq!(state.members.read().await["worker"].status, "stopped");
     assert_eq!(
         state.members.read().await["worker"].working_dir.as_deref(),
@@ -507,8 +507,8 @@ async fn live_agents_are_reserved_together_then_only_selected_agents_evicted() {
     handle_with_gate(&command, &sessions, &state, &gate)
         .await
         .unwrap();
-    assert_eq!(sessions.read().await.len(), 1);
-    assert!(sessions.read().await.contains_key("unrelated"));
+    assert_eq!(sessions.snapshot().await.len(), 1);
+    assert!(sessions.contains("unrelated").await);
     assert!(one.lock().await.ensure_session_lease().is_err());
     assert!(two.lock().await.ensure_session_lease().is_err());
     assert!(unrelated.lock().await.ensure_session_lease().is_ok());
@@ -760,31 +760,31 @@ async fn production_transport_inspect_prepare_abort_with_unrelated_active_sessio
         .unwrap();
     let handler = tokio::spawn(super::super::debug::handle_debug_client(
         stream,
-        server.sessions,
-        server.is_processing,
-        server.session_id,
-        server.provider,
-        server.client_connections,
-        server.swarm_state.members,
-        server.swarm_state.swarms_by_id,
-        server.shared_context,
-        server.swarm_state.plans,
-        server.swarm_state.coordinators,
-        server.file_touch,
-        server.channel_subscriptions,
-        server.channel_subscriptions_by_session,
-        server.client_debug_state,
-        server.client_debug_response_tx,
-        server.debug_jobs,
-        server.event_history,
-        server.event_counter,
-        server.swarm_event_tx,
-        server.identity,
+        server.handles.sessions,
+        server.handles.is_processing,
+        server.handles.session_id,
+        server.handles.provider,
+        server.handles.client_connections,
+        server.handles.swarm_state.members,
+        server.handles.swarm_state.swarms_by_id,
+        server.handles.shared_context,
+        server.handles.swarm_state.plans,
+        server.handles.swarm_state.coordinators,
+        server.handles.file_touch,
+        server.handles.channel_subscriptions,
+        server.handles.channel_subscriptions_by_session,
+        server.handles.client_debug_state,
+        server.handles.client_debug_response_tx,
+        server.handles.debug_jobs,
+        server.handles.event_history,
+        server.handles.event_counter,
+        server.handles.swarm_event_tx,
+        server.handles.identity,
         std::time::Instant::now(),
         None,
         None,
-        server.shutdown_signals,
-        server.soft_interrupt_queues,
+        server.handles.shutdown_signals,
+        server.handles.soft_interrupt_queues,
     ));
     let (reader, mut writer) = client.into_split();
     let mut reader = BufReader::new(reader);

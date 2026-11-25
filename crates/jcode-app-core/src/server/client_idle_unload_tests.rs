@@ -4,11 +4,11 @@ use serde_json::json;
 
 fn unload(server: &Server) -> IdleUnload {
     IdleUnload {
-        sessions: Arc::clone(&server.sessions),
-        swarm: server.swarm_state.clone(),
-        connections: Arc::clone(&server.client_connections),
-        queues: Arc::clone(&server.soft_interrupt_queues),
-        shutdown: Arc::clone(&server.shutdown_signals),
+        sessions: Arc::clone(&server.handles.sessions),
+        swarm: server.handles.swarm_state.clone(),
+        connections: Arc::clone(&server.handles.client_connections),
+        queues: Arc::clone(&server.handles.soft_interrupt_queues),
+        shutdown: Arc::clone(&server.handles.shutdown_signals),
     }
 }
 
@@ -19,7 +19,7 @@ async fn seed(server: &Server, id: &str, cwd: &std::path::Path, tool: bool) {
         ..session.workspace()
     });
     let mut agent = crate::agent::Agent::new_with_session(
-        server.provider.fork(),
+        server.handles.provider.fork(),
         Registry::empty(),
         session,
         None,
@@ -50,6 +50,7 @@ async fn seed(server: &Server, id: &str, cwd: &std::path::Path, tool: bool) {
         );
     }
     server
+        .handles
         .sessions
         .register_new(id.into(), Arc::new(Mutex::new(agent)))
         .await
@@ -97,10 +98,10 @@ async fn idle_unload_restores_identical_history_on_socket_subscribe() {
     assert_eq!(monitor.sweep(&mut idle, threshold), 0);
     idle.insert(id.into(), Instant::now() - Duration::from_secs(2));
     assert_eq!(monitor.sweep(&mut idle, threshold), 1);
-    assert!(server.sessions.read().await.is_empty());
-    assert_eq!(server.sessions.idle_eviction_count(), 1);
+    assert!(server.handles.sessions.ids().await.is_empty());
+    assert_eq!(server.handles.sessions.idle_eviction_count(), 1);
 
-    let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let listener = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&path).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&path)
         .await
@@ -140,7 +141,7 @@ async fn idle_unload_restores_identical_history_on_socket_subscribe() {
             .collect::<Vec<_>>(),
         ["idle unload original user", "idle unload original reply"]
     );
-    assert!(server.sessions.read().await.contains_key(id));
+    assert!(server.handles.sessions.contains(id).await);
     drop(writer);
     drop(reader);
     runtime.shutdown().await;
@@ -168,7 +169,7 @@ async fn idle_unload_preserves_attached_busy_pending_tool_and_active_coordinator
         seed(&server, id, home._home.path(), id == tool).await;
     }
     let now = Instant::now();
-    server.client_connections.write().await.insert(
+    server.handles.client_connections.write().await.insert(
         "client".into(),
         crate::server::ClientConnectionInfo {
             client_id: "client".into(),
@@ -183,7 +184,7 @@ async fn idle_unload_preserves_attached_busy_pending_tool_and_active_coordinator
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     );
-    server.swarm_state.members.write().await.extend([
+    server.handles.swarm_state.members.write().await.extend([
         (
             coordinator.into(),
             member(coordinator, "coordinator", "ready", None),
@@ -206,8 +207,8 @@ async fn idle_unload_preserves_attached_busy_pending_tool_and_active_coordinator
             "pending wake".into(),
             false,
             jcode_agent_runtime::SoftInterruptSource::System,
-            &server.soft_interrupt_queues,
-            &server.sessions
+            &server.handles.soft_interrupt_queues,
+            &server.handles.sessions
         )
         .await
     );
@@ -216,7 +217,7 @@ async fn idle_unload_preserves_attached_busy_pending_tool_and_active_coordinator
         .map(|id| (id.to_owned(), now - Duration::from_secs(120)))
         .collect();
     assert_eq!(unload(&server).sweep(&mut idle, Duration::from_secs(1)), 0);
-    assert_eq!(server.sessions.read().await.len(), ids.len());
+    assert_eq!(server.handles.sessions.snapshot().await.len(), ids.len());
 }
 
 #[tokio::test]
@@ -238,19 +239,16 @@ async fn check_idle_unload_dm(large_context: bool) {
         home._runtime.path().join("unload.sock"),
         home._runtime.path().join("debug.sock"),
     );
-    assert!(
-        server
-            .sessions
-            .revive
-            .set(WorkerReviveContext {
-                provider: Arc::clone(&server.provider),
-                members: Arc::clone(&server.swarm_state.members),
-                mcp_pool: Arc::clone(&server.mcp_pool),
-                shutdown_signals: Arc::clone(&server.shutdown_signals),
-                soft_interrupt_queues: Arc::clone(&server.soft_interrupt_queues),
-            })
-            .is_ok()
-    );
+    server
+        .handles
+        .sessions
+        .install_revive(|| WorkerReviveContext {
+            provider: Arc::clone(&server.handles.provider),
+            members: Arc::clone(&server.handles.swarm_state.members),
+            mcp_pool: Arc::clone(&server.handles.mcp_pool),
+            shutdown_signals: Arc::clone(&server.handles.shutdown_signals),
+            soft_interrupt_queues: Arc::clone(&server.handles.soft_interrupt_queues),
+        });
     let root = "session_unload_root";
     let worker = if large_context {
         "session_unload_large_worker"
@@ -262,21 +260,27 @@ async fn check_idle_unload_dm(large_context: bool) {
     if large_context {
         recipient.runtime.model = Some("claude-sonnet-4-6".into());
     }
-    server.swarm_state.members.write().await.extend([
+    server.handles.swarm_state.members.write().await.extend([
         (root.into(), member(root, "coordinator", "ready", None)),
         (worker.into(), recipient),
     ]);
-    server.swarm_state.swarms_by_id.write().await.insert(
-        "unload-swarm".into(),
-        HashSet::from([root.into(), worker.into()]),
-    );
+    server
+        .handles
+        .swarm_state
+        .swarms_by_id
+        .write()
+        .await
+        .insert(
+            "unload-swarm".into(),
+            HashSet::from([root.into(), worker.into()]),
+        );
     let mut idle = HashMap::from([(worker.into(), Instant::now() - Duration::from_secs(120))]);
     assert_eq!(
         unload(&server).sweep(&mut idle, Duration::from_secs(1800)),
         1
     );
     assert_eq!(
-        server.swarm_state.members.read().await[worker].status,
+        server.handles.swarm_state.members.read().await[worker].status,
         "completed"
     );
     if large_context {
@@ -296,20 +300,20 @@ async fn check_idle_unload_dm(large_context: bool) {
         None,
         true,
         &tx,
-        &server.sessions,
-        &server.soft_interrupt_queues,
-        &server.swarm_state.members,
-        &server.swarm_state.swarms_by_id,
-        &server.channel_subscriptions,
-        &server.event_history,
-        &server.event_counter,
-        &server.swarm_event_tx,
-        &server.client_connections,
+        &server.handles.sessions,
+        &server.handles.soft_interrupt_queues,
+        &server.handles.swarm_state.members,
+        &server.handles.swarm_state.swarms_by_id,
+        &server.handles.channel_subscriptions,
+        &server.handles.event_history,
+        &server.handles.event_counter,
+        &server.handles.swarm_event_tx,
+        &server.handles.client_connections,
     )
     .await;
     if large_context {
         assert!(
-            !server.sessions.read().await.contains_key(worker),
+            !server.handles.sessions.contains(worker).await,
             "expensive cold DM unexpectedly restored the sleeping worker"
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
@@ -317,7 +321,7 @@ async fn check_idle_unload_dm(large_context: bool) {
             matches!(rx.try_recv().unwrap(), ServerEvent::RuntimeCommandResult { data, .. } if data["status"] == "queued_cold")
         );
         let path = home._runtime.path().join("unload.sock");
-        let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+        let runtime = server.runtime();
         let listener =
             runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&path).unwrap());
         let (reader, mut writer) = crate::transport::Stream::connect(&path)
@@ -386,7 +390,7 @@ async fn check_idle_unload_dm(large_context: bool) {
     })
     .await
     .unwrap();
-    let handle = server.sessions.read().await[worker].clone();
+    let handle = server.handles.sessions.snapshot().await[worker].clone();
     let agent = handle.lock().await;
     let provider_messages = provider.messages.lock().unwrap();
     assert!(

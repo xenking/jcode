@@ -164,7 +164,7 @@ pub(super) async fn cleanup_client_connection(
     let allow_reconnect = if disposition == DisconnectDisposition::Closed
         && !crate::session::session_exists(client_session_id)
     {
-        let agent = sessions.read().await.get(client_session_id).cloned();
+        let agent = sessions.get(client_session_id).await;
         agent.is_some_and(|agent| {
             agent
                 .try_lock()

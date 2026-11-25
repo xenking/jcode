@@ -351,7 +351,7 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     assert_eq!(persisted.working_dir(), Some(worktree));
     assert_eq!(persisted.message_count(), 30);
     assert_eq!(persisted.reasoning_effort(), Some("medium"));
-    assert!(Arc::ptr_eq(&sessions.read().await[worker], &agent));
+    assert!(Arc::ptr_eq(&sessions.snapshot().await[worker], &agent));
     assert_eq!(
         members.read().await[worker].runtime.model.as_deref(),
         Some("beta")
@@ -1514,7 +1514,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
                 question.contains(&format!("Effective speed: {effective:?}")),
                 "{question}"
             );
-            assert!(sessions.read().await.is_empty());
+            assert!(sessions.ids().await.is_empty());
             assert_eq!(state.members.read().await.len(), 1);
             assert!(requests.lock().unwrap().is_empty());
             assert!(
@@ -1552,7 +1552,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             while requests.lock().unwrap().is_empty() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            let agent = sessions.read().await.get(&sid).cloned().unwrap();
+            let agent = sessions.get(&sid).await.unwrap();
             drop(agent.lock().await);
         })
         .await
@@ -1707,7 +1707,7 @@ async fn wait_for_worker_requests(
         while requests.lock().unwrap().len() < count {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let agent = sessions.read().await.get(worker).cloned().unwrap();
+        let agent = sessions.get(worker).await.unwrap();
         drop(agent.lock().await);
     })
     .await
@@ -1884,7 +1884,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     .await
     .expect("actual spawn must not await coordinator lock")
     .unwrap();
-    let child = sessions.read().await.get(&child_id).cloned().unwrap();
+    let child = sessions.get(&child_id).await.unwrap();
     let child = child.lock().await;
     assert_eq!(
         child.runtime_skills_snapshot()["active_skill"],

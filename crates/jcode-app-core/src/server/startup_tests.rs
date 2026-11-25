@@ -205,7 +205,7 @@ fn server_initializes_schedule_runner_even_when_ambient_disabled() {
     let server = Server::new(provider);
 
     assert!(
-        server.ambient_runner.is_some(),
+        server.handles.ambient_runner.is_some(),
         "schedule/session tasks need the runner even when ambient is disabled"
     );
 }
@@ -218,7 +218,7 @@ async fn daemon_ping_reports_own_process_and_build_without_creating_session() {
     let socket = temp.path().join("jcode.sock");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket.clone(), temp.path().join("debug.sock"));
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let accept = runtime.spawn_main_accept_loop(Listener::bind(&socket).unwrap());
     let response = tokio::time::timeout(Duration::from_secs(3), async {
         let mut stream = crate::transport::Stream::connect(&socket).await.unwrap();
@@ -244,7 +244,7 @@ async fn daemon_ping_reports_own_process_and_build_without_creating_session() {
     assert_eq!(identity.pid, std::process::id());
     assert_eq!(identity.binary_path, std::env::current_exe().unwrap());
     assert_eq!(identity.git_hash, jcode_build_meta::git_hash());
-    assert!(server.sessions.read().await.is_empty());
+    assert!(server.handles.sessions.ids().await.is_empty());
 }
 
 #[tokio::test]
@@ -255,7 +255,7 @@ async fn openrig_probe_is_read_only_and_keeps_daemon_connection_usable() {
     let socket = temp.path().join("jcode.sock");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket.clone(), temp.path().join("debug.sock"));
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let accept = runtime.spawn_main_accept_loop(Listener::bind(&socket).unwrap());
     tokio::time::timeout(Duration::from_secs(4), async {
         let stream = crate::transport::Stream::connect(&socket).await.unwrap();
@@ -287,7 +287,7 @@ async fn openrig_probe_is_read_only_and_keeps_daemon_connection_usable() {
     .unwrap();
     runtime.shutdown().await;
     accept.await.unwrap();
-    assert!(server.sessions.read().await.is_empty());
+    assert!(server.handles.sessions.ids().await.is_empty());
 }
 
 /// Exclusive admission is process-global: holding it makes every other
@@ -323,7 +323,7 @@ async fn readiness_probe_fixture_subprocess() {
     let debug_socket_path = temp.path().join("jcode-debug.sock");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let main_handle = runtime.spawn_main_accept_loop(Listener::bind(&socket_path).unwrap());
     let debug_handle = runtime.spawn_debug_accept_loop(
         Listener::bind(&debug_socket_path).unwrap(),
@@ -339,8 +339,8 @@ async fn readiness_probe_fixture_subprocess() {
         let mut client = Client::connect_with_path(path).await.unwrap();
         assert!(client.ping().await.expect("read-only Ping during transfer"));
     }
-    assert!(server.sessions.read().await.is_empty());
-    assert_eq!(*server.client_count.read().await, 0);
+    assert!(server.handles.sessions.ids().await.is_empty());
+    assert_eq!(*server.handles.client_count.read().await, 0);
     drop(idle);
     assert!(crate::runtime_activity::global().try_idle().is_some());
 
@@ -357,7 +357,7 @@ async fn debug_accept_loop_responds_to_ping_without_affecting_client_count() {
     let debug_socket_path = temp.path().join("jcode-debug.sock");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket_path, debug_socket_path.clone());
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let debug_listener = Listener::bind(&debug_socket_path).expect("bind debug socket");
     let debug_handle = runtime.spawn_debug_accept_loop(debug_listener, std::time::Instant::now());
 
@@ -370,7 +370,7 @@ async fn debug_accept_loop_responds_to_ping_without_affecting_client_count() {
     .expect("debug client should connect");
 
     assert!(client.ping().await.expect("debug ping should succeed"));
-    assert_eq!(*server.client_count.read().await, 0);
+    assert_eq!(*server.handles.client_count.read().await, 0);
 
     tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
         .await

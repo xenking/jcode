@@ -163,7 +163,7 @@ fn claude_oauth_socket_effort_change_keeps_cached_prefix_and_sends_control() {
         let server = crate::server::Server::new_with_paths(
             Arc::new(provider), socket.clone(), home._runtime.path().join("oauth-debug.sock"),
         );
-        let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+        let runtime = server.runtime();
         let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
         let (reader, mut writer) = crate::transport::Stream::connect(&socket).await.unwrap().into_split();
         let mut reader = BufReader::new(reader);

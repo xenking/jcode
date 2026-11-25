@@ -63,7 +63,7 @@ pub(super) async fn resolve_coordinator_spawn_identity(
     sessions: &SessionAgents,
 ) -> CoordinatorSpawnIdentity {
     if let Some(agent) = {
-        let agent_sessions = sessions.read().await;
+        let agent_sessions = sessions.snapshot().await;
         agent_sessions.get(req_session_id).cloned()
     } && let Ok(agent_guard) = agent.try_lock()
     {
@@ -210,7 +210,7 @@ pub(super) async fn session_swarm_model(
     sessions: &SessionAgents,
     global: Option<String>,
 ) -> Option<String> {
-    let agent = sessions.read().await.get(req_session_id).cloned();
+    let agent = sessions.get(req_session_id).await;
     if let Some(agent) = agent
         && let Ok(guard) = agent.try_lock()
     {
@@ -221,6 +221,18 @@ pub(super) async fn session_swarm_model(
     Session::load_startup_stub(req_session_id)
         .map(|session| session.effective_agent_model("swarm", global.clone()))
         .unwrap_or(global)
+}
+
+/// Selection that inherits the coordinator's model, provider key, and route.
+fn inherit_coordinator_selection(coordinator: &CoordinatorSpawnIdentity) -> SwarmSpawnSelection {
+    SwarmSpawnSelection {
+        model: coordinator.model.clone(),
+        provider_key: coordinator
+            .provider_key
+            .clone()
+            .or_else(|| provider_key_for_spawn_model(coordinator.model.as_deref(), None)),
+        route_api_method: coordinator.route_api_method.clone(),
+    }
 }
 
 pub(super) fn resolve_swarm_spawn_selection(

@@ -16,7 +16,7 @@ async fn stop_receipt_reservation<'a>(
     let exact_id = target.trim();
     // A receipt cannot stand in for authorizing a live or reattached target.
     let slot = sessions.try_reserve(exact_id)?;
-    (!sessions.read().await.contains_key(exact_id)
+    (!sessions.contains(exact_id).await
         && !swarm_members.read().await.contains_key(exact_id)
         && run_blocking_io(|| {
             stopped_member(swarm_id, exact_id).is_some_and(|(session_id, _)| session_id == exact_id)
@@ -57,7 +57,7 @@ pub(super) async fn close_stopped_session(
     soft_interrupt_queues: &SessionInterruptQueues,
     session: &str,
 ) -> anyhow::Result<()> {
-    let agent = { sessions.read().await.get(session).cloned() };
+    let agent = { sessions.get(session).await };
     let mut agent = match agent {
         Some(agent) => Some(
             tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock_owned())

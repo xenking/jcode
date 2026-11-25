@@ -110,7 +110,7 @@ async fn member_provider_extras(
     mut retained: MemberProviderExtras,
 ) -> MemberProviderExtras {
     {
-        let agents = sessions.read().await;
+        let agents = sessions.snapshot().await;
         if let Some(agent) = agents.get(session_id)
             && let Ok(agent) = agent.try_lock()
         {
@@ -395,7 +395,7 @@ pub(super) async fn handle_comm_read_context(
         return;
     }
 
-    let agent_sessions = sessions.read().await;
+    let agent_sessions = sessions.snapshot().await;
     if let Some(agent) = agent_sessions.get(&target_session) {
         let messages = if let Ok(agent) = agent.try_lock() {
             agent.get_history()

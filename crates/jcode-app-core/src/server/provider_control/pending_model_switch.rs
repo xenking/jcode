@@ -43,10 +43,7 @@ fn claim(key: usize, id: u64) -> bool {
     }
 }
 
-fn settle_event(
-    request_id: u64,
-    pending: Option<&PendingModelSwitch>,
-) -> ServerEvent {
+fn settle_event(request_id: u64, pending: Option<&PendingModelSwitch>) -> ServerEvent {
     ServerEvent::ModelChangeCancelled {
         id: request_id,
         pending_id: pending.map(|pending| pending.id),

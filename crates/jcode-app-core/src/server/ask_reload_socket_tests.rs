@@ -116,7 +116,7 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
         socket.clone(),
         home._runtime.path().join("old-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -140,14 +140,18 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
         .wait_for_checkpointable(Duration::ZERO)
         .await
         .expect("an unanswered question must not block the reviewed fence");
-    reload::persist_reload_recovery_intents("reviewed-ask", &server.swarm_state.members, None)
-        .await;
+    reload::persist_reload_recovery_intents(
+        "reviewed-ask",
+        &server.handles.swarm_state.members,
+        None,
+    )
+    .await;
     let unfinished = reload::graceful_shutdown_sessions(
         "reviewed-ask",
-        &server.sessions,
-        &server.swarm_state.members,
-        &server.shutdown_signals,
-        &server.swarm_event_tx,
+        &server.handles.sessions,
+        &server.handles.swarm_state.members,
+        &server.handles.shutdown_signals,
+        &server.handles.swarm_event_tx,
         None,
     )
     .await;
@@ -173,9 +177,9 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
         socket.clone(),
         home._runtime.path().join("new-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = RecoveryOwner::new(&server);
+    let recovery = RecoveryOwner::new(&server.handles);
     let startup = recovery.reconcile_once().await;
     assert!(
         startup.tasks.is_empty(),
@@ -285,14 +289,15 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
     );
     let (member, _worker_events) = member(worker, "agent", true, Some(root));
     server
+        .handles
         .swarm_state
         .members
         .write()
         .await
         .insert(worker.into(), member);
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = reload_recovery::RecoveryOwner::new(&server)
+    let recovery = reload_recovery::RecoveryOwner::new(&server.handles)
         .reconcile_once()
         .await;
     assert_eq!(

@@ -39,17 +39,3 @@ pub(in crate::server) fn is_inherit_sentinel(model: &str) -> bool {
     let trimmed = model.trim();
     trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
 }
-
-/// Selection that inherits the coordinator's model, provider key, and route.
-pub(super) fn inherit_coordinator_selection(
-    coordinator: &CoordinatorSpawnIdentity,
-) -> SwarmSpawnSelection {
-    SwarmSpawnSelection {
-        model: coordinator.model.clone(),
-        provider_key: coordinator
-            .provider_key
-            .clone()
-            .or_else(|| provider_key_for_spawn_model(coordinator.model.as_deref(), None)),
-        route_api_method: coordinator.route_api_method.clone(),
-    }
-}

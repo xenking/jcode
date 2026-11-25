@@ -64,7 +64,7 @@ impl WorkerTarget {
     }
 
     async fn coordinator_notice(&self, message: String) {
-        let owner = { self.sessions.read().await.get(&self.coordinator).cloned() };
+        let owner = { self.sessions.get(&self.coordinator).await };
         if let Some(owner) = owner {
             let id = self.coordinator.clone();
             let message = message.clone();
@@ -88,7 +88,7 @@ impl WorkerTarget {
             agent.session_id() == self.worker
                 && self
                     .sessions
-                    .read()
+                    .snapshot()
                     .await
                     .get(&self.worker)
                     .is_some_and(|live| Arc::ptr_eq(live, OwnedMutexGuard::mutex(&agent))),

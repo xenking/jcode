@@ -1257,7 +1257,7 @@ pub(super) async fn handle_unbound_notify_auth_changed(
         crate::provider::clear_provider_unavailable_for_account(provider_id);
     }
     provider_template.on_auth_changed();
-    let agents: Vec<Arc<Mutex<Agent>>> = sessions.read().await.values().cloned().collect();
+    let agents: Vec<Arc<Mutex<Agent>>> = sessions.handles().await;
     let mut idle = Vec::new();
     let mut busy = Vec::new();
     for agent in agents {

@@ -38,7 +38,7 @@ pub(super) async fn live_or_revived_agent(
             return None;
         }
     };
-    if let Some(context) = sessions.revive.get()
+    if let Some(context) = sessions.revive_context()
         && context
             .members
             .read()
@@ -52,10 +52,10 @@ pub(super) async fn live_or_revived_agent(
         // must not race to publish a fresh turn before recovery claims it.
         return None;
     }
-    if let Some(agent) = sessions.read().await.get(session_id).cloned() {
+    if let Some(agent) = sessions.get(session_id).await {
         return Some(agent);
     }
-    let context = sessions.revive.get()?;
+    let context = sessions.revive_context()?;
     let swarm_members = &context.members;
     let slot = sessions.reserve(session_id).await;
     if let Some(agent) = slot.existing().await {

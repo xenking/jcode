@@ -3,7 +3,6 @@ use super::*;
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupt_queued_batch_delivers_one_turn_promptly() {
-    use crate::server::runtime::ServerRuntime;
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -27,7 +26,7 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
         socket.clone(),
         home._runtime.path().join("batch-debug.sock"),
     );
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -88,7 +87,15 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
         )
         .await;
     }
-    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    let session_id = server
+        .handles
+        .sessions
+        .snapshot()
+        .await
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket)
         .await
         .unwrap()

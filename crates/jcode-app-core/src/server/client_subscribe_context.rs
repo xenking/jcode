@@ -45,7 +45,7 @@ pub(super) async fn resolve_target_subscribe_working_dir(
     else {
         return Ok(());
     };
-    let live = sessions.read().await.get(target).cloned();
+    let live = sessions.get(target).await;
     let resolved = if let Some(live) = live {
         super::super::subscribe_working_dir::live_session_working_dir(&live, target, members).await
     } else {

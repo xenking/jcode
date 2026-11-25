@@ -2119,7 +2119,7 @@ pub(super) async fn handle_client(
                     // different session and every subsequent command reports a
                     // wrong-session attachment.
                     if crate::session::session_exists(&target_session_id)
-                        || sessions.read().await.contains_key(&target_session_id)
+                        || sessions.contains(&target_session_id).await
                     {
                         let pre_resume_session_id = client_session_id.clone();
                         agent = crate::hooks::with_client_terminal_env(
@@ -2560,7 +2560,7 @@ pub(super) async fn handle_client(
                 max_context_tokens,
                 session_id,
             } => {
-                let target_agent = sessions.read().await.get(&session_id).cloned();
+                let target_agent = sessions.get(&session_id).await;
                 if let Some(target_agent) = target_agent {
                     handle_set_context_cap(id, session_id, max_context_tokens, &target_agent, &client_event_tx).await;
                 } else {
@@ -2581,7 +2581,7 @@ pub(super) async fn handle_client(
                 let is_swarm_worker = swarm_members.read().await.get(effective_target)
                     .is_some_and(|member| member.report_back_to_session_id.is_some());
                 if let Some(target_session_id) = target_session_id {
-                    let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
+                    let target_agent = { sessions.get(&target_session_id).await };
                     if let Some(target_agent) = target_agent {
                         handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &target_session_id, SessionControlHandle::provider_for_session(&target_session_id), &client_event_tx)
                             .await;
@@ -4192,8 +4192,8 @@ mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_processing_completion, start_next_queued_prompt,
-    record_available_models, start_processing_message,
+    reconcile_processing_completions, record_available_models, record_processing_completion,
+    start_next_queued_prompt, start_processing_message,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)

@@ -234,7 +234,7 @@ async fn concurrent_cold_resumes_share_one_restored_runtime() -> Result<()> {
     assert!(Arc::ptr_eq(&first_result, &second_result));
     assert!(Arc::ptr_eq(
         &first_result,
-        sessions.read().await.get(&target_id).unwrap()
+        sessions.snapshot().await.get(&target_id).unwrap()
     ));
     assert!(!Arc::ptr_eq(&first_result, &first));
     assert!(!Arc::ptr_eq(&first_result, &second));
@@ -266,7 +266,10 @@ async fn same_session_reattach_preserves_runtime_owner() -> Result<()> {
     .await
     .expect("same-session reattach must not deadlock")?;
     assert!(Arc::ptr_eq(&attached, &agent));
-    assert!(Arc::ptr_eq(sessions.read().await.get(&id).unwrap(), &agent));
+    assert!(Arc::ptr_eq(
+        sessions.snapshot().await.get(&id).unwrap(),
+        &agent
+    ));
     assert!(agent.lock().await.has_concurrency_tracking());
     Ok(())
 }

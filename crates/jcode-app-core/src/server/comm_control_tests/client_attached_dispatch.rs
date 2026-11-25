@@ -208,7 +208,6 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
 #[tokio::test]
 async fn acknowledged_swarm_report_survives_restart_without_plan_task() -> Result<()> {
     use crate::protocol::Request;
-    use crate::server::runtime::ServerRuntime;
     use crate::transport::{Listener, Stream};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -224,20 +223,22 @@ async fn acknowledged_swarm_report_survives_restart_without_plan_task() -> Resul
     let mut worker = member(worker_id, swarm_id, "completed");
     worker.latest_completion_report = Some("Previous report".into());
     server
+        .handles
         .swarm_state
         .members
         .write()
         .await
         .insert(worker_id.into(), worker);
     server
+        .handles
         .swarm_state
         .swarms_by_id
         .write()
         .await
         .insert(swarm_id.into(), HashSet::from([worker_id.into()]));
-    crate::server::persist_swarm_state_for(swarm_id, &server.swarm_state).await;
+    crate::server::persist_swarm_state_for(swarm_id, &server.handles.swarm_state).await;
 
-    let runtime = ServerRuntime::from_server(&server);
+    let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(Listener::bind(&socket)?);
     let (reader, mut writer) = Stream::connect(&socket).await?.into_split();
     let report = "Work finished and the focused tests passed.";
