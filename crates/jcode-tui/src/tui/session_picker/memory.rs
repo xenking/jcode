@@ -2,94 +2,96 @@ use super::{
     PickerItem, PreviewMessage, ResumeTarget, ServerGroup, SessionInfo, SessionPicker, SessionRef,
 };
 
-pub(super) fn debug_memory_profile(picker: &SessionPicker) -> serde_json::Value {
-    let items_estimate_bytes: usize = picker.items.iter().map(estimate_picker_item_bytes).sum();
-    let visible_sessions_estimate_bytes =
-        picker.visible_sessions.capacity() * std::mem::size_of::<SessionRef>();
-    let all_sessions_estimate_bytes: usize = picker
-        .all_sessions
-        .iter()
-        .map(estimate_session_info_bytes)
-        .sum();
-    let all_server_groups_estimate_bytes: usize = picker
-        .all_server_groups
-        .iter()
-        .map(estimate_server_group_bytes)
-        .sum();
-    let all_orphan_sessions_estimate_bytes: usize = picker
-        .all_orphan_sessions
-        .iter()
-        .map(estimate_session_info_bytes)
-        .sum();
-    let item_to_session_estimate_bytes =
-        picker.item_to_session.capacity() * std::mem::size_of::<Option<usize>>();
-    let crashed_session_ids_estimate_bytes: usize = picker
-        .crashed_session_ids
-        .iter()
-        .map(|value| value.capacity())
-        .sum();
-    let selected_session_ids_estimate_bytes: usize = picker
-        .selected_session_ids
-        .iter()
-        .map(|value| value.capacity())
-        .sum();
-    let search_query_bytes = picker.search_query.capacity();
-    let loading_message_bytes = picker
-        .loading_message
-        .as_ref()
-        .map(|message| message.capacity())
-        .unwrap_or(0);
-    let pending_claude_takeover_bytes = picker
-        .pending_claude_takeover
-        .as_ref()
-        .map(estimate_resume_target_bytes)
-        .unwrap_or(0);
-    let retained_preview_bytes = picker.preview_reuse.retained_bytes();
-    let active_preview_bytes = picker
-        .preview_cache
-        .as_ref()
-        .map_or(0, |cache| cache.estimated_bytes());
-    let preview_fingerprint_bytes = picker.preview_fingerprints.borrow().capacity()
-        * std::mem::size_of::<(super::SessionRef, u64)>();
-    let total_estimate_bytes = items_estimate_bytes
-        + visible_sessions_estimate_bytes
-        + all_sessions_estimate_bytes
-        + all_server_groups_estimate_bytes
-        + all_orphan_sessions_estimate_bytes
-        + item_to_session_estimate_bytes
-        + crashed_session_ids_estimate_bytes
-        + selected_session_ids_estimate_bytes
-        + search_query_bytes
-        + loading_message_bytes
-        + pending_claude_takeover_bytes
-        + retained_preview_bytes
-        + active_preview_bytes
-        + preview_fingerprint_bytes;
+impl SessionPicker {
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let items_estimate_bytes: usize = self.items.iter().map(estimate_picker_item_bytes).sum();
+        let visible_sessions_estimate_bytes =
+            self.visible_sessions.capacity() * std::mem::size_of::<SessionRef>();
+        let all_sessions_estimate_bytes: usize = self
+            .all_sessions
+            .iter()
+            .map(estimate_session_info_bytes)
+            .sum();
+        let all_server_groups_estimate_bytes: usize = self
+            .all_server_groups
+            .iter()
+            .map(estimate_server_group_bytes)
+            .sum();
+        let all_orphan_sessions_estimate_bytes: usize = self
+            .all_orphan_sessions
+            .iter()
+            .map(estimate_session_info_bytes)
+            .sum();
+        let item_to_session_estimate_bytes =
+            self.item_to_session.capacity() * std::mem::size_of::<Option<usize>>();
+        let crashed_session_ids_estimate_bytes: usize = self
+            .crashed_session_ids
+            .iter()
+            .map(|value| value.capacity())
+            .sum();
+        let selected_session_ids_estimate_bytes: usize = self
+            .selected_session_ids
+            .iter()
+            .map(|value| value.capacity())
+            .sum();
+        let search_query_bytes = self.search_query.capacity();
+        let loading_message_bytes = self
+            .loading_message
+            .as_ref()
+            .map(|message| message.capacity())
+            .unwrap_or(0);
+        let pending_claude_takeover_bytes = self
+            .pending_claude_takeover
+            .as_ref()
+            .map(estimate_resume_target_bytes)
+            .unwrap_or(0);
+        let retained_preview_bytes = self.preview_reuse.retained_bytes();
+        let active_preview_bytes = self
+            .preview_cache
+            .as_ref()
+            .map_or(0, |cache| cache.estimated_bytes());
+        let preview_fingerprint_bytes = self.preview_fingerprints.borrow().capacity()
+            * std::mem::size_of::<(super::SessionRef, u64)>();
+        let total_estimate_bytes = items_estimate_bytes
+            + visible_sessions_estimate_bytes
+            + all_sessions_estimate_bytes
+            + all_server_groups_estimate_bytes
+            + all_orphan_sessions_estimate_bytes
+            + item_to_session_estimate_bytes
+            + crashed_session_ids_estimate_bytes
+            + selected_session_ids_estimate_bytes
+            + search_query_bytes
+            + loading_message_bytes
+            + pending_claude_takeover_bytes
+            + retained_preview_bytes
+            + active_preview_bytes
+            + preview_fingerprint_bytes;
 
-    serde_json::json!({
-        "items_count": picker.items.len(),
-        "visible_sessions_count": picker.visible_sessions.len(),
-        "all_sessions_count": picker.all_sessions.len(),
-        "all_server_groups_count": picker.all_server_groups.len(),
-        "all_orphan_sessions_count": picker.all_orphan_sessions.len(),
-        "crashed_session_ids_count": picker.crashed_session_ids.len(),
-        "selected_session_ids_count": picker.selected_session_ids.len(),
-        "search_query_bytes": search_query_bytes,
-        "loading_message_bytes": loading_message_bytes,
-        "pending_claude_takeover_bytes": pending_claude_takeover_bytes,
-        "retained_preview_bytes": retained_preview_bytes,
-        "active_preview_bytes": active_preview_bytes,
-        "preview_fingerprint_bytes": preview_fingerprint_bytes,
-        "items_estimate_bytes": items_estimate_bytes,
-        "visible_sessions_estimate_bytes": visible_sessions_estimate_bytes,
-        "all_sessions_estimate_bytes": all_sessions_estimate_bytes,
-        "all_server_groups_estimate_bytes": all_server_groups_estimate_bytes,
-        "all_orphan_sessions_estimate_bytes": all_orphan_sessions_estimate_bytes,
-        "item_to_session_estimate_bytes": item_to_session_estimate_bytes,
-        "crashed_session_ids_estimate_bytes": crashed_session_ids_estimate_bytes,
-        "selected_session_ids_estimate_bytes": selected_session_ids_estimate_bytes,
-        "total_estimate_bytes": total_estimate_bytes,
-    })
+        serde_json::json!({
+            "items_count": self.items.len(),
+            "visible_sessions_count": self.visible_sessions.len(),
+            "all_sessions_count": self.all_sessions.len(),
+            "all_server_groups_count": self.all_server_groups.len(),
+            "all_orphan_sessions_count": self.all_orphan_sessions.len(),
+            "crashed_session_ids_count": self.crashed_session_ids.len(),
+            "selected_session_ids_count": self.selected_session_ids.len(),
+            "search_query_bytes": search_query_bytes,
+            "loading_message_bytes": loading_message_bytes,
+            "pending_claude_takeover_bytes": pending_claude_takeover_bytes,
+            "retained_preview_bytes": retained_preview_bytes,
+            "active_preview_bytes": active_preview_bytes,
+            "preview_fingerprint_bytes": preview_fingerprint_bytes,
+            "items_estimate_bytes": items_estimate_bytes,
+            "visible_sessions_estimate_bytes": visible_sessions_estimate_bytes,
+            "all_sessions_estimate_bytes": all_sessions_estimate_bytes,
+            "all_server_groups_estimate_bytes": all_server_groups_estimate_bytes,
+            "all_orphan_sessions_estimate_bytes": all_orphan_sessions_estimate_bytes,
+            "item_to_session_estimate_bytes": item_to_session_estimate_bytes,
+            "crashed_session_ids_estimate_bytes": crashed_session_ids_estimate_bytes,
+            "selected_session_ids_estimate_bytes": selected_session_ids_estimate_bytes,
+            "total_estimate_bytes": total_estimate_bytes,
+        })
+    }
 }
 
 fn estimate_optional_string_bytes(value: &Option<String>) -> usize {

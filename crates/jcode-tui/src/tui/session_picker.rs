@@ -520,10 +520,6 @@ impl SessionPicker {
         }
     }
 
-    pub fn debug_memory_profile(&self) -> serde_json::Value {
-        memory::debug_memory_profile(self)
-    }
-
     /// Create a picker with server grouping
     pub fn new_grouped(server_groups: Vec<ServerGroup>, orphan_sessions: Vec<SessionInfo>) -> Self {
         // Count totals before filtering
