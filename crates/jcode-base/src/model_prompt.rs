@@ -5,7 +5,7 @@
 //! the default instructions. The match is by model, never by agent role, so
 //! it composes with agent profiles instead of competing with them.
 
-use crate::config::{ModelPromptConfig, ModelPromptMode};
+use crate::config::{AgentsConfig, ModelPromptConfig, ModelPromptMode};
 
 /// The model prompt rules that apply to one model.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,41 +26,7 @@ impl ModelPrompt {
     }
 }
 
-/// Case-insensitive glob with `*` (any run) and `?` (one character).
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
-    let text: Vec<char> = text.to_lowercase().chars().collect();
-    let (mut p, mut t) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some((p, t));
-            p += 1;
-        } else if let Some((star_p, star_t)) = star {
-            p = star_p + 1;
-            t = star_t + 1;
-            star = Some((star_p, star_t + 1));
-        } else {
-            return false;
-        }
-    }
-    pattern[p..].iter().all(|c| *c == '*')
-}
-
-fn rule_matches(rule: &ModelPromptConfig, provider: &str, model: &str) -> bool {
-    let routed = format!("{}:{model}", provider.trim());
-    rule.patterns.iter().any(|pattern| {
-        let pattern = pattern.trim();
-        if pattern.contains(':') {
-            glob_match(pattern, &routed)
-        } else {
-            glob_match(pattern, model)
-        }
-    })
-}
+pub use jcode_config_types::glob_match;
 
 fn rule_text(rule: &ModelPromptConfig) -> Option<String> {
     let text = match rule.instructions_file.as_deref() {
@@ -84,13 +50,10 @@ fn rule_text(rule: &ModelPromptConfig) -> Option<String> {
 }
 
 /// Resolve the rules for `provider` / `model`.
-pub fn resolve(rules: &[ModelPromptConfig], provider: &str, model: &str) -> ModelPrompt {
+pub fn resolve(agents: &AgentsConfig, provider: &str, model: &str) -> ModelPrompt {
     let mut prompt = ModelPrompt::default();
     let mut matched = Vec::new();
-    for (index, rule) in rules.iter().enumerate() {
-        if !rule_matches(rule, provider, model) {
-            continue;
-        }
+    for (index, rule) in agents.matching_model_prompts(provider, model) {
         let Some(text) = rule_text(rule) else {
             continue;
         };

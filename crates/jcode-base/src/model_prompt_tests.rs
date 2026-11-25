@@ -9,6 +9,13 @@ fn rule(patterns: &[&str], mode: ModelPromptMode, text: &str) -> ModelPromptConf
     }
 }
 
+fn agents(rules: Vec<ModelPromptConfig>) -> AgentsConfig {
+    AgentsConfig {
+        model_prompts: rules,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn glob_matches_families_and_exact_ids() {
     assert!(glob_match("claude-*", "claude-opus-5-5"));
@@ -35,15 +42,15 @@ fn rules_stack_in_order_and_last_replace_wins() {
             "second replace",
         ),
     ];
-    let prompt = resolve(&rules, "Claude", "claude-opus-5-5");
+    let prompt = resolve(&agents(rules.clone()), "Claude", "claude-opus-5-5");
     assert_eq!(prompt.append, vec!["family", "exact"]);
     assert_eq!(prompt.replace.as_deref(), Some("second replace"));
     assert_eq!(prompt.key, "0,2,3,4");
 
-    let sonnet = resolve(&rules, "Claude", "claude-sonnet-5-5");
+    let sonnet = resolve(&agents(rules.clone()), "Claude", "claude-sonnet-5-5");
     assert_eq!(sonnet.append, vec!["family"]);
     assert_eq!(sonnet.replace.as_deref(), Some("first replace"));
-    assert!(resolve(&rules, "OpenAI", "deepseek-v4-pro").is_empty());
+    assert!(resolve(&agents(rules.clone()), "OpenAI", "deepseek-v4-pro").is_empty());
 }
 
 #[test]
@@ -54,10 +61,15 @@ fn provider_patterns_match_the_route() {
         "via router",
     )];
     assert_eq!(
-        resolve(&rules, "openrouter", "anthropic/claude-opus").append,
+        resolve(
+            &agents(rules.clone()),
+            "openrouter",
+            "anthropic/claude-opus"
+        )
+        .append,
         vec!["via router"]
     );
-    assert!(resolve(&rules, "Claude", "claude-opus").is_empty());
+    assert!(resolve(&agents(rules.clone()), "Claude", "claude-opus").is_empty());
 }
 
 #[test]
@@ -65,7 +77,7 @@ fn unreadable_file_and_blank_text_are_skipped() {
     let mut missing = rule(&["*"], ModelPromptMode::Replace, "inline");
     missing.instructions_file = Some("/nonexistent/jcode-model-prompt.md".into());
     let blank = rule(&["*"], ModelPromptMode::Append, "   ");
-    let prompt = resolve(&[missing, blank], "x", "y");
+    let prompt = resolve(&agents(vec![missing, blank]), "x", "y");
     assert!(prompt.is_empty());
     assert_eq!(prompt.key, "");
 }

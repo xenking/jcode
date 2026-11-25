@@ -302,7 +302,7 @@ impl Agent {
     /// `[[agents.model_prompts]]` for the model this session runs on now.
     pub(super) fn model_prompt(&self) -> crate::model_prompt::ModelPrompt {
         crate::model_prompt::resolve(
-            &crate::config::config().agents.model_prompts,
+            &crate::config::config().agents,
             self.provider.name(),
             &self.provider.model(),
         )
