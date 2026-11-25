@@ -350,10 +350,15 @@ pub(super) fn handle_history_event(
     // real switch and must announce itself.
     app.remote_session_facts_provisional = false;
     app.clear_remote_startup_phase();
-    app.session.subagent_model = subagent_model;
-    app.session.agent_model_overrides = agent_model_overrides;
-    app.session.autoreview_enabled = autoreview_enabled;
-    app.session.autojudge_enabled = autojudge_enabled;
+    app.session
+        .apply_worker_routing(crate::session::WorkerRouting {
+            subagent_model,
+            agent_model_overrides,
+        });
+    let mut autonomy = app.session.autonomy();
+    autonomy.autoreview_enabled = autoreview_enabled;
+    autonomy.autojudge_enabled = autojudge_enabled;
+    app.session.apply_autonomy(autonomy);
     app.autoreview_enabled =
         autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
     app.autojudge_enabled = autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
@@ -428,7 +433,7 @@ pub(super) fn handle_history_event(
         app.session.set_pinned_skill_names(
             pinned_skills.unwrap_or_else(|| pinned_skill.into_iter().collect()),
         );
-        app.active_skill = app.session.pinned_skill.clone();
+        app.active_skill = app.session.pinned_skill().map(str::to_owned);
         app.remote_sessions = all_sessions;
         app.remote_client_count = client_count;
         app.remote_is_canary = is_canary;

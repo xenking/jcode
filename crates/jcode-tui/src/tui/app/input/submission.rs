@@ -21,7 +21,7 @@ impl App {
                 return true;
             }
             self.session.set_pinned_skill_names(names);
-            self.active_skill = self.session.pinned_skill.clone();
+            self.active_skill = self.session.pinned_skill().map(str::to_owned);
             if !self.is_remote {
                 if self.active_skill.is_some() {
                     self.reannounce_pinned_skill();
@@ -287,7 +287,7 @@ impl App {
             self.session.add_message(Role::User, blocks);
         }
         let reminder = merge_turn_reminders(
-            mission_turn_reminder(&self.session.id),
+            mission_turn_reminder(&self.session.id()),
             self.take_cloud_recovery_reminder(),
         );
         self.append_turn_system_reminder(reminder);
@@ -371,7 +371,7 @@ impl App {
             }
 
             let turn_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id()));
             let turn_reminder =
                 merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
 
@@ -465,7 +465,7 @@ impl App {
             Err(error) => {
                 crate::logging::warn(&format!(
                     "Failed to persist pending session save for {}: {}",
-                    self.session.id, error
+                    self.session.id(), error
                 ));
             }
         }

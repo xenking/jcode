@@ -515,12 +515,12 @@ impl AmbientRunnerHandle {
         let session = Session::load(session_id)?;
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
-        if session.is_canary {
+        if session.is_canary() {
             registry.register_selfdev_tools().await;
         }
 
         let mut agent = Agent::new(cycle_provider, registry);
-        agent.set_debug(session.is_debug);
+        agent.set_debug(session.is_debug());
         agent.restore_session(session_id)?;
 
         let reminder = ambient::format_scheduled_session_message(item);
@@ -541,12 +541,12 @@ impl AmbientRunnerHandle {
         parent_session_id: &str,
     ) -> anyhow::Result<String> {
         let mut child = scheduled_session::scheduled_child_session(item, parent_session_id);
-        child.status = crate::session::SessionStatus::Closed;
+        child.mark_closed_unregistered();
         child.save()?;
 
-        let child_session_id = child.id.clone();
-        let child_is_canary = child.is_canary;
-        let child_is_debug = child.is_debug;
+        let child_session_id = child.id().to_string();
+        let child_is_canary = child.is_canary();
+        let child_is_debug = child.is_debug();
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         if child_is_canary {

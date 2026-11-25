@@ -167,7 +167,7 @@ impl Agent {
             self.session.replace_messages(messages);
             self.persist_session_now()?;
             if is_error {
-                crate::recovery_gate::cancel(&self.session.id)?;
+                crate::recovery_gate::cancel(&self.session.id())?;
             } else if let Some(identity) = self.server_turn_observer().snapshot().1
                 && !crate::recovery_gate::admit_ask_answer(
                     &self.session,

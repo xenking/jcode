@@ -746,7 +746,7 @@ impl Agent {
         archive: bool,
         native: bool,
     ) -> CompactionProjection {
-        let mut projection = if let Some(state) = session.compaction.as_deref() {
+        let mut projection = if let Some(state) = session.compaction().as_deref() {
             let mut manager = CompactionManager::new();
             manager.restore_persisted_state(state, messages.len());
             manager.inspect_provider_messages(session, &messages, archive, native)

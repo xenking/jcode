@@ -275,7 +275,7 @@ pub(super) fn is_clipboard_paste_shortcut(code: KeyCode, modifiers: KeyModifiers
 
 pub(super) fn active_clipboard_session_id(app: &App) -> String {
     app.active_client_session_id()
-        .unwrap_or(app.session.id.as_str())
+        .unwrap_or(app.session.id())
         .to_string()
 }
 

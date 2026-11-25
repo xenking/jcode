@@ -94,7 +94,7 @@ pub(super) fn handle_split_response_event(app: &mut App, event: ServerEvent) -> 
     let exe = app_mod::launch_client_executable();
     let cwd = crate::session::Session::load(&new_session_id)
         .ok()
-        .and_then(|session| session.working_dir)
+        .and_then(|session| session.working_dir().map(str::to_owned))
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_dir())
         .or_else(|| std::env::current_dir().ok())
@@ -498,7 +498,9 @@ pub(super) fn handle_model_changed_event(
         }
         let automatic_failover = automatic_route.is_some();
         if let Some(selection) = automatic_route {
-            app.session.route_api_method = Some(selection.api_method);
+            let mut route = app.session.route();
+            route.route_api_method = Some(selection.api_method);
+            app.session.apply_route(route);
         }
         let acknowledged_provider = app
             .remote_provider_name
@@ -532,7 +534,9 @@ pub(super) fn handle_model_changed_event(
                     .map(|label| format!("{method}@{label}"))
                     .filter(|route| jcode_provider_core::oauth_account_label(route).is_some())
                     .unwrap_or_else(|| method.to_string());
-                app.session.route_api_method = Some(route);
+                let mut session_route = app.session.route();
+                session_route.route_api_method = Some(route);
+                app.session.apply_route(session_route);
             }
         }
         // Always replace: a switch to a provider with no OAuth/API

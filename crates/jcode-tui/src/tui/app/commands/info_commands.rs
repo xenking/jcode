@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in super::super) fn current_subagent_model_summary(app: &App) -> String {
-    match app.session.subagent_model.as_deref() {
+    match app.session.subagent_model() {
         Some(model) => format!("fixed {}", model),
         None => format!("inherit current ({})", app.provider.model()),
     }
@@ -86,7 +86,7 @@ pub(super) fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> boo
     }
 
     if matches!(rest, "inherit" | "reset" | "clear") {
-        app.session.subagent_model = None;
+        app.session.set_subagent_model(None);
         let _ = app.session.save();
         app.push_display_message(DisplayMessage::system(format!(
             "Subagent model reset to inherit the current model ({}).",
@@ -96,7 +96,7 @@ pub(super) fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> boo
         return true;
     }
 
-    app.session.subagent_model = Some(rest.to_string());
+    app.session.set_subagent_model(Some(rest.to_string()));
     let _ = app.session.save();
     app.push_display_message(DisplayMessage::system(format!(
         "Subagent model pinned to {} for this session.",
@@ -340,7 +340,7 @@ pub(in super::super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool
     crate::logging::info(&format!(
         "JCODE_LOG_MARK id={} session={} provider={} model={} cwd={} note={}",
         marker_id,
-        app.session.id,
+        app.session.id(),
         app.provider_name(),
         app.provider_model(),
         working_dir,

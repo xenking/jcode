@@ -212,7 +212,7 @@ impl Agent {
             let has_queued_skills = queued_items
                 .iter()
                 .any(|item| item.active_skill.is_some() || !item.attachments.is_empty());
-            let session_id = self.session.id.clone();
+            let session_id = self.session.id().to_string();
             if !crate::recovery_gate::admit_input(
                 &session_id,
                 lease.identity(),
@@ -689,7 +689,7 @@ impl Agent {
         {
             crate::logging::info(&format!(
                 "STDIN_CHANNEL_REPLACED session={} previous channel was still open",
-                self.session.id
+                self.session.id()
             ));
         }
     }

@@ -5,7 +5,7 @@ impl App {
         if super::super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
             return;
         }
-        let current_dir = self.session.working_dir.clone();
+        let current_dir = self.session.working_dir().map(str::to_owned);
         // Even the cached list can contain tens of MB of search text. Never
         // deserialize it on the input thread before showing the overlay.
         let mut picker = SessionPicker::loading();
@@ -28,7 +28,7 @@ impl App {
         ) {
             return;
         }
-        let current_dir = self.session.working_dir.clone();
+        let current_dir = self.session.working_dir().map(str::to_owned);
         let mut picker = SessionPicker::loading();
         picker.opened_from(current_dir, super::super::commands::active_session_id(self));
         picker.activate_active_filter();
@@ -127,7 +127,7 @@ impl App {
             SessionPickerMode::Resume => {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.opened_from(
-                    self.session.working_dir.clone(),
+                    self.session.working_dir().map(str::to_owned),
                     super::super::commands::active_session_id(self),
                 );
                 picker.apply_resume_project_scope_default();
@@ -138,7 +138,7 @@ impl App {
             SessionPickerMode::CatchUp => {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.activate_catchup_filter();
-                picker.set_current_dir(self.session.working_dir.clone());
+                picker.set_current_dir(self.session.working_dir().map(str::to_owned));
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Catch Up sessions loaded");
                 true
@@ -146,7 +146,7 @@ impl App {
             SessionPickerMode::ActiveSessions => {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.opened_from(
-                    self.session.working_dir.clone(),
+                    self.session.working_dir().map(str::to_owned),
                     super::super::commands::active_session_id(self),
                 );
                 picker.activate_active_filter();
@@ -633,7 +633,7 @@ impl App {
         for session_id in &recovered {
             let mut session_cwd = cwd.clone();
             if let Ok(session) = crate::session::Session::load_startup_stub(session_id)
-                && let Some(dir) = session.working_dir.as_deref()
+                && let Some(dir) = session.working_dir()
                 && std::path::Path::new(dir).is_dir()
             {
                 session_cwd = std::path::PathBuf::from(dir);

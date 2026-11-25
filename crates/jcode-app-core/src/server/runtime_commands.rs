@@ -116,7 +116,7 @@ pub(super) async fn execute(
                 agent.mode_command(&args.join(" "))?
             };
             let pinned = Agent::read_session(agent, |session| {
-                json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()})
+                json!({"pinned_skill": session.pinned_skill(), "pinned_skills": session.pinned_skill_names()})
             });
             return Ok((
                 pinned,

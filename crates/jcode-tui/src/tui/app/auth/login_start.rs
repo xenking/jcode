@@ -95,7 +95,7 @@ impl App {
             "Jcode login: requesting browser approval...".to_string(),
         );
         self.set_status_notice("Jcode account: requesting browser approval");
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_string();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             self.push_display_message(DisplayMessage::error(
                 "Jcode account login requires the async runtime.".to_string(),
@@ -296,7 +296,7 @@ impl App {
 
     pub(in super::super) fn start_jcode_account_logout(&mut self) {
         self.set_status_notice("Jcode account: logging out");
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_string();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             let result = crate::subscription_catalog::clear_account_credentials();
             match result {

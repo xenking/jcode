@@ -291,12 +291,12 @@ pub(in super::super) fn transfer_pause_message() -> String {
 
 pub(super) fn transfer_active_messages(session: &crate::session::Session) -> Vec<Message> {
     let start = session
-        .compaction
+        .compaction()
         .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
+        .map(|state| state.compacted_count.min(session.message_count()))
         .unwrap_or(0);
-    session.messages[start..]
-        .iter()
+    session
+        .iter_messages_from(start)
         .map(crate::session::StoredMessage::to_message)
         .collect()
 }
@@ -314,23 +314,21 @@ pub(in super::super) fn create_transfer_session_from_parent(
         todo.waiting_reason = None;
     }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = compaction.map(std::sync::Arc::new);
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.status = crate::session::SessionStatus::Closed;
-    child.provider_session_id = None;
+    child.inherit_from(
+        parent,
+        crate::session::Inherit::SYSTEM_PROMPT
+            | crate::session::Inherit::WORKING_DIR
+            | crate::session::Inherit::ROUTE
+            | crate::session::Inherit::SUBAGENT_MODEL
+            | crate::session::Inherit::AUTONOMY
+            | crate::session::Inherit::BUILD_UNDER_TEST,
+    );
+    child.adopt_compaction(compaction);
+    child.forget_provider_session();
+    child.mark_closed_unregistered();
     child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
-    Ok((child.id.clone(), child.display_name().to_string()))
+    crate::todo::save_todos(child.id(), &todos)?;
+    Ok((child.id().to_string(), child.display_name().to_string()))
 }
 
 pub(super) async fn prepare_transfer_session_local(
@@ -340,11 +338,11 @@ pub(super) async fn prepare_transfer_session_local(
     let compaction = crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.as_deref().cloned(),
+        parent.compaction().as_deref().cloned(),
     )
     .await?;
     let (session_id, session_name) =
-        create_transfer_session_from_parent(parent.id.as_str(), &parent, compaction)?;
+        create_transfer_session_from_parent(parent.id(), &parent, compaction)?;
     Ok(super::super::PreparedTransferSession {
         session_id,
         session_name,
@@ -386,7 +384,7 @@ pub(in super::super) fn poll_local_transfer_prepare(app: &mut App) -> bool {
                     let exe = super::super::launch_client_executable();
                     let cwd = crate::session::Session::load(&prepared.session_id)
                         .ok()
-                        .and_then(|session| session.working_dir)
+                        .and_then(|session| session.working_dir().map(str::to_owned))
                         .map(std::path::PathBuf::from)
                         .filter(|path| path.is_dir())
                         .or_else(|| std::env::current_dir().ok())

@@ -1918,7 +1918,7 @@ impl Agent {
             ("phase", phase.to_string()),
             ("provider", agent.provider.name().to_string()),
             ("model", agent.provider.model()),
-            ("session_id", agent.session.id.clone()),
+            ("session_id", agent.session.id().to_string()),
             (
                 "connection_type",
                 agent

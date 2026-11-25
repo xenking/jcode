@@ -1081,7 +1081,7 @@ async fn send_history_with_guard(
     let (pinned_skill, pinned_skills, inferred_interrupted, context_occupancy) =
         Agent::read_session(&agent_guard, |session| {
             (
-                session.pinned_skill.clone(),
+                session.pinned_skill().map(str::to_owned),
                 Some(session.pinned_skill_names().to_vec()),
                 was_interrupted
                     .is_none()

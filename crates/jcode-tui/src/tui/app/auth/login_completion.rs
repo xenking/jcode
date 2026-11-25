@@ -38,7 +38,7 @@ impl App {
         );
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::auth(
-                Some(self.session.id.clone()),
+                Some(self.session.id().to_string()),
                 "",
                 Some("Auth: refreshing model routes..."),
             ),
@@ -52,7 +52,7 @@ impl App {
         }
         let provider = Arc::clone(&self.provider);
         let provider_hint = provider_hint.map(str::to_string);
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_string();
         let auto_selection_active = Arc::clone(&self.onboarding_auto_model_selection_active);
         let auto_selection_baseline = Arc::clone(&self.onboarding_auto_model_selection_baseline);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -296,12 +296,12 @@ impl App {
             vec![
                 ("provider_id", provider_id.clone()),
                 ("provider", provider_label.clone()),
-                ("session_id", self.session.id.clone()),
+                ("session_id", self.session.id().to_string()),
             ],
         );
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
-                Some(self.session.id.clone()),
+                Some(self.session.id().to_string()),
                 format!(
                     "{} Model Discovery Started\n\nSaved credentials are active. Jcode is fetching the live model catalog, will only switch to a model returned by that catalog, and will show what changed when discovery finishes.",
                     provider_label
@@ -317,7 +317,7 @@ impl App {
         // but doing it here lets the refresh task see the hot-added provider
         // without requiring a restart or a second user action.
         let provider = Arc::clone(&self.provider);
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_string();
         let before_routes = provider.model_routes();
         self.provider.on_auth_changed();
 

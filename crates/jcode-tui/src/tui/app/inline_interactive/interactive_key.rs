@@ -438,7 +438,7 @@ impl App {
                     PickerAction::SubagentModelChoice { inherit } => {
                         self.inline_interactive_state = None;
                         if inherit {
-                            self.session.subagent_model = None;
+                            self.session.set_subagent_model(None);
                             self.set_status_notice("Subagent model: inherit");
                             self.push_display_message(DisplayMessage::system(format!(
                                 "Subagent model reset to inherit the current model ({}).",
@@ -446,7 +446,7 @@ impl App {
                             )));
                         } else {
                             let spec = model_entry_saved_spec(&entry);
-                            self.session.subagent_model = Some(spec.clone());
+                            self.session.set_subagent_model(Some(spec.clone()));
                             self.set_status_notice(format!("Subagent model → {}", spec));
                             self.push_display_message(DisplayMessage::system(format!(
                                 "Subagent model pinned to {} for this session.",
@@ -544,8 +544,9 @@ impl App {
                             // fallback picks know which credential path the
                             // active route uses (remote sessions have no other
                             // route bookkeeping).
-                            self.session.route_api_method =
-                                Some(route_selection.api_method.clone());
+                            let mut route = self.session.route();
+                            route.route_api_method = Some(route_selection.api_method.clone());
+                            self.session.apply_route(route);
                             self.pending_route_selection = Some(route_selection);
                             self.pending_model_switch = Some(spec);
                             // In remote mode `self.provider` is a local
@@ -561,20 +562,22 @@ impl App {
                                 Ok(()) => {
                                     self.inline_interactive_state = None;
                                     self.provider_session_id = None;
-                                    self.session.provider_session_id = None;
+                                    self.session.forget_provider_session();
                                     self.upstream_provider = None;
                                     self.status_detail = None;
                                     self.invalidate_model_picker_cache();
                                     let active_model = self.provider.model();
                                     self.update_context_limit_for_model(&active_model, None);
-                                    self.session.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                                    let mut route = self.session.route();
+                                    route.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
                                         &spec,
                                         self.provider.name(),
-                                        self.session.provider_key.as_deref(),
+                                        self.session.provider_key(),
                                     );
-                                    self.session.model = Some(active_model.clone());
-                                    self.session.route_api_method =
+                                    route.model = Some(active_model.clone());
+                                    route.route_api_method =
                                         Some(route_selection.api_method.clone());
+                                    self.session.apply_route(route);
                                     let _ = self.session.save();
                                     crate::logging::event_info(
                                         "model_picker_select_applied",

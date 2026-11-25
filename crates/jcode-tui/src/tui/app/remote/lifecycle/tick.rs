@@ -427,7 +427,7 @@ pub(in super::super) async fn dispatch_due_remote_retry(
     if let Some(reason) = blocker {
         crate::logging::event_rate_limited(
             crate::logging::LogLevel::Info,
-            &format!("retry_blocked:{}:{reason}", app.session.id),
+            &format!("retry_blocked:{}:{reason}", app.session.id()),
             Duration::from_secs(30),
             "RECOVERY_RETRY_BLOCKED",
             app.recovery_log_fields(reason),

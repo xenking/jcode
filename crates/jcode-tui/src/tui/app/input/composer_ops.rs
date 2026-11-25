@@ -235,7 +235,7 @@ impl App {
         let todo_session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id)
+            .unwrap_or(&self.session.id())
             .to_string();
         let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
         let plan = crate::todo::load_plan(&todo_session_id).unwrap_or_default();

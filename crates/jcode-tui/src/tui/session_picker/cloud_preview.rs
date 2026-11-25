@@ -154,7 +154,7 @@ fn fetch_and_cache(
 fn parse_for_session(bytes: &[u8], session_id: &str) -> Option<CloudSnapshot> {
     let mut timer = StageTimer::new("parse");
     let snapshot = parse_preview(bytes)?;
-    if snapshot.0.id != session_id {
+    if snapshot.0.id() != session_id {
         timer.resolve("identity_mismatch");
         return None;
     }

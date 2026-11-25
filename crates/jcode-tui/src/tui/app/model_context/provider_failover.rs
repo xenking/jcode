@@ -16,8 +16,7 @@ impl App {
             .as_deref()
             .or_else(|| {
                 self.session
-                    .route_api_method
-                    .as_deref()
+                    .route_api_method()
                     .and_then(jcode_provider_core::oauth_account_label)
             })
             .unwrap_or("unknown account");
@@ -65,17 +64,18 @@ impl App {
     pub(in super::super) fn finalize_model_switch(&mut self, model_request: &str) -> String {
         self.usage_reset.openai_quota_rejected = false;
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.forget_provider_session();
         self.upstream_provider = None;
         self.status_detail = None;
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model, None);
-        self.session.provider_key =
+        let mut route = self.session.route();
+        route.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
                 model_request,
                 self.provider.name(),
-                self.session.provider_key.as_deref(),
+                self.session.provider_key(),
             );
         if let Some(label) = self.provider.oauth_account_label() {
             let method = if self.provider.name().eq_ignore_ascii_case("openai") {
@@ -83,16 +83,16 @@ impl App {
             } else {
                 "claude-oauth"
             };
-            self.session.route_api_method = Some(format!("{method}@{label}"));
-        } else if self
-            .session
+            route.route_api_method = Some(format!("{method}@{label}"));
+        } else if route
             .route_api_method
             .as_deref()
             .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
         {
-            self.session.route_api_method = None;
+            route.route_api_method = None;
         }
-        self.session.model = Some(active_model.clone());
+        route.model = Some(active_model.clone());
+        self.session.apply_route(route);
         if let Err(error) = self.session.save() {
             self.push_display_message(DisplayMessage::error(format!(
                 "Model switched for this session, but the saved route could not be persisted: {error}"
@@ -227,7 +227,7 @@ impl App {
                 "session_id",
                 self.remote_session_id
                     .as_deref()
-                    .unwrap_or(&self.session.id)
+                    .unwrap_or(&self.session.id())
                     .to_string(),
             ),
             (
@@ -644,7 +644,7 @@ impl App {
             {
                 return format!("{base}@{label}");
             }
-            if let Some(method) = self.session.route_api_method.as_deref()
+            if let Some(method) = self.session.route_api_method()
                 && method
                     .split_once('@')
                     .is_some_and(|(prefix, _)| prefix == base)
@@ -681,7 +681,7 @@ impl App {
             (Some(ActiveProvider::Cursor), _) => Some("cursor".to_string()),
             (Some(ActiveProvider::Bedrock), _) => Some("bedrock".to_string()),
             (Some(ActiveProvider::Gemini), _) => Some("code-assist-oauth".to_string()),
-            _ => self.session.route_api_method.clone(),
+            _ => self.session.route_api_method().map(str::to_owned),
         }
     }
 
@@ -906,20 +906,22 @@ impl App {
             Ok(()) => {
                 let spec = offer.selection.routed_model_spec();
                 self.provider_session_id = None;
-                self.session.provider_session_id = None;
+                self.session.forget_provider_session();
                 self.upstream_provider = None;
                 self.status_detail = None;
                 self.invalidate_model_picker_cache();
                 let active_model = self.provider.model();
                 self.update_context_limit_for_model(&active_model, None);
-                self.session.provider_key =
+                let mut route = self.session.route();
+                route.provider_key =
                     crate::provider::MultiProvider::session_provider_key_after_model_switch(
                         &spec,
                         self.provider.name(),
-                        self.session.provider_key.as_deref(),
+                        self.session.provider_key(),
                     );
-                self.session.model = Some(active_model.clone());
-                self.session.route_api_method = Some(offer.selection.api_method.clone());
+                route.model = Some(active_model.clone());
+                route.route_api_method = Some(offer.selection.api_method.clone());
+                self.session.apply_route(route);
                 if let Err(error) = self.session.save() {
                     self.push_display_message(DisplayMessage::error(format!(
                 "Model switched for this session, but the saved route could not be persisted: {error}"

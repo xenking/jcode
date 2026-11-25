@@ -34,7 +34,7 @@ impl App {
             return Self::sanitize_remote_model_hint(self.remote_provider_model.clone());
         }
         Self::sanitize_remote_model_hint(self.remote_provider_model.clone())
-            .or_else(|| Self::sanitize_remote_model_hint(self.session.model.clone()))
+            .or_else(|| Self::sanitize_remote_model_hint(self.session.model().map(str::to_owned)))
             .or_else(|| self.configured_remote_model_hint())
     }
 
@@ -204,7 +204,7 @@ impl App {
         let credential = if self.uses_server_or_replay_metadata() {
             self.remote_resolved_credential.or_else(|| {
                 self.session
-                    .route_api_method
+                    .route_api_method()
                     .as_deref()
                     .and_then(jcode_provider_core::AuthRoute::parse)
                     .filter(|route| {
@@ -291,7 +291,7 @@ impl App {
             // unresolved OpenAI API session render cached subscription limits.
             return self
                 .session
-                .route_api_method
+                .route_api_method()
                 .as_deref()
                 .and_then(jcode_provider_core::AuthRoute::parse)
                 .filter(|auth_route| auth_route.active_provider() == provider)

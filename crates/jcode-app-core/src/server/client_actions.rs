@@ -243,7 +243,7 @@ pub(super) async fn set_session_agent_model(
     if let Ok(mut guard) = agent.try_lock() {
         guard.set_agent_model_override(target, model)?;
         Ok(Agent::read_session(&guard, |session| {
-            session.agent_model_overrides.clone()
+            session.agent_model_overrides()
         }))
     } else {
         let mut session = Session::load_startup_stub(session_id)?;
@@ -264,7 +264,7 @@ pub(super) async fn set_global_agent_model(
     // Report the session's current overrides so the client view stays exact.
     if let Ok(guard) = agent.try_lock() {
         Ok(Agent::read_session(&guard, |session| {
-            session.agent_model_overrides.clone()
+            session.agent_model_overrides()
         }))
     } else {
         Ok(Session::load_startup_stub(session_id)?.agent_model_overrides())

@@ -202,8 +202,7 @@ pub(super) fn format_cache_stats(app: &App) -> String {
 
     let local_persisted_usage = app
         .session
-        .messages
-        .iter()
+        .iter_messages()
         .filter_map(|message| message.token_usage.as_ref())
         .fold(
             (0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_usize),
@@ -252,7 +251,7 @@ pub(super) fn format_cache_stats(app: &App) -> String {
     } else {
         (
             "local_client_session",
-            Some(app.session.messages.len()),
+            Some(app.session.message_count()),
             local_persisted_usage.5,
             local_persisted_usage.0,
             local_persisted_usage.1,
@@ -622,7 +621,7 @@ pub(super) fn format_cache_stats(app: &App) -> String {
     ));
     lines.push(format!(
         "- local_client_session.messages_len: {}",
-        bold_count_usize(app.session.messages.len())
+        bold_count_usize(app.session.message_count())
     ));
     lines.push(format!(
         "- persisted_messages_len: {}",

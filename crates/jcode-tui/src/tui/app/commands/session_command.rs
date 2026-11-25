@@ -152,7 +152,7 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
         crate::tui::session_picker::invalidate_session_list_cache();
         app.trigger_save_memory_extraction();
         let name = app.session.display_name().to_string();
-        let msg = if let Some(ref lbl) = app.session.save_label {
+        let msg = if let Some(ref lbl) = app.session.save_label() {
             format!(
                 "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
                 name, lbl,
@@ -354,8 +354,10 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
         app.session.replace_messages(snapshot.messages);
         app.provider_session_id = snapshot.provider_session_id;
-        app.session.provider_session_id = snapshot.session_provider_session_id;
-        app.session.updated_at = chrono::Utc::now();
+        let mut route = app.session.route();
+        route.provider_session_id = snapshot.session_provider_session_id;
+        app.session.apply_route(route);
+        app.session.touch();
         let provider_messages = app.session.messages_for_provider_uncached();
         app.replace_provider_messages(provider_messages);
 
@@ -429,15 +431,15 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
             Ok(n) if n > 0 && n <= visible_count => {
                 let removed = visible_count - n;
                 app.rewind_undo_snapshot = Some(LocalRewindUndoSnapshot {
-                    messages: app.session.messages.clone(),
+                    messages: app.session.cloned_messages(),
                     provider_session_id: app.provider_session_id.clone(),
-                    session_provider_session_id: app.session.provider_session_id.clone(),
+                    session_provider_session_id: app.session.provider_session_id().map(str::to_owned),
                     visible_message_count: visible_count,
                 });
                 app.session.truncate_messages(targets[n - 1] + 1);
                 let provider_messages = app.session.messages_for_provider_uncached();
                 app.replace_provider_messages(provider_messages);
-                app.session.updated_at = chrono::Utc::now();
+                app.session.touch();
 
                 app.clear_display_messages();
                 // Same defensive preview clear as /rewind undo above.
@@ -463,7 +465,7 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
                 }
 
                 app.provider_session_id = None;
-                app.session.provider_session_id = None;
+                app.session.forget_provider_session();
                 let _ = app.session.save();
 
                 app.push_display_message(DisplayMessage::system(format!(

@@ -468,7 +468,7 @@ impl App {
             if subagent_model {
                 Self::configure_subagent_model_picker(
                     picker,
-                    self.session.subagent_model.as_deref(),
+                    self.session.subagent_model(),
                 );
             }
             picker.preview = preview;

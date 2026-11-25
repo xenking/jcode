@@ -96,7 +96,7 @@ impl App {
         if self.is_remote {
             self.remote_session_id.clone()
         } else {
-            Some(self.session.id.clone())
+            Some(self.session.id().to_string())
         }
     }
 

@@ -128,7 +128,7 @@ pub(super) async fn execute(
         }
         "transcript" => {
             if args == ["path"] {
-                let session_id = Agent::read_session(agent, |session| session.id.clone());
+                let session_id = Agent::read_session(agent, |session| session.id().to_string());
                 let path = crate::session::session_path(&session_id)?;
                 let path = path.display().to_string();
                 return Ok((
@@ -140,7 +140,7 @@ pub(super) async fn execute(
                 bail!("Usage: /transcript [path]");
             }
             let (session_id, messages) = Agent::read_session(agent, |session| {
-                (session.id.clone(), crate::session::render_messages(session))
+                (session.id().to_string(), crate::session::render_messages(session))
             });
             let mut text = format!("# Remote transcript: {session_id}\n");
             for message in messages {
