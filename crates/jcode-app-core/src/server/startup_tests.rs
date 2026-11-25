@@ -290,8 +290,33 @@ async fn openrig_probe_is_read_only_and_keeps_daemon_connection_usable() {
     assert!(server.sessions.read().await.is_empty());
 }
 
+/// Exclusive admission is process-global: holding it makes every other
+/// `try_enter` in the process fail, and any reservation held by an unrelated
+/// test (a tool call, a client handler) makes `try_idle` fail. Run the probe in
+/// its own process so neither side can observe the other.
+#[test]
+fn readiness_probes_do_not_contend_with_group_transfer_admission() {
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "server::startup_tests::readiness_probe_fixture_subprocess",
+        ])
+        .output()
+        .expect("spawn readiness fixture");
+    assert!(
+        output.status.success(),
+        "readiness fixture failed: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[tokio::test]
-async fn readiness_probes_do_not_contend_with_group_transfer_admission() {
+#[ignore = "subprocess fixture with a private runtime activity gate"]
+async fn readiness_probe_fixture_subprocess() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("jcode.sock");
