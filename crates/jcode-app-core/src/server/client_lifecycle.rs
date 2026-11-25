@@ -117,9 +117,17 @@ macro_rules! dispatch_queued_prompt {
     };
 }
 
+mod actions_requests;
+mod attach_requests;
 mod connection;
 mod connection_loop;
+mod dispatch;
+mod runtime_command;
+mod session_requests;
+mod settings_requests;
+mod turn_requests;
 use connection::{ClientConnection, Handshake};
+use dispatch::{Outcome, RequestContext};
 mod comm_dispatch;
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;

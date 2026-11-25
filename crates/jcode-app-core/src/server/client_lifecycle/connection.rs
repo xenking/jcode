@@ -90,7 +90,7 @@ impl ClientConnection {
         } = handshake;
         // Per-client state
         let client_is_processing = false;
-        let (processing_done_tx, mut processing_done_rx) =
+        let (processing_done_tx, processing_done_rx) =
             mpsc::unbounded_channel::<ProcessingCompletion>();
         let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut processing_message_id: Option<u64> = None;
