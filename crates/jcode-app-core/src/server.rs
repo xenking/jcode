@@ -677,7 +677,8 @@ pub(super) struct ServerHandles {
     /// Shared ownership of core swarm coordination state.
     pub(in crate::server) swarm_state: SwarmState,
     /// Shared context by swarm (swarm_id -> key -> SharedContext).
-    pub(in crate::server) shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
+    pub(in crate::server) shared_context:
+        Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
     /// Active and available TUI debug channels (request_id, command).
     pub(in crate::server) client_debug_state: Arc<RwLock<ClientDebugState>>,
     /// Channel to receive client debug responses from TUI (request_id, response).
@@ -700,7 +701,8 @@ pub(super) struct ServerHandles {
     pub(in crate::server) mcp_pool: Arc<OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
     /// Graceful shutdown signals by session_id (stored outside the agent mutex
     /// so they can be signaled without locking the agent during tool execution).
-    pub(in crate::server) shutdown_signals: Arc<RwLock<HashMap<String, jcode_agent_runtime::InterruptSignal>>>,
+    pub(in crate::server) shutdown_signals:
+        Arc<RwLock<HashMap<String, jcode_agent_runtime::InterruptSignal>>>,
     /// Soft interrupt queues by session_id (stored outside the agent mutex so
     /// swarm/debug notifications can be enqueued while an agent is processing).
     pub(in crate::server) soft_interrupt_queues: SessionInterruptQueues,

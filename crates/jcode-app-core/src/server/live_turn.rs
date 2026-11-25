@@ -59,6 +59,36 @@ impl LiveTurnSwarmContext {
     }
 }
 
+/// How long a wake waits for an agent that holds its lock but runs no turn.
+const IDLE_LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+const IDLE_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Reserve the agent lock for a wake without queueing behind a running turn.
+///
+/// A client that has only just attached briefly takes the agent lock for its
+/// own bootstrap requests (history, catalog, queue refresh). A wake that lands
+/// in that window used to see "busy" and fall back to a soft interrupt, which an
+/// idle agent never drains, so the wake was lost until the next prompt. The
+/// turn registry knows whether a turn really runs: only then is the lock
+/// treated as busy at once. Otherwise wait a short, bounded grace period.
+async fn lock_idle_agent(
+    session_id: &str,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+) -> Option<OwnedMutexGuard<Agent>> {
+    let deadline = tokio::time::Instant::now() + IDLE_LOCK_GRACE;
+    loop {
+        if let Ok(guard) = Arc::clone(&agent).try_lock_owned() {
+            return Some(guard);
+        }
+        if crate::turn_cancel_registry::has_active_turn(session_id)
+            || tokio::time::Instant::now() >= deadline
+        {
+            return None;
+        }
+        tokio::time::sleep(IDLE_LOCK_POLL).await;
+    }
+}
+
 /// Reserve the live agent for `session_id` when the session has at least one
 /// live client attachment and its agent is currently idle.
 ///
@@ -86,7 +116,7 @@ pub(super) async fn idle_live_agent(
             })
             .unwrap_or(false)
     };
-    let agent = agent.try_lock_owned().ok()?;
+    let agent = lock_idle_agent(session_id, agent).await?;
     if !can_drive && !agent.restored_from_idle_unload {
         return None;
     }

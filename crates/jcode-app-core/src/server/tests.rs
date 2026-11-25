@@ -740,6 +740,34 @@ async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
 }
 
 #[tokio::test]
+async fn idle_live_agent_waits_out_a_brief_non_turn_lock_holder() {
+    // A freshly attached client takes the agent lock for bootstrap requests. A
+    // wake in that window must still reserve the agent, because the fallback
+    // soft interrupt is never drained by an idle agent.
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel();
+    let member = attached_swarm_member(&session_id, member_event_tx);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+
+    let holder = agent.clone().lock_owned().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(holder);
+    });
+    let reserved = super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await;
+    release.await.unwrap();
+    assert!(
+        reserved.is_some(),
+        "a brief non-turn lock holder must not turn a wake into a lost soft interrupt"
+    );
+}
+
+#[tokio::test]
 async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     // Greptile review on #1166: releasing the guard before the terminal status
     // write let a newer wake's `running` be overwritten by this turn's `ready`.
