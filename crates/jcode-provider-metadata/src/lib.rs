@@ -453,6 +453,38 @@ mod tests {
     }
 
     #[test]
+    fn advertised_login_keys_keep_the_legacy_config_defaults() {
+        for descriptor in login_providers() {
+            let expected = match descriptor.id {
+                "anthropic-api" => Some("claude"),
+                "openai-api" => Some("openai"),
+                "auto-import" | "jcode" | "azure" | "grok-build" | "google" => None,
+                id => Some(id),
+            };
+            assert_eq!(
+                descriptor.default_provider_key(),
+                expected,
+                "{}",
+                descriptor.id
+            );
+            for input in std::iter::once(descriptor.id).chain(descriptor.aliases.iter().copied()) {
+                assert_eq!(
+                    resolve_login_provider(input)
+                        .unwrap_or_else(|| panic!("advertised login key {input:?} did not resolve"))
+                        .default_provider_key(),
+                    expected,
+                    "{input:?} ({})",
+                    descriptor.id,
+                );
+            }
+        }
+
+        for input in ["", "  ", "not-a-provider"] {
+            assert_eq!(resolve_login_provider(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
     fn resolve_login_provider_loose_matches_id_alias_and_display_name() {
         // id
         assert_eq!(
