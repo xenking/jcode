@@ -854,6 +854,7 @@ impl NariRecording {
                         let streamed =
                             stream_resilient(session, &target, &c, pcm, tuning, &mut sink).await;
                         // Words already captured outlive any provider failure.
+                        let mut reported = false;
                         let result = match streamed {
                             Err(error) => Err(error),
                             Ok(Streamed { text, error: None }) => Ok(text),
@@ -862,6 +863,7 @@ impl NariRecording {
                             }
                             Ok(Streamed { text, error: Some(error) }) => {
                                 sink(NariEvent::Interrupted(error));
+                                reported = true;
                                 Ok(text)
                             }
                         };
@@ -874,7 +876,11 @@ impl NariRecording {
                             (Err(err), _) => Err(err),
                             // A microphone fault after speech must not discard the words.
                             (Ok(text), Err(err)) if !text.trim().is_empty() => {
-                                sink(NariEvent::Interrupted(err));
+                                // The provider failure came first and is the cause: the
+                                // capture only failed because nothing was reading it.
+                                if !reported {
+                                    sink(NariEvent::Interrupted(err));
+                                }
                                 Ok(text)
                             }
                             (Ok(_), Err(err)) => Err(err),

@@ -104,6 +104,7 @@ fn feeding_capture(
     acked: Arc<AtomicUsize>,
     chunks: usize,
     boundary: usize,
+    answerable: usize,
 ) -> (PcmRecording, tokio::sync::mpsc::Receiver<Vec<i16>>) {
     let (tx, rx) = nari_pcm_channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -111,7 +112,7 @@ fn feeding_capture(
     let worker = thread::spawn(move || {
         for index in 0..chunks {
             let started = std::time::Instant::now();
-            while acked.load(Ordering::SeqCst) < index {
+            while acked.load(Ordering::SeqCst) < index.min(answerable) {
                 if started.elapsed() > Duration::from_secs(20) || c.load(Ordering::SeqCst) {
                     return Ok(());
                 }
@@ -124,7 +125,8 @@ fn feeding_capture(
             let mut chunk = vec![1i16; CHUNK];
             chunk[0] = index as i16;
             if tx.blocking_send(chunk).is_err() {
-                return Ok(());
+                // Like the real microphone: nobody is reading it any more.
+                return Err(VoiceError::CaptureFailed);
             }
         }
         while !s.load(Ordering::SeqCst) && !c.load(Ordering::SeqCst) {
@@ -173,7 +175,7 @@ async fn run_dictation(fake: &Fake, answered: usize, fed: usize, boundary: usize
             StreamingBackend::Soniox,
             "sk-test",
             &url,
-            move |cancel| Ok(feeding_capture(cancel, acked, chunks, boundary)),
+            move |cancel| Ok(feeding_capture(cancel, acked, chunks, boundary, answered)),
         )
     })
     .await
@@ -243,8 +245,10 @@ async fn provider_gone_for_good_still_delivers_the_text_so_far_with_a_named_reas
     // One session, then the provider is unreachable. The 20 chunks it
     // answered must come back, with the reason, not vanish.
     let fake = fake_server_for(20, Limit::Close, 1).await;
-    let outcome = dictate_with_extra_audio(&fake, 20, 21).await;
+    let outcome = dictate_with_extra_audio(&fake, 20, 40).await;
     assert_eq!(outcome.text, Ok(expected(20)));
+    // The microphone failing afterwards, because nothing reads it, is an effect
+    // of the provider being gone and must not replace the reason.
     assert_eq!(outcome.interrupted, [VoiceError::Network]);
 }
 
@@ -261,7 +265,7 @@ async fn chosen_model_is_what_the_session_requests() {
             &url,
             Some("stt-rt-chosen"),
             StreamTuning::default(),
-            move |cancel| Ok(feeding_capture(cancel, acked, 3, 0)),
+            move |cancel| Ok(feeding_capture(cancel, acked, 3, 0, usize::MAX)),
         )
     })
     .await
