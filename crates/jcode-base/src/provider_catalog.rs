@@ -107,10 +107,7 @@ fn resolve_openai_compatible_profile_endpoint(
     // `[api_key_profiles.<id>] base_url` points a built-in profile at a proxy
     // or a loopback fixture.
     if profile.id != OPENAI_COMPAT_PROFILE.id
-        && let Some(base) = crate::config::config()
-            .api_key_profiles
-            .get(profile.id)
-            .and_then(|config| config.base_url.as_deref())
+        && let Some(base) = crate::config::config().api_key_profile_base_url(profile.id)
     {
         match normalize_api_base(base) {
             Some(normalized) => resolved.api_base = normalized,

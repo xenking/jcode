@@ -328,7 +328,6 @@ struct ConfigCache {
     config: &'static Config,
     fingerprint: ConfigCacheFingerprint,
     last_checked: Instant,
-    force_reload: bool,
 }
 
 static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
@@ -347,7 +346,6 @@ static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
         config,
         fingerprint,
         last_checked: Instant::now(),
-        force_reload: false,
     })
 });
 
@@ -373,7 +371,7 @@ fn populate_context_limits_from_config_ref(cfg: &Config) {
 pub fn config() -> &'static Config {
     let now = Instant::now();
     if let Ok(cache) = CONFIG_CACHE.read()
-        && !cache.force_reload
+        && !FORCE_RELOAD.load(std::sync::atomic::Ordering::Acquire)
         && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL
     {
         return cache.config;
@@ -387,17 +385,18 @@ pub fn config() -> &'static Config {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let now = Instant::now();
-        if !cache.force_reload
-            && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL
-        {
+        // Take the invalidation request before loading, so one that lands
+        // while the file is read triggers another reload instead of being lost.
+        let forced = FORCE_RELOAD.swap(false, std::sync::atomic::Ordering::AcqRel);
+        if !forced && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL {
             return cache.config;
         }
 
         let fingerprint = ConfigCacheFingerprint::current();
         cache.last_checked = now;
-        if cache.force_reload || cache.fingerprint != fingerprint {
+        if forced || cache.fingerprint != fingerprint {
             reload_reason = Some(describe_config_reload(
-                cache.force_reload,
+                forced,
                 &cache.fingerprint,
                 &fingerprint,
             ));
@@ -416,14 +415,17 @@ pub fn config() -> &'static Config {
             // Re-fingerprint after the load so those self-inflicted env changes
             // don't trigger a guaranteed second reload on the next check.
             cache.fingerprint = ConfigCacheFingerprint::current();
-            cache.force_reload = false;
         }
         cache.config
     };
 
-    // Listeners may consult config, so notify after releasing CONFIG_CACHE.
-    if let Some(route) = changed_default_route {
-        notify_default_route_changed(&route);
+    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
+    if let Some(route) = changed_default_route
+        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
+    {
+        crate::logging::error(&format!(
+            "Could not sync account order after config edit: {error}"
+        ));
     }
 
     if let Some(reason) = reload_reason {
@@ -531,12 +533,12 @@ fn config_env_fingerprint() -> Vec<(String, String)> {
     values
 }
 
+/// Set by [`invalidate_config_cache`], consumed by the next reload. It lives
+/// outside the cache so invalidating never depends on the cached `Config`.
+static FORCE_RELOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn invalidate_config_cache() {
-    let mut cache = CONFIG_CACHE
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.force_reload = true;
-    drop(cache);
+    FORCE_RELOAD.store(true, std::sync::atomic::Ordering::Release);
     notify_config_reloaded();
 }
 
@@ -587,33 +589,6 @@ pub fn on_config_reloaded(listener: fn()) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(listener);
-}
-
-/// Type of a default-route listener callback.
-type DefaultRouteListener = fn(&str);
-
-static DEFAULT_ROUTE_LISTENERS: LazyLock<RwLock<Vec<DefaultRouteListener>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
-
-/// Register a reaction to the configured default provider route changing,
-/// whether through a config setter or a direct edit of config.toml. The
-/// account pool uses it to keep its auto-switch order in step. Intended to be
-/// called once per subsystem.
-pub fn on_default_route_changed(listener: fn(&str)) {
-    DEFAULT_ROUTE_LISTENERS
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(listener);
-}
-
-fn notify_default_route_changed(route: &str) {
-    for listener in DEFAULT_ROUTE_LISTENERS
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-    {
-        listener(route);
-    }
 }
 
 /// Scoped local resource bridge policy. Zero disables access.

@@ -170,6 +170,24 @@ impl Config {
         Ok(changed)
     }
 
+    /// Extras configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile(&self, id: &str) -> Option<&ApiKeyProfileConfig> {
+        self.api_key_profiles.get(id)
+    }
+
+    /// `base_url` configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile_base_url(&self, id: &str) -> Option<&str> {
+        self.api_key_profile(id)?.base_url.as_deref()
+    }
+
+    /// Model price overrides configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile_costs(
+        &self,
+        id: &str,
+    ) -> Option<&std::collections::BTreeMap<String, crate::config::ApiKeyModelCost>> {
+        Some(&self.api_key_profile(id)?.costs)
+    }
+
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
         super::invalidate_config_cache();
@@ -226,10 +244,11 @@ impl Config {
             provider.unwrap_or("(auto)")
         ));
         // The first auto-switch account is the default, so the order follows
-        // whichever path changed it. Listeners log their own failures: a
-        // failure there must not undo the save.
-        if let Some(route) = provider {
-            super::notify_default_route_changed(route);
+        // whichever path changed it. A failure here must not undo the save.
+        if let Some(route) = provider
+            && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(route)
+        {
+            crate::logging::error(&format!("Could not sync account order: {error}"));
         }
         Ok(())
     }

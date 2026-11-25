@@ -89,10 +89,7 @@ impl<'a> Provider<'a> {
             {
                 return None;
             }
-            return Some(Self::Builtin(
-                profile,
-                config.api_key_profiles.get(profile.id),
-            ));
+            return Some(Self::Builtin(profile, config.api_key_profile(profile.id)));
         }
         let (name, named) = config.providers.get_key_value(provider)?;
         // Anthropic-compatible providers take their key through a different

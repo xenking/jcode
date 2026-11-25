@@ -244,7 +244,7 @@ pub(crate) fn configured_cost_override_with(
     let costs = if source_key.starts_with("openai-compatible:") || {
         crate::provider_catalog::openai_compatible_profile_by_id(provider).is_some()
     } {
-        &config.api_key_profiles.get(provider)?.costs
+        config.api_key_profile_costs(provider)?
     } else {
         // The ledger slugs a named provider's name, so match either form.
         let slug = |name: &str| {
