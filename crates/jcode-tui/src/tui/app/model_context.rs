@@ -1520,9 +1520,7 @@ impl App {
     }
 }
 
-#[path = "model_context_messages.rs"]
-mod messages;
-pub(super) use messages::*;
+use super::model_context_messages::format_model_refresh_summary;
 
 /// Match `/usage <provider>` queries against report names such as
 /// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.

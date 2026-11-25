@@ -408,7 +408,9 @@ impl App {
             ModelPickerBuildOutcome::Empty => {
                 self.inline_interactive_state = None;
                 self.push_display_message(DisplayMessage::system(
-                    crate::tui::app::model_context::no_models_available_message(self.is_remote),
+                    crate::tui::app::model_context_messages::no_models_available_message(
+                        self.is_remote,
+                    ),
                 ));
                 self.set_status_notice("No models available");
                 return Vec::new();

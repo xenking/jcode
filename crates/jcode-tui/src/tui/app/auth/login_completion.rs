@@ -416,7 +416,7 @@ impl App {
                                                 summary.routes_changed,
                                                 {
                                                     let mut details = String::new();
-                                                    super::model_context::append_model_name_diff(&mut details, &summary);
+                                                    super::model_context_messages::append_model_name_diff(&mut details, &summary);
                                                     if details.is_empty() { String::new() } else { format!("\n{}", details) }
                                                 },
                                                 model

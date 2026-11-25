@@ -462,7 +462,7 @@ impl App {
                     PickerAction::Model => {
                         if !route.available {
                             self.push_display_message(DisplayMessage::error(
-                                crate::tui::app::model_context::unavailable_model_route_message(
+                                crate::tui::app::model_context_messages::unavailable_model_route_message(
                                     &entry.name,
                                     &route.provider,
                                     &route.detail,
@@ -604,7 +604,7 @@ impl App {
                                         ],
                                     );
                                     self.push_display_message(DisplayMessage::error(
-                                        crate::tui::app::model_context::model_switch_failure_message(
+                                        crate::tui::app::model_context_messages::model_switch_failure_message(
                                             &error.to_string(),
                                             self.is_remote,
                                         ),

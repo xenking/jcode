@@ -102,6 +102,7 @@ mod jarvis_status;
 mod local;
 mod misc_ui;
 mod model_context;
+mod model_context_messages;
 mod model_picker_stage;
 mod navigation;
 mod observe;

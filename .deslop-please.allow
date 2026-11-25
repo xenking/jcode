@@ -281,7 +281,6 @@ shallow-module jcode_tui::tui::app::auth_remote
 shallow-module jcode_tui::tui::app::debug
 shallow-module jcode_tui::tui::app::inline_interactive
 shallow-module jcode_tui::tui::app::input
-shallow-module jcode_tui::tui::app::model_context
 shallow-module jcode_tui::tui::app::todos_view
 shallow-module jcode_tui::tui::app::tui_state
 shallow-module jcode_tui::tui::backend

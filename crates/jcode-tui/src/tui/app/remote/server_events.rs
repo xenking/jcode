@@ -1342,7 +1342,7 @@ fn handle_server_event_inner(
                     model_catalog_snapshot.model_routes.clone(),
                 );
                 app.push_display_message(DisplayMessage::system(
-                    app_mod::model_context::format_model_refresh_summary(&summary),
+                    app_mod::model_context_messages::format_model_refresh_summary(&summary),
                 ));
                 app.set_status_notice(format!(
                     "Model list refreshed: +{} models, +{} routes, ~{} changed",

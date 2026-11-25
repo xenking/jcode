@@ -450,7 +450,7 @@ pub(super) fn handle_model_changed_event(
             app.restore_failover_payload(payload);
         }
         app.push_display_message(DisplayMessage::error(
-            crate::tui::app::model_context::model_switch_failure_message(&err, true),
+            crate::tui::app::model_context_messages::model_switch_failure_message(&err, true),
         ));
         app.set_status_notice(if account_switch_failed {
             "Account switch failed"

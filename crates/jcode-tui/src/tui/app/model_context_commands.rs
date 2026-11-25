@@ -1,4 +1,7 @@
 use super::*;
+use crate::tui::app::model_context_messages::{
+    is_refresh_model_list_command, model_switch_failure_message,
+};
 
 pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if is_refresh_model_list_command(trimmed) {
