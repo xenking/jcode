@@ -6,68 +6,75 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
     let Some(info) = &data.memory_info else {
         return Framed::default();
     };
-    if inner.width == 0 || inner.height == 0 {
-        return Framed::default();
-    }
-    if !info.should_render() {
-        return Framed::default();
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    let max_width = inner.width as usize;
-    let activity = info.activity();
-    let show_activity = info.should_show_activity();
-    let title = render_memory_header_line(info, max_width);
-    let footer = activity
-        .filter(|_| show_activity)
-        .and_then(|activity| render_memory_last_trace_line(activity, max_width))
-        .unwrap_or_else(|| {
-            Line::from(Span::styled(
-                clip(
-                    &format!(
-                        "{} project · {} global",
-                        info.project_count, info.global_count
-                    ),
-                    max_width,
-                ),
-                Style::default().fg(rgb(120, 120, 130)),
-            ))
-        });
-
-    if show_activity && let Some(activity) = activity {
-        if lines.len() < inner.height as usize {
-            lines.push(render_memory_status_line(activity, max_width));
-        }
-
-        if memory_should_render_pipeline(activity) {
-            for line in render_memory_pipeline_display_lines(activity, max_width) {
-                if lines.len() >= inner.height as usize {
-                    break;
-                }
-                lines.push(line);
-            }
-        }
-    }
-
-    if lines.is_empty() {
-        let detail = if info.category_count() > 0 {
-            format!("{} categories", info.category_count())
-        } else if info.sidecar_available {
-            "sidecar ready".into()
-        } else {
-            "sidecar offline".into()
-        };
-        lines.push(Line::from(Span::styled(
-            clip(&detail, max_width),
-            Style::default().fg(rgb(120, 120, 130)),
-        )));
-    }
-    lines.truncate(inner.height as usize);
-    Framed::body(lines).title(title).footer(footer)
+    info.render_card(inner)
 }
 
-fn render_memory_header_line(info: &MemoryInfo, max_width: usize) -> Line<'static> {
-    let title = memory_count_label(info.total_count);
+impl MemoryInfo {
+    fn render_card(&self, inner: Rect) -> Framed {
+        let info = self;
+        if inner.width == 0 || inner.height == 0 {
+            return Framed::default();
+        }
+        if !info.should_render() {
+            return Framed::default();
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+        let max_width = inner.width as usize;
+        let activity = self.activity.as_ref();
+        let show_activity = info.should_show_activity();
+        let title = render_memory_header_line(info.total_count, max_width);
+        let footer = activity
+            .filter(|_| show_activity)
+            .and_then(|activity| render_memory_last_trace_line(activity, max_width))
+            .unwrap_or_else(|| {
+                Line::from(Span::styled(
+                    clip(
+                        &format!(
+                            "{} project · {} global",
+                            info.project_count, info.global_count
+                        ),
+                        max_width,
+                    ),
+                    Style::default().fg(rgb(120, 120, 130)),
+                ))
+            });
+
+        if show_activity && let Some(activity) = activity {
+            if lines.len() < inner.height as usize {
+                lines.push(render_memory_status_line(activity, max_width));
+            }
+
+            if memory_should_render_pipeline(activity) {
+                for line in render_memory_pipeline_display_lines(activity, max_width) {
+                    if lines.len() >= inner.height as usize {
+                        break;
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+
+        if lines.is_empty() {
+            let detail = if info.category_count() > 0 {
+                format!("{} categories", info.category_count())
+            } else if info.sidecar_available {
+                "sidecar ready".into()
+            } else {
+                "sidecar offline".into()
+            };
+            lines.push(Line::from(Span::styled(
+                clip(&detail, max_width),
+                Style::default().fg(rgb(120, 120, 130)),
+            )));
+        }
+        lines.truncate(inner.height as usize);
+        Framed::body(lines).title(title).footer(footer)
+    }
+}
+
+fn render_memory_header_line(total_count: usize, max_width: usize) -> Line<'static> {
+    let title = memory_count_label(total_count);
     Line::from(vec![
         Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
         Span::styled(
@@ -181,31 +188,34 @@ fn memory_should_render_pipeline(activity: &MemoryActivity) -> bool {
     activity.is_processing()
 }
 
-fn memory_compact_summary(info: &MemoryInfo) -> String {
-    if info.disabled {
-        return "disabled".to_string();
-    }
-    if let Some(activity) = info.activity() {
-        if activity.is_processing() {
-            return memory_active_summary(&activity.state)
-                .or_else(|| {
-                    activity
-                        .pipeline
-                        .as_ref()
-                        .map(memory_pipeline_progress_summary)
-                })
-                .or_else(|| memory_last_trace_summary(activity))
-                .unwrap_or_else(|| "working".to_string());
+impl MemoryInfo {
+    fn compact_summary(&self) -> String {
+        let info = self;
+        if info.disabled {
+            return "disabled".to_string();
+        }
+        if let Some(activity) = self.activity.as_ref() {
+            if activity.is_processing() {
+                return memory_active_summary(&activity.state)
+                    .or_else(|| {
+                        activity
+                            .pipeline
+                            .as_ref()
+                            .map(memory_pipeline_progress_summary)
+                    })
+                    .or_else(|| memory_last_trace_summary(activity))
+                    .unwrap_or_else(|| "working".to_string());
+            }
+
+            if memory_recent_done(activity) {
+                return "done".to_string();
+            }
+
+            return "idle".to_string();
         }
 
-        if memory_recent_done(activity) {
-            return "done".to_string();
-        }
-
-        return "idle".to_string();
+        "idle".to_string()
     }
-
-    "idle".to_string()
 }
 
 fn memory_status_badge(activity: Option<&MemoryActivity>) -> (String, Color) {
@@ -621,63 +631,77 @@ fn memory_pipeline_progress_summary(pipeline: &PipelineState) -> String {
 }
 
 pub(super) fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<Line<'static>> {
-    if !info.should_render() {
-        return Vec::new();
+    info.render_compact(inner_width)
+}
+
+impl MemoryInfo {
+    fn render_compact(&self, inner_width: u16) -> Vec<Line<'static>> {
+        let info = self;
+        if !info.should_render() {
+            return Vec::new();
+        }
+
+        let max_width = inner_width.saturating_sub(2) as usize;
+        let title = memory_count_label(info.total_count);
+        let show_activity = info.should_show_activity();
+        let summary = info.compact_summary();
+
+        let title_width = UnicodeWidthStr::width(title.as_str());
+        let summary_width = max_width.saturating_sub(title_width + 5);
+        let accent = if let Some(activity) = self.activity.as_ref() {
+            memory_status_badge(Some(activity)).1
+        } else if info.total_count > 0 {
+            rgb(160, 160, 170)
+        } else {
+            rgb(140, 200, 255)
+        };
+
+        let mut spans = vec![
+            Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
+            Span::styled(title, Style::default().fg(rgb(180, 180, 190)).bold()),
+        ];
+        if show_activity {
+            spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
+            spans.push(Span::styled(
+                clip(&summary, summary_width.max(8)),
+                Style::default().fg(accent),
+            ));
+        }
+
+        vec![Line::from(spans)]
     }
-
-    let max_width = inner_width.saturating_sub(2) as usize;
-    let title = memory_count_label(info.total_count);
-    let show_activity = info.should_show_activity();
-    let summary = memory_compact_summary(info);
-
-    let title_width = UnicodeWidthStr::width(title.as_str());
-    let summary_width = max_width.saturating_sub(title_width + 5);
-    let accent = if let Some(activity) = info.activity() {
-        memory_status_badge(Some(activity)).1
-    } else if info.total_count > 0 {
-        rgb(160, 160, 170)
-    } else {
-        rgb(140, 200, 255)
-    };
-
-    let mut spans = vec![
-        Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
-        Span::styled(title, Style::default().fg(rgb(180, 180, 190)).bold()),
-    ];
-    if show_activity {
-        spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
-        spans.push(Span::styled(
-            clip(&summary, summary_width.max(8)),
-            Style::default().fg(accent),
-        ));
-    }
-
-    vec![Line::from(spans)]
 }
 
 pub(super) fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
-    if !info.should_render() {
-        return Vec::new();
-    }
+    info.render_expanded(inner)
+}
 
-    let mut lines: Vec<Line> = Vec::new();
-    let max_width = inner.width.saturating_sub(2) as usize;
-    let show_activity = info.should_show_activity();
-
-    lines.push(render_memory_header_line(info, max_width));
-    if show_activity && let Some(activity) = info.activity() {
-        lines.push(render_memory_status_line(activity, max_width));
-        if memory_should_render_pipeline(activity) {
-            lines.extend(render_memory_pipeline_display_lines(activity, max_width));
+impl MemoryInfo {
+    fn render_expanded(&self, inner: Rect) -> Vec<Line<'static>> {
+        let info = self;
+        if !info.should_render() {
+            return Vec::new();
         }
 
-        if let Some(last_line) = render_memory_last_trace_line(activity, max_width) {
-            lines.push(last_line);
-        }
-    }
+        let mut lines: Vec<Line> = Vec::new();
+        let max_width = inner.width.saturating_sub(2) as usize;
+        let show_activity = info.should_show_activity();
 
-    lines.truncate(inner.height as usize);
-    lines
+        lines.push(render_memory_header_line(info.total_count, max_width));
+        if show_activity && let Some(activity) = self.activity.as_ref() {
+            lines.push(render_memory_status_line(activity, max_width));
+            if memory_should_render_pipeline(activity) {
+                lines.extend(render_memory_pipeline_display_lines(activity, max_width));
+            }
+
+            if let Some(last_line) = render_memory_last_trace_line(activity, max_width) {
+                lines.push(last_line);
+            }
+        }
+
+        lines.truncate(inner.height as usize);
+        lines
+    }
 }
 fn format_age(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();

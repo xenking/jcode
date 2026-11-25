@@ -1,6 +1,5 @@
 use super::{
-    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
-    is_traceworthy_memory_event, model_info_height,
+    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows, model_info_height,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,12 +168,7 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
         let mut height = 1u16;
         if info.should_show_activity() {
             height += 1 + 4;
-            if let Some(activity) = info.activity()
-                && activity
-                    .recent_events
-                    .iter()
-                    .any(is_traceworthy_memory_event)
-            {
+            if info.has_traceworthy_event() {
                 height += 1;
             }
         }

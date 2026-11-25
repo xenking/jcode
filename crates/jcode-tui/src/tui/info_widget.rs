@@ -567,8 +567,23 @@ pub struct MemoryInfo {
 }
 
 impl MemoryInfo {
-    pub(crate) fn activity(&self) -> Option<&MemoryActivity> {
-        self.activity.as_ref()
+    pub(crate) fn has_activity_sample(&self) -> bool {
+        self.activity.is_some()
+    }
+
+    fn processing_memory(&self) -> bool {
+        self.activity
+            .as_ref()
+            .is_some_and(MemoryActivity::is_processing)
+    }
+
+    fn has_traceworthy_event(&self) -> bool {
+        self.activity.as_ref().is_some_and(|activity| {
+            activity
+                .recent_events
+                .iter()
+                .any(is_traceworthy_memory_event)
+        })
     }
 
     pub(crate) fn category_count(&self) -> usize {
@@ -845,9 +860,7 @@ impl InfoWidgetData {
                 if self
                     .memory_info
                     .as_ref()
-                    .and_then(MemoryInfo::activity)
-                    .map(MemoryActivity::is_processing)
-                    .unwrap_or(false)
+                    .is_some_and(MemoryInfo::processing_memory)
                 {
                     0
                 } else {
@@ -920,9 +933,9 @@ impl InfoWidgetData {
 
 #[path = "info_widget/placement_state.rs"]
 mod placement_state;
+pub(crate) use layout::calculate_widget_height;
 #[allow(unused_imports)]
 pub use placement_state::*;
-pub(crate) use layout::calculate_widget_height;
 
 /// Shrink a text widget's box so its bottom border hugs the rendered body.
 /// The slot can be taller than the body (Overview reserves its tallest page,

@@ -227,7 +227,6 @@ field-leak jcode_setup_hints::SetupHintsState::mac_ghostty_guided
 field-leak jcode_setup_hints::SetupHintsState::onboarding_start_choice_shown
 field-leak jcode_telemetry_core::TodoSessionTelemetry::todo_updates
 field-leak jcode_todo_policy::followup::FollowUpPolicy::gate_digest_enabled
-field-leak jcode_tui::tui::info_widget::MemoryInfo::activity
 field-leak jcode_tui_markdown::incremental::IncrementalMarkdownRenderer::rendered_show_link_urls
 field-leak jcode_tui_markdown::math_copy::Bounded::entries
 field-leak jcode_tui_mermaid::FittedSourceCache::entries
