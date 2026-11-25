@@ -8,6 +8,8 @@
 use crate::config::{DiagramDisplayMode, DiagramPanePosition};
 use std::time::Instant;
 
+use crate::tui::mermaid::DiagramInfo;
+
 /// Seconds the pane takes to animate to a new size.
 const RATIO_ANIM_SECS: f32 = 0.15;
 const DEFAULT_RATIO: u8 = 40;
@@ -107,23 +109,23 @@ impl DiagramPane {
         }
     }
 
-    /// Whether a pinned, enabled pane has something to show.
-    pub(in crate::tui::app) fn available(&self) -> bool {
-        self.mode == DiagramDisplayMode::Pinned
-            && self.enabled
-            && !crate::tui::mermaid::get_active_diagrams().is_empty()
+    pub(super) fn is_pinned(&self) -> bool {
+        self.mode == DiagramDisplayMode::Pinned && self.enabled
     }
 
     /// Hash of the diagram currently on screen, if the pane is showing one.
     /// `side_panel_focused` hides a side-positioned pane behind a focused page.
-    pub(in crate::tui::app) fn visible_hash(&self, side_panel_focused: bool) -> Option<u64> {
-        if self.mode != DiagramDisplayMode::Pinned || !self.enabled {
+    pub(in crate::tui::app) fn visible_hash(
+        &self,
+        diagrams: &[DiagramInfo],
+        side_panel_focused: bool,
+    ) -> Option<u64> {
+        if !self.is_pinned() {
             return None;
         }
         if side_panel_focused && self.position == DiagramPanePosition::Side {
             return None;
         }
-        let diagrams = crate::tui::mermaid::get_active_diagrams();
         diagrams
             .get(self.index.min(diagrams.len().saturating_sub(1)))
             .map(|diagram| diagram.hash)
@@ -136,25 +138,35 @@ impl DiagramPane {
     }
 
     /// Reset the view when the visible diagram changed since the last call.
-    pub(in crate::tui::app) fn sync_fit_context(&mut self, side_panel_focused: bool) {
-        let hash = self.visible_hash(side_panel_focused);
+    pub(in crate::tui::app) fn sync_fit_context(
+        &mut self,
+        diagrams: &[DiagramInfo],
+        side_panel_focused: bool,
+    ) {
+        let hash = self.visible_hash(diagrams, side_panel_focused);
         if hash != self.last_visible_hash {
             self.reset_to_fit();
             self.last_visible_hash = hash;
         }
     }
 
-    /// The pane geometry changed: refit, drop render caches, remember what is visible.
-    pub(in crate::tui::app) fn geometry_changed(&mut self, side_panel_focused: bool) {
+    /// Refit and remember what is visible after a geometry change.
+    pub(in crate::tui::app) fn geometry_changed(
+        &mut self,
+        diagrams: &[DiagramInfo],
+        side_panel_focused: bool,
+    ) {
         self.reset_to_fit();
-        crate::tui::mermaid::clear_image_state();
-        crate::tui::clear_side_panel_render_caches();
-        self.last_visible_hash = self.visible_hash(side_panel_focused);
+        self.last_visible_hash = self.visible_hash(diagrams, side_panel_focused);
     }
 
     /// Keep the selection valid after the mode, the enabled flag or the set of
     /// active diagrams changed.
-    pub(in crate::tui::app) fn normalize(&mut self, side_panel_focused: bool) {
+    pub(in crate::tui::app) fn normalize(
+        &mut self,
+        diagrams: &[DiagramInfo],
+        side_panel_focused: bool,
+    ) {
         if self.mode != DiagramDisplayMode::Pinned {
             self.clear_selection();
             return;
@@ -162,7 +174,7 @@ impl DiagramPane {
         if !self.enabled {
             self.focus = false;
         }
-        let count = crate::tui::mermaid::get_active_diagrams().len();
+        let count = diagrams.len();
         if count == 0 {
             self.clear_selection();
             return;
@@ -172,7 +184,7 @@ impl DiagramPane {
             self.scroll_x = 0;
             self.scroll_y = 0;
         }
-        self.last_visible_hash = self.visible_hash(side_panel_focused);
+        self.last_visible_hash = self.visible_hash(diagrams, side_panel_focused);
     }
 
     fn clear_selection(&mut self) {
@@ -197,8 +209,11 @@ impl DiagramPane {
     }
 
     /// Select the next or previous diagram. Returns (1-based index, count).
-    pub(in crate::tui::app) fn cycle(&mut self, direction: i32) -> Option<(usize, usize)> {
-        let diagrams = crate::tui::mermaid::get_active_diagrams();
+    pub(in crate::tui::app) fn cycle(
+        &mut self,
+        diagrams: &[DiagramInfo],
+        direction: i32,
+    ) -> Option<(usize, usize)> {
         let count = diagrams.len();
         if count == 0 {
             return None;
@@ -304,7 +319,6 @@ impl DiagramPane {
         if self.mode != DiagramDisplayMode::Pinned {
             self.mode = DiagramDisplayMode::Pinned;
         }
-        crate::tui::markdown::set_diagram_mode_override(Some(self.mode));
         self.enabled = !self.enabled;
         if !self.enabled {
             self.focus = false;
@@ -387,8 +401,10 @@ impl DiagramPane {
         self.mode = DiagramDisplayMode::None;
     }
 
-    /// Use `mode` for diagrams (debug and benchmark drivers).
-    pub(in crate::tui::app) fn use_mode(&mut self, mode: DiagramDisplayMode) {
+    /// Start a benchmark override and retain the state needed to undo it.
+    pub(super) fn begin_benchmark(&mut self, mode: DiagramDisplayMode) -> DiagramSnapshot {
+        let snapshot = self.snapshot();
         self.mode = mode;
+        snapshot
     }
 }

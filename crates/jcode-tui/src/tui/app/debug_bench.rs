@@ -66,7 +66,7 @@ impl App {
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let include_samples = cfg.include_samples.unwrap_or(true);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
@@ -308,7 +308,7 @@ impl App {
         let keep_mermaid_cache = cfg.keep_mermaid_cache.unwrap_or(false);
         let sleep_between_frames_ms = cfg.sleep_between_frames_ms.unwrap_or(0).min(1_000);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
@@ -733,13 +733,11 @@ impl App {
         let include_paused = cfg.include_paused.unwrap_or(true);
         let diagram_override = cfg.diagram.as_deref();
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, Some(diagram_mode));
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
-
-        self.diagram.use_mode(diagram_mode);
         crate::tui::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
@@ -1003,7 +1001,9 @@ impl App {
 
         let widths = cfg.widths.unwrap_or_else(|| vec![80, 100, 120]);
         let heights = cfg.heights.unwrap_or_else(|| vec![24, 40]);
-        let diagram_modes = cfg.diagram_modes.unwrap_or_else(|| vec![self.diagram.view().mode]);
+        let diagram_modes = cfg
+            .diagram_modes
+            .unwrap_or_else(|| vec![self.diagram.view().mode]);
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let step = cfg.step.unwrap_or(5).max(1);
         let max_steps = cfg.max_steps.unwrap_or(12).clamp(4, 100);
@@ -1109,7 +1109,7 @@ impl App {
         let max_frames = cfg.max_frames.unwrap_or(160).clamp(4, 2000);
         let include_frames = cfg.include_frames.unwrap_or(false);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
 

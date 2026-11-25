@@ -483,7 +483,11 @@ pub(super) struct ScrollTestState {
 }
 
 impl ScrollTestState {
-    fn capture(app: &App) -> Self {
+    fn capture(app: &mut App, mode: Option<crate::config::DiagramDisplayMode>) -> Self {
+        let diagram = match mode {
+            Some(mode) => app.diagram.begin_benchmark(mode),
+            None => app.diagram.snapshot(),
+        };
         Self {
             display_messages: app.display_messages.clone(),
             display_messages_version: app.display_messages_version,
@@ -506,7 +510,7 @@ impl ScrollTestState {
             status: app.status.clone(),
             processing_started: app.processing_started,
             status_notice: app.status_notice.clone(),
-            diagram: app.diagram.snapshot(),
+            diagram,
         }
     }
 

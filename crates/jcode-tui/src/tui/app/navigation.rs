@@ -503,12 +503,15 @@ impl App {
     }
 
     pub(super) fn diagram_available(&self) -> bool {
-        self.diagram.available()
+        self.diagram.is_pinned() && !crate::tui::mermaid::get_active_diagrams().is_empty()
     }
 
     pub(super) fn normalize_diagram_state(&mut self) {
         let side_panel_focused = self.side_panel.focused_page().is_some();
-        self.diagram.normalize(side_panel_focused);
+        self.diagram.normalize(
+            &crate::tui::mermaid::get_active_diagrams(),
+            side_panel_focused,
+        );
     }
 
     pub(super) fn set_diagram_focus(&mut self, focus: bool) {
@@ -995,7 +998,10 @@ impl App {
     }
 
     pub(super) fn cycle_diagram(&mut self, direction: i32) {
-        if let Some((position, count)) = self.diagram.cycle(direction) {
+        if let Some((position, count)) = self
+            .diagram
+            .cycle(&crate::tui::mermaid::get_active_diagrams(), direction)
+        {
             self.set_status_notice(format!("Diagram {position}/{count}"));
         }
     }
@@ -1005,7 +1011,10 @@ impl App {
     }
 
     /// Refit the diagram after the pane geometry changed and clear render caches.
-    fn apply_diagram_ratio_change(&mut self, change: Option<diagram_pane::RatioChange>) -> Option<u8> {
+    fn apply_diagram_ratio_change(
+        &mut self,
+        change: Option<diagram_pane::RatioChange>,
+    ) -> Option<u8> {
         let target = change?.target;
         self.handle_diagram_geometry_change();
         Some(target)
@@ -1090,7 +1099,9 @@ impl App {
     }
 
     pub(super) fn toggle_diagram_pane(&mut self) {
-        let status = if self.diagram.toggle_enabled() {
+        let enabled = self.diagram.toggle_enabled();
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram.view().mode));
+        let status = if enabled {
             "Diagram pane: ON"
         } else {
             "Diagram pane: OFF"
@@ -1144,21 +1155,21 @@ impl App {
         if diagram_available {
             match code {
                 KeyCode::Left => {
-                    if !self.diagram.focus {
+                    if !self.diagram.view().focus {
                         return false;
                     }
                     self.cycle_diagram(-1);
                     return true;
                 }
                 KeyCode::Right => {
-                    if !self.diagram.focus {
+                    if !self.diagram.view().focus {
                         return false;
                     }
                     self.cycle_diagram(1);
                     return true;
                 }
                 KeyCode::Char('h') => {
-                    if !self.diagram.focus {
+                    if !self.diagram.view().focus {
                         return false;
                     }
                     self.set_diagram_focus(false);
@@ -1225,7 +1236,10 @@ impl App {
         modifiers: KeyModifiers,
         diagram_available: bool,
     ) -> bool {
-        if !diagram_available || !self.diagram.focus || modifiers.contains(KeyModifiers::CONTROL) {
+        if !diagram_available
+            || !self.diagram.view().focus
+            || modifiers.contains(KeyModifiers::CONTROL)
+        {
             return false;
         }
 
