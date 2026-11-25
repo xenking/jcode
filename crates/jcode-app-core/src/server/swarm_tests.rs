@@ -1,10 +1,13 @@
+use super::super::swarm_policy::{
+    idle_spawned_worker_reap_candidates, member_in_status_broadcast, member_status_is_dead,
+    now_unix_ms, swarm_idle_worker_reap_after,
+};
 use super::{
     broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
-    broadcast_swarm_status_now, member_in_status_broadcast, member_status_is_dead,
-    monitor_wait_status, now_unix_ms, parse_swarm_tasks, refresh_swarm_task_staleness,
-    remove_session_from_swarm, salvage_assignments_of_dead_member, swarm_ancestors,
-    swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress, update_member_status,
-    update_member_status_with_report,
+    broadcast_swarm_status_now, monitor_wait_status, parse_swarm_tasks,
+    refresh_swarm_task_staleness, remove_session_from_swarm, salvage_assignments_of_dead_member,
+    swarm_ancestors, swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress,
+    update_member_status, update_member_status_with_report,
 };
 use crate::plan::PlanItem;
 use crate::protocol::{NotificationType, ServerEvent};
@@ -611,8 +614,6 @@ fn member_with_parent(session_id: &str, parent: Option<&str>) -> SwarmMember {
 
 #[test]
 fn idle_spawned_worker_reap_selects_only_finished_idle_spawned_agents() {
-    use super::idle_spawned_worker_reap_candidates;
-
     let idle_after = Duration::from_secs(60);
     let old = Instant::now() - Duration::from_secs(120);
 
@@ -674,18 +675,18 @@ fn idle_worker_reap_window_env_zero_disables() {
     unsafe {
         std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
     }
-    assert_eq!(super::swarm_idle_worker_reap_after(), None);
+    assert_eq!(swarm_idle_worker_reap_after(), None);
     unsafe {
         std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
     }
     assert_eq!(
-        super::swarm_idle_worker_reap_after(),
+        swarm_idle_worker_reap_after(),
         Some(Duration::from_secs(90))
     );
     unsafe {
         std::env::remove_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS");
     }
-    assert!(super::swarm_idle_worker_reap_after().is_some());
+    assert!(swarm_idle_worker_reap_after().is_some());
 }
 
 #[test]

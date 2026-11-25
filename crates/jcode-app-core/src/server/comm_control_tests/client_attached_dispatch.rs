@@ -138,7 +138,7 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     // this does NOT terminalize the plan item — there is no turn-end hook for
     // client-attached assignees; the task must be closed by the assignee's
     // terminal report or the coordinator.
-    crate::server::swarm::update_member_status_with_report(
+    crate::server::swarm_status::update_member_status_with_report(
         worker,
         "ready",
         None,

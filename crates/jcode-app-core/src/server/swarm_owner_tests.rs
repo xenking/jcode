@@ -795,7 +795,8 @@ async fn refresh_swarm_task_staleness_marks_running_tasks_stale_and_heartbeat_re
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
     let now_ms = now_unix_ms();
-    let stale_age_ms = super::super::swarm_task_stale_after().as_millis() as u64 + 5_000;
+    let stale_age_ms =
+        super::super::super::swarm_policy::swarm_task_stale_after().as_millis() as u64 + 5_000;
     let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
         "swarm-1".to_string(),
         VersionedPlan {

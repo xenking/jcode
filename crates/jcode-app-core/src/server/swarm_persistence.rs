@@ -323,8 +323,8 @@ fn to_persisted_plan(plan: &VersionedPlan) -> PersistedVersionedPlan {
 }
 
 fn to_persisted_member(member: &SwarmMember, snapshot_unix_ms: u64) -> PersistedSwarmMember {
-    let terminal_since_unix_ms =
-        super::swarm::member_status_is_terminal(&member.status).then(|| {
+    let terminal_since_unix_ms = super::swarm_policy::member_status_is_terminal(&member.status)
+        .then(|| {
             snapshot_unix_ms.saturating_sub(member.last_status_change.elapsed().as_millis() as u64)
         });
     PersistedSwarmMember {
@@ -467,7 +467,7 @@ fn decode_member(
     let record = member.record;
     let original_status = record.status.as_str();
     let was_terminal_before_recovery =
-        super::swarm::member_status_is_terminal(original_status.as_ref());
+        super::swarm_policy::member_status_is_terminal(original_status.as_ref());
     let (status, detail) = if daemon_restart
         && record.is_headless
         && (record.status == SwarmLifecycleStatus::Ready
@@ -481,8 +481,8 @@ fn decode_member(
         recover_member_status(record.status, record.detail, record.is_headless)
     };
     let status_text = status.as_str();
-    let terminal_since_unix_ms = super::swarm::member_status_is_terminal(status_text.as_ref())
-        .then(|| {
+    let terminal_since_unix_ms =
+        super::swarm_policy::member_status_is_terminal(status_text.as_ref()).then(|| {
             member
                 .terminal_since_unix_ms
                 .unwrap_or(if was_terminal_before_recovery {
@@ -555,7 +555,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     let mut running_before_restart = HashSet::new();
     let mut swarms_by_id: HashMap<String, HashSet<String>> = HashMap::new();
     let loaded_at_unix_ms = now_unix_ms();
-    let terminal_retention = super::swarm::swarm_terminal_member_retention();
+    let terminal_retention = super::swarm_policy::swarm_terminal_member_retention();
     let plan_retention = dormant_plan_retention();
     let mut pruned_terminal_members = 0usize;
     let mut pruned_dormant_plans = 0usize;

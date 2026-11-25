@@ -1,13 +1,12 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::swarm::{
-    now_unix_ms, swarm_task_heartbeat_interval, swarm_task_stale_after, touch_swarm_task_progress,
-};
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, begin_or_join_in_flight as begin_swarm_mutation_no_replay,
     begin_or_replay as begin_swarm_mutation_or_replay,
     finish_request as finish_swarm_mutation_request, request_key as swarm_mutation_request_key,
 };
+use super::swarm_plan::touch_swarm_task_progress;
+use super::swarm_policy::{now_unix_ms, swarm_task_heartbeat_interval, swarm_task_stale_after};
 use super::{
     ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,

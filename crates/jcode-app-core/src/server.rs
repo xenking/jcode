@@ -83,9 +83,15 @@ mod runtime_upgrade;
 mod socket;
 mod swarm;
 mod swarm_channels;
+mod swarm_event_history;
 mod swarm_labels;
+mod swarm_membership;
 mod swarm_mutation_state;
 mod swarm_persistence;
+mod swarm_plan;
+mod swarm_policy;
+mod swarm_salvage;
+mod swarm_status;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
@@ -105,23 +111,28 @@ use self::headless::create_headless_session;
 use self::reload::await_reload_signal;
 use self::runtime::ServerRuntime;
 use self::swarm::{
-    MAX_SWARM_MEMBERS, broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
-    broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
-    record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
-    remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
-    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor, truncate_detail,
-    update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
+    MAX_SWARM_MEMBERS, remove_session_from_swarm, run_swarm_message, swarm_is_self_or_ancestor,
 };
 use self::swarm_channels::{
     remove_session_channel_subscriptions, subscribe_session_to_channel,
     unsubscribe_session_from_channel,
 };
+use self::swarm_event_history::{record_swarm_event, record_swarm_event_for_session};
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{
     LoadedSwarmRuntimeState, capture_swarm_state_version,
     load_runtime_state as load_persisted_swarm_runtime_state,
     persist_swarm_state as persist_swarm_state_snapshot, remove_swarm_state_if_version,
     swarm_operation_lock,
+};
+use self::swarm_plan::{
+    broadcast_swarm_plan, broadcast_swarm_plan_with_previous, refresh_swarm_task_staleness,
+    remove_plan_participant, rename_plan_participant, send_swarm_plan_to_session,
+};
+use self::swarm_policy::{expired_terminal_member_ids, member_consumes_swarm_capacity};
+use self::swarm_status::{
+    broadcast_swarm_status, set_member_task_label, truncate_detail, update_member_status,
+    update_member_status_with_report, update_member_status_with_report_tldr,
 };
 use self::util::get_shared_mcp_pool;
 use crate::agent::Agent;
@@ -246,7 +257,7 @@ async fn prune_expired_terminal_swarm_members(
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
 ) -> usize {
-    let retention = swarm::swarm_terminal_member_retention();
+    let retention = swarm_policy::swarm_terminal_member_retention();
     let mut candidates = {
         let members = swarm_state.members.read().await;
         expired_terminal_member_ids(&members, retention)
@@ -271,7 +282,7 @@ async fn prune_expired_terminal_swarm_members(
         let removed_swarm_id = {
             let mut members = swarm_state.members.write().await;
             let still_expired = members.get(&session_id).is_some_and(|member| {
-                swarm::member_status_is_terminal(&member.status)
+                swarm_policy::member_status_is_terminal(&member.status)
                     && member.last_status_change.elapsed() >= retention
                     && !crate::turn_activity::session_is_stopped(&session_id)
             });
@@ -331,12 +342,12 @@ async fn reap_idle_spawned_workers(
     channel_subscriptions_by_session: &ChannelSubscriptions,
     soft_interrupt_queues: &SessionInterruptQueues,
 ) -> usize {
-    let Some(idle_after) = swarm::swarm_idle_worker_reap_after() else {
+    let Some(idle_after) = swarm_policy::swarm_idle_worker_reap_after() else {
         return 0;
     };
     let candidates = {
         let members = swarm_state.members.read().await;
-        swarm::idle_spawned_worker_reap_candidates(&members, idle_after)
+        swarm_policy::idle_spawned_worker_reap_candidates(&members, idle_after)
     };
     if candidates.is_empty() {
         return 0;
@@ -355,7 +366,7 @@ async fn reap_idle_spawned_workers(
                 member.report_back_to_session_id.is_some()
                     && member.role != "coordinator"
                     && (member.status == "ready"
-                        || swarm::member_status_is_terminal(&member.status))
+                        || swarm_policy::member_status_is_terminal(&member.status))
                     && member.last_status_change.elapsed() >= idle_after
             })
         };

@@ -47,7 +47,7 @@ impl IdleUnload {
         if member.is_some_and(|member| {
             member.event_txs.values().any(|tx| !tx.is_closed())
                 || (member.status != "ready"
-                    && !super::swarm::member_status_is_terminal(&member.status))
+                    && !super::swarm_policy::member_status_is_terminal(&member.status))
         }) {
             return None;
         }

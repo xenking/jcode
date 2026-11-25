@@ -478,7 +478,7 @@ pub(super) async fn dispatch_swarm_output_tail(
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
-        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        super::swarm_status::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
     }
 }
 
@@ -537,7 +537,7 @@ pub(super) async fn dispatch_swarm_todo_progress(
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
-        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        super::swarm_status::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
     }
 }
 
@@ -560,7 +560,7 @@ pub(super) async fn dispatch_swarm_tool_activity(
     };
 
     if let Some(swarm_id) = swarm_id {
-        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        super::swarm_status::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
     }
 }
 
@@ -588,7 +588,7 @@ pub(super) async fn dispatch_swarm_runtime_status(
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
-        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        super::swarm_status::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
     }
 }
 
@@ -611,7 +611,7 @@ pub(super) async fn dispatch_swarm_batch_progress(
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
-        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        super::swarm_status::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
     }
 }
 

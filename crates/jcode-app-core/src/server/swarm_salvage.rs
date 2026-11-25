@@ -1,6 +1,16 @@
 //! Salvaging a dead swarm member's plan assignments.
 
-use super::*;
+use super::persist_swarm_state_for;
+use super::state::fanout_session_event;
+use super::swarm_event_history::*;
+use super::swarm_plan::*;
+use super::swarm_policy::*;
+use super::swarm_status::*;
+use super::{SwarmMember, SwarmState, VersionedPlan};
+use crate::protocol::{NotificationType, ServerEvent};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Outcome of salvaging one dead member's plan assignments.
 #[derive(Debug, Default, PartialEq, Eq)]

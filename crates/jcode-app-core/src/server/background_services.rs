@@ -142,7 +142,7 @@ impl Server {
         let stale_swarm_coordinators = Arc::clone(&self.handles.swarm_state.coordinators);
         tokio::spawn(async move {
             let mut interval =
-                tokio::time::interval(crate::server::swarm::swarm_task_sweep_interval());
+                tokio::time::interval(crate::server::swarm_policy::swarm_task_sweep_interval());
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
@@ -156,7 +156,7 @@ impl Server {
             }
         });
 
-        tokio::spawn(swarm::monitor_wait_status(
+        tokio::spawn(swarm_status::monitor_wait_status(
             Arc::clone(&self.handles.swarm_state.members),
             Arc::clone(&self.handles.swarm_state.swarms_by_id),
         ));
@@ -190,7 +190,8 @@ impl Server {
             Arc::clone(&self.handles.channel_subscriptions_by_session);
         let gc_soft_interrupt_queues = Arc::clone(&self.handles.soft_interrupt_queues);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(swarm::swarm_terminal_member_gc_interval());
+            let mut interval =
+                tokio::time::interval(swarm_policy::swarm_terminal_member_gc_interval());
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
@@ -1096,7 +1097,7 @@ impl Server {
                     )
                     .await
                     {
-                        self::swarm::broadcast_swarm_plan(
+                        self::swarm_plan::broadcast_swarm_plan(
                             &swarm_id,
                             Some("todos_changed".to_string()),
                             &swarm_plans,

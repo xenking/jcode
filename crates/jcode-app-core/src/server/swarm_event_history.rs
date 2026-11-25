@@ -1,5 +1,6 @@
 //! Bounded swarm event history publication.
 
+use super::state::MAX_EVENT_HISTORY;
 use super::*;
 
 pub(super) fn log_swarm_lifecycle(phase: &str, fields: Vec<(&str, String)>) {
