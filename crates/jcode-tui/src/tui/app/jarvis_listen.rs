@@ -394,8 +394,8 @@ impl AlwaysListening {
     pub(super) fn clear_playback(&mut self) {
         self.playback = DeferredPlayback::default();
     }
-    pub(super) fn captions(&self) -> &VecDeque<JarvisCaption> {
-        &self.captions
+    pub(super) fn visit_captions(&self, visit: &mut dyn FnMut(&JarvisCaption)) {
+        self.captions.iter().for_each(visit);
     }
 
     fn update_caption(&mut self, id: u64, text: &str) {

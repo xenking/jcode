@@ -457,9 +457,7 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
-    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
-        None
-    }
+    fn visit_jarvis_captions(&self, _visit: &mut dyn FnMut(&JarvisCaption)) {}
     /// Voice input rendered in the composer instead of the status line.
     fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
         None

@@ -671,8 +671,8 @@ impl crate::tui::TuiState for App {
         self.remote_client_count
     }
 
-    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
-        Some(self.jarvis_listener.captions())
+    fn visit_jarvis_captions(&self, visit: &mut dyn FnMut(&crate::tui::JarvisCaption)) {
+        self.jarvis_listener.visit_captions(visit);
     }
 
     fn voice_input_status(&self) -> Option<(bool, String)> {

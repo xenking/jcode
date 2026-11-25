@@ -1099,9 +1099,7 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let mut lines = Vec::new();
-    for row in app.jarvis_transcript().into_iter().flatten() {
-        lines.push(caption_line(row, width));
-    }
+    app.visit_jarvis_captions(&mut |row| lines.push(caption_line(row, width)));
     if !spans.is_empty() {
         lines.push(compact_status_fit(Line::from(spans), usize::from(width)));
     }
@@ -1124,8 +1122,9 @@ pub(super) fn notification_height(app: &dyn TuiState, width: u16) -> u16 {
             .try_into()
             .unwrap_or(u16::MAX)
     } else {
-        u16::from(app.has_notification())
-            + app.jarvis_transcript().map_or(0, |rows| rows.len() as u16)
+        let mut rows = u16::from(app.has_notification());
+        app.visit_jarvis_captions(&mut |_| rows = rows.saturating_add(1));
+        rows
     }
 }
 
