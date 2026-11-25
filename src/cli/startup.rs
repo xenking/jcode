@@ -79,6 +79,7 @@ pub async fn run() -> Result<()> {
     crate::config::on_config_reloaded(sync_output_style_from_config);
     crate::config::on_config_reloaded(crate::auth::AuthStatus::invalidate_cache);
     crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
+    crate::auth::account_pool::install_default_route_listener();
 
     // Invert the legacy provider_catalog -> auth dependency: provider_catalog
     // consults registered fallback resolvers, and auth (the higher layer)

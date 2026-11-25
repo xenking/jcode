@@ -159,10 +159,6 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
     Ok(())
 }
 
-/// Dynamic cache of model context window sizes, populated from API at startup.
-static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
     reason: String,
@@ -252,12 +248,13 @@ pub fn format_account_model_availability_detail(
 
 #[path = "models/model_catalog_state.rs"]
 mod model_catalog_state;
+use crate::context_limits::{cached_context_limit_for_model, populate_context_limits};
 pub(crate) use model_catalog_state::normalize_model_id;
 pub(crate) use model_catalog_state::openai_oauth_route_capabilities;
 pub(crate) use model_catalog_state::openai_route_context_limit_resolver;
 pub use model_catalog_state::{
     anthropic_catalog_scope_for_route, cached_anthropic_model_ids,
-    cached_anthropic_model_ids_for_scope, cached_context_limit_for_model, cached_openai_model_ids,
+    cached_anthropic_model_ids_for_scope, cached_openai_model_ids,
     cached_openai_model_ids_for_scope, cached_openai_reasoning_efforts,
     cached_openai_reasoning_efforts_for_scope, cached_openai_service_tiers_for_scope,
     clear_model_unavailable_for_account, clear_model_unavailable_for_scope,
@@ -265,10 +262,9 @@ pub use model_catalog_state::{
     persist_anthropic_model_catalog_for_scope, persist_openai_model_catalog,
     persist_openai_model_catalog_for_scope, populate_account_models,
     populate_account_models_for_scope, populate_anthropic_models,
-    populate_anthropic_models_for_scope, populate_context_limits,
-    populate_context_limits_from_config, populate_context_limits_from_config_value,
-    publish_openai_model_catalog_refresh, record_model_unavailable_for_account,
-    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background,
+    populate_anthropic_models_for_scope, publish_openai_model_catalog_refresh,
+    record_model_unavailable_for_account, record_model_unavailable_for_scope,
+    refresh_openai_model_catalog_in_background,
     refresh_openai_model_catalog_in_background_for_scope,
 };
 use model_catalog_state::{
@@ -720,7 +716,7 @@ mod catalog_ownership_tests {
         let legacy = context_limit_for_model_with_provider(model, Some("openai"));
         let api = resolver(model, "openai-api");
         let account = resolver(model, "openai-oauth@regression-new-account");
-        CONTEXT_LIMIT_CACHE.write().unwrap().remove(model);
+        crate::context_limits::with_cache(|cache| cache.remove(model));
         assert_eq!(legacy, Some(123_000), "reproduce the poisoned global cache");
         assert_eq!(api, Some(1_000_000));
         assert_eq!(account, Some(1_000_000));
@@ -1063,28 +1059,29 @@ mod catalog_ownership_tests {
         populate_context_limits(HashMap::from([(unrelated.clone(), 42), (model.clone(), 1)]));
         populate_context_limits(HashMap::from([(model, 987_654)]));
         populate_context_limits(HashMap::new());
-        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
-        let (key, value) = cache.get_key_value("catalog-ownership-moved-key").unwrap();
-        // HashMap retains an existing equal key when replacing its value.
-        assert_eq!(*value, 987_654);
-        assert_eq!(cache.get(&unrelated), Some(&42));
-        assert_ne!(key.as_ptr() as usize, allocation);
-        cache.remove("catalog-ownership-moved-key");
-        cache.remove(&unrelated);
+        crate::context_limits::with_cache(|cache| {
+            let (key, value) = cache.get_key_value("catalog-ownership-moved-key").unwrap();
+            // HashMap retains an existing equal key when replacing its value.
+            assert_eq!(*value, 987_654);
+            assert_eq!(cache.get(&unrelated), Some(&42));
+            assert_ne!(key.as_ptr() as usize, allocation);
+            cache.remove("catalog-ownership-moved-key");
+            cache.remove(&unrelated);
+        });
 
         let fresh = "catalog-ownership-fresh-key".to_string();
         let allocation = fresh.as_ptr() as usize;
-        drop(cache);
         populate_context_limits(HashMap::from([(fresh, 123_456)]));
-        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
-        let (key, value) = cache.get_key_value("catalog-ownership-fresh-key").unwrap();
-        assert_eq!(
-            key.as_ptr() as usize,
-            allocation,
-            "new keys must be moved, not cloned"
-        );
-        assert_eq!(*value, 123_456);
-        cache.remove("catalog-ownership-fresh-key");
+        crate::context_limits::with_cache(|cache| {
+            let (key, value) = cache.get_key_value("catalog-ownership-fresh-key").unwrap();
+            assert_eq!(
+                key.as_ptr() as usize,
+                allocation,
+                "new keys must be moved, not cloned"
+            );
+            assert_eq!(*value, 123_456);
+            cache.remove("catalog-ownership-fresh-key");
+        });
     }
 
     #[test]
@@ -1161,7 +1158,7 @@ mod catalog_ownership_tests {
                 .len(),
             4
         );
-        CONTEXT_LIMIT_CACHE.write().unwrap().remove(&selected);
+        crate::context_limits::with_cache(|cache| cache.remove(&selected));
     }
 }
 

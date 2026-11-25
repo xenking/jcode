@@ -11,24 +11,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-/// What the memoized trust list was read from: config path, mtime, length and
-/// the env override that can also change it.
+/// What the memoized trust list was read from: config path, mtime, length,
+/// the env override that can also change it, and the config reload generation.
+/// Saving config bumps the generation, which catches two same-length saves
+/// inside one filesystem timestamp tick that the mtime alone would miss.
 type MemoKey = (
     Option<PathBuf>,
     Option<SystemTime>,
     Option<u64>,
     Option<String>,
+    u64,
 );
 
 static MEMO: Mutex<Option<(MemoKey, Arc<Config>)>> = Mutex::new(None);
-
-/// Drop the memoized list. Config saves call this because the mtime key can
-/// miss two same-length saves inside one filesystem timestamp tick.
-pub(crate) fn forget_memo() {
-    if let Ok(mut guard) = MEMO.lock() {
-        *guard = None;
-    }
-}
 
 fn normalize(source_id: &str) -> String {
     source_id.trim().to_ascii_lowercase()
@@ -73,6 +68,7 @@ fn fresh_trust() -> Arc<Config> {
         metadata.as_ref().and_then(|meta| meta.modified().ok()),
         metadata.as_ref().map(std::fs::Metadata::len),
         std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
+        crate::config::config_reload_generation(),
     );
     if let Ok(guard) = MEMO.lock()
         && let Some((cached_key, trust)) = guard.as_ref()

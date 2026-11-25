@@ -37,6 +37,7 @@ pub mod compaction;
 pub mod companion_client;
 pub mod config;
 pub mod console;
+pub mod context_limits;
 pub mod copilot_usage;
 pub mod detected_emails;
 pub mod egress;

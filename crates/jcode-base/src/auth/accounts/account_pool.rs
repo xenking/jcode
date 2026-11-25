@@ -258,6 +258,24 @@ fn key_for_route(route: &str, active: impl Fn(&str) -> Option<String>) -> Option
     ))
 }
 
+/// Register [`sync_order_after_default_route_change`] with config, once.
+///
+/// Startup does this explicitly. Pool users that start without that wiring (a
+/// separate client process) get it the first time they load the pool, so a
+/// default route changed in that process still reorders the pool.
+pub fn install_default_route_listener() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        crate::config::on_default_route_changed(sync_order_after_default_route_change);
+    });
+}
+
+fn sync_order_after_default_route_change(route: &str) {
+    if let Err(error) = sync_order_with_default_route(route) {
+        crate::logging::error(&format!("Could not sync account order: {error}"));
+    }
+}
+
 /// Keep the auto-switch order in step after the default provider changed
 /// through any path (model picker, `/account`, login, Desktop).
 pub fn sync_order_with_default_route(route: &str) -> Result<()> {
@@ -343,6 +361,7 @@ impl AccountPool {
 
     /// Missing or unreadable files mean "use defaults", never an error.
     pub fn load() -> Self {
+        install_default_route_listener();
         path()
             .ok()
             .filter(|path| path.exists())
@@ -700,6 +719,7 @@ mod tests {
     #[test]
     fn saving_a_default_route_reorders_the_pool() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        install_default_route_listener();
         pool_with_api_key_second().save().unwrap();
 
         crate::config::Config::set_default_model(None, Some("anthropic-api")).unwrap();
@@ -712,6 +732,7 @@ mod tests {
     #[test]
     fn editing_the_default_route_in_config_toml_reorders_the_pool_on_reload() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        install_default_route_listener();
         // Settle the cache on this home so the edit below is compared with it.
         crate::config::invalidate_config_cache();
         let _ = crate::config::config();

@@ -357,11 +357,10 @@ fn leak_config(config: Config) -> &'static Config {
 
 /// Seed the global context-limit cache from a config reference directly.
 ///
-/// Used during CONFIG_CACHE initialization (where calling config() would
-/// deadlock) and shares its logic with
-/// `crate::provider::populate_context_limits_from_config`.
+/// Used during CONFIG_CACHE initialization, where calling config() would
+/// deadlock, and again after every reload.
 fn populate_context_limits_from_config_ref(cfg: &Config) {
-    crate::provider::populate_context_limits_from_config_value(cfg);
+    crate::context_limits::populate_from_providers(&cfg.providers);
 }
 
 /// Get the global config instance.
@@ -422,13 +421,9 @@ pub fn config() -> &'static Config {
         cache.config
     };
 
-    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
-    if let Some(route) = changed_default_route
-        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
-    {
-        crate::logging::error(&format!(
-            "Could not sync account order after config edit: {error}"
-        ));
+    // Listeners may consult config, so notify after releasing CONFIG_CACHE.
+    if let Some(route) = changed_default_route {
+        notify_default_route_changed(&route);
     }
 
     if let Some(reason) = reload_reason {
@@ -442,7 +437,7 @@ pub fn config() -> &'static Config {
         notify_config_reloaded();
         // Re-seed the global context-limit cache so user edits to named
         // provider `context_window` values take effect without a restart.
-        crate::provider::populate_context_limits_from_config();
+        populate_context_limits_from_config_ref(config);
     }
 
     config
@@ -592,6 +587,33 @@ pub fn on_config_reloaded(listener: fn()) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(listener);
+}
+
+/// Type of a default-route listener callback.
+type DefaultRouteListener = fn(&str);
+
+static DEFAULT_ROUTE_LISTENERS: LazyLock<RwLock<Vec<DefaultRouteListener>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Register a reaction to the configured default provider route changing,
+/// whether through a config setter or a direct edit of config.toml. The
+/// account pool uses it to keep its auto-switch order in step. Intended to be
+/// called once per subsystem.
+pub fn on_default_route_changed(listener: fn(&str)) {
+    DEFAULT_ROUTE_LISTENERS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(listener);
+}
+
+fn notify_default_route_changed(route: &str) {
+    for listener in DEFAULT_ROUTE_LISTENERS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+    {
+        listener(route);
+    }
 }
 
 /// Scoped local resource bridge policy. Zero disables access.

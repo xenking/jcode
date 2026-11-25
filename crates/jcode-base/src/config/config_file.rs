@@ -172,9 +172,6 @@ impl Config {
 
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
-        // Also drop the trust-list memo: its mtime key can miss two same-length
-        // saves inside one filesystem timestamp tick.
-        crate::auth::external_trust::forget_memo();
         super::invalidate_config_cache();
     }
 
@@ -229,11 +226,10 @@ impl Config {
             provider.unwrap_or("(auto)")
         ));
         // The first auto-switch account is the default, so the order follows
-        // whichever path changed it. A failure here must not undo the save.
-        if let Some(route) = provider
-            && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(route)
-        {
-            crate::logging::error(&format!("Could not sync account order: {error}"));
+        // whichever path changed it. Listeners log their own failures: a
+        // failure there must not undo the save.
+        if let Some(route) = provider {
+            super::notify_default_route_changed(route);
         }
         Ok(())
     }

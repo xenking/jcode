@@ -187,6 +187,8 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
         || provider_name.eq_ignore_ascii_case("openai")
 }
 
+pub use crate::context_limits::{cached_context_limit_for_model, populate_context_limits};
+
 #[path = "direct_profile_routes.rs"]
 mod direct_profile_routes;
 #[cfg(test)]
@@ -220,9 +222,8 @@ pub use self::models::{
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
     begin_anthropic_model_catalog_refresh, begin_anthropic_model_catalog_refresh_for_scope,
     begin_openai_model_catalog_refresh, cached_anthropic_model_ids,
-    cached_anthropic_model_ids_for_scope, cached_context_limit_for_model, cached_openai_model_ids,
-    cached_openai_reasoning_efforts, clear_all_model_unavailability_for_account,
-    clear_all_provider_unavailability_for_account,
+    cached_anthropic_model_ids_for_scope, cached_openai_model_ids, cached_openai_reasoning_efforts,
+    clear_all_model_unavailability_for_account, clear_all_provider_unavailability_for_account,
     clear_claude_provider_unavailability_for_account_label, clear_model_unavailable_for_account,
     clear_openai_provider_unavailability_for_account_label, clear_provider_unavailable_for_account,
     context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
@@ -236,13 +237,12 @@ pub use self::models::{
     openai_platform_api_key_configured, persist_anthropic_model_catalog,
     persist_anthropic_model_catalog_for_scope, persist_openai_model_catalog,
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
-    populate_context_limits, populate_context_limits_from_config,
-    populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
-    record_model_unavailable_for_account, record_provider_unavailable_for_account,
-    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
-    resolve_model_capabilities, should_refresh_anthropic_model_catalog,
-    should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
+    provider_for_model, provider_for_model_with_hint, provider_unavailability_detail_for_account,
+    provider_unavailability_detail_for_account_label, record_model_unavailable_for_account,
+    record_provider_unavailable_for_account, record_provider_unavailable_for_account_label,
+    refresh_openai_model_catalog_in_background, resolve_model_capabilities,
+    should_refresh_anthropic_model_catalog, should_refresh_anthropic_model_catalog_for_scope,
+    should_refresh_openai_model_catalog,
 };
 pub use self::models::{
     begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
