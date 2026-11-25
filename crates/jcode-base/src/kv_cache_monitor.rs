@@ -687,6 +687,16 @@ impl KvCacheMonitor {
         Self::default()
     }
 
+    /// Prompt tokens of the last completed request, as the provider counted
+    /// them. Unlike the message estimate it includes the system prompt and
+    /// tool schemas, and it survives a daemon restart through the checkpoint.
+    pub fn last_request_tokens(&self) -> Option<u64> {
+        self.baseline
+            .as_ref()
+            .map(|baseline| baseline.reusable_cache_tokens)
+            .filter(|tokens| *tokens > 0)
+    }
+
     /// Fallback for sessions saved before the last attempted route was stored.
     pub fn checkpoint_cache_domain(&self) -> Option<RequestCacheDomain> {
         self.baseline

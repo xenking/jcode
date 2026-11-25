@@ -1009,3 +1009,51 @@ async fn a_cold_cache_does_not_shake_for_a_few_percent() {
         .count();
     assert_eq!(stored, 1);
 }
+
+/// 2026-11-25 13:40: after a daemon restart the cold-cache notice said "76k
+/// re-cached" while the provider re-cached 116K. The figure counted only the
+/// messages, not the system prompt and tool schemas, because the provider's
+/// own count lived in memory and did not survive the restart. The restored
+/// cache checkpoint still holds the last request's real size.
+#[tokio::test]
+async fn the_cold_cache_notice_reports_the_whole_prompt_after_a_restart() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, before) = fixture(0, 100_000, 1_200).await;
+    let last_request = before as u64 + 40_000;
+    agent.session.last_provider_cache_domain = Some(agent.request_cache_domain());
+    agent.kv_cache_monitor.begin_request(
+        crate::kv_cache_monitor::RequestRoute::default(),
+        crate::kv_cache_monitor::RequestSignature::default(),
+    );
+    agent
+        .kv_cache_monitor
+        .finish_request(last_request, Some(last_request));
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .note_provider_response(
+            std::time::SystemTime::now() - Duration::from_secs(3_601),
+            Some(before as u64),
+        );
+    let (started, event) = agent.idle_cache_expiry_at(std::time::SystemTime::now());
+    assert!(!started && event.is_none());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = crate::stream_batching::BatchingSender::new(tx, agent.session_id().into());
+    agent.messages_for_provider(Some(&tx)).await.unwrap();
+    drop(tx);
+    let mut dividers = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::Compaction { divider, .. } = event {
+            dividers.extend(divider);
+        }
+    }
+    let expected = format!("cache cold · {}k re-cached", last_request / 1_000);
+    assert_eq!(dividers.len(), 1, "{dividers:?}");
+    assert!(
+        dividers[0].starts_with(&expected),
+        "{} vs {expected}",
+        dividers[0]
+    );
+}

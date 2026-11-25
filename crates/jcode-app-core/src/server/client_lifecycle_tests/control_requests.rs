@@ -202,7 +202,9 @@ async fn background_request_is_refused_while_a_prompt_waits_for_a_person() {
     assert!(!background_signal.is_set());
 
     assert!(crate::tool::interactive::answer_with_text(
-        session_id, "no", vec![]
+        session_id,
+        "no",
+        vec![]
     ));
     let _ = answer.await;
     assert!(
