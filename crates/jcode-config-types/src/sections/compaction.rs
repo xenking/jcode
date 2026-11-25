@@ -291,6 +291,17 @@ impl CompactionConfig {
         }
     }
 
+    /// The mode a session runs in: its own explicit choice when it made one,
+    /// otherwise the configured mode.
+    pub fn effective_mode(&self, explicit: Option<&CompactionMode>) -> CompactionMode {
+        explicit.unwrap_or(&self.mode).clone()
+    }
+
+    /// Whether compaction fires on a fixed token threshold.
+    pub fn is_reactive(&self) -> bool {
+        self.mode == CompactionMode::Reactive
+    }
+
     /// Switch the compaction mode.
     pub fn set_mode(&mut self, mode: CompactionMode) {
         self.mode = mode;

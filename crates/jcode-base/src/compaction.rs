@@ -455,7 +455,7 @@ fn threshold_tokens_for(
     cfg: &crate::config::CompactionConfig,
     context_window: usize,
 ) -> Option<usize> {
-    if cfg.mode != crate::config::CompactionMode::Reactive {
+    if !cfg.is_reactive() {
         return None;
     }
     threshold_tokens_after_overrides(cfg, context_window)
@@ -562,7 +562,7 @@ impl ShakeReason {
 impl CompactionManager {
     pub fn new() -> Self {
         let cfg = crate::config::config().compaction.clone();
-        let mode = cfg.mode.clone();
+        let mode = cfg.effective_mode(None);
         Self {
             compacted_count: 0,
             active_summary: None,
@@ -660,11 +660,7 @@ impl CompactionManager {
     fn refresh_context_cap(&mut self) {
         let resolved = self.resolved_config();
         if self.active_route.0.is_some() || self.active_route.1.is_some() {
-            let mode = if self.mode_overridden {
-                self.mode.clone()
-            } else {
-                resolved.mode.clone()
-            };
+            let mode = resolved.effective_mode(self.mode_overridden.then_some(&self.mode));
             self.compaction_config = resolved;
             self.compaction_config.set_mode(mode.clone());
             self.mode = mode;

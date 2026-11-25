@@ -862,7 +862,7 @@ async fn send_history_from_persisted_session(
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
         service_tier: provider.service_tier(),
-        compaction_mode: crate::config::config().compaction.mode.clone(),
+        compaction_mode: crate::config::config().compaction.effective_mode(None),
         activity,
         side_panel,
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
