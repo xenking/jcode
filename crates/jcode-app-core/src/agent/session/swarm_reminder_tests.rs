@@ -41,8 +41,7 @@ async fn last_user_text(effort: Option<&str>, message: &str) -> String {
         .append_user_context_message(message, Vec::new(), None)
         .expect("append user message");
     agent
-        .messages()
-        .iter()
+        .iter_messages()
         .rev()
         .find(|m| m.role == Role::User)
         .and_then(|m| {
@@ -166,8 +165,7 @@ async fn run_once_path_also_appends_reminder() {
     // The provider errors on complete; we only care about the stored message.
     let _ = agent.run_once_capture("ship it").await;
     let text = agent
-        .messages()
-        .iter()
+        .iter_messages()
         .filter(|m| m.role == Role::User)
         .flat_map(|m| m.content.iter())
         .find_map(|block| match block {

@@ -1215,7 +1215,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
         let agent = server.sessions.read().await.get(&id).unwrap().clone();
         {
             let agent = agent.lock().await;
-            let last = agent.messages().last().unwrap();
+            let last = agent.last_message().unwrap();
             assert_eq!(last.display_role, Some(StoredDisplayRole::System));
             assert!(last.content.iter().any(|block| matches!(block,
                 ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Stay concise."))));

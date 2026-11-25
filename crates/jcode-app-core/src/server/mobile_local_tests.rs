@@ -77,7 +77,7 @@ async fn transcript(agent: &Arc<Mutex<Agent>>) -> String {
     let agent = timeout(Duration::from_secs(5), agent.lock())
         .await
         .expect("turn should release the agent");
-    format!("{:?}", agent.messages())
+    format!("{:?}", agent.iter_messages().collect::<Vec<_>>())
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn phone_photo_starts_same_session_turn_with_image_content() {
     until_done(&mut f.events).await;
     let agent = f.agent.lock().await;
     assert_eq!(agent.session_id(), f.session_id);
-    let transcript = format!("{:?}", agent.messages());
+    let transcript = format!("{:?}", agent.iter_messages().collect::<Vec<_>>());
     assert!(transcript.contains("image/png"), "{transcript}");
     assert!(transcript.contains("aGk="), "{transcript}");
     assert!(transcript.contains("photo received"), "{transcript}");

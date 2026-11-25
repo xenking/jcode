@@ -399,5 +399,5 @@ async fn check_idle_unload_dm(large_context: bool) {
             .iter()
             .any(|text| text.contains("idle unload original user"))
     );
-    assert!(agent.messages().iter().any(|msg| msg.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("wake from idle unload DM")))));
+    assert!(agent.iter_messages().any(|msg| msg.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("wake from idle unload DM")))));
 }

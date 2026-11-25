@@ -1107,7 +1107,7 @@ async fn new_client_agent_stamps_client_cwd_into_initial_context() {
     let agent = Agent::new_with_initial_working_dir(provider, registry, Some(&client_cwd));
 
     assert_eq!(agent.working_dir(), Some(client_cwd.as_ref()));
-    let context = agent.messages()[0].content_preview();
+    let context = agent.message_at(0).expect("transcript message").content_preview();
     assert!(
         context.contains(&format!("Working directory: {client_cwd}")),
         "initial context must be created from the client cwd: {context}"

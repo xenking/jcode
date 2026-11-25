@@ -180,6 +180,12 @@ impl Session {
         self.messages[start.min(self.messages.len())..].iter()
     }
 
+    /// The messages added after the first `before`, or `None` when the
+    /// transcript is now shorter than that (compaction replaced it).
+    pub fn iter_messages_since(&self, before: usize) -> Option<std::slice::Iter<'_, StoredMessage>> {
+        self.messages.get(before..).map(<[StoredMessage]>::iter)
+    }
+
     pub fn message_at(&self, index: usize) -> Option<&StoredMessage> {
         self.messages.get(index)
     }

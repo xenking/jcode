@@ -470,14 +470,13 @@ pub(super) fn build_run_todo_validation_message(
 
 /// Whether the turn that appended `messages[before..]` called any tool. A
 /// shrunken transcript (compaction) counts as progress, never as a stall.
-pub(super) fn run_turn_had_tool_calls(
-    messages: &[crate::session::StoredMessage],
-    before: usize,
+pub(super) fn run_turn_had_tool_calls<'a>(
+    new: Option<impl IntoIterator<Item = &'a crate::session::StoredMessage>>,
 ) -> bool {
-    let Some(new) = messages.get(before..) else {
+    let Some(new) = new else {
         return true;
     };
-    new.iter().any(|message| {
+    new.into_iter().any(|message| {
         message
             .content
             .iter()

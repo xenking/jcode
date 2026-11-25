@@ -1337,8 +1337,7 @@ mod tests {
                 let user_messages = agent
                     .lock()
                     .await
-                    .messages()
-                    .iter()
+                    .iter_messages()
                     .filter(|message| {
                         message.role == crate::message::Role::User
                             && message.content.iter().any(|block| {

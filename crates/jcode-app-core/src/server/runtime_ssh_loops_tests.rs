@@ -800,12 +800,12 @@ fn turn_tool_call_detection_only_looks_at_new_messages() {
         thought_signature: None,
     };
     let history = vec![stored(vec![tool()]), stored(vec![text()])];
-    assert!(!turn_had_tool_calls(&history, 2), "no new messages");
+    assert!(!turn_had_tool_calls(history.get(2..)), "no new messages");
     let mut with_text = history.clone();
     with_text.push(stored(vec![text()]));
-    assert!(!turn_had_tool_calls(&with_text, 2), "old tool use ignored");
+    assert!(!turn_had_tool_calls(with_text.get(2..)), "old tool use ignored");
     let mut with_tool = with_text.clone();
     with_tool.push(stored(vec![tool()]));
-    assert!(turn_had_tool_calls(&with_tool, 2));
-    assert!(turn_had_tool_calls(&history, 5), "compaction is progress");
+    assert!(turn_had_tool_calls(with_tool.get(2..)));
+    assert!(turn_had_tool_calls(history.get(5..)), "compaction is progress");
 }

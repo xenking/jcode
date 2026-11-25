@@ -1372,9 +1372,27 @@ impl Agent {
         self.log_env_snapshot("working_dir");
     }
 
-    /// Get the stored messages (for transcript export)
-    pub fn messages(&self) -> &[StoredMessage] {
-        self.session.iter_messages().as_slice()
+    pub fn iter_messages(&self) -> std::slice::Iter<'_, StoredMessage> {
+        self.session.iter_messages()
+    }
+
+    pub fn iter_messages_from(&self, start: usize) -> std::slice::Iter<'_, StoredMessage> {
+        self.session.iter_messages_from(start)
+    }
+
+    pub fn iter_messages_since(
+        &self,
+        before: usize,
+    ) -> Option<std::slice::Iter<'_, StoredMessage>> {
+        self.session.iter_messages_since(before)
+    }
+
+    pub fn last_message(&self) -> Option<&StoredMessage> {
+        self.session.last_message()
+    }
+
+    pub fn message_at(&self, index: usize) -> Option<&StoredMessage> {
+        self.session.message_at(index)
     }
 }
 

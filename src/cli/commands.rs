@@ -2646,7 +2646,7 @@ async fn run_single_message_with_agent(
             }
         }
         if let Some(path) = output.last_message {
-            run_options::write_last_message(path, agent.messages().iter().skip(start_index))?;
+            run_options::write_last_message(path, agent.iter_messages_from(start_index))?;
         }
         Ok(())
     }
@@ -2797,9 +2797,9 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
-        let messages_before = agent.messages().len();
+        let messages_before = agent.message_count();
         agent.run_once(&next_message).await?;
-        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2939,9 +2939,9 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
-        let messages_before = agent.messages().len();
+        let messages_before = agent.message_count();
         outputs.push(agent.run_once_capture(&next_message).await?);
-        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -3094,7 +3094,7 @@ async fn run_single_message_command_ndjson(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
-        let messages_before = agent.messages().len();
+        let messages_before = agent.message_count();
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
                 &next_message,
@@ -3129,7 +3129,7 @@ async fn run_single_message_command_ndjson(
             result = Err(err);
             break;
         }
-        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;

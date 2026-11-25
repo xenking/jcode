@@ -351,11 +351,13 @@ pub(super) fn session_has_pending_await(session_id: &str) -> bool {
 
 /// Whether the turn that appended `messages[before..]` called any tool. A
 /// shrunken transcript (compaction) is treated as progress, never as a stall.
-fn turn_had_tool_calls(messages: &[crate::session::StoredMessage], before: usize) -> bool {
-    let Some(new) = messages.get(before..) else {
+fn turn_had_tool_calls<'a>(
+    new: Option<impl IntoIterator<Item = &'a crate::session::StoredMessage>>,
+) -> bool {
+    let Some(new) = new else {
         return true;
     };
-    new.iter().any(|message| {
+    new.into_iter().any(|message| {
         message
             .content
             .iter()
@@ -506,7 +508,7 @@ pub(super) async fn run_reserved_followups(
         ));
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
-        let messages_before = agent.messages().len();
+        let messages_before = agent.message_count();
         let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
             agent,
             lease,
@@ -532,7 +534,7 @@ pub(super) async fn run_reserved_followups(
         if result.is_ok() {
             // A poke that made no tool calls changed nothing. Block repeats of
             // the same open state instead of looping on "nothing to do".
-            let had_tool_calls = turn_had_tool_calls(agent.messages(), messages_before);
+            let had_tool_calls = turn_had_tool_calls(agent.iter_messages_since(messages_before));
             update_state(&session_id, |state| {
                 state.policy.record_turn(had_tool_calls);
                 Ok(())

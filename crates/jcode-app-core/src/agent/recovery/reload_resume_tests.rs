@@ -472,8 +472,7 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
         matches!(plan, ResumePlan::ToolResults(_)),
         "plan={plan:?} messages={:?}",
         resumed
-            .messages()
-            .iter()
+            .iter_messages()
             .map(|message| format!("{:?}[{}]", message.role, message.content.len()))
             .collect::<Vec<_>>()
     );

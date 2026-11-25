@@ -438,7 +438,7 @@ async fn swarm_worker_report_wakes_idle_root_and_queues_for_busy_root() {
             .await
             .expect("idle root should wake and finish a real tracked turn");
             let guard = agent.lock().await;
-            assert!(guard.messages().iter().any(|message| {
+            assert!(guard.iter_messages().any(|message| {
                 message.content.iter().any(|block| matches!(block,
                     crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification)))
             }), "worker report must reach model context, not just UI");
@@ -575,7 +575,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     assert!(streamed.contains("Build result processed."));
 
     let guard = agent.lock().await;
-    assert!(guard.messages().iter().any(|message| {
+    assert!(guard.iter_messages().any(|message| {
         message.role == Role::User
             && message
                 .content_preview()
@@ -595,7 +595,7 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
     let provider_dyn: Arc<dyn Provider> = provider;
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let initial_message_count = agent.lock().await.messages().len();
+    let initial_message_count = agent.lock().await.message_count();
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(session_id.clone(), agent.clone())]),
     ));
@@ -664,7 +664,7 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
             .is_err(),
         "external mode must not stream an autonomous model turn"
     );
-    assert_eq!(agent.lock().await.messages().len(), initial_message_count);
+    assert_eq!(agent.lock().await.message_count(), initial_message_count);
     assert!(soft_interrupt_queues.read().await.is_empty());
 }
 

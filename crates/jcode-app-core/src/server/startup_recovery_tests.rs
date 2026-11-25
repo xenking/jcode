@@ -47,7 +47,7 @@ async fn formal_recovery_running_worker_requires_owner() -> Result<()> {
         })
         .await?;
         assert!(
-            !agent.lock().await.messages().iter().any(|message| {
+            !agent.lock().await.iter_messages().any(|message| {
                 message
                     .content_preview()
                     .contains("continued without owner")
@@ -138,7 +138,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     })
     .await?;
     assert!(
-        !agent.lock().await.messages().iter().any(|message| {
+        !agent.lock().await.iter_messages().any(|message| {
             message
                 .content_preview()
                 .contains("continued after owner stopped")
@@ -426,14 +426,14 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 
             let initiator_done = {
                 let guard = initiator_agent.lock().await;
-                guard.messages().iter().any(|message| {
+                guard.iter_messages().any(|message| {
                     message.role == Role::Assistant
                         && message.content_preview().contains("continued after reload")
                 })
             };
             let peer_done = {
                 let guard = peer_agent.lock().await;
-                guard.messages().iter().any(|message| {
+                guard.iter_messages().any(|message| {
                     message.role == Role::Assistant
                         && message.content_preview().contains("continued after reload")
                 })
@@ -600,7 +600,7 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
     );
     let agent = sessions[worker.id()].clone();
     drop(sessions);
-    assert!(agent.lock().await.messages().iter().any(|message| {
+    assert!(agent.lock().await.iter_messages().any(|message| {
         message.role == Role::Assistant && message.content_preview().contains("recovered ")
     }));
     assert!(!super::super::reload_recovery::has_pending_for_session(
@@ -735,7 +735,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
 
             let headless_done = {
                 let guard = headless_agent.lock().await;
-                guard.messages().iter().any(|message| {
+                guard.iter_messages().any(|message| {
                     message.role == Role::Assistant
                         && message.content_preview().contains("continued after reload")
                 })
@@ -914,7 +914,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
         loop {
             let agent = server.sessions.read().await.get(busy.id()).cloned();
             if let Some(agent) = agent {
-                let resumed = agent.lock().await.messages().iter().any(|message| {
+                let resumed = agent.lock().await.iter_messages().any(|message| {
                     message.role == Role::Assistant
                         && message
                             .content_preview()
@@ -940,8 +940,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
         agent
             .lock()
             .await
-            .messages()
-            .iter()
+            .iter_messages()
             .any(|message| message.content_preview().contains("run the tests")),
         "the continuation must include actionable todo details"
     );
@@ -1014,7 +1013,7 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
         loop {
             let agent = server.sessions.read().await.get(worker.id()).cloned();
             if let Some(agent) = agent
-                && agent.lock().await.messages().iter().any(|message| {
+                && agent.lock().await.iter_messages().any(|message| {
                     message.role == Role::Assistant
                         && message
                             .content_preview()

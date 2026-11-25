@@ -1858,11 +1858,11 @@ fn run_turn_tool_call_detection_only_looks_at_new_messages() {
         thought_signature: None,
     };
     let history = vec![stored(vec![tool()]), stored(vec![text()])];
-    assert!(!todo_followup::run_turn_had_tool_calls(&history, 2));
+    assert!(!todo_followup::run_turn_had_tool_calls(history.get(2..)));
     let mut with_tool = history.clone();
     with_tool.push(stored(vec![tool()]));
-    assert!(todo_followup::run_turn_had_tool_calls(&with_tool, 2));
-    assert!(todo_followup::run_turn_had_tool_calls(&history, 9));
+    assert!(todo_followup::run_turn_had_tool_calls(with_tool.get(2..)));
+    assert!(todo_followup::run_turn_had_tool_calls(history.get(9..)));
 }
 
 #[test]
