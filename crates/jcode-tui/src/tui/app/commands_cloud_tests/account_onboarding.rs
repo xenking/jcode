@@ -63,7 +63,7 @@ fn signed_out_cloud_shows_setup_steps_and_queues_nothing() {
         assert!(handle_cloud_command(&mut app, input, &session));
         assert!(app.pending_cloud_handoff.is_none(), "{input}");
         assert!(app.cloud_job.is_none(), "{input}");
-        assert!(app.cloud_recovery_context.is_none(), "{input}");
+        assert!(app.cloud_recovery_reminder().is_none(), "{input}");
         assert!(!app.has_pending_cloud_recovery(), "{input}");
         let message = app.display_messages.last().unwrap();
         assert_eq!(message.role, "system", "{input}");
@@ -118,7 +118,7 @@ fn cli_account_failures_become_guidance_not_agent_diagnosis() {
         let mut app = crate::tui::app::tests::create_test_app();
         let session = super::super::super::commands::active_session_id(&app);
         show_cloud_failure(&mut app, "/cloud", &session, Some(1), &details);
-        assert!(app.cloud_recovery_context.is_none(), "{issue:?}");
+        assert!(app.cloud_recovery_reminder().is_none(), "{issue:?}");
         assert!(!app.has_pending_cloud_recovery(), "{issue:?}");
         let message = &app.display_messages.last().unwrap().content;
         assert!(message.contains(expected), "{issue:?}: {message}");

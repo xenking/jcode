@@ -180,8 +180,8 @@ fn reload_recovery_cloud_retry_marks_final_wire_reminder() {
         )
         .unwrap()
         .continuation_message;
-        app.cloud_recovery_context = Some((session, original.clone()));
-        app.cloud_recovery_auto_pending = true;
+        app.cloud_recovery
+            .note_failure(&session, "/cloud", original.clone());
         let mut connection = crate::tui::backend::RemoteConnection::dummy();
         let mut peer = tokio::io::BufReader::new(connection.take_dummy_peer().unwrap());
         rt.block_on(async {
@@ -209,8 +209,8 @@ fn reload_recovery_cloud_retry_marks_final_wire_reminder() {
             if let Some(existing) = existing.as_ref() {
                 assert!(reminder.contains(existing));
             }
-            assert!(app.cloud_recovery_context.is_none());
-            assert!(!app.cloud_recovery_auto_pending);
+            assert!(app.cloud_recovery_reminder().is_none());
+            assert!(!app.has_pending_cloud_recovery());
             let pending = app.rate_limit_pending_message.clone().unwrap();
             assert_eq!(pending.system_reminder.as_deref(), Some(reminder));
 
@@ -286,7 +286,8 @@ fn reload_recovery_cloud_only_retry_marks_final_reminder_once() {
     let mut app = create_test_app();
     app.is_remote = true;
     let session = super::commands::active_session_id(&app);
-    app.cloud_recovery_context = Some((session, "Recover the cloud environment".to_string()));
+    app.cloud_recovery
+        .note_replacement(session, "Recover the cloud environment".into());
     let mut connection = crate::tui::backend::RemoteConnection::dummy();
     rt.block_on(remote::begin_remote_send(
         &mut app,
@@ -308,7 +309,7 @@ fn reload_recovery_cloud_only_retry_marks_final_reminder_once() {
         .unwrap();
     assert!(reminder.starts_with("<system-reminder>Retry the interrupted execution"));
     assert!(reminder.ends_with("Recover the cloud environment"));
-    assert!(app.cloud_recovery_context.is_none());
+    assert!(app.cloud_recovery_reminder().is_none());
     rt.block_on(remote::begin_remote_send(
         &mut app,
         &mut connection,

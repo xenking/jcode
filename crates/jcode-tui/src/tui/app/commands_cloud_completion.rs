@@ -95,10 +95,10 @@ pub(super) fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::pr
                     CloudCommand::Replace { host, .. } => host.as_deref(),
                     _ => None,
                 });
-                app.cloud_recovery_context = Some((
+                app.cloud_recovery.note_replacement(
                     job.session_id.clone(),
                     crate::cloud_environment::replacement_guidance(host),
-                ));
+                );
             }
         } else {
             show_cloud_failure(
@@ -147,13 +147,8 @@ pub(super) fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::pr
     if matches!(
         command,
         CloudCommand::Move { .. } | CloudCommand::MoveSelected { .. } | CloudCommand::Return
-    ) && app
-        .cloud_recovery_context
-        .as_ref()
-        .is_some_and(|(id, _)| id == session_id)
-    {
-        app.cloud_recovery_context = None;
-        app.cloud_recovery_auto_pending = false;
+    ) {
+        app.cloud_recovery.take_reminder(session_id);
     }
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     match command {

@@ -299,9 +299,9 @@ fn replacement_completion_stays_local_and_shows_backup() {
         assert!(app.poll_cloud_job());
         assert!(!app.should_quit);
         assert!(app.cloud_handoff_requested.is_none());
-        assert_eq!(app.cloud_recovery_context.is_some(), !dry_run);
-        if let Some((session, reminder)) = &app.cloud_recovery_context {
-            assert_eq!(session, "original-session");
+        let reminder = app.cloud_recovery.reminder("original-session");
+        assert_eq!(reminder.is_some(), !dry_run);
+        if let Some(reminder) = reminder {
             assert!(reminder.contains("box"));
             assert!(reminder.contains("environment"));
         }
@@ -344,7 +344,7 @@ fn replacement_notice_reaches_next_local_turn_once() {
     );
     app.input = "continue configuring cloud".into();
     app.submit_input();
-    assert!(app.cloud_recovery_context.is_none());
+    assert!(app.cloud_recovery_reminder().is_none());
     assert!(app.session.iter_messages().any(|message| {
         message.content.iter().any(|block| {
             matches!(block, crate::message::ContentBlock::Text { text, .. } if text.contains(&reminder))
@@ -482,10 +482,11 @@ fn cloud_failure_context_is_session_scoped_and_consumed_once() {
             .unwrap()
             .contains("permission denied")
     );
-    let saved = app.cloud_recovery_context.clone();
-    app.cloud_recovery_context.as_mut().unwrap().0 = "another-session".into();
-    assert!(app.take_cloud_recovery_reminder().is_none());
-    app.cloud_recovery_context = saved;
+    assert!(
+        app.cloud_recovery
+            .take_reminder("another-session")
+            .is_none()
+    );
     assert!(app.take_cloud_recovery_reminder().is_some());
     assert!(app.take_cloud_recovery_reminder().is_none());
 }
@@ -503,7 +504,7 @@ fn cloud_failure_reaches_next_local_agent_turn() {
     );
     app.input = "fix that cloud error".into();
     app.submit_input();
-    assert!(app.cloud_recovery_context.is_none());
+    assert!(app.cloud_recovery_reminder().is_none());
     assert!(app.session.iter_messages().any(|message| {
         message.content.iter().any(|block| {
             matches!(block,

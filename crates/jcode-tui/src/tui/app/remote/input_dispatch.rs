@@ -158,8 +158,7 @@ async fn begin_remote_send_with_attachments(
         app.publish_user_image_previews(&images);
     }
     if recovery.is_some() {
-        app.cloud_recovery_context = None;
-        app.cloud_recovery_auto_pending = false;
+        app.cloud_recovery.clear_after_delivery();
     }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;

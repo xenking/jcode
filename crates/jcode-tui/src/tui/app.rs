@@ -72,6 +72,7 @@ pub(super) mod commands;
 mod commit_log;
 pub(crate) use crate::tui::commit_log::CommitLogOverlay;
 mod cloud_environment;
+mod cloud_recovery;
 mod commands_cloud;
 mod commands_colors;
 mod commands_desktop;
@@ -1154,11 +1155,7 @@ pub struct App {
     cloud_interrupt_sent_for: Option<u64>,
     // Remote mode: the daemon turn must be cancelled for a ready handoff.
     cloud_remote_interrupt_pending: bool,
-    cloud_recovery_context: Option<(String, String)>,
-    cloud_recovery_auto_pending: bool,
-    // One autonomous diagnosis per command/session per client lifetime. A
-    // diagnosis must never become an endless failed-handoff/recovery loop.
-    cloud_recovery_auto_attempted: std::collections::HashSet<(String, String)>,
+    cloud_recovery: cloud_recovery::CloudRecovery,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message

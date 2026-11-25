@@ -85,7 +85,7 @@ fn cloud_auto_recovery_waits_for_history_then_sends_hidden_diagnostics() {
     ));
     assert!(app.is_processing);
     assert!(!app.has_pending_cloud_recovery());
-    assert!(app.cloud_recovery_context.is_none());
+    assert!(app.cloud_recovery_reminder().is_none());
     let sent = app.rate_limit_pending_message.as_ref().unwrap();
     assert!(sent.is_system);
     assert!(sent.content.is_empty());
