@@ -18,6 +18,7 @@
 
 pub mod allocator;
 pub mod background_progress;
+mod capabilities;
 pub mod search_index;
 pub mod timing;
 pub mod translate;
@@ -33,8 +34,7 @@ mod stdio_tests;
 
 use anyhow::{Context, Result};
 use jcode_harness_api::{
-    API_VERSION_MAJOR, ApiEvent, BACKGROUND_TASKS_CAPABILITY, BackgroundTasksSnapshot, ErrorCode,
-    ServerFrame,
+    API_VERSION_MAJOR, ApiEvent, BackgroundTasksSnapshot, ErrorCode, ServerFrame,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -65,6 +65,7 @@ fn release_large_frame(buffer: &mut Vec<u8>) {
 }
 
 mod session_controls;
+use capabilities::DaemonCapabilities;
 use session_controls::{DaemonControl, daemon_routing_view, daemon_side_questions};
 
 const TASK_POLL_MIN: Duration = Duration::from_secs(2);
@@ -538,120 +539,14 @@ where
         timing::ms(daemon_connected_at.saturating_duration_since(hello_at)),
         timing::ms(daemon_connected_at.elapsed()),
     ));
-    let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
-    let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
-    let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
-    let context_breakdown_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY);
-    let shake_tools_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == jcode_harness_api::SHAKE_TOOLS_CAPABILITY);
-    let force_stop_turn_supported = daemon_caps.iter().any(|cap| cap == "force_stop_turn_v1");
-    let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
-    let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
-    let file_attachments_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY);
-    let queued_prompt_batch_interrupt_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == "queued_prompt_batch_interrupt_v1");
-    let queued_prompt_mutations_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == "queued_prompt_mutations_v1");
-    let queued_prompt_editing_supported =
-        daemon_caps.iter().any(|cap| cap == "queued_prompt_editing");
-    let queued_prompt_active_skill_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == "queued_prompt_active_skill");
-    let bounded_history_supported = daemon_caps.iter().any(|cap| cap == "bounded_history_v1");
-    let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
-    let background_tasks_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
-    let routing_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == jcode_harness_api::ROUTING_CAPABILITY);
-    let side_questions_supported = daemon_caps
-        .iter()
-        .any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
+    let daemon = DaemonCapabilities::from_daemon(&daemon_caps);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
             runtime_identity: Some(runtime_identity),
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
-            capabilities: [
-                "sessions",
-                "draft_model_catalog",
-                "bridge_lifecycle_v1",
-                "peer_user_message_v1",
-                "streaming",
-                "text_framing",
-                "turn_stop_reasons",
-                "side_panel",
-                "persisted_session_discovery",
-                "runtime_info",
-                "api_key_provisioning",
-                "auth_changed_notification",
-                "usage_invalidation",
-                "session_archive",
-                "session_retention",
-                "session_files",
-                "session_fork",
-                "session_search",
-                "todo_state",
-                "todo_state_pending_swarm_await_v1",
-                "memory_events",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .chain(openrig_host_cap)
-            .chain(user_connections_supported.then(|| "session_connections".to_string()))
-            .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
-            .chain(runtime_commands_supported.then(|| "skill_message_v1".to_string()))
-            .chain(session_tools_supported.then(|| "session_tools".to_string()))
-            .chain(
-                context_breakdown_supported
-                    .then(|| jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY.to_string()),
-            )
-            .chain(
-                shake_tools_supported
-                    .then(|| jcode_harness_api::SHAKE_TOOLS_CAPABILITY.to_string()),
-            )
-            .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
-            .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
-            .chain(
-                file_attachments_supported
-                    .then(|| jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY.to_string()),
-            )
-            .chain(
-                queued_prompt_batch_interrupt_supported
-                    .then(|| "queued_prompt_batch_interrupt_v1".to_string()),
-            )
-            .chain(
-                queued_prompt_mutations_supported.then(|| "queued_prompt_mutations_v1".to_string()),
-            )
-            .chain(queued_prompt_editing_supported.then(|| "queued_prompt_editing".to_string()))
-            .chain(
-                queued_prompt_active_skill_supported
-                    .then(|| "queued_prompt_active_skill".to_string()),
-            )
-            .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
-            .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
-            .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
-            .chain(
-                side_questions_supported
-                    .then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()),
-            )
-            .chain(routing_supported.then(|| jcode_harness_api::ROUTING_CAPABILITY.to_string()))
-            .chain(
-                ["soft_interrupt_ids", "background_tool_result"]
-                    .into_iter()
-                    .filter(|_| soft_interrupt_ids_supported)
-                    .map(str::to_string),
-            )
-            .collect(),
+            capabilities: daemon.hello_capabilities(openrig_host_cap),
         },
     );
     write_json_line(&mut write_half, &hello_ok).await?;
@@ -660,24 +555,7 @@ where
     let (legacy_read, mut legacy_write) = legacy.into_split();
     let mut legacy_reader = BufReader::new(legacy_read);
 
-    let mut state =
-        translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
-    state.session_tools_supported = session_tools_supported;
-    state.side_questions_supported = side_questions_supported;
-    state.routing_supported = routing_supported;
-    state.force_stop_turn_supported = force_stop_turn_supported;
-    state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
-    state.supports_applets = hello["supports_applets"].as_bool();
-    state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
-    state.runtime_commands_supported = runtime_commands_supported;
-    state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
-    state.queued_prompts_supported = queued_prompts_supported;
-    state.file_attachments_supported = file_attachments_supported;
-    state.queued_prompt_batch_interrupt_supported = queued_prompt_batch_interrupt_supported;
-    state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
-    state.queued_prompt_editing_supported = queued_prompt_editing_supported;
-    state.queued_prompt_active_skill_supported = queued_prompt_active_skill_supported;
-    state.bounded_history_supported = bounded_history_supported;
+    let mut state = translate::BridgeState::open(&daemon, &hello, client_name);
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
@@ -734,10 +612,10 @@ where
                 // not a permanent rejection. Recheck on a disposable connection
                 // before dispatch, without reattaching or replaying anything on
                 // the live session stream.
-                if request["req"] == "runtime_command" && !state.runtime_commands_supported {
+                if request["req"] == "runtime_command" && !state.runtime_commands_available() {
                     match DaemonControl::default().capabilities(&legacy_socket).await {
                         Some(capabilities) => {
-                            state.runtime_commands_supported = capabilities.iter().any(|cap| cap == "runtime_commands");
+                            state.note_runtime_commands(&capabilities);
                         }
                         None => {
                             write_json_line(&mut write_half, &ServerFrame::reply(
@@ -751,7 +629,7 @@ where
                         }
                     }
                 }
-                if request["req"] == "session_context_breakdown" && !context_breakdown_supported {
+                if request["req"] == "session_context_breakdown" && !daemon.context_breakdown() {
                     write_json_line(&mut write_half, &ServerFrame::reply(
                         request["id"].as_u64().unwrap_or(0),
                         ApiEvent::Error {
@@ -761,7 +639,7 @@ where
                     )).await?;
                     continue;
                 }
-                if request["req"] == "session_shake_tools" && !shake_tools_supported {
+                if request["req"] == "session_shake_tools" && !daemon.shake_tools() {
                     write_json_line(&mut write_half, &ServerFrame::reply(
                         request["id"].as_u64().unwrap_or(0),
                         ApiEvent::Error {
@@ -773,7 +651,7 @@ where
                 }
                 if request["req"] == "get_routing_view" {
                     let id = request["id"].as_u64().unwrap_or(0);
-                    let event = if routing_supported {
+                    let event = if daemon.routing() {
                         daemon_routing_view(&legacy_socket).await
                     } else {
                         ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support account routing.".into() }
@@ -783,7 +661,7 @@ where
                 }
                 if matches!(request["req"].as_str(), Some("list_side_questions" | "get_side_question_history" | "promote_side_question")) {
                     let id = request["id"].as_u64().unwrap_or(0);
-                    let event = if side_questions_supported {
+                    let event = if daemon.side_questions() {
                         daemon_side_questions(&legacy_socket, &request).await
                     } else {
                         ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support side questions.".into() }
@@ -793,10 +671,10 @@ where
                 }
                 // Never wait on a task poll here: it is driven by this same
                 // select loop. Use the last presence snapshot until it finishes.
-                if request["req"] == "list_sessions" && user_connections_supported
+                if request["req"] == "list_sessions" && daemon.user_connections()
                     && let Ok(mut control) = control.try_lock()
                 {
-                    state.user_connected_sessions = control.user_connections(&legacy_socket).await;
+                    state.set_user_connected_sessions(control.user_connections(&legacy_socket).await);
                 }
                 if request["req"] == "list_draft_models" {
                     let id = request["id"].as_u64().unwrap_or(0);
@@ -807,7 +685,7 @@ where
                 if matches!(request["req"].as_str(), Some("watch_background_tasks" | "cancel_background_task")) {
                     use jcode_harness_api::{ApiRequest, ClientFrame};
                     let id = request["id"].as_u64().unwrap_or(0);
-                    let event = if background_tasks_supported {
+                    let event = if daemon.background_tasks() {
                         match serde_json::from_value::<ClientFrame>(request).map(|frame| frame.request) {
                             Ok(ApiRequest::WatchBackgroundTasks { session_id, task_id }) if
                                 state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {

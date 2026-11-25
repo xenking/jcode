@@ -11,11 +11,11 @@ mod turn_identity;
 mod turn_identity_tests;
 
 use crate::background_progress::parse_background_notification;
+use crate::capabilities::DaemonCapabilities;
 use control_replies::SimpleKind;
 use jcode_harness_api::{
     ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ModelSwitchState, RewindAnchor,
-    ServerFrame, SessionInfo,
-    TextMatch,
+    ServerFrame, SessionInfo, TextMatch,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -150,32 +150,32 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct BridgeState {
     turn_fence: turn_identity::TurnFence,
     /// Refreshed from an authoritative source-daemon Ping before each list.
-    pub user_connected_sessions: std::collections::HashSet<String>,
-    pub runtime_commands_supported: bool,
+    pub(crate) user_connected_sessions: std::collections::HashSet<String>,
+    pub(crate) runtime_commands_supported: bool,
     /// Set only after a safe legacy ping capability probe succeeds.
-    pub session_tools_supported: bool,
-    pub force_stop_turn_supported: bool,
+    pub(crate) session_tools_supported: bool,
+    pub(crate) force_stop_turn_supported: bool,
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
-    pub queued_prompts_supported: bool,
-    pub file_attachments_supported: bool,
-    pub queued_prompt_batch_interrupt_supported: bool,
-    pub queued_prompt_mutations_supported: bool,
-    pub queued_prompt_editing_supported: bool,
-    pub queued_prompt_active_skill_supported: bool,
-    pub bounded_history_supported: bool,
-    pub soft_interrupt_ids_supported: bool,
+    pub(crate) queued_prompts_supported: bool,
+    pub(crate) file_attachments_supported: bool,
+    pub(crate) queued_prompt_batch_interrupt_supported: bool,
+    pub(crate) queued_prompt_mutations_supported: bool,
+    pub(crate) queued_prompt_editing_supported: bool,
+    pub(crate) queued_prompt_active_skill_supported: bool,
+    pub(crate) bounded_history_supported: bool,
+    pub(crate) soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
     pending_soft_interrupts_at_done: Option<u32>,
     /// Whether an unannounced transport loss should crash the attached session.
-    pub crash_on_disconnect: bool,
+    pub(crate) crash_on_disconnect: bool,
     /// Client-side inline response renderer, negotiated in Hello.
-    pub supports_user_response: bool,
-    pub supports_applets: Option<bool>,
+    pub(crate) supports_user_response: bool,
+    pub(crate) supports_applets: Option<bool>,
     /// Client name from Hello, forwarded on subscribe (e.g. `jcode-ios/0.3.0`).
-    pub client_name: Option<String>,
+    pub(crate) client_name: Option<String>,
     /// Session id assigned by the daemon for this connection.
-    pub session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
@@ -272,6 +272,43 @@ impl BridgeState {
             crash_on_disconnect,
             ..Self::default()
         }
+    }
+
+    /// Seed a connection from what the daemon advertised and what the client
+    /// said in its Hello.
+    pub fn open(daemon: &DaemonCapabilities, hello: &Value, client_name: &str) -> Self {
+        Self {
+            session_tools_supported: daemon.session_tools(),
+            side_questions_supported: daemon.side_questions(),
+            routing_supported: daemon.routing(),
+            force_stop_turn_supported: daemon.force_stop_turn(),
+            supports_user_response: hello["supports_user_response"].as_bool().unwrap_or(false),
+            supports_applets: hello["supports_applets"].as_bool(),
+            client_name: Some(client_name.to_string()).filter(|n| !n.is_empty()),
+            runtime_commands_supported: daemon.runtime_commands(),
+            soft_interrupt_ids_supported: daemon.soft_interrupt_ids(),
+            queued_prompts_supported: daemon.queued_prompts(),
+            file_attachments_supported: daemon.file_attachments(),
+            queued_prompt_batch_interrupt_supported: daemon.queued_prompt_batch_interrupt(),
+            queued_prompt_mutations_supported: daemon.queued_prompt_mutations(),
+            queued_prompt_editing_supported: daemon.queued_prompt_editing(),
+            queued_prompt_active_skill_supported: daemon.queued_prompt_active_skill(),
+            bounded_history_supported: daemon.bounded_history(),
+            ..Self::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"))
+        }
+    }
+
+    pub fn runtime_commands_available(&self) -> bool {
+        self.runtime_commands_supported
+    }
+
+    /// Record a fresh daemon capability probe for runtime commands.
+    pub fn note_runtime_commands(&mut self, advertised: &[String]) {
+        self.runtime_commands_supported = advertised.iter().any(|cap| cap == "runtime_commands");
+    }
+
+    pub fn set_user_connected_sessions(&mut self, sessions: std::collections::HashSet<String>) {
+        self.user_connected_sessions = sessions;
     }
 }
 
@@ -1766,10 +1803,18 @@ impl BridgeState {
             "routing_gate_answer" => {
                 let gate_id = request["gate_id"].as_str().unwrap_or("").trim();
                 if gate_id.is_empty() {
-                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing gate ID");
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Missing routing gate ID",
+                    );
                 }
                 if !request["choice"].is_object() {
-                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing gate choice");
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Missing routing gate choice",
+                    );
                 }
                 let id = self.legacy_id();
                 // The daemon reports done, or an error when no gate is waiting.
@@ -1783,7 +1828,11 @@ impl BridgeState {
             }
             "routing_intent" => {
                 if !request["action"]["action"].is_string() {
-                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing routing action");
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Missing routing action",
+                    );
                 }
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Routing));
@@ -3199,14 +3248,14 @@ impl BridgeState {
                         Some(api_id) => vec![ServerFrame::reply(api_id, frame)],
                         // A queued switch that failed to apply has no request
                         // left to answer, so it is reported as an event.
-                        None if settles_pending => vec![ServerFrame::event(
-                            ApiEvent::ModelSwitch {
+                        None if settles_pending => {
+                            vec![ServerFrame::event(ApiEvent::ModelSwitch {
                                 session_id: session(self),
                                 state: ModelSwitchState::Failed,
                                 model: None,
                                 error: Some(error.to_string()),
-                            },
-                        )],
+                            })]
+                        }
                         None => vec![],
                     };
                 }
