@@ -532,7 +532,8 @@ async fn stream_resilient(
                 failed_in_a_row = 0;
                 committed = join_text(&committed, &segment.text);
                 sink(NariEvent::Transcript(committed.clone()));
-                if !segment.more {
+                // Nothing more to say: do not open a session just to close it.
+                if !segment.more || audio_finished(&pcm) {
                     return Ok(Streamed { text: committed, error: None });
                 }
             }
