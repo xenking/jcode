@@ -685,7 +685,10 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.set_model(Some("gpt-5.4".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.save().expect("save remote session");
 
     let app = App::new_for_remote(Some(session_id.to_string()));
@@ -717,7 +720,10 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
         None,
         Some("remote cached model".to_string()),
     );
-    session.set_model(Some("gpt-5.4".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.save().expect("save remote session");
 
     let mut app = App::new_for_remote(Some(session_id.to_string()));
@@ -746,7 +752,10 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.set_model(Some("gpt-5.4".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
         attachment_data: None,
@@ -957,7 +966,10 @@ fn test_remote_header_keeps_known_model_during_brief_loading_session_phase() {
     // hint), so a short LoadingSession phase must not flash "loading session…"
     // over it. That pre-settle churn is exactly what made spawns look unstable.
     let mut app = App::new_for_remote(None);
-    app.session.set_model(Some("claude-fable-5".to_string()));
+    app.session.apply_route(crate::session::Route {
+        model: Some("claude-fable-5".to_string()),
+        ..app.session.route()
+    });
     app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "claude-fable-5");
@@ -978,7 +990,10 @@ fn test_remote_effort_identity_falls_back_to_session_model_before_history() {
     // None, but the session stub already knows the model. Effort cycling must
     // work off that hint instead of reporting "not available".
     let mut app = App::new_for_remote(None);
-    app.session.set_model(Some("claude-fable-5".to_string()));
+    app.session.apply_route(crate::session::Route {
+        model: Some("claude-fable-5".to_string()),
+        ..app.session.route()
+    });
     assert!(app.remote_provider_name.is_none());
     assert!(app.remote_provider_model.is_none());
 
@@ -1256,7 +1271,10 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
     );
 
     app.remote_resolved_credential = None;
-    app.session.set_route_api_method(None);
+    app.session.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1273,8 +1291,10 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = None;
 
-    app.session
-        .set_route_api_method(Some("openai-api-key".to_string()));
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-api-key".to_string()),
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1285,8 +1305,10 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
         Some(crate::tui::info_widget::UsageProvider::CostBased)
     );
 
-    app.session
-        .set_route_api_method(Some("openai-oauth".to_string()));
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-oauth".to_string()),
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,

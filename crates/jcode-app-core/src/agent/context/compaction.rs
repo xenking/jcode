@@ -220,7 +220,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         if self.session.pinned_skill().is_some() {
             self.active_skill = self.session.pinned_skill().map(str::to_owned);
             self.announce_active_skill();
@@ -512,7 +512,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
 
         logging::warn(&format!(
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
@@ -650,7 +650,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
     }
 
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
@@ -679,7 +679,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",

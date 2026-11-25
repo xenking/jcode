@@ -914,8 +914,10 @@ fn test_goals_command_opens_overview_in_side_panel() {
     .expect("create goal");
 
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(project.display().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(project.display().to_string()),
+        ..app.session.workspace()
+    });
     app.input = "/goals".to_string();
     app.submit_input();
 
@@ -994,8 +996,10 @@ fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(project.display().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(project.display().to_string()),
+        ..app.session.workspace()
+    });
     app.input = "/goals".to_string();
     app.submit_input();
 
@@ -1455,8 +1459,10 @@ fn test_goals_show_command_focuses_goal_page() {
     .expect("create goal");
 
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(project.display().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(project.display().to_string()),
+        ..app.session.workspace()
+    });
     app.input = format!("/goals show {}", goal.id);
     app.submit_input();
 
@@ -1487,8 +1493,10 @@ fn test_initiatives_commands_reopen_a_closed_side_panel() {
         .expect("create goal");
 
         let mut app = create_test_app();
-        app.session
-            .set_working_dir(Some(project.path().display().to_string()));
+        app.session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(project.path().display().to_string()),
+            ..app.session.workspace()
+        });
         app.side_panel = test_side_panel_snapshot("plan", "Plan");
         for command in [
             "/initiatives".to_string(),

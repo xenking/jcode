@@ -5,8 +5,10 @@ fn agent_edited_paths_come_from_transcript_edit_tools() {
     use crate::tui::TuiState;
     let _lock = scroll_render_test_lock();
     let (mut app, _terminal) = create_scroll_test_app(80, 20, 0, 4);
-    app.session
-        .set_working_dir(Some("/repo/crates".to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/repo/crates".to_string()),
+        ..app.session.workspace()
+    });
     let tool = |name: &str, input: serde_json::Value| {
         DisplayMessage::tool(
             "ok",
@@ -168,8 +170,10 @@ fn changes_widget_end_to_end_on_real_git_repo() {
     crate::tui::app::helpers::seed_git_info_cache_for_tests(Some(info));
     crate::tui::info_widget::clear_widget_placements_for_tests();
     let (mut app, mut terminal) = create_scroll_test_app(140, 40, 0, 0);
-    app.session
-        .set_working_dir(Some(root.join("src").to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(root.join("src").to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     app.display_messages.push(DisplayMessage::tool(
         "ok",
         crate::message::ToolCall {

@@ -409,7 +409,7 @@ impl App {
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         self.context_warning_shown = false;
         // The sidebar/status context figure is derived from the last
         // provider-reported stream usage, which described the *pre-compaction*
@@ -652,8 +652,10 @@ impl App {
         if let Some(pending_time) = self.quit_pending
             && pending_time.elapsed() < QUIT_TIMEOUT
         {
-            self.session
-                .set_provider_session_id(self.provider_session_id.clone());
+            self.session.apply_route(crate::session::Route {
+                provider_session_id: self.provider_session_id.clone(),
+                ..self.session.route()
+            });
             crate::telemetry::end_session_with_reason(
                 self.provider.name(),
                 &self.provider.model(),

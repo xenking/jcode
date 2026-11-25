@@ -170,7 +170,10 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
 
     let project = tempfile::tempdir_in(home.root()).unwrap();
     let mut session = crate::session::Session::create(None, None);
-    session.set_working_dir(Some(project.path().to_string_lossy().into_owned()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(project.path().to_string_lossy().into_owned()),
+        ..session.workspace()
+    });
     session.set_system_prompt(Some("Synthetic Responses wire fixture".into()));
     session.ensure_initial_session_context_message();
     let existing =

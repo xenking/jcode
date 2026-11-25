@@ -547,7 +547,10 @@ mod tests {
             let mut peer = BufReader::new(peer);
             let request = if session_bound {
                 let mut session = crate::session::Session::create(None, None);
-                session.set_working_dir(Some(home.path().to_string_lossy().into_owned()));
+                session.apply_workspace(crate::session::Workspace {
+                    working_dir: Some(home.path().to_string_lossy().into_owned()),
+                    ..session.workspace()
+                });
                 session.save_prepared().unwrap();
                 serde_json::json!({
                     "type": "subscribe", "id": 1, "working_dir": session.working_dir(),
@@ -635,7 +638,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (_home, _runtime, runtime) = isolated_runtime(home.path());
         let mut session = crate::session::Session::create(None, None);
-        session.set_working_dir(Some(home.path().to_string_lossy().into_owned()));
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(home.path().to_string_lossy().into_owned()),
+            ..session.workspace()
+        });
         session.save_prepared().unwrap();
         let target = runtime.sessions.reserve(session.id()).await;
         let baseline = *runtime.client_count.read().await;

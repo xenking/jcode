@@ -104,7 +104,7 @@ impl Agent {
             summary_chars: None,
             active_messages: None,
         };
-        staged.set_provider_session_id(None);
+        staged.forget_provider_session();
         staged.record_compaction_event(&event, Some("shake"), None);
         staged
             .save_rewritten_context()

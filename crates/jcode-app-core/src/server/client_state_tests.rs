@@ -742,7 +742,10 @@ async fn history_attach_replays_persisted_context_occupancy() {
 
     let session_id = "session_history_context_occupancy";
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.set_model(Some("mock-model".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("mock-model".to_string()),
+        ..session.route()
+    });
     session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
@@ -862,7 +865,10 @@ async fn assert_history_service_tier_and_pdf_capability(
         None,
         Some("busy fallback".to_string()),
     );
-    session.set_model(Some("mock-model".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("mock-model".to_string()),
+        ..session.route()
+    });
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
         attachment_data: None,
@@ -889,7 +895,10 @@ async fn assert_history_service_tier_and_pdf_capability(
     let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
     let registry = Registry::empty();
     let mut live_session = session.clone();
-    live_session.set_title(Some("live agent".to_string()));
+    live_session.apply_titles(crate::session::Titles {
+        title: Some("live agent".to_string()),
+        ..live_session.titles()
+    });
     live_session.messages_mut_for_tests()[0].content = vec![crate::message::ContentBlock::Text {
         text: "live unsaved history".to_string(),
         cache_control: None,
@@ -1130,7 +1139,7 @@ fn write_pending_user_session(
     status: crate::session::SessionStatus,
 ) -> Result<()> {
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.set_status(status);
+    session.set_status_for_tests(status);
     session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
@@ -1194,7 +1203,7 @@ fn history_reload_recovery_infers_pending_assistant_tool_during_reload() -> Resu
     let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
     let session_id = "session_history_pending_bg";
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.set_status(crate::session::SessionStatus::Active);
+    session.set_status_for_tests(crate::session::SessionStatus::Active);
     session.add_message(
         crate::message::Role::Assistant,
         vec![crate::message::ContentBlock::ToolUse {

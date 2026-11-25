@@ -30,6 +30,6 @@ pub(super) fn create_coordinator_session(
         autojudge_enabled: Some(false),
         ..child.autonomy()
     });
-    child.set_provider_session_id(None);
+    child.forget_provider_session();
     Ok(child)
 }

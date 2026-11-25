@@ -385,7 +385,10 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
     let mut seed = Session::create_with_id("session_seed".to_string(), None, None);
-    seed.set_working_dir(Some("/tmp/repo".to_string()));
+    seed.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/repo".to_string()),
+        ..seed.workspace()
+    });
     seed.record_swarm_status_event(vec![SwarmMemberStatus {
         session_id: "session_seed".to_string(),
         friendly_name: Some("seed".to_string()),
@@ -409,7 +412,10 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         Some(seed.id().to_owned()),
         Some("child".to_string()),
     );
-    child.set_working_dir(Some("/tmp/repo".to_string()));
+    child.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/repo".to_string()),
+        ..child.workspace()
+    });
     child.record_swarm_plan_event(
         "swarm_x".to_string(),
         1,
@@ -429,7 +435,10 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
     child.save_prepared().unwrap();
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
-    unrelated.set_working_dir(Some("/tmp/other".to_string()));
+    unrelated.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/other".to_string()),
+        ..unrelated.workspace()
+    });
     unrelated.save_prepared().unwrap();
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();

@@ -489,7 +489,10 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
             None,
             Some("spawn fresh".to_string()),
         );
-        session.set_model(Some("gpt-5.4".to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some("gpt-5.4".to_string()),
+            ..session.route()
+        });
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
             attachment_data: None,
@@ -559,7 +562,10 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             None,
             Some("remote resume".to_string()),
         );
-        session.set_model(Some("gpt-5.4".to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some("gpt-5.4".to_string()),
+            ..session.route()
+        });
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
             attachment_data: None,

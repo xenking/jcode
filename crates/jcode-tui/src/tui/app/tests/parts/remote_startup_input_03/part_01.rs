@@ -495,7 +495,10 @@ fn test_restore_session_adds_reload_message() {
             cache_control: None,
         }],
     );
-    session.set_provider_session_id(Some("fake-uuid".to_string()));
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some("fake-uuid".to_string()),
+        ..session.route()
+    });
     let session_id = session.id().to_owned();
     session.save().unwrap();
 
@@ -596,8 +599,10 @@ fn test_recover_session_without_tools_preserves_debug_and_canary_flags() {
     app.session.set_is_canary_for_tests(true);
     app.session
         .set_testing_build_for_tests(Some("self-dev".to_string()));
-    app.session
-        .set_working_dir(Some("/tmp/jcode-test".to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/jcode-test".to_string()),
+        ..app.session.workspace()
+    });
     let old_session_id = app.session.id().to_owned();
 
     app.recover_session_without_tools();
@@ -1004,8 +1009,10 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
 
     let repo = create_jcode_repo_fixture();
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(repo.path().display().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(repo.path().display().to_string()),
+        ..app.session.workspace()
+    });
 
     app.input = "/selfdev fix the markdown renderer".to_string();
     app.submit_input();

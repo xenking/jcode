@@ -640,8 +640,10 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
     )
     .unwrap();
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(repository.path().to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(repository.path().to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     crate::tui::ui::clear_copy_viewport_snapshot();
     crate::tui::ui::record_copy_viewport_snapshot(
         std::sync::Arc::new(vec!["Read the guide".to_string()]),
@@ -763,8 +765,10 @@ fn test_repository_markdown_link_cannot_escape_working_directory() {
     std::fs::create_dir(&repository).unwrap();
     std::fs::write(parent.path().join("outside.md"), "secret").unwrap();
     let mut app = create_test_app();
-    app.session
-        .set_working_dir(Some(repository.to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(repository.to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
 
     assert!(app.try_open_repository_markdown_link("../outside.md"));
     assert!(app.side_panel.focused_page().is_none());

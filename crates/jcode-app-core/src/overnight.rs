@@ -78,14 +78,20 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         create_coordinator_session(&options.parent_session, &options.mission)?
     };
     if let Some(working_dir) = options.working_dir.as_ref() {
-        child.set_working_dir(Some(working_dir.to_string_lossy().to_string()));
+        child.apply_workspace(crate::session::Workspace {
+            working_dir: Some(working_dir.to_string_lossy().to_string()),
+            ..child.workspace()
+        });
     }
-    child.set_model(Some(options.provider.model()));
+    child.apply_route(crate::session::Route {
+        model: Some(options.provider.model()),
+        ..child.route()
+    });
     let coordinator_session_id = child.id().to_owned();
     let coordinator_session_name = child.display_name().to_string();
     let child_is_canary = child.is_canary();
     if !options.use_current_session {
-        child.set_status(SessionStatus::Closed);
+        child.mark_closed_unregistered();
     }
     child.save()?;
 

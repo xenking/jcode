@@ -814,10 +814,22 @@ fn import_session_from_file_with_target(
     }
 
     let mut session = Session::create_with_id(jcode_session_id, None, title);
-    session.set_provider_session_id(Some(session_id.to_string()));
-    session.set_provider_key(Some("claude-code".to_string()));
-    session.set_working_dir(working_dir);
-    session.set_model(model);
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("claude-code".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: working_dir,
+        ..session.workspace()
+    });
+    session.apply_route(crate::session::Route {
+        model: model,
+        ..session.route()
+    });
 
     for message in imported_messages {
         session.append_stored_message(message);
@@ -989,7 +1001,7 @@ fn finalize_imported_session(
         created_at,
         updated_at,
     });
-    session.set_status(SessionStatus::Closed);
+    session.mark_closed_unregistered();
     normalize_imported_history(&mut session, true);
     session.save()?;
     crate::logging::info(&format!(
@@ -1064,8 +1076,14 @@ pub fn import_codex_session_from_path(
         .map(|s| s.to_string());
     let mut model: Option<String> = None;
     let mut session = Session::create_with_id(imported_codex_session_id(session_id), None, None);
-    session.set_provider_session_id(Some(session_id.to_string()));
-    session.set_provider_key(Some("openai-codex".to_string()));
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("openai-codex".to_string()),
+        ..session.route()
+    });
 
     for line in lines {
         let line = line?;
@@ -1148,9 +1166,18 @@ pub fn import_codex_session_from_path(
         append_text_message(&mut session, role, text, timestamp);
     }
 
-    session.set_title(title.or_else(|| Some(format!("Codex session {}", session_id))));
-    session.set_working_dir(working_dir);
-    session.set_model(model);
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| Some(format!("Codex session {}", session_id))),
+        ..session.titles()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: working_dir,
+        ..session.workspace()
+    });
+    session.apply_route(crate::session::Route {
+        model: model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1178,17 +1205,21 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
     let mut model: Option<String> = None;
     let mut provider_key: Option<String> = Some("pi".to_string());
     let mut session = Session::create_with_id(imported_pi_session_id(session_path), None, None);
-    session.set_provider_session_id(if provider_session_id.is_empty() {
-        None
-    } else {
-        Some(provider_session_id)
+    session.apply_route(crate::session::Route {
+        provider_session_id: if provider_session_id.is_empty() {
+            None
+        } else {
+            Some(provider_session_id)
+        },
+        ..session.route()
     });
-    session.set_working_dir(
-        header
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: header
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-    );
+        ..session.workspace()
+    });
 
     for line in lines {
         let line = line?;
@@ -1243,13 +1274,22 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
         }
     }
 
-    session.set_title(title.or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|stem| format!("Pi session {}", stem))
-    }));
-    session.set_provider_key(provider_key);
-    session.set_model(model);
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|stem| format!("Pi session {}", stem))
+        }),
+        ..session.titles()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: provider_key,
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        model: model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1297,20 +1337,28 @@ pub fn import_opencode_session_from_path(
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .or(Some(created_at));
     let mut session = Session::create_with_id(imported_opencode_session_id(session_id), None, None);
-    session.set_provider_session_id(Some(session_id.to_string()));
-    session.set_provider_key(Some("opencode".to_string()));
-    session.set_working_dir(
-        value
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("opencode".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: value
             .get("directory")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-    );
-    session.set_title(
-        value
+        ..session.workspace()
+    });
+    session.apply_titles(crate::session::Titles {
+        title: value
             .get("title")
             .and_then(|v| v.as_str())
             .map(truncate_title),
-    );
+        ..session.titles()
+    });
 
     let messages_root = crate::storage::user_home_path(format!(
         ".local/share/opencode/storage/message/{}",
@@ -1382,10 +1430,19 @@ pub fn import_opencode_session_from_path(
     }
 
     if session.title().is_none() {
-        session.set_title(Some(format!("OpenCode session {}", session_id)));
+        session.apply_titles(crate::session::Titles {
+            title: Some(format!("OpenCode session {}", session_id)),
+            ..session.titles()
+        });
     }
-    session.set_provider_key(provider_key);
-    session.set_model(model);
+    session.apply_route(crate::session::Route {
+        provider_key: provider_key,
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        model: model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1421,9 +1478,18 @@ pub fn import_cursor_session_from_path(
         jcode_import_core::file_modified_datetime(session_path).unwrap_or_else(Utc::now);
 
     let mut session = Session::create_with_id(imported_cursor_session_id(&session_id), None, None);
-    session.set_provider_session_id(Some(session_id.clone()));
-    session.set_provider_key(Some("cursor".to_string()));
-    session.set_working_dir(cursor_cwd_from_transcript_path(session_path));
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.clone()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("cursor".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: cursor_cwd_from_transcript_path(session_path),
+        ..session.workspace()
+    });
 
     let file = File::open(session_path)?;
     let reader = BufReader::new(file);
@@ -1462,7 +1528,10 @@ pub fn import_cursor_session_from_path(
         append_text_message(&mut session, role, text, None);
     }
 
-    session.set_title(title.or_else(|| Some(format!("Cursor session {}", session_id))));
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| Some(format!("Cursor session {}", session_id))),
+        ..session.titles()
+    });
     finalize_imported_session(session, created_at, Some(created_at))
 }
 

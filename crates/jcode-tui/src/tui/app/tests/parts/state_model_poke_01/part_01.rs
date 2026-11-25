@@ -80,8 +80,10 @@ fn test_rewind_truncates_provider_messages() {
         );
     }
     app.provider_session_id = Some("provider-session".to_string());
-    app.session
-        .set_provider_session_id(Some("provider-session".to_string()));
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("provider-session".to_string()),
+        ..app.session.route()
+    });
 
     app.input = "/rewind 2".to_string();
     app.submit_input();
@@ -113,8 +115,10 @@ fn test_rewind_undo_restores_truncated_messages() {
         );
     }
     app.provider_session_id = Some("provider-session".to_string());
-    app.session
-        .set_provider_session_id(Some("provider-session".to_string()));
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("provider-session".to_string()),
+        ..app.session.route()
+    });
 
     app.input = "/rewind 1".to_string();
     app.submit_input();

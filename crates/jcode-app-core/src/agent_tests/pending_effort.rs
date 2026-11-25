@@ -138,7 +138,10 @@ async fn effort_chosen_before_a_restart_is_adopted_by_the_restored_agent() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let session_id = "session_pending_effort_restart";
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.set_reasoning_effort(Some("xhigh".into()));
+    session.apply_limits(crate::session::Limits {
+        reasoning_effort: Some("xhigh".into()),
+        ..session.limits()
+    });
     session.save_prepared().unwrap();
     crate::session_effort::queue_pending_effort(session_id, "high");
     crate::session_effort::forget_pending_efforts_in_memory();

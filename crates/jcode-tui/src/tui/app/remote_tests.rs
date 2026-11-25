@@ -438,8 +438,10 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
         "---\nname: remote-skill\ndescription: Remote prompt regression skill\n---\nUse it.\n",
     )
     .expect("write skill");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let _guard = rt.enter();

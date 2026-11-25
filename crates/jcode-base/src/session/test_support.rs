@@ -76,4 +76,8 @@ impl Session {
     ) {
         self.last_provider_cache_domain = domain;
     }
+
+    pub fn set_status_for_tests(&mut self, status: super::SessionStatus) {
+        self.status = status;
+    }
 }

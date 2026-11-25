@@ -536,9 +536,18 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     let repo = create_repo_fixture();
 
     let mut parent = session::Session::create(None, Some("Origin Session".to_string()));
-    parent.set_working_dir(Some("/tmp/origin-project".to_string()));
-    parent.set_model(Some("gpt-test".to_string()));
-    parent.set_provider_key(Some("openai".to_string()));
+    parent.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/origin-project".to_string()),
+        ..parent.workspace()
+    });
+    parent.apply_route(crate::session::Route {
+        model: Some("gpt-test".to_string()),
+        ..parent.route()
+    });
+    parent.apply_route(crate::session::Route {
+        provider_key: Some("openai".to_string()),
+        ..parent.route()
+    });
     parent.apply_worker_routing(crate::session::WorkerRouting {
         subagent_model: Some("gpt-subagent".to_string()),
         ..parent.worker_routing()

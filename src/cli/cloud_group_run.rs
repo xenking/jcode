@@ -128,7 +128,10 @@ pub(crate) fn run_migrate(
             label: credentials.label().to_string(),
         });
         if let Some(account) = &auth_account {
-            sess.set_route_api_method(Some(account.route()));
+            sess.apply_route(crate::session::Route {
+                route_api_method: Some(account.route()),
+                ..sess.route()
+            });
         }
         let epoch = selected.epoch;
         if selected.session_id != sess.id() {
@@ -206,9 +209,15 @@ pub(crate) fn run_migrate(
                 .context("missing member working directory")?;
             member.manifest.repo = Some(member_repo);
             if let Some(account) = &member.manifest.auth_account {
-                sess.set_route_api_method(Some(account.route()));
+                sess.apply_route(crate::session::Route {
+                    route_api_method: Some(account.route()),
+                    ..sess.route()
+                });
             }
-            sess.set_migration_epoch(member.manifest.epoch);
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: member.manifest.epoch,
+                ..sess.lineage()
+            });
             let dangling = dangling_tool_use_ids(sess);
             let notice = group_arrival_notice(&member.manifest, &journal.group.coordinator, &ids);
             append_arrival(sess, &dangling, &host, &notice);

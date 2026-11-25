@@ -46,6 +46,40 @@ pub struct Limits {
     pub context_cap: Option<usize>,
 }
 
+/// Where the session sends its requests: the model, the account that serves
+/// it, the API method it was reached through, and the provider's own handle
+/// for resuming the conversation. The handle only makes sense for the route it
+/// was issued on, so they change together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Route {
+    pub model: Option<String>,
+    pub provider_key: Option<String>,
+    pub route_api_method: Option<String>,
+    pub provider_session_id: Option<String>,
+}
+
+/// The generated or imported title, and the one a person chose.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Titles {
+    pub title: Option<String>,
+    pub custom_title: Option<String>,
+}
+
+/// The directory the session works in, and the one it began in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Workspace {
+    pub working_dir: Option<String>,
+    pub original_working_dir: Option<String>,
+}
+
+/// Where the session came from: the session it was forked from, and the
+/// epoch of its last move between machines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lineage {
+    pub parent_id: Option<String>,
+    pub migration_epoch: u64,
+}
+
 /// Which models the session's helpers run on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkerRouting {
@@ -83,6 +117,64 @@ impl Session {
         self.improve_mode = autonomy.improve_mode;
         self.autoreview_enabled = autonomy.autoreview_enabled;
         self.autojudge_enabled = autonomy.autojudge_enabled;
+    }
+
+    pub fn route(&self) -> Route {
+        Route {
+            model: self.model.clone(),
+            provider_key: self.provider_key.clone(),
+            route_api_method: self.route_api_method.clone(),
+            provider_session_id: self.provider_session_id.clone(),
+        }
+    }
+
+    pub fn apply_route(&mut self, route: Route) {
+        self.model = route.model;
+        self.provider_key = route.provider_key;
+        self.route_api_method = route.route_api_method;
+        self.provider_session_id = route.provider_session_id;
+    }
+
+    /// Drop the provider's resume handle, so the next request sends the whole
+    /// conversation.
+    pub fn forget_provider_session(&mut self) {
+        self.provider_session_id = None;
+    }
+
+    pub fn titles(&self) -> Titles {
+        Titles {
+            title: self.title.clone(),
+            custom_title: self.custom_title.clone(),
+        }
+    }
+
+    pub fn apply_titles(&mut self, titles: Titles) {
+        self.title = titles.title;
+        self.custom_title = titles.custom_title;
+    }
+
+    pub fn workspace(&self) -> Workspace {
+        Workspace {
+            working_dir: self.working_dir.clone(),
+            original_working_dir: self.original_working_dir.clone(),
+        }
+    }
+
+    pub fn apply_workspace(&mut self, workspace: Workspace) {
+        self.working_dir = workspace.working_dir;
+        self.original_working_dir = workspace.original_working_dir;
+    }
+
+    pub fn lineage(&self) -> Lineage {
+        Lineage {
+            parent_id: self.parent_id.clone(),
+            migration_epoch: self.migration_epoch,
+        }
+    }
+
+    pub fn apply_lineage(&mut self, lineage: Lineage) {
+        self.parent_id = lineage.parent_id;
+        self.migration_epoch = lineage.migration_epoch;
     }
 
     pub fn limits(&self) -> Limits {
@@ -213,6 +305,26 @@ impl Session {
     /// moved into the todo list.
     pub fn has_legacy_user_asks(&self) -> bool {
         !self.user_asks.legacy_open.is_empty()
+    }
+
+    /// Take a generated title unless a person has named the session (a rename
+    /// or a bookmark label) or the title is already current. Returns whether
+    /// the title changed. The caller persists.
+    pub fn adopt_generated_title(&mut self, title: &str) -> bool {
+        let named = self
+            .custom_title
+            .as_deref()
+            .is_some_and(|custom| !custom.trim().is_empty())
+            || (self.saved
+                && self
+                    .save_label
+                    .as_deref()
+                    .is_some_and(|label| !label.trim().is_empty()));
+        if named || self.title.as_deref() == Some(title) {
+            return false;
+        }
+        self.title = Some(title.to_string());
+        true
     }
 
     /// Note that the session's transcript changed through a user command, so

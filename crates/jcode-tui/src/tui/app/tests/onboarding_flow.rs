@@ -1698,8 +1698,10 @@ fn starting_recent_project_review_queues_remote_turn_without_stuck_sending() {
 fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     let mut app = onboarding_test_app();
     app.is_remote = true;
-    app.session
-        .set_working_dir(dirs::home_dir().map(|path| path.to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
 
     app.onboarding_start_recent_project_review();
 

@@ -85,10 +85,19 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
     let _home = ScopedJcodeHome::new("catalog-context");
     let mut session =
         jcode_base::session::Session::create_with_id("catalog_context".to_owned(), None, None);
-    session.set_model(Some("example-model".into()));
-    session.set_reasoning_effort(Some("high".into()));
+    session.apply_route(jcode_base::session::Route {
+        model: Some("example-model".into()),
+        ..session.route()
+    });
+    session.apply_limits(jcode_base::session::Limits {
+        reasoning_effort: Some("high".into()),
+        ..session.limits()
+    });
     session.pinned_skills = vec!["swarm".into(), "selfdev".into()];
-    session.set_route_api_method(Some("openrouter".into()));
+    session.apply_route(jcode_base::session::Route {
+        route_api_method: Some("openrouter".into()),
+        ..session.route()
+    });
     session.set_last_provider_request_at_for_tests(Some(session.updated_at()));
     session.replace_messages(serde_json::from_value(json!([
         {"id":"reply", "role":"assistant", "content":[{"type":"text", "text":"response"}], "timestamp":"2024-01-01T00:00:01Z"},
@@ -185,7 +194,10 @@ fn backfill_adds_missing_message_time_without_replacing_old_activity() {
         None,
         Some("Old catalog test".into()),
     );
-    session.set_model(Some("example-model".into()));
+    session.apply_route(jcode_base::session::Route {
+        model: Some("example-model".into()),
+        ..session.route()
+    });
     session.save().unwrap();
     let journal = home.path.join(format!("sessions/{id}.journal.jsonl"));
     std::fs::write(&journal, concat!(

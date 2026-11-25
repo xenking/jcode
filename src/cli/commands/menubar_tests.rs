@@ -116,7 +116,10 @@ fn session_menu_item_title_prefers_generated_title_then_persisted_todo_title() {
         format_session_menu_item_title(session_id, false),
         "🐃 Generated session title"
     );
-    session.set_title(None);
+    session.apply_titles(crate::session::Titles {
+        title: None,
+        ..session.titles()
+    });
     session.save().expect("clear generated session title");
     assert_eq!(
         format_session_menu_item_title(session_id, false),

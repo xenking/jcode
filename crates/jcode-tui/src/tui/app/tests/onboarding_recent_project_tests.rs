@@ -6,8 +6,10 @@ fn seed_onboarding_git_project(app: &mut App) -> tempfile::TempDir {
         .status()
         .expect("initialize isolated Git project");
     assert!(status.success());
-    app.session
-        .set_working_dir(Some(directory.path().to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(directory.path().to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     directory
 }
 

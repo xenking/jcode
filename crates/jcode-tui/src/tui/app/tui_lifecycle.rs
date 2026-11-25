@@ -236,10 +236,16 @@ impl App {
             crate::mcp::McpConfig::default(),
         )));
         if session.model().is_none() {
-            session.set_model(Some(provider.model()));
+            session.apply_route(crate::session::Route {
+                model: Some(provider.model()),
+                ..session.route()
+            });
         }
         if session.provider_key().is_none() {
-            session.set_provider_key(crate::session::derive_session_provider_key(provider.name()));
+            session.apply_route(crate::session::Route {
+                provider_key: crate::session::derive_session_provider_key(provider.name()),
+                ..session.route()
+            });
         }
         let display = config().display.clone();
         let features = config().features.clone();
@@ -754,8 +760,14 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.mark_active();
-        session.set_model(Some(provider.model()));
-        session.set_provider_key(crate::session::derive_session_provider_key(provider.name()));
+        session.apply_route(crate::session::Route {
+            model: Some(provider.model()),
+            ..session.route()
+        });
+        session.apply_route(crate::session::Route {
+            provider_key: crate::session::derive_session_provider_key(provider.name()),
+            ..session.route()
+        });
         session.ensure_initial_session_context_message();
         let display = config().display.clone();
         let features = config().features.clone();

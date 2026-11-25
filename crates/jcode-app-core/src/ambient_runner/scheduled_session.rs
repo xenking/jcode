@@ -24,17 +24,20 @@ pub(super) fn scheduled_child_session(item: &ScheduledItem, parent_session_id: &
                     | Inherit::DEBUG_FLAG
                     | Inherit::REPLAY,
             );
-            child.set_model(
-                parent
+            child.apply_route(crate::session::Route {
+                model: parent
                     .effective_agent_model("ambient", crate::config::Config::load().ambient.model)
                     .filter(|model| model != "inherit")
                     .or_else(|| parent.model().map(str::to_owned)),
-            );
-            child.set_working_dir(
-                item.working_dir
+                ..child.route()
+            });
+            child.apply_workspace(crate::session::Workspace {
+                working_dir: item
+                    .working_dir
                     .clone()
                     .or(parent.working_dir().map(str::to_owned)),
-            );
+                ..child.workspace()
+            });
             child
         }
         Err(err) => {
@@ -50,7 +53,10 @@ pub(super) fn scheduled_child_session(item: &ScheduledItem, parent_session_id: &
                         .unwrap_or_else(|| "Scheduled task".to_string()),
                 ),
             );
-            child.set_working_dir(item.working_dir.clone());
+            child.apply_workspace(crate::session::Workspace {
+                working_dir: item.working_dir.clone(),
+                ..child.workspace()
+            });
             child
         }
     };

@@ -10,7 +10,10 @@ impl App {
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
         if crate::tui::is_ssh_remote() {
-            self.session.set_working_dir(remote_working_dir.clone());
+            self.session.apply_workspace(crate::session::Workspace {
+                working_dir: remote_working_dir.clone(),
+                ..self.session.workspace()
+            });
         }
         super::super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();

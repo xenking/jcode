@@ -283,18 +283,24 @@ pub(super) fn handle_bus_event(
                 return false;
             }
             app.provider_session_id = None;
-            app.session.set_provider_session_id(None);
+            app.session.forget_provider_session();
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
             app.update_context_limit_for_model(&model, None);
-            app.session.set_provider_key(provider_key.or_else(|| {
-                crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                    &model,
-                    app.provider.name(),
-                    app.session.provider_key(),
-                )
-            }));
-            app.session.set_model(Some(model.clone()));
+            app.session.apply_route(crate::session::Route {
+                provider_key: provider_key.or_else(|| {
+                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                        &model,
+                        app.provider.name(),
+                        app.session.provider_key(),
+                    )
+                }),
+                ..app.session.route()
+            });
+            app.session.apply_route(crate::session::Route {
+                model: Some(model.clone()),
+                ..app.session.route()
+            });
             let _ = app.session.save();
             if !app.auth_catalog_refresh_pending {
                 app.push_display_message(crate::tui::DisplayMessage::system(message));

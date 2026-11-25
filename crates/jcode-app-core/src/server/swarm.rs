@@ -1905,14 +1905,22 @@ pub(super) async fn run_swarm_task(
     );
     session.mark_agent_started();
     let child_session_id = session.id().to_owned();
-    session.set_model(Some(coordinator_model));
+    session.apply_route(crate::session::Route {
+        model: Some(coordinator_model),
+        ..session.route()
+    });
     // Inherit the coordinator's exact auth identity so the forked worker keeps
     // the same provider/auth route (OAuth vs API, openai-compatible profile)
-    // instead of silently falling back to the config default on persistence.
-    session.set_provider_key(provider_key);
-    session.set_route_api_method(route);
+    // insteadofsilentlyfallingbacktotheconfigdefaultonpersistence.session.apply_route(crate::session::Route { provider_key: provider_key, ..insteadofsilentlyfallingbacktotheconfigdefaultonpersistence.session.route() });
+    session.apply_route(crate::session::Route {
+        route_api_method: route,
+        ..session.route()
+    });
     if let Some(dir) = working_dir {
-        session.set_working_dir(Some(dir.display().to_string()));
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(dir.display().to_string()),
+            ..session.workspace()
+        });
     }
     session.save()?;
 

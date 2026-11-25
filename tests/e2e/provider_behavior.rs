@@ -162,7 +162,10 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Resume Test".to_string()));
-    session.set_model(Some("gpt-5.2-codex".to_string()));
+    session.apply_route(jcode::session::Route {
+        model: Some("gpt-5.2-codex".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -261,8 +264,14 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Target Subscribe Test".to_string()));
-    session.set_model(Some("model-a".to_string()));
-    session.set_provider_session_id(Some("provider-resume-123".to_string()));
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
+    session.apply_route(jcode::session::Route {
+        provider_session_id: Some("provider-resume-123".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -418,7 +427,10 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     // A closed session with a pending user turn. Attaching it must not schedule
     // crash recovery before the explicit resume-all request.
     let mut session = Session::create(None, Some("Interrupted Session".to_string()));
-    session.set_model(Some("model-a".to_string()));
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -506,7 +518,10 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Reload Interrupted Session".to_string()));
-    session.set_model(Some("model-a".to_string()));
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::ToolResult {

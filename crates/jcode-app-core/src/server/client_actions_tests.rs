@@ -151,8 +151,14 @@ fn clone_split_session_uses_persisted_session_state() {
         None,
         None,
     );
-    parent.set_working_dir(Some("/tmp/jcode-split-test".to_string()));
-    parent.set_model(Some("gpt-test".to_string()));
+    parent.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/jcode-split-test".to_string()),
+        ..parent.workspace()
+    });
+    parent.apply_route(crate::session::Route {
+        model: Some("gpt-test".to_string()),
+        ..parent.route()
+    });
     parent.set_system_prompt(Some("forked system prompt".into()));
     parent.add_message(
         Role::User,
@@ -176,7 +182,10 @@ fn clone_split_session_uses_persisted_session_state() {
     parent.save().expect("save parent");
 
     let mut unsaved_parent = parent.clone();
-    unsaved_parent.set_model(Some("unsaved-model".into()));
+    unsaved_parent.apply_route(crate::session::Route {
+        model: Some("unsaved-model".into()),
+        ..unsaved_parent.route()
+    });
     unsaved_parent.set_system_prompt(Some("unsaved prompt".into()));
     unsaved_parent.add_message(
         Role::Assistant,

@@ -48,7 +48,10 @@ impl App {
             // Local reload files can belong to an unrelated session with the same id.
             app.onboarding_startup_checked = true;
             app.auto_server_reload = false;
-            app.session.set_working_dir(None);
+            app.session.apply_workspace(crate::session::Workspace {
+                working_dir: None,
+                ..app.session.workspace()
+            });
             app.resume_session_id = resume_session;
             app.set_status_notice(format!("SSH: {host} (remote server)"));
             // `/cloud` hands a mid-task session over and asks the new runtime

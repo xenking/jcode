@@ -779,7 +779,10 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
     // A todo group is a lane label, so it only names sessions that have no
     // generated title at all.
     let mut untitled = Session::load(session_id).expect("load session");
-    untitled.set_title(None);
+    untitled.apply_titles(crate::session::Titles {
+        title: None,
+        ..untitled.titles()
+    });
     untitled.save().expect("save untitled session");
     invalidate_session_list_cache();
 

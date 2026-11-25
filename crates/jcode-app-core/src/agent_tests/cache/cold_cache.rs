@@ -335,7 +335,10 @@ async fn manual_snapcompact_preview_matches_apply_without_writing_the_session() 
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ArchivePreviewProvider { explicit: false });
     let (_home, mut agent, _) = fixture_with_provider(300, 160_000, 9_000, provider.clone()).await;
-    agent.session.set_context_cap(Some(1_000_000));
+    agent.session.apply_limits(crate::session::Limits {
+        context_cap: Some(1_000_000),
+        ..agent.session.limits()
+    });
     let original = serde_json::to_vec(&agent.session).unwrap();
     let before = agent.inspect_context_breakdown(false, true).await;
     assert_eq!(

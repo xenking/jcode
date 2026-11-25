@@ -101,7 +101,10 @@ fn bundle(swarms: Vec<PersistedSwarmState>, ids: &[&str]) -> GroupTransferBundle
 }
 fn save_session(id: &str, epoch: u64) -> Session {
     let mut session = Session::create_with_id(id.into(), None, None);
-    session.set_migration_epoch(epoch);
+    session.apply_lineage(crate::session::Lineage {
+        migration_epoch: epoch,
+        ..session.lineage()
+    });
     session.save_prepared().unwrap();
     session
 }
@@ -209,7 +212,10 @@ async fn prepare_rejects_busy_gate_then_fences_and_abort_restores() {
         stale.migration_lease_block(),
         Some(storage::SessionLeaseBlock::MovedAway { .. })
     ));
-    stale.set_title(Some("must not persist".into()));
+    stale.apply_titles(crate::session::Titles {
+        title: Some("must not persist".into()),
+        ..stale.titles()
+    });
     stale.save_prepared().unwrap();
     assert_ne!(Session::load("independent").unwrap().title(), stale.title());
     handle_with_gate(
@@ -390,8 +396,14 @@ async fn reserve_fences_before_install_and_import_keeps_members_blocked() {
         .await
         .unwrap();
     let mut session = Session::create_with_id("worker".into(), None, None);
-    session.set_migration_epoch(1);
-    session.set_working_dir(Some("/destination/project".into()));
+    session.apply_lineage(crate::session::Lineage {
+        migration_epoch: 1,
+        ..session.lineage()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/destination/project".into()),
+        ..session.workspace()
+    });
     assert!(session.migration_lease_block().is_some());
     // The transport installs the already-validated full snapshot, not a save
     // by a running agent (which the pending lease intentionally prohibits).

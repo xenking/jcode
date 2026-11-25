@@ -1215,7 +1215,10 @@ impl Agent {
                         // the user lands in an empty new session while the
                         // real transcript sits untouched on disk.
                         self.provider_session_id = Some(sid.clone());
-                        self.session.set_provider_session_id(Some(sid));
+                        self.session.apply_route(crate::session::Route {
+                            provider_session_id: Some(sid),
+                            ..self.session.route()
+                        });
                     }
                     StreamEvent::OpenAIReasoning {
                         id,
@@ -1538,7 +1541,10 @@ impl Agent {
                     "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
                     model_at_request_start, model_after_stream
                 ));
-                self.session.set_model(Some(self.provider_model()));
+                self.session.apply_route(crate::session::Route {
+                    model: Some(self.provider_model()),
+                    ..self.session.route()
+                });
                 self.provider_runtime_state.apply(
                     crate::provider::ProviderStateEvent::RuntimeModelObserved {
                         model: model_after_stream.clone(),

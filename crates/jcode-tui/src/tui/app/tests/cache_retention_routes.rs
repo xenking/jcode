@@ -74,7 +74,10 @@ fn cache_timer_openai_routes_distinguish_api_oauth_and_unknown() {
         (None, Some("openai-oauth"), "openai-oauth", false),
     ] {
         app.remote_resolved_credential = credential;
-        app.session.set_route_api_method(route.map(str::to_string));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: route.map(str::to_string),
+            ..app.session.route()
+        });
         assert_eq!(app.kv_cache_provider_name(), identity);
         app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
         app.streaming.streaming_input_tokens = 42_000;

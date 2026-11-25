@@ -185,7 +185,10 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     assert!(crate::config::config().features.persist_memory_injections);
     let mut session = crate::session::Session::create(None, None);
     let project = tempfile::tempdir().unwrap();
-    session.set_working_dir(Some(project.path().to_string_lossy().into_owned()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(project.path().to_string_lossy().into_owned()),
+        ..session.workspace()
+    });
     let id = session.id().to_owned();
     let capture = ScriptedProvider::default();
     capture.push_reply(vec![
@@ -389,7 +392,10 @@ async fn reload_mid_tool_with_prefix(compacted: bool) {
             "---\nname: reload-probe\ndescription: reload fixture\n---\nRetain this skill across reload.\n",
         )
         .unwrap();
-        session.set_working_dir(Some(home._home.path().to_string_lossy().into_owned()));
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(home._home.path().to_string_lossy().into_owned()),
+            ..session.workspace()
+        });
         session.add_message(
             Role::User,
             Message::user("Archived prompt").content.to_vec(),

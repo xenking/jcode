@@ -175,7 +175,10 @@ fn title_timing_is_first_and_third_turn_only() {
 
     session.messages_mut_for_tests().push(assistant("ok"));
     session.messages_mut_for_tests().push(user("third prompt"));
-    session.set_title(Some("Earlier title".to_string()));
+    session.apply_titles(crate::session::Titles {
+        title: Some("Earlier title".to_string()),
+        ..session.titles()
+    });
     assert_eq!(
         plan_for_session(&session, true).0,
         TitleAction::Generate(jcode_session_types::TitleStage::ThirdTurn)

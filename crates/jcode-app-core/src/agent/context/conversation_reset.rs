@@ -10,8 +10,14 @@ impl Agent {
         let mut new_session = Session::create(None, None);
         // begin_concurrency_tracking below writes the presence markers.
         new_session.mark_active_unregistered();
-        new_session.set_model(Some(self.provider_model()));
-        new_session.set_provider_key(self.provider_key_for_new_session());
+        new_session.apply_route(crate::session::Route {
+            model: Some(self.provider_model()),
+            ..new_session.route()
+        });
+        new_session.apply_route(crate::session::Route {
+            provider_key: self.provider_key_for_new_session(),
+            ..new_session.route()
+        });
         // A cleared conversation keeps the kind of agent it was and where it ran.
         new_session.inherit_from(
             &self.session,
@@ -37,7 +43,7 @@ impl Agent {
     /// Clear provider session so the next turn sends full context.
     pub fn reset_provider_session(&mut self) {
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         self.persist_session_best_effort("provider session reset");
     }
 
@@ -135,7 +141,7 @@ impl Agent {
         self.rewind_undo_snapshot = Some(snapshot);
         self.session.touch();
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
@@ -163,8 +169,10 @@ impl Agent {
         self.session.replace_messages(snapshot.messages);
         self.refresh_tool_call_snapshot();
         self.provider_session_id = snapshot.provider_session_id;
-        self.session
-            .set_provider_session_id(snapshot.session_provider_session_id);
+        self.session.apply_route(crate::session::Route {
+            provider_session_id: snapshot.session_provider_session_id,
+            ..self.session.route()
+        });
         self.session.touch();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();

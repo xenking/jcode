@@ -879,7 +879,10 @@ impl Agent {
                             eprintln!("[trace] session_id {}", sid);
                         }
                         self.provider_session_id = Some(sid.clone());
-                        self.session.set_provider_session_id(Some(sid));
+                        self.session.apply_route(crate::session::Route {
+                            provider_session_id: Some(sid),
+                            ..self.session.route()
+                        });
                         // We've received session_id, can exit the loop now
                         if saw_message_end {
                             break;

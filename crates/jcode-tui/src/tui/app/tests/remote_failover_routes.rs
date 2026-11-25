@@ -54,8 +54,10 @@ fn remote_exact_failover_on(
     app.is_remote = true;
     app.remote_provider_name = Some("Anthropic".into());
     app.remote_provider_model = Some(model.into());
-    app.session
-        .set_route_api_method(Some("claude-oauth@claude-otter".into()));
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("claude-oauth@claude-otter".into()),
+        ..app.session.route()
+    });
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     let mut target = openai_oauth_route("gpt-5.4");
     target.api_method = "openai-oauth@openai-fox".into();
@@ -624,7 +626,10 @@ fn test_automatic_failover_refuses_opus_target_and_skips_ranked_opus() {
                 .iter()
                 .any(|message| message.content.contains("failover_excluded_models"))
         );
-        app.session.set_route_api_method(Some("claude-api".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut opus = claude_oauth_route("claude-opus-5-5");
         opus.api_method = "claude-oauth@claude-otter".into();
@@ -681,7 +686,10 @@ fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         app.automatic_failover_targets.clear();
-        app.session.set_route_api_method(Some("claude-api".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut opus = claude_oauth_route("claude-opus-5-5");
         opus.api_method = "claude-oauth@claude-otter".into();
@@ -739,7 +747,10 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         // Discard the fixture's staged switch before testing a fresh error.
         app.automatic_failover_targets.clear();
-        app.session.set_route_api_method(Some("claude-api".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut preferred = claude_oauth_route("claude-sonnet-4");
         preferred.api_method = "claude-oauth@claude-otter".into();
@@ -833,8 +844,10 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
         app.automatic_failover_targets.clear();
         app.remote_provider_name = Some("OpenAI".into());
         app.remote_provider_model = Some("gpt-5.4".into());
-        app.session
-            .set_route_api_method(Some("openai-oauth@openai-otter".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("openai-oauth@openai-otter".into()),
+            ..app.session.route()
+        });
         let mut exhausted_sibling = openai_oauth_route("gpt-5.2");
         exhausted_sibling.api_method = "openai-oauth@openai-otter".into();
         app.remote_model_options.insert(0, exhausted_sibling);
@@ -870,8 +883,10 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
-        app.session
-            .set_route_api_method(Some("claude-oauth@claude-otter".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-oauth@claude-otter".into()),
+            ..app.session.route()
+        });
         app.pending_provider_failover.as_mut().unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         app.maybe_progress_provider_failover_countdown();
@@ -1392,8 +1407,10 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
             app.is_remote = true;
             app.remote_provider_name = Some("Antigravity".into());
             app.remote_provider_model = Some("gemini-4-neon-low".into());
-            app.session
-                .set_route_api_method(initial_route_api_method.clone());
+            app.session.apply_route(crate::session::Route {
+                route_api_method: initial_route_api_method.clone(),
+                ..app.session.route()
+            });
             app.remote_model_options = vec![
                 crate::provider::ModelRoute {
                     reasoning_efforts: None,

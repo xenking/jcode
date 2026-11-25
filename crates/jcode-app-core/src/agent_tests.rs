@@ -159,15 +159,20 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
     crate::config::Config::invalidate_cache();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let mut agent = Agent::new(provider, Registry::empty());
-    agent
-        .session
-        .set_route_api_method(Some("openai-oauth@work".into()));
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-oauth@work".into()),
+        ..agent.session.route()
+    });
     let error = agent.ensure_session_lease().unwrap_err().to_string();
     assert!(error.contains("Saved account 'work' could not be restored"));
-    agent.session.set_route_api_method(None);
-    agent
-        .session
-        .set_provider_key(Some("openai-oauth@personal".into()));
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..agent.session.route()
+    });
+    agent.session.apply_route(crate::session::Route {
+        provider_key: Some("openai-oauth@personal".into()),
+        ..agent.session.route()
+    });
     assert!(
         agent
             .ensure_session_lease()
@@ -175,7 +180,10 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
             .to_string()
             .contains("personal")
     );
-    agent.session.set_provider_key(Some("openai-oauth".into()));
+    agent.session.apply_route(crate::session::Route {
+        provider_key: Some("openai-oauth".into()),
+        ..agent.session.route()
+    });
     assert!(agent.ensure_session_lease().is_ok());
 }
 

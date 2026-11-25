@@ -56,7 +56,10 @@ impl Agent {
         let load_start = Instant::now();
         let mut session = Session::load_for_resume(session_id)?;
         if let Some(working_dir) = working_dir {
-            session.set_working_dir(Some(working_dir.to_string()));
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: Some(working_dir.to_string()),
+                ..session.workspace()
+            });
             session.refresh_initial_session_context_message();
         }
         let load_ms = load_start.elapsed().as_millis();

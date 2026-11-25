@@ -6,7 +6,10 @@ fn session_with_provider_key(key: Option<&str>) -> crate::session::Session {
         None,
         None,
     );
-    session.set_provider_key(key.map(str::to_string));
+    session.apply_route(crate::session::Route {
+        provider_key: key.map(str::to_string),
+        ..session.route()
+    });
     session
 }
 

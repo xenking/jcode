@@ -106,7 +106,10 @@ async fn jarvis_delegation_policy_only_changes_the_attached_root() {
     let description = swarm(agent.tool_definitions_for_debug().await);
     assert!(description.contains("single-lane work"));
     assert!(!description.contains("keep working yourself"));
-    agent.session.set_parent_id(Some("coordinator".into()));
+    agent.session.apply_lineage(crate::session::Lineage {
+        parent_id: Some("coordinator".into()),
+        ..agent.session.lineage()
+    });
     assert_eq!(swarm(agent.tool_definitions_for_debug().await), baseline);
     assert!(
         !agent
@@ -268,7 +271,10 @@ async fn jarvis_default_reasoning_effort_respects_persisted_session_and_non_root
     let provider: Arc<dyn Provider> = Arc::new(MutableEffortProvider::new(Some("medium"), false));
     let registry = Registry::new(provider.clone()).await;
     let mut session = Session::create(None, None);
-    session.set_reasoning_effort(Some("high".to_string()));
+    session.apply_limits(crate::session::Limits {
+        reasoning_effort: Some("high".to_string()),
+        ..session.limits()
+    });
     let mut agent = Agent::new_with_session(provider.clone(), registry.clone(), session, None);
     let id = agent.session_id().to_owned();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -282,7 +288,10 @@ async fn jarvis_default_reasoning_effort_respects_persisted_session_and_non_root
     let child_provider: Arc<dyn Provider> =
         Arc::new(MutableEffortProvider::new(Some("medium"), false));
     let mut child = Agent::new(child_provider, registry.clone());
-    child.session.set_parent_id(Some("parent".into()));
+    child.session.apply_lineage(crate::session::Lineage {
+        parent_id: Some("parent".into()),
+        ..child.session.lineage()
+    });
     let child_id = child.session_id().to_owned();
     let _child_guard = crate::tool::sdk::ConnectionGuard(child_id.clone());
     crate::tool::sdk::configure(&child_id, &child_id, jarvis_tool_config(), tx.clone()).unwrap();

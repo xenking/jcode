@@ -82,7 +82,10 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
         None,
         Some("resume me".to_string()),
     );
-    session.set_model(Some("gpt-5.4".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
         attachment_data: None,

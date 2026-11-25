@@ -1160,7 +1160,10 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
     ] {
         let before = provider.calls.load(Ordering::SeqCst);
         let mut session = Session::create(None, None);
-        session.set_working_dir(Some(home._home.path().to_string_lossy().into_owned()));
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(home._home.path().to_string_lossy().into_owned()),
+            ..session.workspace()
+        });
         session.set_pinned_skill_names(vec!["restore-probe".into()]);
         if role == Role::Assistant {
             session.add_message(
@@ -2561,10 +2564,12 @@ async fn sdk_socket_cancel_workflow(
     // callback to B. The first client keeps A's Agent alive throughout.
     let mut other_session =
         crate::session::Session::create_with_id("sdk_other_session".into(), None, None);
-    other_session.set_working_dir(Some(home._home.path().to_string_lossy().into_owned()));
+    other_session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(home._home.path().to_string_lossy().into_owned()),
+        ..other_session.workspace()
+    });
     // An existing session, not an empty panel: empty untitled sessions are
-    // never written to disk and get a 30s reconnect grace on disconnect.
-    other_session.set_title(Some("sdk other session".into()));
+    // neverwrittentodiskandgeta30sreconnectgraceondisconnect.other_session.apply_titles(crate::session::Titles { title: Some("sdk other session".into()), ..neverwrittentodiskandgeta30sreconnectgraceondisconnect.other_session.titles() });
     for index in 0..8 {
         other_session.append_stored_message(crate::session::StoredMessage {
             codemode: None,

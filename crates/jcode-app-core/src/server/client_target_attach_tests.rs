@@ -73,7 +73,10 @@ async fn live_agent(id: &str, root: &str) -> Arc<Mutex<Agent>> {
     let provider: Arc<dyn Provider> = Arc::new(NoRequests);
     let registry = Registry::new(provider.clone()).await;
     let mut session = crate::session::Session::create_with_id(id.into(), None, None);
-    session.set_working_dir(Some(root.into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(root.into()),
+        ..session.workspace()
+    });
     Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )))
@@ -115,7 +118,10 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.set_working_dir(Some("/workspace/persisted-original".into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/workspace/persisted-original".into()),
+        ..session.workspace()
+    });
     session.save().unwrap();
     let mut request = subscribe(session.id());
     resolve_target_subscribe_working_dir(
@@ -155,7 +161,10 @@ async fn cross_project_attach_over_socket(target_subscribe: bool) {
     std::fs::create_dir(&target_root).unwrap();
     std::fs::create_dir(&client_root).unwrap();
     let mut target = crate::session::Session::create(None, Some("Target project".into()));
-    target.set_working_dir(Some(target_root.to_string_lossy().into_owned()));
+    target.apply_workspace(crate::session::Workspace {
+        working_dir: Some(target_root.to_string_lossy().into_owned()),
+        ..target.workspace()
+    });
     target.save().unwrap();
 
     let sockets = tempfile::tempdir_in("/tmp").unwrap();
@@ -221,7 +230,10 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.set_working_dir(Some("/workspace/stale".into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/workspace/stale".into()),
+        ..session.workspace()
+    });
     session.save().unwrap();
     let agent = live_agent(session.id(), "/workspace/live").await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
@@ -379,7 +391,10 @@ async fn target_subscribe_busy_agent_without_member_root_uses_persisted_root() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("busy".into()));
-    session.set_working_dir(Some("/workspace/busy-persisted".into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/workspace/busy-persisted".into()),
+        ..session.workspace()
+    });
     session.save().unwrap();
     let id = session.id().to_owned();
     let agent = live_agent(&id, "/workspace/busy-persisted").await;

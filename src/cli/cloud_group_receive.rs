@@ -169,7 +169,10 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                     bail!("group workspace mapping mismatch");
                 }
                 save_workspace_mapping(sess.id(), member.manifest.epoch, original, &member_mapped)?;
-                sess.set_working_dir(Some(member_mapped.working_dir));
+                sess.apply_workspace(crate::session::Workspace {
+                    working_dir: Some(member_mapped.working_dir),
+                    ..sess.workspace()
+                });
                 append_system_notice(
                     &mut sess,
                     &format!(

@@ -136,8 +136,14 @@ fn selected_facts_do_not_invent_live_telemetry() {
 #[test]
 fn durable_reasoning_and_cap_are_retained_without_fake_context_usage() {
     let mut session = Session::create_with_id("selected".into(), None, None);
-    session.set_reasoning_effort(Some("high".into()));
-    session.set_context_cap(Some(42_000));
+    session.apply_limits(crate::session::Limits {
+        reasoning_effort: Some("high".into()),
+        ..session.limits()
+    });
+    session.apply_limits(crate::session::Limits {
+        context_cap: Some(42_000),
+        ..session.limits()
+    });
     let data = persisted_info(&session);
     assert_eq!(data.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(data.context_limit, Some(42_000));

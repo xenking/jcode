@@ -1100,7 +1100,7 @@ mod tests {
         session.persist_state.messages_len = 3;
         session.strip_transcript_for_remote_client();
         // `/restart` changes status, which forces a full snapshot.
-        session.set_status(crate::session::SessionStatus::Reloaded);
+        session.mark_reloaded();
 
         let error = session
             .checkpoint_snapshot(&snapshot_path, &journal_path)

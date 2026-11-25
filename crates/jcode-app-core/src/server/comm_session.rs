@@ -86,24 +86,35 @@ fn create_visible_spawn_session(
             profile: worker.profile.clone(),
         });
     }
-    session.set_working_dir(Some(cwd.display().to_string()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(cwd.display().to_string()),
+        ..session.workspace()
+    });
     if let Some(model) = model_override {
-        session.set_model(Some(model.to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some(model.to_string()),
+            ..session.route()
+        });
     }
     if let Some(provider_key) = provider_key_override {
-        session.set_provider_key(Some(provider_key.to_string()));
+        session.apply_route(crate::session::Route {
+            provider_key: Some(provider_key.to_string()),
+            ..session.route()
+        });
     }
     if let Some(route_api_method) = route_api_method_override
         .map(str::trim)
         .filter(|route| !route.is_empty())
     {
-        session.set_route_api_method(Some(route_api_method.to_string()));
+        session.apply_route(crate::session::Route {
+            route_api_method: Some(route_api_method.to_string()),
+            ..session.route()
+        });
     }
     if let Some(effort) = effort_override.map(str::trim).filter(|e| !e.is_empty()) {
         // Persisted effort is restored (and validated against the resolved
         // provider/model) by `restore_reasoning_effort_from_session` when the
-        // headed client attaches to this session.
-        session.set_reasoning_effort(Some(effort.to_string()));
+        // headedclientattachestothissession.session.apply_limits(crate::session::Limits { reasoning_effort: Some(effort.to_string()), ..headedclientattachestothissession.session.limits() });
     }
     if selfdev_requested {
         session.set_canary("self-dev");

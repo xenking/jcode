@@ -502,7 +502,10 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         None,
         Some("Parent".to_string()),
     );
-    parent.set_working_dir(Some(temp.path().display().to_string()));
+    parent.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().display().to_string()),
+        ..parent.workspace()
+    });
     parent.save().expect("save parent session");
 
     let item = ScheduledItem {

@@ -270,7 +270,10 @@ impl Agent {
     /// later resumes inherit the route this session actually runs on.
     pub(crate) fn restore_session_model_from_session(&mut self) {
         let Some(model) = self.session.model().map(str::to_owned) else {
-            self.session.set_model(Some(self.provider_model()));
+            self.session.apply_route(crate::session::Route {
+                model: Some(self.provider_model()),
+                ..self.session.route()
+            });
             return;
         };
         match crate::provider::restore_session_model(
@@ -289,8 +292,14 @@ impl Agent {
                         self.session.provider_key(),
                         healed.provider_key,
                     ));
-                    self.session.set_provider_key(healed.provider_key);
-                    self.session.set_route_api_method(healed.route_api_method);
+                    self.session.apply_route(crate::session::Route {
+                        provider_key: healed.provider_key,
+                        ..self.session.route()
+                    });
+                    self.session.apply_route(crate::session::Route {
+                        route_api_method: healed.route_api_method,
+                        ..self.session.route()
+                    });
                 }
                 self.reconcile_explicit_provider_pin_route();
             }
@@ -309,11 +318,12 @@ impl Agent {
             .explicit_provider_pin_for_current_model()
             .is_some()
         {
-            self.session.select_route(
-                self.provider_model(),
-                "openrouter".to_string(),
-                "openrouter".to_string(),
-            );
+            self.session.apply_route(crate::session::Route {
+                model: Some(self.provider_model()),
+                provider_key: Some("openrouter".to_string()),
+                route_api_method: Some("openrouter".to_string()),
+                ..self.session.route()
+            });
         }
     }
 

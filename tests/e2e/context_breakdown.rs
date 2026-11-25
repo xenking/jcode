@@ -128,9 +128,18 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     )?;
 
     let mut saved = Session::create(None, None);
-    saved.set_model(Some("mock-model".into()));
-    saved.set_provider_key(Some("mock".into()));
-    saved.set_working_dir(Some(repo.display().to_string()));
+    saved.apply_route(jcode::session::Route {
+        model: Some("mock-model".into()),
+        ..saved.route()
+    });
+    saved.apply_route(jcode::session::Route {
+        provider_key: Some("mock".into()),
+        ..saved.route()
+    });
+    saved.apply_workspace(jcode::session::Workspace {
+        working_dir: Some(repo.display().to_string()),
+        ..saved.workspace()
+    });
     saved.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -152,11 +161,26 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     saved.save()?;
 
     let mut long_saved = Session::create(None, None);
-    long_saved.set_model(Some("gpt-6.2-astra".into()));
-    long_saved.set_provider_key(Some("openai-oauth@fixture".into()));
-    long_saved.set_route_api_method(long_saved.provider_key().map(str::to_owned));
-    long_saved.set_working_dir(Some(repo.display().to_string()));
-    long_saved.set_context_cap(Some(500_000));
+    long_saved.apply_route(jcode::session::Route {
+        model: Some("gpt-6.2-astra".into()),
+        ..long_saved.route()
+    });
+    long_saved.apply_route(jcode::session::Route {
+        provider_key: Some("openai-oauth@fixture".into()),
+        ..long_saved.route()
+    });
+    long_saved.apply_route(jcode::session::Route {
+        route_api_method: long_saved.provider_key().map(str::to_owned),
+        ..long_saved.route()
+    });
+    long_saved.apply_workspace(jcode::session::Workspace {
+        working_dir: Some(repo.display().to_string()),
+        ..long_saved.workspace()
+    });
+    long_saved.apply_limits(jcode::session::Limits {
+        context_cap: Some(500_000),
+        ..long_saved.limits()
+    });
     long_saved.set_last_provider_request_at_for_tests(Some(chrono::Utc::now()));
     long_saved.add_message(
         Role::Assistant,
@@ -257,8 +281,8 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         assert_eq!(fast.meter, long.meter);
         assert!(fast.categories.is_empty());
         assert_eq!(fast.residual_tokens, None);
-        long_saved.set_route_api_method(Some("openai-api".into()));
-        long_saved.set_provider_key(long_saved.route_api_method().map(str::to_owned));
+        long_saved.apply_route(jcode::session::Route { route_api_method: Some("openai-api".into()), ..long_saved.route() });
+        long_saved.apply_route(jcode::session::Route { provider_key: long_saved.route_api_method().map(str::to_owned), ..long_saved.route() });
         long_saved.save()?;
         let rerouted = observer.inspect(15, Some(long_saved.id()), None).await?;
         let rerouted = rerouted.meter.unwrap();

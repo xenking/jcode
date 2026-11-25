@@ -43,7 +43,10 @@ fn capture_current_snapshot_includes_active_sessions_only() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 
     let mut active = Session::create(None, Some("Active".to_string()));
-    active.set_working_dir(Some("/tmp".to_string()));
+    active.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp".to_string()),
+        ..active.workspace()
+    });
     active.mark_active_with_pid(std::process::id());
     active.save().expect("save active session");
 
@@ -117,7 +120,10 @@ fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
         None,
         Some("Crash Me".to_string()),
     );
-    crashed.set_working_dir(Some("/tmp".to_string()));
+    crashed.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp".to_string()),
+        ..crashed.workspace()
+    });
     crashed.mark_active_with_pid(dead_pid);
     crashed.save().expect("save crashed session");
 
@@ -160,7 +166,7 @@ fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
     let old_ts = Utc::now() - chrono::Duration::hours(AUTO_RESTORE_CRASH_MAX_AGE_HOURS + 2);
     crashed.set_updated_at_for_tests(old_ts);
     crashed.set_last_active_at_for_tests(Some(old_ts));
-    crashed.set_status(crate::session::SessionStatus::Active);
+    crashed.set_status_for_tests(crate::session::SessionStatus::Active);
     crashed.last_pid = Some(dead_pid);
     crashed.save().expect("save stale active session");
     let active_dir = crate::storage::jcode_dir()

@@ -240,10 +240,11 @@ impl App {
         let session_id = if self.is_remote {
             self.reload_handoff_session_id()
         } else {
-            self.session
-                .set_provider_session_id(self.provider_session_id.clone());
-            self.session
-                .set_status(crate::session::SessionStatus::Reloaded);
+            self.session.apply_route(crate::session::Route {
+                provider_session_id: self.provider_session_id.clone(),
+                ..self.session.route()
+            });
+            self.session.mark_reloaded();
             if let Err(error) = self.session.save() {
                 crate::logging::warn(&format!(
                     "Failed to save session during TUI lifecycle: {error}"
@@ -388,8 +389,7 @@ impl App {
                 self.session.id(),
                 &self.session.injected_memory_ids(),
             );
-            // Clear the saved provider_session_id since it's no longer valid
-            self.session.set_provider_session_id(None);
+            // Clear the saved provider_session_id since it'snolongervalidself.session.forget_provider_session();
             let mut restored_model = false;
             if let Some(model) = self.session.model().map(str::to_owned) {
                 match crate::provider::restore_session_model(
@@ -411,8 +411,14 @@ impl App {
                     }
                     Ok(restore) => {
                         if let Some(healed) = restore.healed_route {
-                            self.session.set_provider_key(healed.provider_key);
-                            self.session.set_route_api_method(healed.route_api_method);
+                            self.session.apply_route(crate::session::Route {
+                                provider_key: healed.provider_key,
+                                ..self.session.route()
+                            });
+                            self.session.apply_route(crate::session::Route {
+                                route_api_method: healed.route_api_method,
+                                ..self.session.route()
+                            });
                         }
                         restored_model = true;
                     }
@@ -421,7 +427,10 @@ impl App {
 
             let active_model = self.provider.model();
             if restored_model || self.session.model().is_none() {
-                self.session.set_model(Some(active_model.clone()));
+                self.session.apply_route(crate::session::Route {
+                    model: Some(active_model.clone()),
+                    ..self.session.route()
+                });
             }
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
@@ -720,10 +729,11 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             tool_data: None,
             codemode: None,
         });
-        app.session
-            .set_provider_session_id(app.provider_session_id.clone());
-        app.session
-            .set_status(crate::session::SessionStatus::Reloaded);
+        app.session.apply_route(crate::session::Route {
+            provider_session_id: app.provider_session_id.clone(),
+            ..app.session.route()
+        });
+        app.session.mark_reloaded();
         let _ = app.session.save();
         app.save_input_for_reload(app.session.id());
         app.reload_requested = Some(app.session.id().to_owned());
@@ -741,10 +751,11 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             tool_data: None,
             codemode: None,
         });
-        app.session
-            .set_provider_session_id(app.provider_session_id.clone());
-        app.session
-            .set_status(crate::session::SessionStatus::Reloaded);
+        app.session.apply_route(crate::session::Route {
+            provider_session_id: app.provider_session_id.clone(),
+            ..app.session.route()
+        });
+        app.session.mark_reloaded();
         let _ = app.session.save();
         app.save_input_for_reload(app.session.id());
         app.restart_requested = Some(app.session.id().to_owned());

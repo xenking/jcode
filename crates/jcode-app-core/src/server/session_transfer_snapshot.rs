@@ -43,7 +43,7 @@ fn snapshot_child_session(
             // with a 400.
             | Inherit::ROUTE,
     );
-    child.set_status(crate::session::SessionStatus::Closed);
+    child.mark_closed_unregistered();
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
@@ -120,8 +120,8 @@ pub(super) fn create_transfer_child_session(
             | Inherit::BUILD_UNDER_TEST,
     );
     child.set_compaction(compaction);
-    child.set_provider_session_id(None);
-    child.set_status(crate::session::SessionStatus::Closed);
+    child.forget_provider_session();
+    child.mark_closed_unregistered();
     child.save()?;
     crate::todo::save_todos(child.id(), &todos)?;
     crate::session_env::inherit_session_env(parent_session_id, child.id());

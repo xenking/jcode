@@ -1371,10 +1371,18 @@ fn test_transfer_command_queues_pause_while_processing_locally() {
 fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_context_only() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session.set_working_dir(Some("/tmp".to_string()));
-        app.session.set_model(Some("test-model".to_string()));
-        app.session
-            .set_provider_key(Some("test-provider".to_string()));
+        app.session.apply_workspace(crate::session::Workspace {
+            working_dir: Some("/tmp".to_string()),
+            ..app.session.workspace()
+        });
+        app.session.apply_route(crate::session::Route {
+            model: Some("test-model".to_string()),
+            ..app.session.route()
+        });
+        app.session.apply_route(crate::session::Route {
+            provider_key: Some("test-provider".to_string()),
+            ..app.session.route()
+        });
         app.session
             .set_system_prompt(Some("custom transfer prompt".to_string()));
         app.session

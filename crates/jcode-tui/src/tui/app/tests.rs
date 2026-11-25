@@ -1078,8 +1078,10 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
         "---\nname: late-skill\ndescription: Added after startup\n---\n# Late skill\n",
     )
     .expect("write SKILL.md");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
 
     // Project-local skills are a session overlay composed at read time, so
     // the new skill is available immediately (issue #457).
@@ -1112,8 +1114,10 @@ fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
         "---\nname: pinned-probe\ndescription: Mode test\n---\nPINNED_MODE_BODY\n",
     )
     .unwrap();
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     for command in ["/mode pinned-probe", "/mode"] {
         app.input = command.into();
         app.submit_input();
@@ -1172,8 +1176,10 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
         "---\nname: image-skill\ndescription: Image attachment regression skill\n---\nUse it.\n",
     )
     .expect("write skill");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
     app.pending_images = vec![("image/png".to_string(), "ZmFrZSBwbmcgYnl0ZXM=".to_string())];
     app.input = "/image-skill describe this screenshot".to_string();
     app.cursor_pos = app.input.len();
@@ -1216,8 +1222,10 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
 fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
     app.input = "/definitely-not-a-real-skill".to_string();
     app.cursor_pos = app.input.len();
     let session_messages_before = app.session.messages().len();
@@ -1241,8 +1249,10 @@ fn endorsed_but_not_installed_skill_invocation_surfaces_install_hint() {
     let mut app = create_test_app();
     // Empty working dir so no endorsed skill is actually installed there.
     let temp = tempfile::tempdir().expect("tempdir");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
 
     let endorsed = crate::skill::endorsed_skills()
         .iter()

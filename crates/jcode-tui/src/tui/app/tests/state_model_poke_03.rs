@@ -1701,9 +1701,14 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.provider_session_id = Some("stale-upstream".to_string());
-    app.session
-        .set_provider_session_id(Some("stale-upstream".to_string()));
-    app.session.set_model(Some("old-model".to_string()));
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("stale-upstream".to_string()),
+        ..app.session.route()
+    });
+    app.session.apply_route(crate::session::Route {
+        model: Some("old-model".to_string()),
+        ..app.session.route()
+    });
 
     app.handle_login_completed(crate::bus::LoginCompleted {
         provider: "Azure OpenAI".to_string(),

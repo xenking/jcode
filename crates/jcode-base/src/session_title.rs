@@ -239,21 +239,7 @@ pub async fn generate_title(
 /// already current. The caller persists, because offline tools write back to
 /// the file they loaded rather than the canonical session path.
 pub fn set_title_if_allowed(session: &mut Session, title: &str) -> bool {
-    if session
-        .custom_title()
-        .is_some_and(|custom| !custom.trim().is_empty())
-        || (session.is_saved()
-            && session
-                .save_label()
-                .is_some_and(|label| !label.trim().is_empty()))
-    {
-        return false;
-    }
-    if session.title() == Some(title) {
-        return false;
-    }
-    session.set_title(Some(title.to_string()));
-    true
+    session.adopt_generated_title(title)
 }
 
 /// Apply a generated title to the live session, persisting it.

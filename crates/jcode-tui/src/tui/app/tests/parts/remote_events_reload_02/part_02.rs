@@ -304,8 +304,10 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.provider_session_id = Some("provider-session".to_string());
-    app.session
-        .set_provider_session_id(Some("provider-session".to_string()));
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("provider-session".to_string()),
+        ..app.session.route()
+    });
     app.context_warning_shown = true;
 
     app.handle_server_event(

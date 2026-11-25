@@ -197,8 +197,10 @@ fn remote_anthropic_widget_missing_usage_never_falls_back_to_local_getter() {
     };
     for label in [None, Some("remote-anthropic-missing-snapshot-test")] {
         app.remote_provider_oauth_account_label = label.map(str::to_string);
-        app.session
-            .set_route_api_method(Some("claude-oauth".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-oauth".into()),
+            ..app.session.route()
+        });
         let info = app
             .widget_usage_info(route, AuthMethod::AnthropicOAuth)
             .unwrap();

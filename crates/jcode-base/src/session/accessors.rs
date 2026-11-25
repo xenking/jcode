@@ -205,44 +205,8 @@ impl Session {
 
 /// Setters for fields that are plain data with no invariant to maintain.
 impl Session {
-    pub fn set_title(&mut self, title: Option<String>) {
-        self.title = title;
-    }
-
     pub fn set_compaction(&mut self, compaction: Option<Arc<StoredCompactionState>>) {
         self.compaction = compaction;
-    }
-
-    pub fn set_route_api_method(&mut self, method: Option<String>) {
-        self.route_api_method = method;
-    }
-
-    pub fn set_working_dir(&mut self, dir: Option<String>) {
-        self.working_dir = dir;
-    }
-
-    pub fn set_original_working_dir(&mut self, dir: Option<String>) {
-        self.original_working_dir = dir;
-    }
-
-    pub fn set_model(&mut self, model: Option<String>) {
-        self.model = model;
-    }
-
-    pub fn set_provider_key(&mut self, key: Option<String>) {
-        self.provider_key = key;
-    }
-
-    pub fn set_provider_session_id(&mut self, id: Option<String>) {
-        self.provider_session_id = id;
-    }
-
-    pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
-        self.reasoning_effort = effort;
-    }
-
-    pub fn set_context_cap(&mut self, cap: Option<usize>) {
-        self.context_cap = cap;
     }
 
     pub fn set_subagent_model(&mut self, model: Option<String>) {
@@ -255,14 +219,6 @@ impl Session {
 
     pub fn set_model_usage_turn_id(&mut self, id: Option<String>) {
         self.model_usage_turn_id = id;
-    }
-
-    pub fn set_parent_id(&mut self, parent_id: Option<String>) {
-        self.parent_id = parent_id;
-    }
-
-    pub fn set_migration_epoch(&mut self, epoch: u64) {
-        self.migration_epoch = epoch;
     }
 
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
@@ -341,15 +297,5 @@ impl Session {
         self.env_snapshots.shrink_to_fit();
         self.memory_injections.shrink_to_fit();
         self.replay_events.shrink_to_fit();
-    }
-}
-
-impl Session {
-    /// Record a complete route selection: the model, the provider account that
-    /// serves it, and the API method it was reached through.
-    pub fn select_route(&mut self, model: String, provider_key: String, route_api_method: String) {
-        self.provider_key = Some(provider_key);
-        self.route_api_method = Some(route_api_method);
-        self.model = Some(model);
     }
 }

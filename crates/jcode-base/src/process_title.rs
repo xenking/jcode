@@ -264,7 +264,10 @@ mod tests {
         // A todo group is a lane label ("resume title sync"), so it only names
         // sessions that have no generated title at all.
         let mut untitled = crate::session::Session::load(session_id).expect("load session");
-        untitled.set_title(None);
+        untitled.apply_titles(crate::session::Titles {
+            title: None,
+            ..untitled.titles()
+        });
         untitled.save().expect("save untitled session");
         assert_eq!(
             terminal_session_label_for_id(session_id),

@@ -58,7 +58,7 @@ pub(super) fn fork(
             | Inherit::ROUTE
             | Inherit::LIMITS,
     );
-    child.set_status(session::SessionStatus::Closed);
+    child.mark_closed_unregistered();
     child.append_fork_notice(&parent_id, parent.display_name());
     child.save()?;
     crate::session_env::inherit_session_env(&parent_id, child.id());

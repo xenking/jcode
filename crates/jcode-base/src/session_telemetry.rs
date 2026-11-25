@@ -229,9 +229,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(directory.path());
         let mut session = Session::create_with_id("telemetry-test".into(), None, None);
-        session.set_model(Some("future-model".into()));
-        session.set_provider_key(Some("openai".into()));
-        session.set_route_api_method(Some("openai:account-a".into()));
+        session.apply_route(crate::session::Route {
+            model: Some("future-model".into()),
+            ..session.route()
+        });
+        session.apply_route(crate::session::Route {
+            provider_key: Some("openai".into()),
+            ..session.route()
+        });
+        session.apply_route(crate::session::Route {
+            route_api_method: Some("openai:account-a".into()),
+            ..session.route()
+        });
         save_context(
             &session,
             1234,
@@ -250,9 +259,15 @@ mod tests {
             saved.account_usage.is_none(),
             "missing quota cache is unknown"
         );
-        session.set_route_api_method(Some("openai:account-b".into()));
+        session.apply_route(crate::session::Route {
+            route_api_method: Some("openai:account-b".into()),
+            ..session.route()
+        });
         assert!(load_context(&session).is_none());
-        session.set_route_api_method(saved.route_api_method);
+        session.apply_route(crate::session::Route {
+            route_api_method: saved.route_api_method,
+            ..session.route()
+        });
         std::fs::write(path(session.id()).unwrap(), b"{broken").unwrap();
         assert!(load_context(&session).is_none());
     }

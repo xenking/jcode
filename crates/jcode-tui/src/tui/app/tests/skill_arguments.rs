@@ -9,8 +9,10 @@ fn skill_invocation_renders_arguments_in_the_model_transcript() {
         "---\nname: parameterized\ndescription: Parameterized skill fixture\narguments: issue, repo\n---\nissue=$issue repo=$repo first=$0 second=$ARGUMENTS[1] all=$ARGUMENTS\n",
     )
     .unwrap();
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     app.input = "/parameterized 42 'project repo'".into();
     app.submit_input();
     assert!(app.session.messages().iter().flat_map(|msg| &msg.content).any(|block| {
@@ -30,8 +32,10 @@ fn command_skill_runs_a_literal_argument_without_a_model_turn() {
         "---\nname: shell-fixture\ndescription: Command skill fixture\ncommand: \"printf '%s' > output\"\n---\nDo not send this to the model.\n",
     )
     .unwrap();
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().into_owned()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().into_owned()),
+        ..app.session.workspace()
+    });
     app.input = "/shell-fixture 'two words; touch injected'".into();
     app.submit_input();
     assert!(
@@ -65,8 +69,10 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
         "---\nname: prompt-skill\ndescription: Prompt regression skill\n---\nUse it.\n",
     )
     .expect("write skill");
-    app.session
-        .set_working_dir(Some(temp.path().to_string_lossy().to_string()));
+    app.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().to_string_lossy().to_string()),
+        ..app.session.workspace()
+    });
     app.input = "/prompt-skill \"then type prompt here and all that\"".to_string();
     app.cursor_pos = app.input.len();
 

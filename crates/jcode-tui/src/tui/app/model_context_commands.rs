@@ -126,7 +126,10 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
             Ok(()) => {
                 let new_model = app.provider.model();
                 if new_model != prev_model {
-                    app.session.set_model(Some(new_model));
+                    app.session.apply_route(crate::session::Route {
+                        model: Some(new_model),
+                        ..app.session.route()
+                    });
                     app.invalidate_model_picker_cache();
                     crate::tui::ui::prepare::invalidate_header_prep_cache();
                 }

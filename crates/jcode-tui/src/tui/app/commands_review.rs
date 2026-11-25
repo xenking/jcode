@@ -285,7 +285,7 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
     let transcript = build_judge_visible_transcript_messages(&parent_session);
     session.replace_messages(transcript);
     session.set_compaction(None);
-    session.set_provider_session_id(None);
+    session.forget_provider_session();
 }
 
 /// Drop every side panel page belonging to the discarded session (#605).
@@ -334,10 +334,14 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.improve_mode = None;
     let mut session = Session::create(None, None);
     session.mark_active();
-    session.set_model(Some(app.provider.model()));
-    session.set_provider_key(crate::session::derive_session_provider_key(
-        app.provider.name(),
-    ));
+    session.apply_route(crate::session::Route {
+        model: Some(app.provider.model()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: crate::session::derive_session_provider_key(app.provider.name()),
+        ..session.route()
+    });
     session.apply_autonomy(crate::session::Autonomy {
         autoreview_enabled: Some(app.autoreview_enabled),
         ..session.autonomy()
@@ -689,10 +693,15 @@ fn clone_session_for_review(
         &app.session,
         Inherit::COMPACTION | Inherit::WORKING_DIR | Inherit::SUBAGENT_MODEL,
     );
-    child.set_model(Some(initial_model));
-    child.set_provider_key(
-        provider_key_override.or_else(|| app.session.provider_key().map(str::to_owned)),
-    );
+    child.apply_route(crate::session::Route {
+        model: Some(initial_model),
+        ..child.route()
+    });
+    child.apply_route(crate::session::Route {
+        provider_key: provider_key_override
+            .or_else(|| app.session.provider_key().map(str::to_owned)),
+        ..child.route()
+    });
     child.apply_autonomy(crate::session::Autonomy {
         autoreview_enabled: Some(false),
         ..child.autonomy()
@@ -701,7 +710,7 @@ fn clone_session_for_review(
         autojudge_enabled: Some(false),
         ..child.autonomy()
     });
-    child.set_status(crate::session::SessionStatus::Closed);
+    child.mark_closed_unregistered();
     child.save()?;
     Ok((child.id().to_owned(), child.display_name().to_string()))
 }
@@ -719,7 +728,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
             | Inherit::SUBAGENT_MODEL
             | Inherit::REVIEW_TOGGLES,
     );
-    child.set_status(crate::session::SessionStatus::Closed);
+    child.mark_closed_unregistered();
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
@@ -746,16 +755,28 @@ pub(super) fn prepare_review_spawned_session(
             ..session.autonomy()
         });
         if let Some(parent_session_id) = parent_session_id_override {
-            session.set_parent_id(Some(parent_session_id));
+            session.apply_lineage(crate::session::Lineage {
+                parent_id: Some(parent_session_id),
+                ..session.lineage()
+            });
         }
         if let Some(title) = title_override.clone() {
-            session.set_title(Some(title));
+            session.apply_titles(crate::session::Titles {
+                title: Some(title),
+                ..session.titles()
+            });
         }
         if let Some(model) = model_override {
-            session.set_model(Some(model));
+            session.apply_route(crate::session::Route {
+                model: Some(model),
+                ..session.route()
+            });
         }
         if provider_key_override.is_some() {
-            session.set_provider_key(provider_key_override);
+            session.apply_route(crate::session::Route {
+                provider_key: provider_key_override,
+                ..session.route()
+            });
         }
         apply_judge_visible_context_if_needed(&mut session, title_override.as_deref());
         let _ = session.save();

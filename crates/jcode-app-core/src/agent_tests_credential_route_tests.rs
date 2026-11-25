@@ -85,9 +85,18 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         None,
         None,
     );
-    stale.set_model(Some("claude-sonnet-5".to_string()));
-    stale.set_provider_key(Some("anthropic-api".to_string()));
-    stale.set_route_api_method(None);
+    stale.apply_route(crate::session::Route {
+        model: Some("claude-sonnet-5".to_string()),
+        ..stale.route()
+    });
+    stale.apply_route(crate::session::Route {
+        provider_key: Some("anthropic-api".to_string()),
+        ..stale.route()
+    });
+    stale.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..stale.route()
+    });
     stale.save_prepared().expect("persist stale session");
 
     let provider = Arc::new(OAuthOnlyClaudeProvider::default());

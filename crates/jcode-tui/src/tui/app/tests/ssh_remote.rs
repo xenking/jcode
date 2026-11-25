@@ -46,7 +46,10 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
                 cache_control: None,
             }],
         );
-        local.set_model(Some("gpt-5.4".into()));
+        local.apply_route(crate::session::Route {
+            model: Some("gpt-5.4".into()),
+            ..local.route()
+        });
         local.save().expect("save handoff source");
         crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", local.id());
         let app = App::new_for_remote(Some(local.id().to_owned()));
@@ -291,7 +294,10 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
 fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
     with_ssh_remote_test_home(|| {
         let mut app = App::new_for_remote(None);
-        app.session.set_model(Some("laptop-only-model".into()));
+        app.session.apply_route(crate::session::Route {
+            model: Some("laptop-only-model".into()),
+            ..app.session.route()
+        });
         assert!(app.effective_remote_provider_model().is_none());
         assert_eq!(app.remote_effort_identity(), (None, None));
         assert!(app.remote_reasoning_effort_hint().is_none());

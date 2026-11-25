@@ -424,8 +424,8 @@ impl App {
         );
         // Never inherit the provider session id: the parent's provider-side
         // state (and its prompt cache) must not be appended to.
-        child.set_provider_session_id(None);
-        child.set_status(crate::session::SessionStatus::Closed);
+        child.forget_provider_session();
+        child.mark_closed_unregistered();
         child.save_new_side_question()?;
         Ok(child.id().to_owned())
     }

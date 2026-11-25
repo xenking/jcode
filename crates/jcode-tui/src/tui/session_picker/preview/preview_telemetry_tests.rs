@@ -3,9 +3,18 @@ use crate::session_telemetry::SessionTelemetry;
 
 fn fixture() -> (Session, SessionTelemetry) {
     let mut session = Session::create_with_id("preview-telemetry-test".into(), None, None);
-    session.set_model(Some("model".into()));
-    session.set_provider_key(Some("openai".into()));
-    session.set_route_api_method(Some("openai:account-a".into()));
+    session.apply_route(crate::session::Route {
+        model: Some("model".into()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("openai".into()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        route_api_method: Some("openai:account-a".into()),
+        ..session.route()
+    });
     let snapshot = SessionTelemetry {
         session_id: session.id().to_owned(),
         model: session.model().map(str::to_owned),
@@ -80,9 +89,18 @@ fn foreign_or_changed_route_snapshots_are_rejected() {
         let mut changed = session.clone();
         match field {
             "id" => changed.set_id_for_tests("different".into()),
-            "model" => changed.set_model(Some("different".into())),
-            "provider" => changed.set_provider_key(Some("different".into())),
-            "account" => changed.set_route_api_method(Some("openai:other".into())),
+            "model" => changed.apply_route(crate::session::Route {
+                model: Some("different".into()),
+                ..changed.route()
+            }),
+            "provider" => changed.apply_route(crate::session::Route {
+                provider_key: Some("different".into()),
+                ..changed.route()
+            }),
+            "account" => changed.apply_route(crate::session::Route {
+                route_api_method: Some("openai:other".into()),
+                ..changed.route()
+            }),
             _ => changed.set_compaction(Some(
                 jcode_session_types::StoredCompactionState {
                     summary_text: "new summary".into(),

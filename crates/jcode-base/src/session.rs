@@ -52,7 +52,8 @@ mod inherit;
 pub use inherit::Inherit;
 mod settings;
 pub use settings::{
-    Autonomy, CacheClock, ImportedStamps, Limits, SpeedState, SwarmWorkerSetup, WorkerRouting,
+    Autonomy, CacheClock, ImportedStamps, Limits, Lineage, Route, SpeedState, SwarmWorkerSetup,
+    Titles, WorkerRouting, Workspace,
 };
 mod catalog_activity;
 mod crash;
@@ -1380,11 +1381,6 @@ impl Session {
     pub fn clear_canary(&mut self) {
         self.is_canary = false;
         self.testing_build = None;
-    }
-
-    /// Set the session status
-    pub fn set_status(&mut self, status: SessionStatus) {
-        self.status = status;
     }
 
     /// Detect if an active session likely crashed (process no longer running)

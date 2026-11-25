@@ -971,7 +971,10 @@ fn handle_server_event_inner(
                     && app.session.title().is_none()
                     && display_title != app.session.display_name()
                 {
-                    app.session.set_title(Some(display_title.clone()));
+                    app.session.apply_titles(crate::session::Titles {
+                        title: Some(display_title.clone()),
+                        ..app.session.titles()
+                    });
                 }
                 app.update_terminal_title();
                 if title.is_some() {
@@ -1389,7 +1392,10 @@ fn handle_server_event_inner(
                 let model_changed = if let Some(new_model) = model {
                     let changed = app.remote_provider_model.as_deref() != Some(new_model.as_str());
                     app.remote_provider_model = Some(new_model.clone());
-                    app.session.set_model(Some(new_model));
+                    app.session.apply_route(crate::session::Route {
+                        model: Some(new_model),
+                        ..app.session.route()
+                    });
                     changed
                 } else {
                     false

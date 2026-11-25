@@ -31,7 +31,10 @@ fn ssh_account_header_uses_daemon_identity() {
         crate::usage::clear_remote_account_usage();
         // Missing daemon identity must not fall back to host-local credentials.
         app.remote_provider_oauth_account_label = None;
-        app.session.set_route_api_method(None);
+        app.session.apply_route(crate::session::Route {
+            route_api_method: None,
+            ..app.session.route()
+        });
         assert!(crate::tui::TuiState::startup_oauth_account_label(&app).is_none());
     });
 }
@@ -104,8 +107,10 @@ fn failed_account_acknowledgement_redraws_without_replacing_identity() {
         let mut app = provisional_facts_app("gpt-6.1-sol");
         app.remote_provider_oauth_account_label = Some("personal".into());
         app.remote_model_switch_in_flight = true;
-        app.session
-            .set_route_api_method(Some("openai-oauth@personal".into()));
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("openai-oauth@personal".into()),
+            ..app.session.route()
+        });
         app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
             provider_id: "openai".into(),
             label: "work".into(),
@@ -147,8 +152,10 @@ fn queued_account_acknowledgement_preserves_newer_target_and_syncs_route() {
             app.remote_session_facts_provisional = false;
             app.remote_provider_name = Some(provider.into());
             app.remote_provider_oauth_account_label = Some("personal".into());
-            app.session
-                .set_route_api_method(Some(format!("{method}@personal")));
+            app.session.apply_route(crate::session::Route {
+                route_api_method: Some(format!("{method}@personal")),
+                ..app.session.route()
+            });
             let target = crate::tui::AccountPickerAction::Switch {
                 provider_id: provider.to_lowercase(),
                 label: "latest".into(),
@@ -197,7 +204,10 @@ fn remote_oauth_identity_is_hydrated_without_a_saved_route_or_shared_email() {
         for kind in ["history", "model_changed"] {
             let mut app = create_test_app();
             app.is_remote = true;
-            app.session.set_route_api_method(None);
+            app.session.apply_route(crate::session::Route {
+                route_api_method: None,
+                ..app.session.route()
+            });
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             for label in [Some("solosystems"), Some("personal"), None] {
                 let event = serde_json::from_value(serde_json::json!({

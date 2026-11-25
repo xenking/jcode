@@ -679,8 +679,7 @@ pub(crate) fn run_move(
                 label: credentials.label().to_string(),
             });
             if let Some(account) = &auth_account {
-                // Pin an implicit OAuth route to the exact account being transferred.
-                sess.set_route_api_method(Some(account.route()));
+                // PinanimplicitOAuthroutetotheexactaccountbeingtransferred.sess.apply_route(crate::session::Route { route_api_method: Some(account.route()), ..PinanimplicitOAuthroutetotheexactaccountbeingtransferred.sess.route() });
             }
             let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
@@ -721,8 +720,7 @@ pub(crate) fn run_move(
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
-            // tells the agent where it now runs and what did not come along.
-            sess.set_migration_epoch(epoch);
+            // tellstheagentwhereitnowrunsandwhatdidnotcomealong.sess.apply_lineage(crate::session::Lineage { migration_epoch: epoch, ..tellstheagentwhereitnowrunsandwhatdidnotcomealong.sess.lineage() });
             let dangling = dangling_tool_use_ids(&sess);
             append_arrival(&mut sess, &dangling, &host, &arrival_notice(&manifest));
             let session_json = serde_json::to_vec(&sess)?;
@@ -1193,8 +1191,14 @@ pub(crate) fn run_return(
     // ---- conversation: install the cloud transcript ----------------------
     step("session", "installing the cloud transcript locally");
     let mut sess: session::Session = read_json(&stage.join("session.json"))?;
-    sess.set_migration_epoch(epoch);
-    sess.set_working_dir(local_working_dir);
+    sess.apply_lineage(crate::session::Lineage {
+        migration_epoch: epoch,
+        ..sess.lineage()
+    });
+    sess.apply_workspace(crate::session::Workspace {
+        working_dir: local_working_dir,
+        ..sess.workspace()
+    });
     let merge_note = match &merge {
         MergeOutcome::Conflicts { files, .. } => format!(
             " Git merge of the cloud work into the local checkout left conflicts in: {}. Resolve them (the cloud side is `{SNAPSHOT_REF_PREFIX}/{session_id}/cloud`) before continuing.",
@@ -1449,7 +1453,10 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         let repo: RepoManifest = read_json(&dir.join("mapped-repo.json"))?;
         _workspace_lock = Some(lock_portable_repo(&repo)?);
         validate_staged_workspace(&repo, &[session_id.to_owned()])?;
-        sess.set_working_dir(Some(repo.working_dir.clone()));
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(repo.working_dir.clone()),
+            ..sess.workspace()
+        });
         save_workspace_mapping(
             session_id,
             epoch,
@@ -2785,7 +2792,10 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
-            sess.set_migration_epoch(epoch);
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: epoch,
+                ..sess.lineage()
+            });
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
             // Cancellation is serialized with export. Discard the old snapshot

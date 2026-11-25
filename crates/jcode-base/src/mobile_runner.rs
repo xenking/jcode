@@ -177,8 +177,14 @@ fn transfer_session(
     );
     let mut session =
         crate::session::Session::create(Some(metadata.session_id.clone()), metadata.title.clone());
-    session.set_working_dir(Some(workspace.to_string_lossy().into_owned()));
-    session.set_original_working_dir(metadata.cwd.clone());
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(workspace.to_string_lossy().into_owned()),
+        ..session.workspace()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        original_working_dir: metadata.cwd.clone(),
+        ..session.workspace()
+    });
     for message in messages {
         // Imported tool entries are historical text, not executable tool calls
         // or unmatched tool results. Never elevate synced system text into the

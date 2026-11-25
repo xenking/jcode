@@ -14,7 +14,10 @@ fn unload(server: &Server) -> IdleUnload {
 
 async fn seed(server: &Server, id: &str, cwd: &std::path::Path, tool: bool) {
     let mut session = crate::session::Session::create_with_id(id.into(), None, None);
-    session.set_working_dir(Some(cwd.display().to_string()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(cwd.display().to_string()),
+        ..session.workspace()
+    });
     let mut agent = crate::agent::Agent::new_with_session(
         server.provider.fork(),
         Registry::empty(),

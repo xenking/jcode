@@ -268,8 +268,10 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
 fn test_fix_resets_provider_session() {
     let mut app = create_test_app();
     app.provider_session_id = Some("provider-session".to_string());
-    app.session
-        .set_provider_session_id(Some("provider-session".to_string()));
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("provider-session".to_string()),
+        ..app.session.route()
+    });
     app.last_stream_error = Some("Stream error: context window exceeded".to_string());
 
     app.input = "/fix".to_string();

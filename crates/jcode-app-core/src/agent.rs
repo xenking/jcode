@@ -936,7 +936,7 @@ impl Agent {
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         if self.session.pinned_skill().is_some() {
             self.active_skill = self.session.pinned_skill().map(str::to_owned);
             self.announce_active_skill();

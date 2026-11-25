@@ -658,7 +658,7 @@ mod tests {
     fn render_markdown_includes_key_sections() {
         let mut session = Session::create(None, Some("catchup".to_string()));
         session.short_name = Some("fox".to_string());
-        session.set_status(SessionStatus::Closed);
+        session.mark_closed_unregistered();
         session.add_message(
             Role::User,
             vec![ContentBlock::Text {

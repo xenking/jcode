@@ -264,11 +264,19 @@ impl Agent {
         profile: Option<String>,
     ) -> Result<()> {
         if provider_key.is_some() {
-            self.session.set_provider_key(provider_key);
+            self.session.apply_route(crate::session::Route {
+                provider_key: provider_key,
+                ..self.session.route()
+            });
         }
-        self.session.set_route_api_method(route_api_method);
-        self.session
-            .set_reasoning_effort(self.provider.reasoning_effort());
+        self.session.apply_route(crate::session::Route {
+            route_api_method: route_api_method,
+            ..self.session.route()
+        });
+        self.session.apply_limits(crate::session::Limits {
+            reasoning_effort: self.provider.reasoning_effort(),
+            ..self.session.limits()
+        });
         // The fresh-session constructor clears any inherited provider speed.
         // Reinstall only the selection granted for this new worker.
         self.session
@@ -441,8 +449,10 @@ impl Agent {
             {
                 self.provider.set_reasoning_effort(&effort)?;
             }
-            self.session
-                .set_reasoning_effort(self.provider.reasoning_effort());
+            self.session.apply_limits(crate::session::Limits {
+                reasoning_effort: self.provider.reasoning_effort(),
+                ..self.session.limits()
+            });
             crate::session_effort::record_session_effort(
                 self.session.id(),
                 self.session.reasoning_effort(),
@@ -540,8 +550,12 @@ impl Agent {
         if self.session.route_api_method() == Some(route.as_str()) {
             return;
         }
-        self.session
-            .select_route(self.provider_model(), method.to_string(), route);
+        self.session.apply_route(crate::session::Route {
+            model: Some(self.provider_model()),
+            provider_key: Some(method.to_string()),
+            route_api_method: Some(route),
+            ..self.session.route()
+        });
         self.persist_session_best_effort("observed saved account route");
     }
 
@@ -821,11 +835,12 @@ impl Agent {
         self.provider.set_route_selection(selection)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
-        self.session.select_route(
-            self.provider_model(),
-            selection.runtime_key.stable_id(),
-            selection.api_method.clone(),
-        );
+        self.session.apply_route(crate::session::Route {
+            model: Some(self.provider_model()),
+            provider_key: Some(selection.runtime_key.stable_id()),
+            route_api_method: Some(selection.api_method.clone()),
+            ..self.session.route()
+        });
         self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -852,29 +867,38 @@ impl Agent {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
-        self.session.set_provider_key(
-            crate::provider::MultiProvider::session_provider_key_after_model_switch(
+        self.session.apply_route(crate::session::Route {
+            provider_key: crate::provider::MultiProvider::session_provider_key_after_model_switch(
                 model,
                 self.provider.name(),
                 self.session.provider_key(),
             ),
-        );
+            ..self.session.route()
+        });
         if let Some(label) = self.provider.oauth_account_label() {
             let method = if self.provider.name().eq_ignore_ascii_case("openai") {
                 "openai-oauth"
             } else {
                 "claude-oauth"
             };
-            self.session
-                .set_route_api_method(Some(format!("{method}@{label}")));
+            self.session.apply_route(crate::session::Route {
+                route_api_method: Some(format!("{method}@{label}")),
+                ..self.session.route()
+            });
         } else if self
             .session
             .route_api_method()
             .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
         {
-            self.session.set_route_api_method(None);
+            self.session.apply_route(crate::session::Route {
+                route_api_method: None,
+                ..self.session.route()
+            });
         }
-        self.session.set_model(Some(self.provider_model()));
+        self.session.apply_route(crate::session::Route {
+            model: Some(self.provider_model()),
+            ..self.session.route()
+        });
         self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -1058,7 +1082,10 @@ impl Agent {
                 "Adopting reasoning effort '{pending}' chosen before the restart for {}",
                 self.session.id()
             ));
-            self.session.set_reasoning_effort(Some(pending));
+            self.session.apply_limits(crate::session::Limits {
+                reasoning_effort: Some(pending),
+                ..self.session.limits()
+            });
             self.restore_saved_reasoning_effort();
             if let Err(error) = self.session.save_prepared() {
                 crate::logging::warn(&format!(
@@ -1077,9 +1104,10 @@ impl Agent {
                 .worker_effort(&effort)
                 .and_then(|effort| self.provider.set_reasoning_effort(&effort))
             {
-                Ok(()) => self
-                    .session
-                    .set_reasoning_effort(self.provider.reasoning_effort()),
+                Ok(()) => self.session.apply_limits(crate::session::Limits {
+                    reasoning_effort: self.provider.reasoning_effort(),
+                    ..self.session.limits()
+                }),
                 Err(e) => crate::logging::error(&format!(
                     "Failed to restore session reasoning effort '{}': {}",
                     effort, e
@@ -1087,15 +1115,19 @@ impl Agent {
             }
         } else {
             self.reasoning_effort_user_override = false;
-            self.session
-                .set_reasoning_effort(self.provider.reasoning_effort());
+            self.session.apply_limits(crate::session::Limits {
+                reasoning_effort: self.provider.reasoning_effort(),
+                ..self.session.limits()
+            });
             if let Some(effort) = self.session.reasoning_effort().map(str::to_owned)
                 && let Ok(clamped) = self.worker_effort(&effort)
                 && clamped != effort
                 && self.provider.set_reasoning_effort(&clamped).is_ok()
             {
-                self.session
-                    .set_reasoning_effort(self.provider.reasoning_effort());
+                self.session.apply_limits(crate::session::Limits {
+                    reasoning_effort: self.provider.reasoning_effort(),
+                    ..self.session.limits()
+                });
             }
         }
         self.jarvis_default_effort_applied = false;
@@ -1125,7 +1157,10 @@ impl Agent {
         match self.provider.set_reasoning_effort("none") {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
-                self.session.set_reasoning_effort(current.clone());
+                self.session.apply_limits(crate::session::Limits {
+                    reasoning_effort: current.clone(),
+                    ..self.session.limits()
+                });
                 crate::session_effort::record_session_effort(self.session.id(), current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
@@ -1150,10 +1185,16 @@ impl Agent {
         // This choice supersedes any older one still waiting for a busy turn.
         crate::session_effort::clear_pending_effort(self.session.id());
         let current = self.provider.reasoning_effort();
-        self.session.set_reasoning_effort(current.clone());
+        self.session.apply_limits(crate::session::Limits {
+            reasoning_effort: current.clone(),
+            ..self.session.limits()
+        });
         let new_model = self.provider.model();
         if new_model != prev_model {
-            self.session.set_model(Some(self.provider_model()));
+            self.session.apply_route(crate::session::Route {
+                model: Some(self.provider_model()),
+                ..self.session.route()
+            });
             let event = crate::provider::ProviderStateEvent::selected_model(
                 crate::provider::ProviderModelSelectionSource::User,
                 new_model,
@@ -1193,8 +1234,10 @@ impl Agent {
     /// Persist a setting already applied through the live provider handle.
     /// Read the latest value rather than replaying a stale queued request.
     pub(crate) fn persist_current_reasoning_effort(&mut self) -> Result<()> {
-        self.session
-            .set_reasoning_effort(self.provider.reasoning_effort());
+        self.session.apply_limits(crate::session::Limits {
+            reasoning_effort: self.provider.reasoning_effort(),
+            ..self.session.limits()
+        });
         crate::session_effort::record_session_effort(
             self.session.id(),
             self.session.reasoning_effort(),
@@ -1252,7 +1295,10 @@ impl Agent {
     }
 
     pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
-        self.session.set_provider_key(provider_key);
+        self.session.apply_route(crate::session::Route {
+            provider_key: provider_key,
+            ..self.session.route()
+        });
     }
 
     /// Persist the session immediately, including a fresh one with no

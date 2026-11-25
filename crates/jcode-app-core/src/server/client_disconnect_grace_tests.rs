@@ -71,7 +71,10 @@ impl Fixture {
         let registry = Registry::new(provider.clone()).await;
         let mut session = Session::create(None, None);
         if persisted {
-            session.set_title(Some("Explicit saved panel".into()));
+            session.apply_titles(crate::session::Titles {
+                title: Some("Explicit saved panel".into()),
+                ..session.titles()
+            });
             session.save().unwrap();
         }
         let id = session.id().to_owned();

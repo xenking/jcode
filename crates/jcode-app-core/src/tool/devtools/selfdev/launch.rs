@@ -41,8 +41,11 @@ pub fn enter_selfdev_session(
         session::Session::create(None, Some("Self-development session".to_string()))
     };
     session.set_canary("self-dev");
-    session.set_working_dir(Some(repo_dir.display().to_string()));
-    session.set_status(session::SessionStatus::Closed);
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(repo_dir.display().to_string()),
+        ..session.workspace()
+    });
+    session.mark_closed_unregistered();
     session.save()?;
 
     let session_id = session.id().to_owned();

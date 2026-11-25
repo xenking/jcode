@@ -98,7 +98,10 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.is_remote = true;
     app.remote_session_id = Some("session_remote_rename".to_string());
-    app.session.set_title(Some("Generated title".to_string()));
+    app.session.apply_titles(crate::session::Titles {
+        title: Some("Generated title".to_string()),
+        ..app.session.titles()
+    });
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::SessionRenamed {

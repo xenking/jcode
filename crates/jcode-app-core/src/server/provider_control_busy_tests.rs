@@ -207,10 +207,22 @@ async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
     drop(busy_worker);
     let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
     assert!(saved.is_swarm_worker());
-    saved.set_model(Some("test-model-b".into()));
-    saved.set_provider_key(None);
-    saved.set_route_api_method(None);
-    saved.set_reasoning_effort(Some("max".into()));
+    saved.apply_route(crate::session::Route {
+        model: Some("test-model-b".into()),
+        ..saved.route()
+    });
+    saved.apply_route(crate::session::Route {
+        provider_key: None,
+        ..saved.route()
+    });
+    saved.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..saved.route()
+    });
+    saved.apply_limits(crate::session::Limits {
+        reasoning_effort: Some("max".into()),
+        ..saved.limits()
+    });
     let resumed_provider = Arc::new(TestEffortProvider {
         model: StdMutex::new(Some("test-model-b".into())),
         ..Default::default()
@@ -248,7 +260,10 @@ async fn test_agent(
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.set_model(Some(provider.model()));
+    session.apply_route(crate::session::Route {
+        model: Some(provider.model()),
+        ..session.route()
+    });
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         Arc::clone(&provider_dyn),
         registry,
@@ -997,7 +1012,10 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
         None,
         None,
     );
-    session.set_model(Some(provider.model()));
+    session.apply_route(crate::session::Route {
+        model: Some(provider.model()),
+        ..session.route()
+    });
     session.save_prepared().unwrap();
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),

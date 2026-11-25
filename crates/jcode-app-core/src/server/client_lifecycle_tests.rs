@@ -721,7 +721,10 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.set_model(Some("never-ending-stream".to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some("never-ending-stream".to_string()),
+            ..session.route()
+        });
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -1155,7 +1158,10 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id("session_guard".to_string(), None, None);
-        session.set_model(Some("panic-on-fork".to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some("panic-on-fork".to_string()),
+            ..session.route()
+        });
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -1243,7 +1249,10 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
     let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider(Arc::clone(&resume)));
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.set_model(Some("fanout-stream".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("fanout-stream".to_string()),
+        ..session.route()
+    });
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1565,7 +1574,10 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.set_model(Some("complete-immediately".into()));
+    session.apply_route(crate::session::Route {
+        model: Some("complete-immediately".into()),
+        ..session.route()
+    });
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1894,7 +1906,10 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.set_model(Some("complete-immediately".to_string()));
+        session.apply_route(crate::session::Route {
+            model: Some("complete-immediately".to_string()),
+            ..session.route()
+        });
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -2124,7 +2139,10 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
         ] {
             let mut session =
                 crate::session::Session::create_with_id(session_id.to_string(), None, None);
-            session.set_model(Some("panic-on-fork".to_string()));
+            session.apply_route(crate::session::Route {
+                model: Some("panic-on-fork".to_string()),
+                ..session.route()
+            });
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 Arc::clone(&provider),
                 registry.clone(),

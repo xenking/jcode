@@ -298,7 +298,10 @@ pub(super) fn export_group(coordinator: String, epoch: u64, transfer: String) ->
         let stage = stage.join("members").join(&transfer.session_id);
         std::fs::create_dir_all(&stage)?;
         let mut sess = session::Session::load(&transfer.session_id)?;
-        sess.set_migration_epoch(transfer.epoch);
+        sess.apply_lineage(crate::session::Lineage {
+            migration_epoch: transfer.epoch,
+            ..sess.lineage()
+        });
         let session_file = stage.join("session.json");
         let todos = stage.join("todos.json");
         durable_json(&session_file, &sess)?;
@@ -389,7 +392,10 @@ fn return_archive_sessions(
             {
                 bail!("group return archive failed transcript or todo verification for {id}");
             }
-            sess.set_working_dir(manifest.repo.as_ref().map(|repo| repo.working_dir.clone()));
+            sess.apply_workspace(crate::session::Workspace {
+                working_dir: manifest.repo.as_ref().map(|repo| repo.working_dir.clone()),
+                ..sess.workspace()
+            });
             Ok(sess)
         })
         .collect()

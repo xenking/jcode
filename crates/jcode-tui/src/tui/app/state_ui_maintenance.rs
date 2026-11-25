@@ -575,9 +575,15 @@ Do not force-push or discard local commits without confirming they are already u
     ) -> anyhow::Result<bool> {
         let mut session = crate::session::Session::create(Some(self.session.id().to_owned()), None);
         if let Some(dir) = repo_dir {
-            session.set_working_dir(Some(dir.display().to_string()));
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: Some(dir.display().to_string()),
+                ..session.workspace()
+            });
         } else {
-            session.set_working_dir(self.session.working_dir().map(str::to_owned));
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: self.session.working_dir().map(str::to_owned),
+                ..session.workspace()
+            });
         }
         let session_id = session.id().to_owned();
         let _ = session.save();

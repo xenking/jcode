@@ -21,6 +21,17 @@ impl Session {
         }
     }
 
+    /// Mark closed in memory only, for a session that never held presence
+    /// markers (a fork, a transfer copy or an import).
+    pub fn mark_closed_unregistered(&mut self) {
+        self.status = SessionStatus::Closed;
+    }
+
+    /// Mark session as replaced by a reloaded server.
+    pub fn mark_reloaded(&mut self) {
+        self.status = SessionStatus::Reloaded;
+    }
+
     /// Mark session as crashed
     pub fn mark_crashed(&mut self, message: Option<String>) {
         self.status = SessionStatus::Crashed { message };

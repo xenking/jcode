@@ -30,7 +30,10 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         None,
         Some("busy model catalog".to_string()),
     );
-    session.set_model(Some("persisted-model".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("persisted-model".to_string()),
+        ..session.route()
+    });
     session.save().expect("save session");
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));

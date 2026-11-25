@@ -519,7 +519,10 @@ impl App {
             Ok(()) => {
                 let new_model = self.provider.model();
                 if new_model != prev_model {
-                    self.session.set_model(Some(new_model));
+                    self.session.apply_route(crate::session::Route {
+                        model: Some(new_model),
+                        ..self.session.route()
+                    });
                     self.invalidate_model_picker_cache();
                     crate::tui::ui::prepare::invalidate_header_prep_cache();
                 }
@@ -1005,7 +1008,7 @@ impl App {
     /// the compaction manager lock must `drop` it before calling this.
     fn reset_state_for_compaction_retry(&mut self) {
         self.provider_session_id = None;
-        self.session.set_provider_session_id(None);
+        self.session.forget_provider_session();
         self.context_warning_shown = false;
         self.clear_streaming_render_state();
         self.stream_buffer.clear();
@@ -1381,7 +1384,7 @@ impl App {
 
         if self.provider_session_id.is_some() || self.session.provider_session_id().is_some() {
             self.provider_session_id = None;
-            self.session.set_provider_session_id(None);
+            self.session.forget_provider_session();
             actions.push("Reset provider session resume state.".to_string());
         }
 

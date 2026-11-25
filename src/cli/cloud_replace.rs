@@ -424,8 +424,14 @@ mod tests {
         std::fs::write(cloud.path().join("cloud-only"), "unreturned work").unwrap();
         let id = "recover-session";
         let mut sess = session::Session::create_with_id(id.into(), None, None);
-        sess.set_working_dir(Some(cloud.path().to_string_lossy().into_owned()));
-        sess.set_migration_epoch(1);
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(cloud.path().to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
+        sess.apply_lineage(crate::session::Lineage {
+            migration_epoch: 1,
+            ..sess.lineage()
+        });
         sess.save_prepared().unwrap();
         storage::write_session_lease(&storage::SessionLease {
             session_id: id.into(),
@@ -508,8 +514,14 @@ mod tests {
         }
         for (id, require_completion) in [("legacy-client", false), ("new-client", true)] {
             let mut sess = session::Session::create_with_id(id.into(), None, None);
-            sess.set_working_dir(None);
-            sess.set_migration_epoch(1);
+            sess.apply_workspace(crate::session::Workspace {
+                working_dir: None,
+                ..sess.workspace()
+            });
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: 1,
+                ..sess.lineage()
+            });
             sess.save_prepared().unwrap();
             storage::write_session_lease(&storage::SessionLease {
                 session_id: id.into(),
@@ -608,7 +620,10 @@ mod tests {
         );
         storage::remove_session_lease("different-session");
         let mut sess = session::Session::create_with_id("live-other-session".into(), None, None);
-        sess.set_working_dir(Some(root.join("nested").to_string_lossy().into_owned()));
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(root.join("nested").to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
         sess.save().unwrap();
         storage::register_active_pid(sess.id(), std::process::id());
         assert!(

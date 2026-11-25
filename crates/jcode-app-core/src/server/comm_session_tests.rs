@@ -255,7 +255,10 @@ async fn swarm_worker_control_keeps_busy_worker_identity_and_respects_owner_poli
     });
     let worktree = home.path().to_str().unwrap();
     let mut session = crate::session::Session::create_with_id(worker.into(), None, None);
-    session.set_working_dir(Some(worktree.into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(worktree.into()),
+        ..session.workspace()
+    });
     for index in 0..30 {
         session.add_message(
             if index % 2 == 0 {
@@ -392,8 +395,14 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.set_model(Some("mock".to_string()));
-    session.set_working_dir(Some(working_dir.to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("mock".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(working_dir.to_string()),
+        ..session.workspace()
+    });
     let mut agent = Agent::new_with_session(provider, registry, session, None);
     agent.set_working_dir(working_dir);
     Arc::new(Mutex::new(agent))
@@ -509,7 +518,10 @@ async fn resolve_spawn_working_dir_uses_persisted_session_when_agent_busy() {
     let home = tempfile::TempDir::new().unwrap();
     crate::env::set_var("JCODE_HOME", home.path());
     let mut session = crate::session::Session::create_with_id("cwd_busy".into(), None, None);
-    session.set_working_dir(Some("/tmp/persisted-project".into()));
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/tmp/persisted-project".into()),
+        ..session.workspace()
+    });
     session.save_prepared().unwrap();
     let agent = test_agent_with_working_dir("cwd_busy", "/tmp/persisted-project").await;
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
@@ -1278,9 +1290,18 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Persist after the agent is built so it reflects the authoritative on-disk
     // snapshot the spawn path will read when the agent lock is unavailable.
     let mut session = crate::session::Session::create_with_id("coord_busy".to_string(), None, None);
-    session.set_model(Some("claude-opus-4-6".to_string()));
-    session.set_provider_key(Some("claude-api".to_string()));
-    session.set_route_api_method(Some("claude-api".to_string()));
+    session.apply_route(crate::session::Route {
+        model: Some("claude-opus-4-6".to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("claude-api".to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        route_api_method: Some("claude-api".to_string()),
+        ..session.route()
+    });
     session
         .save_prepared()
         .expect("persist coordinator session");
@@ -1771,9 +1792,18 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     crate::env::set_var("JCODE_HOME", temp.path());
     let agent = test_agent_with_working_dir("routing_busy", "/tmp/coord").await;
     let mut session = crate::session::Session::create_with_id("routing_busy".into(), None, None);
-    session.set_model(Some("claude-opus-4-6".into()));
-    session.set_provider_key(Some("claude-api".into()));
-    session.set_route_api_method(Some("claude-api".into()));
+    session.apply_route(crate::session::Route {
+        model: Some("claude-opus-4-6".into()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("claude-api".into()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        route_api_method: Some("claude-api".into()),
+        ..session.route()
+    });
     session.set_canary("self-dev");
     session
         .set_agent_model_override("review", Some("review-override".into()))

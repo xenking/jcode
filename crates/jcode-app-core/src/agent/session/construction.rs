@@ -79,7 +79,10 @@ impl Agent {
         };
         let tool_selection = crate::config::config().tools.selection();
         if let Some(working_dir) = working_dir {
-            session.set_working_dir(Some(working_dir.to_string()));
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: Some(working_dir.to_string()),
+                ..session.workspace()
+            });
         }
         mark("session", &mut lap);
         let mut agent = Self::build_base(
@@ -95,10 +98,14 @@ impl Agent {
         // session never touches the marker files.
         agent.session.mark_active_unregistered();
         mark("mark_active", &mut lap);
-        agent.session.set_model(Some(agent.provider_model()));
-        agent
-            .session
-            .set_provider_key(agent.provider_key_for_new_session());
+        agent.session.apply_route(crate::session::Route {
+            model: Some(agent.provider_model()),
+            ..agent.session.route()
+        });
+        agent.session.apply_route(crate::session::Route {
+            provider_key: agent.provider_key_for_new_session(),
+            ..agent.session.route()
+        });
         agent.reconcile_explicit_provider_pin_route();
         agent.restore_speed_from_session();
         mark("provider", &mut lap);
@@ -180,9 +187,10 @@ impl Agent {
         // begin_concurrency_tracking below writes the presence markers.
         agent.session.mark_active_unregistered();
         if agent.session.provider_key().is_none() {
-            agent
-                .session
-                .set_provider_key(agent.provider_key_for_new_session());
+            agent.session.apply_route(crate::session::Route {
+                provider_key: agent.provider_key_for_new_session(),
+                ..agent.session.route()
+            });
         }
         agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();

@@ -233,9 +233,15 @@ fn isolated_latency_child() {
     }
     if mode == "overlap" || mode == "join-error" {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.set_working_dir(Some(root.to_string_lossy().into_owned()));
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(root.to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
         if mode == "join-error" {
-            sess.set_route_api_method(Some("openai-oauth@".into()));
+            sess.apply_route(crate::session::Route {
+                route_api_method: Some("openai-oauth@".into()),
+                ..sess.route()
+            });
         }
         sess.save_prepared().unwrap();
         let error = format!("{:#}", run_move(None, &target, true, true).unwrap_err());
@@ -265,7 +271,10 @@ fn isolated_latency_child() {
     }
     let result = if mode.starts_with("prepare") {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.set_working_dir(Some(root.to_string_lossy().into_owned()));
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(root.to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
         sess.save_prepared().unwrap();
         storage::mark_streaming("latency-session");
         assert!(storage::streaming_session_ids().contains(&"latency-session".to_string()));

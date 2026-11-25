@@ -4,7 +4,10 @@ use super::*;
 async fn working_directory_moves_preserve_first_active_session_origin() {
     let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
     agent.session.messages_mut_for_tests().clear();
-    agent.session.set_working_dir(Some("/daemon".into()));
+    agent.session.apply_workspace(crate::session::Workspace {
+        working_dir: Some("/daemon".into()),
+        ..agent.session.workspace()
+    });
     agent.set_working_dir("/projects/start");
     assert_eq!(
         agent.session.original_working_dir(),
@@ -51,7 +54,10 @@ async fn saved_account_observed_binding_is_persisted() {
     crate::config::Config::invalidate_cache();
     let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.set_route_api_method(None);
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..agent.session.route()
+    });
     agent.session.save_prepared().unwrap();
     agent.sync_bound_account_route();
     assert_eq!(agent.session.route_api_method(), Some("openai-oauth@work"));
@@ -75,9 +81,10 @@ async fn saved_account_observed_binding_is_persisted() {
         .is_none()
     );
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent
-        .session
-        .set_route_api_method(Some("openai-oauth@personal".to_string()));
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-oauth@personal".to_string()),
+        ..agent.session.route()
+    });
     agent.sync_bound_account_route();
     assert_eq!(
         agent.session.route_api_method(),
