@@ -115,7 +115,7 @@ fn main() -> anyhow::Result<()> {
             "session": args.session,
         },
         "counts": {
-            "session_messages": session.messages.len(),
+            "session_messages": session.message_count(),
             "display_messages": display_messages.len(),
             "resident_provider_messages": resident_provider_messages.len(),
             "side_panel_pages": side_panel.pages.len(),

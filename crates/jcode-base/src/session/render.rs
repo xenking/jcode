@@ -380,7 +380,7 @@ pub fn render_images(session: &Session) -> Vec<RenderedImage> {
 }
 
 pub fn has_rendered_images(session: &Session) -> bool {
-    session.messages.iter().any(|msg| {
+    session.iter_messages().any(|msg| {
         msg.content
             .iter()
             .any(|block| matches!(block, ContentBlock::Image { .. }))
@@ -392,8 +392,7 @@ pub fn summarize_tool_calls(
     limit: usize,
 ) -> Vec<crate::protocol::ToolCallSummary> {
     let mut calls: Vec<_> = session
-        .messages
-        .iter()
+        .iter_messages()
         .rev()
         .flat_map(|msg| newest_message_tool_calls(msg).take(limit))
         .take(limit)

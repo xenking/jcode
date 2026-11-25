@@ -477,14 +477,14 @@ impl BenchState {
         let session = jcode::replay::load_session(id_or_path)
             .with_context(|| format!("failed to load session '{}'", id_or_path))?;
         let mut side_panel =
-            jcode::side_panel::snapshot_for_session(&session.id).unwrap_or_default();
+            jcode::side_panel::snapshot_for_session(&session.id()).unwrap_or_default();
         if side_panel.pages.is_empty() {
             side_panel = reconstruct_side_panel_snapshot_from_session(&session);
         }
         if matches!(mode, BenchMode::SidePanel) && side_panel.pages.is_empty() {
             anyhow::bail!(
                 "session '{}' has no side-panel content in storage or recoverable tool history",
-                session.id
+                session.id()
             );
         }
 
@@ -495,7 +495,7 @@ impl BenchState {
                 anyhow::bail!(
                     "side-panel page '{}' not found in session '{}'",
                     page_id,
-                    session.id
+                    session.id()
                 );
             }
         } else if side_panel.focused_page_id.is_none() {
@@ -525,13 +525,11 @@ impl BenchState {
             context_info: ContextInfo::default(),
             info_widget: InfoWidgetData::default(),
             provider_name: session
-                .provider_key
-                .clone()
-                .unwrap_or_else(|| "session".to_string()),
+                .provider_key()
+                .map_or_else(|| "session".to_string(), str::to_owned),
             provider_model: session
-                .model
-                .clone()
-                .unwrap_or_else(|| "session-replay".to_string()),
+                .model()
+                .map_or_else(|| "session-replay".to_string(), str::to_owned),
             started_at: Instant::now(),
             diff_pane_scroll: usize::MAX,
             diff_pane_scroll_x: 0,
@@ -540,7 +538,7 @@ impl BenchState {
             bench_file_paths: Vec::new(),
             linked_refresh_path: None,
             linked_refresh_generation: 0,
-            session_source: Some(session.id),
+            session_source: Some(session.id().to_string()),
             copy_selection_range: None,
             copy_selection_mode: matches!(mode, BenchMode::CopySelection),
         })
@@ -590,10 +588,10 @@ impl Drop for BenchState {
 }
 
 fn session_to_display_messages(session: &Session, max_messages: usize) -> Vec<DisplayMessage> {
-    let start = session.messages.len().saturating_sub(max_messages);
+    let start = session.message_count().saturating_sub(max_messages);
     let mut out = Vec::new();
 
-    for message in session.messages.iter().skip(start) {
+    for message in session.iter_messages_from(start) {
         let text = stored_message_visible_text(message);
         if text.trim().is_empty() {
             continue;
@@ -615,7 +613,7 @@ fn session_to_display_messages(session: &Session, max_messages: usize) -> Vec<Di
     if out.is_empty() {
         out.push(DisplayMessage::assistant(format!(
             "Loaded session {} for side-panel benchmarking.",
-            session.id
+            session.id()
         )));
     }
 
@@ -661,7 +659,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
     let mut focused_page_id: Option<String> = None;
     let mut revision = 1u64;
 
-    for message in &session.messages {
+    for message in session.iter_messages() {
         for block in &message.content {
             let ContentBlock::ToolUse { name, input, .. } = block else {
                 continue;
@@ -695,7 +693,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
                         .or_insert_with(|| SidePanelPage {
                             id: page_id.to_string(),
                             title: title.clone(),
-                            file_path: format!("session://{}/{}.md", session.id, page_id),
+                            file_path: format!("session://{}/{}.md", session.id(), page_id),
                             format: SidePanelPageFormat::Markdown,
                             pdf_data: None,
                             source: SidePanelPageSource::Managed,
