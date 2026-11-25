@@ -13,8 +13,16 @@ pub(in crate::tui::app) struct TurnFence {
 }
 
 impl TurnFence {
-    pub(in crate::tui::app) fn diagnostic_identity(&self) -> Option<&TurnIdentity> {
-        self.active.as_ref()
+    /// Runtime generation of the active turn, for failover diagnostics.
+    pub(in crate::tui::app) fn active_runtime_generation(&self) -> Option<String> {
+        self.active
+            .as_ref()
+            .map(|turn| turn.runtime_generation.clone())
+    }
+
+    /// Id of the active turn, for failover diagnostics.
+    pub(in crate::tui::app) fn active_turn_id(&self) -> Option<String> {
+        self.active.as_ref().map(|turn| turn.turn_id.to_string())
     }
 
     pub(super) fn has_active_turn(&self) -> bool {

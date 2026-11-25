@@ -63,14 +63,32 @@ impl ColorReports {
         self.body.starts_with("11;rgb:") || self.body.starts_with("11;rgba:")
     }
 
-    /// A background query was just written, so its reply is due by `deadline`.
-    fn expect_reply_until(&mut self, deadline: Instant) {
-        self.expecting_until = Some(deadline);
+    /// Ask the terminal for its background color without waiting for the reply.
+    /// A reply is then expected until `REPORT_TIMEOUT` has passed.
+    fn query_background(&mut self, now: Instant, passthrough: bool) {
+        let query = background_query(passthrough);
+        let mut stdout = io::stdout().lock();
+        if stdout
+            .write_all(query)
+            .and_then(|()| stdout.flush())
+            .is_ok()
+        {
+            self.expecting_until = Some(now + REPORT_TIMEOUT);
+        }
     }
 
-    /// Theme mode parsed from the latest complete report, consumed once.
-    fn take_detected_mode(&mut self) -> Option<ThemeMode> {
-        self.mode.take()
+    /// Switch the app theme to the one the latest complete report implies.
+    /// Returns whether the theme changed, which needs a full redraw.
+    fn apply_detected_theme(&mut self) -> bool {
+        let Some(mode) = self.mode.take() else {
+            return false;
+        };
+        if !super::theme_detect::auto_theme_enabled() || mode == jcode_tui_style::theme_mode() {
+            return false;
+        }
+        jcode_tui_style::set_theme_mode(mode);
+        THEME_REDRAW_PENDING.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Next input event that is not part of a color report.
@@ -267,7 +285,7 @@ impl RuntimeTheme {
             // tmux consumes outer-terminal color replies to update its cache.
             // Read that refreshed cache on the next timer tick, without blocking
             // the input stream or competing for stdin.
-            self.write_background_query(now, false);
+            self.reports.query_background(now, false);
             return;
         }
         let interval = if focused {
@@ -286,29 +304,11 @@ impl RuntimeTheme {
         if passthrough {
             self.cache_query_at = Some(now + PREFIX_TIMEOUT);
         }
-        self.write_background_query(now, passthrough);
-    }
-
-    fn write_background_query(&mut self, now: Instant, passthrough: bool) {
-        // Query only the background. No stdin read and no blocking response wait.
-        let query = background_query(passthrough);
-        let mut stdout = io::stdout().lock();
-        if stdout
-            .write_all(query)
-            .and_then(|()| stdout.flush())
-            .is_ok()
-        {
-            self.reports.expect_reply_until(now + REPORT_TIMEOUT);
-        }
+        self.reports.query_background(now, passthrough);
     }
 
     fn take_event(&mut self) -> Option<Event> {
-        if let Some(mode) = self.reports.take_detected_mode()
-            && super::theme_detect::auto_theme_enabled()
-            && mode != jcode_tui_style::theme_mode()
-        {
-            jcode_tui_style::set_theme_mode(mode);
-            THEME_REDRAW_PENDING.store(true, Ordering::Relaxed);
+        if self.reports.apply_detected_theme() {
             // Reuse the existing resize invalidation/redraw path without inventing
             // a keypress or changing focus self. The actual dimensions stay intact.
             if let Ok((width, height)) = crossterm::terminal::size() {

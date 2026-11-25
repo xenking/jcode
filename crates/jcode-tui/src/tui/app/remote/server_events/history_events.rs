@@ -506,7 +506,7 @@ pub(super) fn handle_history_event(
     let should_apply_history_payload = session_changed || !remote.has_loaded_history();
     if should_apply_history_payload {
         let activity = if app.remote_turn_fence.scoped() {
-            app.remote_turn_fence.diagnostic_identity().map(|_| {
+            app.remote_turn_fence.has_active_turn().then(|| {
                 crate::protocol::SessionActivitySnapshot {
                     is_processing: true,
                     current_tool_name: activity

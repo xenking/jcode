@@ -202,15 +202,13 @@ impl App {
             (
                 "runtime_generation",
                 self.remote_turn_fence
-                    .diagnostic_identity()
-                    .map(|turn| turn.runtime_generation.clone())
+                    .active_runtime_generation()
                     .unwrap_or_else(|| "none".into()),
             ),
             (
                 "turn_id",
                 self.remote_turn_fence
-                    .diagnostic_identity()
-                    .map(|turn| turn.turn_id.to_string())
+                    .active_turn_id()
                     .unwrap_or_else(|| "none".into()),
             ),
             (

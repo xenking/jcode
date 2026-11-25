@@ -792,10 +792,12 @@ impl SessionPicker {
         hit
     }
 
-    /// Record the session the picker was opened from so it can be labeled in
-    /// the list (most useful in the Active view).
-    pub fn set_current_session_id(&mut self, session_id: Option<String>) {
-        self.current_session_id = session_id;
+    /// Record where the picker was opened from: the working directory (so
+    /// sessions sharing it are highlighted) and the live session (so it is
+    /// labeled in the list, most useful in the Active view).
+    pub fn opened_from(&mut self, dir: Option<String>, session_id: String) {
+        self.set_current_dir(dir);
+        self.current_session_id = Some(session_id);
     }
 
     /// Whether this entry is the session the picker was opened from.
@@ -1790,15 +1792,11 @@ impl SessionPicker {
         self.run_with_session_updates(None)
     }
 
-    pub(crate) fn set_cloud_warning(&mut self, warning: String) {
-        self.cloud_warning = Some(warning);
-    }
-
-    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
+    pub(crate) fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
         let (sessions, finished) = match update {
             SessionListUpdate::Cached(sessions) => (sessions, false),
             SessionListUpdate::CloudUnavailable(warning) => {
-                self.set_cloud_warning(warning);
+                self.cloud_warning = Some(warning);
                 return Ok(false);
             }
             SessionListUpdate::Fresh(sessions) => (sessions?, true),

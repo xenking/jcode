@@ -21,7 +21,25 @@ pub(crate) struct WorkspaceClientState {
     map: WorkspaceMapModel,
     imported_server_sessions: bool,
     pending_split_target: Option<WorkspaceSplitTarget>,
-    pending_resume_session: Option<String>,
+    pending_resume: ResumeInbox,
+}
+
+/// Session id the workspace asked the run loop to switch to, delivered once.
+#[derive(Debug, Clone, Default)]
+struct ResumeInbox(Option<String>);
+
+impl ResumeInbox {
+    fn post(&mut self, session_id: String) {
+        self.0 = Some(session_id);
+    }
+
+    fn take(&mut self) -> Option<String> {
+        self.0.take()
+    }
+
+    fn clear(&mut self) {
+        self.0 = None;
+    }
 }
 
 impl WorkspaceClientState {
@@ -41,7 +59,7 @@ impl WorkspaceClientState {
     pub(crate) fn disable(&mut self) {
         self.enabled = false;
         self.pending_split_target = None;
-        self.pending_resume_session = None;
+        self.pending_resume.clear();
     }
 
     #[cfg(test)]
@@ -86,11 +104,11 @@ impl WorkspaceClientState {
     }
 
     pub(crate) fn take_pending_resume_session(&mut self) -> Option<String> {
-        self.pending_resume_session.take()
+        self.pending_resume.take()
     }
 
     pub(crate) fn queue_resume_session(&mut self, session_id: String) {
-        self.pending_resume_session = Some(session_id);
+        self.pending_resume.post(session_id);
     }
 
     pub(crate) fn handle_split_response(&mut self, new_session_id: &str) -> bool {
@@ -112,7 +130,7 @@ impl WorkspaceClientState {
             WorkspaceSessionTile::new(new_session_id.to_string()),
         );
         let _ = self.map.focus_session_by_id(new_session_id);
-        self.pending_resume_session = Some(new_session_id.to_string());
+        self.pending_resume.post(new_session_id.to_string());
         true
     }
 

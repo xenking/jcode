@@ -920,7 +920,7 @@ pub(super) fn queue_review_spawn_remote(
 pub(super) fn queue_autojudge_remote(app: &mut App) {
     if !app.autojudge_enabled
         || app.pending_split_request
-        || app.pending_split_startup_message.is_some()
+        || app.split_startup_staged()
     {
         return;
     }

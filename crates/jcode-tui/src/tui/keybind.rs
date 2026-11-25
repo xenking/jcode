@@ -415,8 +415,8 @@ impl ToggleBinding {
     }
 
     /// The configured chord, or `None` when the toggle is disabled.
-    pub fn binding(&self) -> Option<&KeyBinding> {
-        self.binding.as_ref()
+    pub fn chord(&self) -> Option<KeyBinding> {
+        self.binding.clone()
     }
 }
 
@@ -489,7 +489,8 @@ pub(crate) fn side_panel_toggle_key_label() -> String {
 pub(crate) fn diagram_pane_visibility_key_label() -> String {
     load_toggle_keys()
         .diagram_pane_visibility
-        .binding()
+        .chord()
+        .as_ref()
         .map(format_binding)
         .unwrap_or_else(|| jcode_tui_core::keybind::alt_chord("Shift+M"))
 }
@@ -701,7 +702,7 @@ mod tests {
         assert!(!remapped.matches(KeyCode::Char('p'), KeyModifiers::CONTROL));
 
         let disabled = ToggleBinding::load_with_default("", default);
-        assert!(disabled.binding().is_none());
+        assert!(disabled.chord().is_none());
         assert!(!disabled.matches(KeyCode::Char('p'), KeyModifiers::CONTROL));
     }
 

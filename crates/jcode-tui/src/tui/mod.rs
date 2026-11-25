@@ -249,7 +249,7 @@ pub trait TuiState {
         false
     }
     /// Live build telemetry displayed below the pinned todo band.
-    fn justrust_status(&self) -> Option<&justrust_status::StatusRow> {
+    fn justrust_status(&self) -> Option<justrust_status::StatusRow> {
         None
     }
     /// Running and recently completed background tasks for the session.

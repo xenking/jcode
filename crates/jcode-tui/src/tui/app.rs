@@ -1909,7 +1909,12 @@ pub(crate) use inert_runtime_provider::*;
 #[path = "app/kv_cache_notices.rs"]
 mod kv_cache_notices;
 
-impl App {}
+impl App {
+    /// Whether a split child launch is staged and still owes its startup message.
+    fn split_startup_staged(&self) -> bool {
+        self.pending_split_startup_message.is_some()
+    }
+}
 
 // The cache-relevant projection lives in `jcode-message-types` (re-exported
 // through `crate::message`) so this local path and the server event path in

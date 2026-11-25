@@ -39,7 +39,7 @@ impl App {
         self.prepare_cloud_environment(remote).await?;
         if crate::tui::jarvis::enabled()
             && !remote.jarvis_tools_configured
-            && remote.local_tools_request.is_none()
+            && !remote.has_local_tools_request()
             && self.remote_session_id.is_some()
             && remote.has_loaded_history()
             && !self.is_processing

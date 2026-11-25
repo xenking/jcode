@@ -116,7 +116,7 @@ fn test_running_rows_show_spinner_state_and_ready_rows_show_age() {
 fn test_current_session_row_is_labeled() {
     let session = make_session("session_self", "self", false, SessionStatus::Active);
     let mut picker = SessionPicker::new(vec![session.clone()]);
-    picker.set_current_session_id(Some("session_self".to_string()));
+    picker.opened_from(None, "session_self".to_string());
 
     let lines = picker.render_session_item_lines(&session, false);
     let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
@@ -205,7 +205,7 @@ fn test_recent_window_close_expires_and_rejects_future_timestamps_and_current_se
         .recent_window_closures
         .insert(session.id.clone(), Utc::now());
     assert!(picker.session_recently_closed(&session));
-    picker.set_current_session_id(Some(session.id.clone()));
+    picker.opened_from(None, session.id.clone());
     assert!(!picker.session_recently_closed(&session));
 }
 

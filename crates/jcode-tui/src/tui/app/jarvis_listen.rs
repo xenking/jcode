@@ -694,7 +694,7 @@ impl App {
                     listener
                         .history
                         .command(recording, &cmd, listener.history_request, blocked);
-                if let Some(caption) = listener.history.caption.take() {
+                if let Some(caption) = listener.history.take_caption() {
                     self.set_status_notice(format!("Replaying local audio: {caption}"));
                 } else {
                     self.set_status_notice(notice);

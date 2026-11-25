@@ -11,7 +11,7 @@ pub(super) struct HistoryControl {
     player: Option<(Child, Instant)>,
     last: &'static str,
     commands: u64,
-    pub(super) caption: Option<String>,
+    caption: Option<String>,
 }
 impl Drop for HistoryControl {
     fn drop(&mut self) {
@@ -29,6 +29,12 @@ impl Drop for HistoryControl {
     }
 }
 impl HistoryControl {
+    /// Caption of the clip the last replay started, once.
+    pub(super) fn take_caption(&mut self) -> Option<String> {
+        self.caption.take()
+    }
+
+
     fn stop(&mut self) {
         if let Some((mut child, _)) = self.player.take() {
             if let Err(err) = child.kill()

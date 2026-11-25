@@ -8,6 +8,16 @@ fn identity(generation: &str, turn_id: u64) -> crate::protocol::TurnIdentity {
         turn_id,
     }
 }
+fn assert_active_turn(app: &App, generation: &str, turn_id: u64) {
+    assert_eq!(
+        app.remote_turn_fence.active_runtime_generation().as_deref(),
+        Some(generation)
+    );
+    assert_eq!(
+        app.remote_turn_fence.active_turn_id(),
+        Some(turn_id.to_string())
+    );
+}
 fn start(app: &mut App, remote: &mut RemoteConnection, generation: &str, turn_id: u64) {
     handle_server_event(
         app,
@@ -307,10 +317,7 @@ fn local_send_rejection_preserves_running_observer_and_restores_prompt() {
     assert_eq!(app.streaming_text(), "external partial");
     assert_eq!(app.input, "rejected local prompt");
     assert_eq!(app.last_stream_activity, activity);
-    assert_eq!(
-        app.remote_turn_fence.diagnostic_identity(),
-        Some(&identity("runtime", 1))
-    );
+    assert_active_turn(&app, "runtime", 1);
     assert!(
         app.display_messages
             .last()
@@ -408,10 +415,7 @@ fn explicit_session_switch_can_revisit_previous_runtime() {
             },
             &mut remote,
         );
-        assert_eq!(
-            app.remote_turn_fence.diagnostic_identity(),
-            Some(&identity(generation, 1))
-        );
+        assert_active_turn(&app, generation, 1);
     }
 }
 
@@ -484,10 +488,7 @@ fn old_runtime_start_output_and_terminal_rejected_after_bootstrap() {
     );
     assert!(app.is_processing);
     assert!(app.streaming_text().is_empty());
-    assert_eq!(
-        app.remote_turn_fence.diagnostic_identity(),
-        Some(&identity("new", 1))
-    );
+    assert_active_turn(&app, "new", 1);
 }
 
 #[test]

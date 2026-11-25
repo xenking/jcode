@@ -268,8 +268,8 @@ impl crate::tui::TuiState for App {
         self.pinned_todos_expanded
     }
 
-    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
-        self.justrust_status.row()
+    fn justrust_status(&self) -> Option<crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.row_snapshot()
     }
 
     fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {

@@ -179,8 +179,8 @@ impl crate::tui::TuiState for TestState {
     fn client_focused(&self) -> bool {
         !self.unfocused
     }
-    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
-        self.justrust_status.as_ref()
+    fn justrust_status(&self) -> Option<crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.clone()
     }
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload.as_deref()

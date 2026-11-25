@@ -9,8 +9,7 @@ impl App {
         // Even the cached list can contain tens of MB of search text. Never
         // deserialize it on the input thread before showing the overlay.
         let mut picker = SessionPicker::loading();
-        picker.set_current_dir(current_dir);
-        picker.set_current_session_id(Some(super::super::commands::active_session_id(self)));
+        picker.opened_from(current_dir, super::super::commands::active_session_id(self));
         picker.apply_resume_project_scope_default();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Resume;
@@ -31,8 +30,7 @@ impl App {
         }
         let current_dir = self.session.working_dir.clone();
         let mut picker = SessionPicker::loading();
-        picker.set_current_dir(current_dir);
-        picker.set_current_session_id(Some(super::super::commands::active_session_id(self)));
+        picker.opened_from(current_dir, super::super::commands::active_session_id(self));
         picker.activate_active_filter();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::ActiveSessions;
@@ -128,9 +126,10 @@ impl App {
         match self.session_picker_mode {
             SessionPickerMode::Resume => {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-                picker.set_current_dir(self.session.working_dir.clone());
-                picker
-                    .set_current_session_id(Some(super::super::commands::active_session_id(self)));
+                picker.opened_from(
+                    self.session.working_dir.clone(),
+                    super::super::commands::active_session_id(self),
+                );
                 picker.apply_resume_project_scope_default();
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Sessions loaded");
@@ -146,9 +145,10 @@ impl App {
             }
             SessionPickerMode::ActiveSessions => {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-                picker.set_current_dir(self.session.working_dir.clone());
-                picker
-                    .set_current_session_id(Some(super::super::commands::active_session_id(self)));
+                picker.opened_from(
+                    self.session.working_dir.clone(),
+                    super::super::commands::active_session_id(self),
+                );
                 picker.activate_active_filter();
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Active sessions loaded");
@@ -179,7 +179,9 @@ impl App {
         match recv_result {
             Ok(session_picker::SessionListUpdate::CloudUnavailable(warning)) => {
                 if picker_active && let Some(picker) = self.session_picker_overlay.as_ref() {
-                    picker.borrow_mut().set_cloud_warning(warning);
+                    let _ = picker
+                        .borrow_mut()
+                        .apply_session_list_update(session_picker::SessionListUpdate::CloudUnavailable(warning));
                     return true;
                 }
                 false

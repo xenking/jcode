@@ -28,6 +28,11 @@ impl RemoteConnection {
         Ok(())
     }
 
+    /// Whether a local capability probe is awaiting the server's answer.
+    pub(crate) fn has_local_tools_request(&self) -> bool {
+        self.local_tools_request.is_some()
+    }
+
     pub(crate) fn finish_local_tools_request(&mut self, id: u64, accepted: bool) -> bool {
         if self.local_tools_request != Some(id) {
             return false;
