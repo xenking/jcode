@@ -12,6 +12,11 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     }
 }
 
+/// A spent allowance may move to another model. An auth error may not: it can
+/// only rotate credentials for the selected model, so these routing tests use a
+/// quota error to exercise cross-provider selection.
+const USAGE_EXHAUSTED_ERROR: &str = "429 usage limit reached; quota exhausted";
+
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
         speed_options: Vec::new(),
@@ -307,7 +312,7 @@ fn test_remote_immediate_failover_dispatches_once_and_suppresses_exhaustion_spam
 }
 
 #[test]
-fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
+fn test_remote_generic_quota_error_arms_countdown_for_exact_pool_route() {
     with_temp_jcode_home(|| {
         write_test_config(
             "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
@@ -319,7 +324,7 @@ fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         // Discard the fixture's staged switch before testing a fresh error.
         app.automatic_failover_targets.clear();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert!(app.pending_fallback_offer.is_none());
         let pending = app.pending_provider_failover.as_ref().unwrap();
         assert_eq!(
@@ -626,7 +631,7 @@ fn test_automatic_failover_refuses_opus_target_and_skips_ranked_opus() {
         }
         .save()
         .unwrap();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         let target = app
             .pending_provider_failover
             .as_ref()
@@ -684,7 +689,7 @@ fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
         .save()
         .unwrap();
         assert!(
-            app.offer_fallback_after_error_with_payload("401 invalid API key", payload.clone())
+            app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload.clone())
         );
         assert_eq!(
             app.pending_provider_failover
@@ -700,7 +705,7 @@ fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
         write_test_config(
             "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\nfailover_excluded_models = []\n",
         );
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert_eq!(
             app.pending_provider_failover
                 .as_ref()
@@ -738,7 +743,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         };
         pool.save().unwrap();
         assert!(
-            app.offer_fallback_after_error_with_payload("401 invalid API key", payload.clone())
+            app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload.clone())
         );
         assert_eq!(
             app.pending_provider_failover
@@ -753,7 +758,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         pool.members.retain(|key| key != "anthropic-api");
         pool.excluded.push("anthropic-api".into());
         pool.save().unwrap();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert!(app.pending_provider_failover.is_none());
         // Unified router: pooled accounts outrank excluded ones even for
         // the manual offer; the excluded route stays reachable only when no
@@ -792,7 +797,7 @@ fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
         }
         .save()
         .unwrap();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert_eq!(
             app.pending_provider_failover
                 .as_ref()
