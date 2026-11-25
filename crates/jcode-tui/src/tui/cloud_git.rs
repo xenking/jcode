@@ -216,8 +216,7 @@ pub(crate) async fn bounded_output_for(
     limit: usize,
     operation: WorkspaceOperation,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
-    let mut timing = super::cloud_latency::Span::new("workspace_command");
-    timing.during(operation.label());
+    let timing = super::cloud_latency::Span::new("workspace_command").during(operation.label());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

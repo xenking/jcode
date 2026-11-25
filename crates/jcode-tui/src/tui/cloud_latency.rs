@@ -53,8 +53,10 @@ impl Span {
             ..Self::new("request_write")
         }
     }
-    pub(super) fn during(&mut self, operation: &'static str) {
+    #[must_use]
+    pub(super) fn during(mut self, operation: &'static str) -> Self {
         self.operation = operation;
+        self
     }
     pub(super) fn finish(mut self, outcome: &'static str) {
         self.outcome = outcome;

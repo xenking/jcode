@@ -341,8 +341,7 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
-        let mut timing = super::cloud_latency::Span::new("connect");
-        timing.during("socket_connect");
+        let mut timing = super::cloud_latency::Span::new("connect").during("socket_connect");
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let socket_path = server::socket_path();
@@ -401,7 +400,7 @@ impl RemoteConnection {
         };
 
         let connection_setup_ms = connection_setup_start.elapsed().as_millis();
-        timing.during("ssh_ready");
+        timing = timing.during("ssh_ready");
         let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
@@ -411,7 +410,7 @@ impl RemoteConnection {
 
         let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
-        timing.during("subscribe");
+        timing = timing.during("subscribe");
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
@@ -449,7 +448,7 @@ impl RemoteConnection {
 
         // If resuming a session, the target-aware Subscribe attaches directly to
         // that session and returns History, so avoid a second bootstrap request.
-        timing.during("bootstrap_request");
+        timing = timing.during("bootstrap_request");
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
         if resume_target.is_none() {
@@ -492,7 +491,7 @@ impl RemoteConnection {
             bootstrap_request,
         ));
 
-        timing.during("complete");
+        timing = timing.during("complete");
         timing.finish("ok");
         Ok(conn)
     }
