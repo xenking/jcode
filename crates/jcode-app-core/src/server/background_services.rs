@@ -173,7 +173,7 @@ impl Server {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
-                    swarm_watchdog::sweep_stalled_workers(
+                    super::swarm_watchdog_delivery::sweep_stalled_workers(
                         &wd_swarm_state,
                         &wd_sessions,
                         &wd_soft_interrupt_queues,

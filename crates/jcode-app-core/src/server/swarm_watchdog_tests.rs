@@ -248,7 +248,7 @@ async fn watchdog_sweep_publishes_and_clears_stall_snapshot() {
         HashMap::new(),
     ));
     let queues = std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-    sweep_stalled_workers(&state, &sessions, &queues).await;
+    crate::server::swarm_watchdog_delivery::sweep_stalled_workers(&state, &sessions, &queues).await;
     let snapshot = super::super::swarm_persistence::read_transfer_snapshot("swarm-wd")
         .unwrap()
         .unwrap();
@@ -264,7 +264,7 @@ async fn watchdog_sweep_publishes_and_clears_stall_snapshot() {
         .get_mut(id)
         .unwrap()
         .last_status_change = Instant::now();
-    sweep_stalled_workers(&state, &sessions, &queues).await;
+    crate::server::swarm_watchdog_delivery::sweep_stalled_workers(&state, &sessions, &queues).await;
     let snapshot = super::super::swarm_persistence::read_transfer_snapshot("swarm-wd")
         .unwrap()
         .unwrap();

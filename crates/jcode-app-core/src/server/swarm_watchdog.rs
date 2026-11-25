@@ -19,10 +19,7 @@
 //! `SwarmMember`. Fresh observations are mirrored into swarm snapshots for
 //! external clients, with a bounded freshness window on the reader side.
 
-use super::state::fanout_session_event;
-use super::{SessionAgents, SessionInterruptQueues, SwarmMember, queue_soft_interrupt_for_session};
-use crate::protocol::{NotificationType, ServerEvent};
-use jcode_agent_runtime::SoftInterruptSource;
+use super::SwarmMember;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -198,21 +195,17 @@ pub(super) fn nudge_message(silent_secs: u64) -> String {
     )
 }
 
-/// One watchdog pass: detect new stalls, notify their owner once, and
-/// optionally nudge the worker.
-pub(super) async fn sweep_stalled_workers(
+pub(super) async fn scan_stalled_workers(
     swarm_state: &super::SwarmState,
-    sessions: &SessionAgents,
-    soft_interrupt_queues: &SessionInterruptQueues,
-) {
+) -> (Vec<NewStall>, std::collections::HashSet<String>) {
     let Some(stall_after) = stall_after() else {
         if let Ok(mut registry) = STALLED.lock() {
             registry.clear();
         }
-        return;
+        return (Vec::new(), Default::default());
     };
     let swarm_members = &swarm_state.members;
-    let (fresh, affected_swarms) = {
+    {
         let members = swarm_members.read().await;
         let coordinators = swarm_state.coordinators.read().await;
         let before: Vec<String> = STALLED
@@ -236,46 +229,6 @@ pub(super) async fn sweep_stalled_workers(
             .filter_map(|id| members.get(&id).and_then(|member| member.swarm_id.clone()))
             .collect::<std::collections::HashSet<_>>();
         (fresh, affected)
-    };
-    // Refresh while stalled and once on recovery. Snapshot readers reject old
-    // observations, so a dead/restarted daemon cannot leave a permanent stall.
-    for swarm_id in affected_swarms {
-        super::persist_swarm_state_for(&swarm_id, swarm_state).await;
-    }
-    let nudge = crate::config::config().agents.swarm_stall_nudge;
-    for stall in fresh {
-        crate::logging::warn(&format!(
-            "Swarm watchdog: worker {} ({}) stalled, silent for {}s",
-            stall.label, stall.session_id, stall.silent_secs
-        ));
-        if let Some(recipient) = stall.recipient_session_id.as_deref() {
-            let _ = fanout_session_event(
-                swarm_members,
-                recipient,
-                ServerEvent::Notification {
-                    from_session: stall.session_id.clone(),
-                    from_name: Some(stall.label.clone()),
-                    notification_type: NotificationType::Message {
-                        scope: Some("swarm".to_string()),
-                        channel: None,
-                        tldr: Some(format!("{} stalled", stall.label)),
-                    },
-                    message: coordinator_message(&stall),
-                },
-            )
-            .await;
-        }
-        if nudge {
-            let _ = queue_soft_interrupt_for_session(
-                &stall.session_id,
-                nudge_message(stall.silent_secs),
-                false,
-                SoftInterruptSource::System,
-                soft_interrupt_queues,
-                sessions,
-            )
-            .await;
-        }
     }
 }
 
