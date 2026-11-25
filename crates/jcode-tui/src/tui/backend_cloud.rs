@@ -6,15 +6,6 @@ impl RemoteConnection {
         self.cloud_authority = Some(Arc::downgrade(live));
     }
 
-    pub(super) fn revoke_cloud_authority(&mut self) {
-        self.stop_screen_context();
-        if let Some(live) = self.cloud_authority.take().and_then(|live| live.upgrade()) {
-            live.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        for task in self.cloud_callbacks.drain(..) {
-            task.abort();
-        }
-    }
     pub(crate) fn track_cloud_callback(&mut self, task: &tokio::task::JoinHandle<()>) {
         self.cloud_callbacks.retain(|task| !task.is_finished());
         self.cloud_callbacks.push(task.abort_handle());
@@ -33,20 +24,6 @@ impl RemoteConnection {
         self.send_request(Request::ConfigureTools { id, tools })
             .await?;
         self.local_tools_request = Some(id);
-        self.jarvis_tools_configured = false;
-        Ok(())
-    }
-
-    pub(super) async fn clear_local_tools(&mut self) -> Result<()> {
-        self.stop_screen_context();
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::ConfigureTools {
-            id,
-            tools: Default::default(),
-        })
-        .await?;
-        self.local_tools_request = None;
         self.jarvis_tools_configured = false;
         Ok(())
     }
