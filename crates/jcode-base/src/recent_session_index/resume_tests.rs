@@ -296,7 +296,7 @@ fn resume_timestamp_roundtrip_preserves_nanoseconds() -> Result<()> {
     let _home = HomeGuard::set(home.path());
     let mut session = session("session_sqlite_precision", "Precise title");
     session.save()?;
-    session.set_updated_at(
+    session.set_updated_at_for_tests(
         chrono::DateTime::parse_from_rfc3339("2026-10-29T12:34:56.123456789Z")?
             .with_timezone(&chrono::Utc),
     );

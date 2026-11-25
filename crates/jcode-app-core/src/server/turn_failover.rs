@@ -2267,7 +2267,7 @@ mod tests {
                 // fable. Its server-initiated turns must stay inside the list
                 // instead of turning into an unrestricted session.
                 session.set_model(Some("claude-fable-5".into()));
-                session.set_is_swarm_worker(true);
+                session.mark_swarm_worker();
                 let worker = Agent::new_with_session(
                     Arc::clone(&provider),
                     crate::tool::Registry::new(Arc::clone(&provider)).await,

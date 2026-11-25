@@ -17,7 +17,7 @@ impl Agent {
     }
 
     pub(crate) fn mark_agent_started(&mut self) {
-        self.session.set_agent_started(true);
+        self.session.mark_agent_started();
     }
 
     pub(crate) fn new_with_initial_working_dir(

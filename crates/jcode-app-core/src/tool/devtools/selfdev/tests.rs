@@ -539,7 +539,10 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     parent.set_working_dir(Some("/tmp/origin-project".to_string()));
     parent.set_model(Some("gpt-test".to_string()));
     parent.set_provider_key(Some("openai".to_string()));
-    parent.set_subagent_model(Some("gpt-subagent".to_string()));
+    parent.apply_worker_routing(crate::session::WorkerRouting {
+        subagent_model: Some("gpt-subagent".to_string()),
+        ..parent.worker_routing()
+    });
     parent.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {

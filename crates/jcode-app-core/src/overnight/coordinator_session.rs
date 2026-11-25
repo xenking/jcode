@@ -10,7 +10,7 @@ pub(super) fn create_coordinator_session(
         None => "Overnight coordinator".to_string(),
     });
     let mut child = Session::create(Some(parent.id().to_owned()), title);
-    child.set_agent_started(true);
+    child.mark_agent_started();
     child.inherit_from(
         parent,
         Inherit::MESSAGES
@@ -22,8 +22,14 @@ pub(super) fn create_coordinator_session(
             | Inherit::BUILD_UNDER_TEST
             | Inherit::WORKING_DIR,
     );
-    child.set_autoreview_enabled(Some(false));
-    child.set_autojudge_enabled(Some(false));
+    child.apply_autonomy(crate::session::Autonomy {
+        autoreview_enabled: Some(false),
+        ..child.autonomy()
+    });
+    child.apply_autonomy(crate::session::Autonomy {
+        autojudge_enabled: Some(false),
+        ..child.autonomy()
+    });
     child.set_provider_session_id(None);
     Ok(child)
 }

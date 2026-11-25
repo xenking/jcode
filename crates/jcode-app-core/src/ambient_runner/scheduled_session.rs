@@ -54,6 +54,6 @@ pub(super) fn scheduled_child_session(item: &ScheduledItem, parent_session_id: &
             child
         }
     };
-    child.set_agent_started(true);
+    child.mark_agent_started();
     child
 }

@@ -338,8 +338,14 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.set_provider_key(crate::session::derive_session_provider_key(
         app.provider.name(),
     ));
-    session.set_autoreview_enabled(Some(app.autoreview_enabled));
-    session.set_autojudge_enabled(Some(app.autojudge_enabled));
+    session.apply_autonomy(crate::session::Autonomy {
+        autoreview_enabled: Some(app.autoreview_enabled),
+        ..session.autonomy()
+    });
+    session.apply_autonomy(crate::session::Autonomy {
+        autojudge_enabled: Some(app.autojudge_enabled),
+        ..session.autonomy()
+    });
     session.ensure_initial_session_context_message();
     app.session = session;
     clear_side_panel_for_new_session(app);
@@ -687,8 +693,14 @@ fn clone_session_for_review(
     child.set_provider_key(
         provider_key_override.or_else(|| app.session.provider_key().map(str::to_owned)),
     );
-    child.set_autoreview_enabled(Some(false));
-    child.set_autojudge_enabled(Some(false));
+    child.apply_autonomy(crate::session::Autonomy {
+        autoreview_enabled: Some(false),
+        ..child.autonomy()
+    });
+    child.apply_autonomy(crate::session::Autonomy {
+        autojudge_enabled: Some(false),
+        ..child.autonomy()
+    });
     child.set_status(crate::session::SessionStatus::Closed);
     child.save()?;
     Ok((child.id().to_owned(), child.display_name().to_string()))
@@ -725,8 +737,14 @@ pub(super) fn prepare_review_spawned_session(
     parent_session_id_override: Option<String>,
 ) {
     if let Ok(mut session) = crate::session::Session::load(session_id) {
-        session.set_autoreview_enabled(Some(false));
-        session.set_autojudge_enabled(Some(false));
+        session.apply_autonomy(crate::session::Autonomy {
+            autoreview_enabled: Some(false),
+            ..session.autonomy()
+        });
+        session.apply_autonomy(crate::session::Autonomy {
+            autojudge_enabled: Some(false),
+            ..session.autonomy()
+        });
         if let Some(parent_session_id) = parent_session_id_override {
             session.set_parent_id(Some(parent_session_id));
         }

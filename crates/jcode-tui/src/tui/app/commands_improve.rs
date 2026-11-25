@@ -394,8 +394,10 @@ fn current_mode_for(app: &App, predicate: impl Fn(ImproveMode) -> bool) -> Optio
 
 fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
     app.improve_mode = mode;
-    app.session
-        .set_improve_mode(mode.map(session_improve_mode_for));
+    app.session.apply_autonomy(crate::session::Autonomy {
+        improve_mode: mode.map(session_improve_mode_for),
+        ..app.session.autonomy()
+    });
     let _ = app.session.save();
 }
 

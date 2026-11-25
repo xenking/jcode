@@ -157,7 +157,7 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     long_saved.set_route_api_method(long_saved.provider_key().map(str::to_owned));
     long_saved.set_working_dir(Some(repo.display().to_string()));
     long_saved.set_context_cap(Some(500_000));
-    long_saved.set_last_provider_request_at(Some(chrono::Utc::now()));
+    long_saved.set_last_provider_request_at_for_tests(Some(chrono::Utc::now()));
     long_saved.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {

@@ -50,4 +50,30 @@ impl Session {
     pub fn replay_events_mut_for_tests(&mut self) -> &mut Vec<super::StoredReplayEvent> {
         &mut self.replay_events
     }
+
+    pub fn set_created_at_for_tests(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.created_at = at;
+    }
+
+    pub fn set_updated_at_for_tests(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.updated_at = at;
+    }
+
+    pub fn set_last_active_at_for_tests(&mut self, at: Option<chrono::DateTime<chrono::Utc>>) {
+        self.last_active_at = at;
+    }
+
+    pub fn set_last_provider_request_at_for_tests(
+        &mut self,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        self.last_provider_request_at = at;
+    }
+
+    pub fn set_last_provider_cache_domain_for_tests(
+        &mut self,
+        domain: Option<crate::kv_cache_monitor::RequestCacheDomain>,
+    ) {
+        self.last_provider_cache_domain = domain;
+    }
 }

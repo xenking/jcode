@@ -579,7 +579,10 @@ mod tests {
         assert!(agent.set_speed_mode(SpeedMode::Ultrafast).is_err());
         let session_id = agent.session_id().to_owned();
         let load = || crate::session::Session::load_for_resume(&session_id).unwrap();
-        assert_eq!(load().speed_selection().unwrap().mode, SpeedMode::Fast);
+        assert_eq!(
+            load().speed_state().selection.unwrap().mode,
+            SpeedMode::Fast
+        );
         drop(agent);
 
         let same_route = provider("account-a");
@@ -602,7 +605,7 @@ mod tests {
             restored.set_speed_mode(SpeedMode::Standard).unwrap(),
             SpeedMode::Standard
         );
-        assert!(load().speed_selection().is_none());
+        assert!(load().speed_state().selection.is_none());
     }
 
     #[tokio::test]

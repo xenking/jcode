@@ -229,8 +229,8 @@ fn test_user_message_and_thinking() {
 fn test_export_timeline_includes_persisted_swarm_replay_events() {
     let base = Utc::now();
     let mut session = Session::create_with_id("session_replay_swarm_test".to_string(), None, None);
-    session.set_created_at(base);
-    session.set_updated_at(base);
+    session.set_created_at_for_tests(base);
+    session.set_updated_at_for_tests(base);
     session.set_replay_events_for_tests(vec![
         StoredReplayEvent {
             timestamp: base + Duration::milliseconds(100),

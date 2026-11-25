@@ -138,7 +138,7 @@ async fn member_provider_extras(
             .effort
             .or(session.reasoning_effort().map(str::to_owned));
         if is_worker {
-            retained.worker_speed = session.worker_speed().cloned();
+            retained.worker_speed = session.speed_state().worker;
         }
     }
     retained

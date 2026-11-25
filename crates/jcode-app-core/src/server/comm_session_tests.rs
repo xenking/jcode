@@ -1549,7 +1549,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             assert_eq!(startup_count, 1);
         }
         let saved = crate::session::Session::load(&sid).unwrap();
-        let status = saved.worker_speed().unwrap();
+        let status = saved.speed_state().worker.unwrap();
         assert_eq!(status.requested, speed.unwrap_or_default());
         assert_eq!(status.effective, effective);
         assert!(saved.is_worker_model_approved(model, "mock", Some("high")));
@@ -1604,7 +1604,8 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             assert_eq!(
                 crate::session::Session::load(&sibling)
                     .unwrap()
-                    .worker_speed()
+                    .speed_state()
+                    .worker
                     .unwrap()
                     .effective,
                 SpeedMode::Standard
@@ -1636,8 +1637,8 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Opt
             observed += 1;
             let status = crate::session::Session::load(&unsupported)
                 .unwrap()
-                .worker_speed()
-                .cloned()
+                .speed_state()
+                .worker
                 .unwrap();
             assert_eq!(status.requested, SpeedMode::Fast);
             assert_eq!(status.effective, SpeedMode::Standard);

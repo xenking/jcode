@@ -43,7 +43,7 @@ fn side_question_catalog_keeps_direct_children_and_stable_order_after_promotion(
         Session::create_with_id("session_ordinary".into(), Some(parent.into()), None);
     ordinary.save_prepared().unwrap();
     let mut older = Session::create_with_id("session_btw_older".into(), Some(parent.into()), None);
-    older.set_created_at(older.created_at() - std::time::Duration::from_secs(3));
+    older.set_created_at_for_tests(older.created_at() - std::time::Duration::from_secs(3));
     older.set_model(Some("gpt-5-btw-child".into()));
     older.set_reasoning_effort(Some("high".into()));
     older.add_message(Role::User, Message::user("main topic context").content);
@@ -58,7 +58,7 @@ fn side_question_catalog_keeps_direct_children_and_stable_order_after_promotion(
     nested.save_new_side_question().unwrap();
     let mut legacy =
         Session::create_with_id("session_btw_legacy".into(), Some(parent.into()), None);
-    legacy.set_created_at(legacy.created_at() - std::time::Duration::from_secs(10));
+    legacy.set_created_at_for_tests(legacy.created_at() - std::time::Duration::from_secs(10));
     legacy.hidden = true;
     legacy.save_prepared().unwrap();
 

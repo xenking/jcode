@@ -75,14 +75,16 @@ fn create_visible_spawn_session(
     };
 
     let mut session = Session::create(None, None);
-    session.set_is_swarm_worker(true);
+    session.mark_swarm_worker();
     if let Some(worker) = prepared {
-        session.set_worker_model_approval(worker.approval.clone());
-        session.set_speed_selection(worker.speed_selection.clone());
-        session.set_worker_speed(Some(worker.speed.clone()));
         // Stored before launch: the headed client restores the session and
         // re-applies the profile from it.
-        session.set_agent_profile(worker.profile.clone());
+        session.enlist_swarm_worker(crate::session::SwarmWorkerSetup {
+            approval: worker.approval.clone(),
+            speed: worker.speed.clone(),
+            speed_selection: worker.speed_selection.clone(),
+            profile: worker.profile.clone(),
+        });
     }
     session.set_working_dir(Some(cwd.display().to_string()));
     if let Some(model) = model_override {
@@ -217,7 +219,10 @@ fn inherit_visible_spawn_preferences(parent_id: &str, child_id: &str) -> anyhow:
     // the just-prepared child in full before updating its initial snapshot.
     let mut child = Session::load(child_id)?;
     child.inherit_pinned_skill(&parent);
-    child.set_agent_model_overrides(parent.agent_model_overrides().clone());
+    child.apply_worker_routing(crate::session::WorkerRouting {
+        agent_model_overrides: parent.agent_model_overrides().clone(),
+        ..child.worker_routing()
+    });
     child.save_prepared()
 }
 
@@ -1036,7 +1041,7 @@ pub(super) async fn handle_comm_spawn(
         Ok(new_session_id) => PersistedSwarmMutationResponse::Spawn {
             worker_speed: Session::load_startup_stub(&new_session_id)
                 .ok()
-                .and_then(|session| session.worker_speed().cloned()),
+                .and_then(|session| session.speed_state().worker),
             new_session_id,
         },
         Err(error) => PersistedSwarmMutationResponse::Error {

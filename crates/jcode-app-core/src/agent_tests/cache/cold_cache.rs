@@ -191,7 +191,9 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
     let compaction = agent.registry.compaction();
     let mut manager = compaction.write().await;
     manager.note_provider_response(now, None);
-    agent.session.set_last_provider_request_at(Some(now.into()));
+    agent
+        .session
+        .set_last_provider_request_at_for_tests(Some(now.into()));
     let snapshot = serde_json::to_value(agent.session.provider_messages()).unwrap();
     let busy = agent
         .shake_tools(ShakeToolsAction::Preview, now)
@@ -424,7 +426,7 @@ async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
         .note_provider_response(response, None);
     agent
         .session
-        .set_last_provider_request_at(Some(response.into()));
+        .set_last_provider_request_at_for_tests(Some(response.into()));
     assert!(
         agent
             .idle_cache_expiry_at(response + Duration::from_secs(299))
@@ -493,7 +495,7 @@ async fn prompt_arriving_during_idle_fold_joins_it_without_shaking() {
         .note_provider_response(response, None);
     agent
         .session
-        .set_last_provider_request_at(Some(response.into()));
+        .set_last_provider_request_at_for_tests(Some(response.into()));
     let (started, event) = agent.idle_cache_expiry_at(now);
     assert!(
         started && event.is_none(),
@@ -621,9 +623,9 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 1_000, 20_000).await;
     // The reloaded process only has the session file to go on.
-    agent
-        .session
-        .set_last_provider_request_at(Some(chrono::Utc::now() - chrono::Duration::hours(2)));
+    agent.session.set_last_provider_request_at_for_tests(Some(
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    ));
     agent.seed_compaction_from_session();
 
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
@@ -665,7 +667,7 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
 async fn restored_cold_cache_clock_falls_back_to_the_last_assistant_message() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, _) = fixture(0, 1_000, 20_000).await;
-    agent.session.set_last_provider_request_at(None);
+    agent.session.set_last_provider_request_at_for_tests(None);
     let stale = chrono::Utc::now() - chrono::Duration::hours(2);
     let last_assistant = agent
         .session
@@ -1028,7 +1030,7 @@ async fn the_cold_cache_notice_reports_the_whole_prompt_after_a_restart() {
     let last_request = before as u64 + 40_000;
     agent
         .session
-        .set_last_provider_cache_domain(Some(agent.request_cache_domain()));
+        .set_last_provider_cache_domain_for_tests(Some(agent.request_cache_domain()));
     agent.kv_cache_monitor.begin_request(
         crate::kv_cache_monitor::RequestRoute::default(),
         crate::kv_cache_monitor::RequestSignature::default(),

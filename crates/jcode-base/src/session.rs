@@ -50,6 +50,10 @@ mod accessors;
 mod agent_models;
 mod inherit;
 pub use inherit::Inherit;
+mod settings;
+pub use settings::{
+    Autonomy, CacheClock, ImportedStamps, Limits, SpeedState, SwarmWorkerSetup, WorkerRouting,
+};
 mod catalog_activity;
 mod crash;
 pub use agent_models::AgentModelOverrides;

@@ -46,6 +46,8 @@ impl Inherit {
     pub const BOOKMARK: Self = Self(1 << 17);
     /// Provider-side session handle used for provider resume.
     pub const PROVIDER_SESSION_ID: Self = Self(1 << 18);
+    /// The agent profile the session was created with.
+    pub const AGENT_PROFILE: Self = Self(1 << 19);
 
     /// Provider account and API method, which replayed account-bound blocks need together.
     pub const ACCOUNT_ROUTE: Self = Self::PROVIDER_KEY.union(Self::ROUTE_API_METHOD);
@@ -131,6 +133,9 @@ impl Session {
         if axes.contains(Inherit::BOOKMARK) {
             self.saved = parent.saved;
             self.save_label = parent.save_label.clone();
+        }
+        if axes.contains(Inherit::AGENT_PROFILE) {
+            self.agent_profile = parent.agent_profile.clone();
         }
         if axes.contains(Inherit::PROVIDER_SESSION_ID) {
             self.provider_session_id = parent.provider_session_id.clone();

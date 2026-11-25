@@ -48,8 +48,9 @@ impl Agent {
     }
 
     pub(super) fn request_cache_domain_switch(&self) -> Option<MissReason> {
+        let stored = self.session.cache_clock().last_domain;
         let legacy;
-        let previous = if let Some(domain) = &self.session.last_provider_cache_domain() {
+        let previous = if let Some(domain) = &stored {
             domain
         } else {
             legacy = self.kv_cache_monitor.checkpoint_cache_domain()?;

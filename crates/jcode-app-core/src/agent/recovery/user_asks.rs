@@ -60,7 +60,7 @@ impl Agent {
     /// Sessions saved before requests were todos kept them in the session
     /// file. Move the open ones into the todo list, once.
     pub(super) fn migrate_legacy_user_asks(&mut self) {
-        if self.session.user_asks().legacy_open.is_empty() {
+        if !self.session.has_legacy_user_asks() {
             return;
         }
         let legacy = self.session.take_legacy_open_user_asks();

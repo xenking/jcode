@@ -702,7 +702,7 @@ impl Agent {
         manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
         if (self.provider.name().eq_ignore_ascii_case("anthropic")
             || self.provider.name().eq_ignore_ascii_case("claude"))
-            && let Some(previous) = self.session.last_provider_cache_domain().as_ref()
+            && let Some(previous) = self.session.cache_clock().last_domain.as_ref()
             && self.request_cache_domain().switch_from(previous).is_none()
             && let Some(hit) = crate::cache_keepalive::load_usage(self.session.id())
                 .and_then(|usage| usage.last_hit)
@@ -864,9 +864,11 @@ impl Agent {
     /// the artifact kind is what a reader needs to know, not the trigger label.
     fn record_compaction_divider(&mut self, event: &crate::compaction::CompactionEvent) {
         if event.trigger == crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER {
-            self.session.set_last_cache_expiry_compaction_for(
-                self.persisted_last_provider_request_at().map(Into::into),
-            );
+            let expired_request = self.persisted_last_provider_request_at().map(Into::into);
+            self.session.apply_cache_clock(crate::session::CacheClock {
+                last_expiry_compaction_for: expired_request,
+                ..self.session.cache_clock()
+            });
         }
         let summary = self
             .session
@@ -1060,9 +1062,12 @@ impl Agent {
             // shake would overwrite that slot and leave the shake invisible.
             self.note_compaction_applied();
             self.record_compaction_divider(event);
-            self.session.set_last_cache_expiry_compaction_for(
-                manager.expired_cache_response(now, ttl).map(Into::into),
-            );
+            self.session.apply_cache_clock(crate::session::CacheClock {
+                last_expiry_compaction_for: manager
+                    .expired_cache_response(now, ttl)
+                    .map(Into::into),
+                ..self.session.cache_clock()
+            });
             self.persist_session_best_effort("shake compaction");
         }
         if event.is_some() {
@@ -1172,8 +1177,11 @@ impl Agent {
     /// this reason: a daemon reload, `exec` or resume starts a new process, and
     /// the persisted session is the only place that timestamp can come from.
     fn note_provider_request_sent(&mut self) {
-        self.session
-            .record_provider_dispatch(chrono::Utc::now(), self.request_cache_domain());
+        self.session.apply_cache_clock(crate::session::CacheClock {
+            last_request_at: Some(chrono::Utc::now()),
+            last_domain: Some(self.request_cache_domain()),
+            ..self.session.cache_clock()
+        });
     }
 
     /// The last provider request time, from the session file when possible.
@@ -1196,8 +1204,10 @@ impl Agent {
 
     async fn note_shake_provider_response(&mut self, cache_read_tokens: Option<u64>) {
         let now = std::time::SystemTime::now();
-        self.session
-            .set_last_provider_request_at(Some(chrono::DateTime::<chrono::Utc>::from(now)));
+        self.session.apply_cache_clock(crate::session::CacheClock {
+            last_request_at: Some(chrono::DateTime::<chrono::Utc>::from(now)),
+            ..self.session.cache_clock()
+        });
         self.registry
             .compaction()
             .write()
@@ -1705,18 +1715,7 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
-            if self.session.original_working_dir().is_none()
-                && self.session.working_dir() != working_dir.as_deref()
-                && self
-                    .session
-                    .messages()
-                    .iter()
-                    .any(|message| message.role == Role::User)
-            {
-                self.session
-                    .set_original_working_dir(self.session.working_dir().map(str::to_owned));
-            }
-            self.session.set_working_dir(working_dir);
+            self.session.move_working_dir(working_dir);
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();
         }

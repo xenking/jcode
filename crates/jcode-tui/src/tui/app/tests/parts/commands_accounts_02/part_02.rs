@@ -2,7 +2,10 @@
 fn test_improve_mode_persists_in_session_file() {
     with_temp_jcode_home(|| {
         let mut session = crate::session::Session::create(None, None);
-        session.set_improve_mode(Some(crate::session::SessionImproveMode::ImprovePlan));
+        session.apply_autonomy(crate::session::Autonomy {
+            improve_mode: Some(crate::session::SessionImproveMode::ImprovePlan),
+            ..session.autonomy()
+        });
         // Untouched sessions are not persisted (783c979a0); give it a real turn.
         session.add_message(
             crate::message::Role::User,
@@ -206,8 +209,10 @@ fn test_refactor_status_summarizes_current_todos() {
 fn test_refactor_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session
-            .set_improve_mode(Some(crate::session::SessionImproveMode::RefactorRun));
+        app.session.apply_autonomy(crate::session::Autonomy {
+            improve_mode: Some(crate::session::SessionImproveMode::RefactorRun),
+            ..app.session.autonomy()
+        });
         app.session.save().expect("save session");
         crate::todo::save_todos(
             app.session.id(),

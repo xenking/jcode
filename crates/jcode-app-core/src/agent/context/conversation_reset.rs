@@ -3,13 +3,6 @@ use super::*;
 impl Agent {
     /// Clear conversation history
     pub fn clear(&mut self) {
-        let preserve_canary = self.session.is_canary();
-        let preserve_testing_build = self.session.testing_build().map(str::to_owned);
-        let preserve_debug = self.session.is_debug();
-        let preserve_working_dir = self.session.working_dir().map(str::to_owned);
-        // A cleared conversation keeps the kind of agent it was.
-        let preserve_profile = self.session.agent_profile().map(str::to_owned);
-
         self.session.mark_closed();
         self.finish_concurrency_tracking();
         self.persist_session_best_effort("pre-clear session close state");
@@ -19,10 +12,15 @@ impl Agent {
         new_session.mark_active_unregistered();
         new_session.set_model(Some(self.provider_model()));
         new_session.set_provider_key(self.provider_key_for_new_session());
-        new_session.set_build_under_test(preserve_canary, preserve_testing_build);
-        new_session.set_debug(preserve_debug);
-        new_session.set_working_dir(preserve_working_dir);
-        new_session.set_agent_profile(preserve_profile);
+        // A cleared conversation keeps the kind of agent it was and where it ran.
+        new_session.inherit_from(
+            &self.session,
+            crate::session::Inherit::BUILD_UNDER_TEST
+                | crate::session::Inherit::WORKING_DIR
+                | crate::session::Inherit::AGENT_PROFILE,
+        );
+        // Unlike a plain copy, this also tells presence the session is internal.
+        new_session.set_debug(self.session.is_debug());
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
@@ -135,7 +133,7 @@ impl Agent {
             self.refresh_tool_call_snapshot();
         }
         self.rewind_undo_snapshot = Some(snapshot);
-        self.session.set_updated_at(chrono::Utc::now());
+        self.session.touch();
         self.provider_session_id = None;
         self.session.set_provider_session_id(None);
         self.cache_tracker.reset();
@@ -167,7 +165,7 @@ impl Agent {
         self.provider_session_id = snapshot.provider_session_id;
         self.session
             .set_provider_session_id(snapshot.session_provider_session_id);
-        self.session.set_updated_at(chrono::Utc::now());
+        self.session.touch();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;

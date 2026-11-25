@@ -692,7 +692,11 @@ fn handle_server_event_inner(
             if app.remote_session_id.as_deref().unwrap_or(app.session.id()) != session_id {
                 return false;
             }
-            app.session.set_agent_model_overrides(overrides);
+            app.session
+                .apply_worker_routing(crate::session::WorkerRouting {
+                    agent_model_overrides: overrides,
+                    ..app.session.worker_routing()
+                });
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
                 app.set_status_notice(if app.agent_models_global_scope {

@@ -111,14 +111,6 @@ impl Session {
         self.reasoning_effort.as_deref()
     }
 
-    pub fn speed_selection(&self) -> Option<&StoredSpeedSelection> {
-        self.speed_selection.as_ref()
-    }
-
-    pub fn worker_speed(&self) -> Option<&WorkerSpeedStatus> {
-        self.worker_speed.as_ref()
-    }
-
     /// Provider-side session handle, e.g. a Claude Code CLI session for resume.
     pub fn provider_session_id(&self) -> Option<&str> {
         self.provider_session_id.as_deref()
@@ -206,10 +198,6 @@ impl Session {
         self.last_provider_request_at
     }
 
-    pub fn last_provider_cache_domain(&self) -> Option<&RequestCacheDomain> {
-        self.last_provider_cache_domain.as_ref()
-    }
-
     pub fn last_cache_expiry_compaction_for(&self) -> Option<DateTime<Utc>> {
         self.last_cache_expiry_compaction_for
     }
@@ -217,18 +205,6 @@ impl Session {
 
 /// Setters for fields that are plain data with no invariant to maintain.
 impl Session {
-    pub fn set_created_at(&mut self, at: DateTime<Utc>) {
-        self.created_at = at;
-    }
-
-    pub fn set_updated_at(&mut self, at: DateTime<Utc>) {
-        self.updated_at = at;
-    }
-
-    pub fn set_last_active_at(&mut self, at: Option<DateTime<Utc>>) {
-        self.last_active_at = at;
-    }
-
     pub fn set_title(&mut self, title: Option<String>) {
         self.title = title;
     }
@@ -265,14 +241,6 @@ impl Session {
         self.reasoning_effort = effort;
     }
 
-    pub fn set_speed_selection(&mut self, selection: Option<StoredSpeedSelection>) {
-        self.speed_selection = selection;
-    }
-
-    pub fn set_worker_speed(&mut self, speed: Option<WorkerSpeedStatus>) {
-        self.worker_speed = speed;
-    }
-
     pub fn set_context_cap(&mut self, cap: Option<usize>) {
         self.context_cap = cap;
     }
@@ -285,20 +253,8 @@ impl Session {
         self.agent_model_overrides = overrides;
     }
 
-    pub fn set_agent_profile(&mut self, profile: Option<String>) {
-        self.agent_profile = profile;
-    }
-
     pub fn set_model_usage_turn_id(&mut self, id: Option<String>) {
         self.model_usage_turn_id = id;
-    }
-
-    pub fn set_is_swarm_worker(&mut self, is_worker: bool) {
-        self.is_swarm_worker = is_worker;
-    }
-
-    pub fn set_agent_started(&mut self, started: bool) {
-        self.agent_started = started;
     }
 
     pub fn set_parent_id(&mut self, parent_id: Option<String>) {
@@ -309,50 +265,8 @@ impl Session {
         self.migration_epoch = epoch;
     }
 
-    pub fn set_improve_mode(&mut self, mode: Option<SessionImproveMode>) {
-        self.improve_mode = mode;
-    }
-
-    pub fn set_autoreview_enabled(&mut self, enabled: Option<bool>) {
-        self.autoreview_enabled = enabled;
-    }
-
-    pub fn set_autojudge_enabled(&mut self, enabled: Option<bool>) {
-        self.autojudge_enabled = enabled;
-    }
-
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt;
-    }
-
-    pub fn set_last_provider_request_at(&mut self, at: Option<DateTime<Utc>>) {
-        self.last_provider_request_at = at;
-    }
-
-    pub fn set_last_provider_cache_domain(&mut self, domain: Option<RequestCacheDomain>) {
-        self.last_provider_cache_domain = domain;
-    }
-
-    pub fn set_last_cache_expiry_compaction_for(&mut self, at: Option<DateTime<Utc>>) {
-        self.last_cache_expiry_compaction_for = at;
-    }
-}
-
-/// Operations that keep related fields consistent, so callers never reach into
-/// the ledger, the replay log or the transcript to do them.
-impl Session {
-    /// Restore the canary flag together with the build it was testing.
-    pub fn set_build_under_test(&mut self, is_canary: bool, testing_build: Option<String>) {
-        self.is_canary = is_canary;
-        self.testing_build = testing_build;
-    }
-
-    /// Swap the speed selection, returning the previous one for rollback.
-    pub fn replace_speed_selection(
-        &mut self,
-        next: Option<StoredSpeedSelection>,
-    ) -> Option<StoredSpeedSelection> {
-        std::mem::replace(&mut self.speed_selection, next)
     }
 
     pub fn set_last_user_ask_id(&mut self, id: u64) {
@@ -437,12 +351,5 @@ impl Session {
         self.provider_key = Some(provider_key);
         self.route_api_method = Some(route_api_method);
         self.model = Some(model);
-    }
-
-    /// Note a provider request: when it was sent and the cache domain it used.
-    /// Persisted so the cold-cache shake still fires after a daemon reload.
-    pub fn record_provider_dispatch(&mut self, at: DateTime<Utc>, domain: RequestCacheDomain) {
-        self.last_provider_request_at = Some(at);
-        self.last_provider_cache_domain = Some(domain);
     }
 }

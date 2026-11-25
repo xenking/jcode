@@ -250,7 +250,7 @@ impl Agent {
         if self.session.is_swarm_worker() {
             return Ok(());
         }
-        self.session.set_is_swarm_worker(true);
+        self.session.mark_swarm_worker();
         self.session.save_prepared()
     }
 
@@ -269,15 +269,18 @@ impl Agent {
         self.session.set_route_api_method(route_api_method);
         self.session
             .set_reasoning_effort(self.provider.reasoning_effort());
-        self.session.set_worker_model_approval(approval);
-        self.session.set_worker_speed(Some(speed));
-        self.session.set_speed_selection(speed_selection);
         // The fresh-session constructor clears any inherited provider speed.
         // Reinstall only the selection granted for this new worker.
-        self.session.set_is_swarm_worker(true);
+        self.session
+            .enlist_swarm_worker(crate::session::SwarmWorkerSetup {
+                approval,
+                speed,
+                speed_selection,
+                profile: self.session.agent_profile().map(str::to_owned),
+            });
         // A worker never keeps a root default; it gets only its spawn profile.
         self.set_agent_profile(profile)?;
-        if let Some(choice) = &self.session.speed_selection() {
+        if let Some(choice) = &self.session.speed_state().selection {
             self.ensure_worker_speed_allowed(choice.mode)?;
             Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)?;
         }
@@ -290,7 +293,7 @@ impl Agent {
     }
 
     pub(crate) fn worker_speed_status(&self) -> Option<jcode_message_types::WorkerSpeedStatus> {
-        self.session.worker_speed().cloned()
+        self.session.speed_state().worker
     }
 
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
@@ -391,10 +394,10 @@ impl Agent {
             "Worker speed {mode:?} exceeds the configured swarm speed cap. Select Standard."
         );
         anyhow::ensure!(
-            self.session.speed_selection().is_some_and(|speed| {
+            self.session.speed_state().selection.is_some_and(|speed| {
                 speed.mode == mode
-                    && self.speed_selection_matches(speed)
-                    && self.session.is_worker_speed_approved(speed)
+                    && self.speed_selection_matches(&speed)
+                    && self.session.is_worker_speed_approved(&speed)
             }),
             "Worker speed {mode:?} has no owner approval for this session and route. Select Standard or request a new worker."
         );
@@ -482,8 +485,7 @@ impl Agent {
     }
 
     pub(super) fn begin_model_usage_turn(&mut self, message_id: &str) {
-        self.session
-            .set_model_usage_turn_id(Some(format!("{}:{}", self.session.id(), message_id)));
+        self.session.begin_model_usage_turn(message_id);
     }
 
     pub(super) fn model_usage_turn_id(&mut self) -> String {
@@ -654,10 +656,13 @@ impl Agent {
         let cap = max_context_tokens.filter(|cap| *cap > 0);
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
-        let previous = self.session.context_cap();
-        self.session.set_context_cap(cap);
+        let previous = self.session.limits();
+        self.session.apply_limits(crate::session::Limits {
+            context_cap: cap,
+            ..previous.clone()
+        });
         if let Err(error) = self.persist_session_now() {
-            self.session.set_context_cap(previous);
+            self.session.apply_limits(previous);
             return Err(error);
         }
         manager.set_context_cap_override(cap);
@@ -720,7 +725,7 @@ impl Agent {
         use jcode_provider_core::SpeedMode;
         let candidate = self.provider.fork();
         crate::provider::set_model_with_auth_refresh(candidate.as_ref(), model)?;
-        let speed = self.session.speed_selection().filter(|choice| {
+        let speed = self.session.speed_state().selection.filter(|choice| {
             choice.mode != SpeedMode::Standard
                 && choice.model == candidate.model()
                 && candidate.speed_route_identity().as_deref() == Some(choice.route.as_str())
@@ -756,7 +761,7 @@ impl Agent {
             candidate.set_reasoning_effort(&capped)?;
         }
         let candidate_model = candidate.model();
-        if let Some(choice) = speed {
+        if let Some(choice) = &speed {
             anyhow::ensure!(
                 choice.model == candidate_model
                     && candidate.speed_route_identity().as_deref() == Some(choice.route.as_str())
@@ -765,7 +770,7 @@ impl Agent {
                         provider_key.as_deref(),
                         choice.mode
                     ) == choice.mode
-                    && self.session.is_worker_speed_approved(choice),
+                    && self.session.is_worker_speed_approved(&choice),
                 "This retune would invalidate the worker's approved speed. Select Standard before retuning."
             );
         }
@@ -888,7 +893,7 @@ impl Agent {
     }
 
     pub(crate) fn restore_speed_from_session(&mut self) {
-        let Some(choice) = self.session.speed_selection().cloned() else {
+        let Some(choice) = self.session.speed_state().selection else {
             if self.provider.speed_mode() != jcode_provider_core::SpeedMode::Standard {
                 let _ = self
                     .provider
@@ -897,7 +902,7 @@ impl Agent {
             return;
         };
         if !self.speed_selection_matches(&choice) {
-            self.session.set_speed_selection(None);
+            self.session.clear_speed_selection();
             self.session
                 .record_worker_standard_speed("The credential route changed");
             let _ = self
@@ -912,7 +917,7 @@ impl Agent {
                 let _ = self
                     .provider
                     .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
-                self.session.set_speed_selection(None);
+                self.session.clear_speed_selection();
                 self.session.record_worker_standard_speed(&format!(
                     "Saved worker speed unavailable: {error}"
                 ));
@@ -921,7 +926,7 @@ impl Agent {
     }
 
     pub(super) fn ensure_session_speed(&self) -> Result<()> {
-        if let Some(choice) = &self.session.speed_selection() {
+        if let Some(choice) = &self.session.speed_state().selection {
             anyhow::ensure!(
                 self.speed_selection_matches(choice) && self.provider.speed_mode() == choice.mode,
                 "The saved {:?} speed is unavailable on this route. Select Standard or choose a supported speed before retrying.",
@@ -939,15 +944,16 @@ impl Agent {
     fn reset_speed_after_route_change(&mut self) -> Result<()> {
         if self
             .session
-            .speed_selection()
-            .is_some_and(|choice| !self.speed_selection_matches(choice))
+            .speed_state()
+            .selection
+            .is_some_and(|choice| !self.speed_selection_matches(&choice))
         {
             self.provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
-            self.session.set_speed_selection(None);
+            self.session.clear_speed_selection();
             self.session
                 .record_worker_standard_speed("The credential route changed");
-        } else if self.session.is_swarm_worker() && self.session.speed_selection().is_none() {
+        } else if self.session.is_swarm_worker() && self.session.speed_state().selection.is_none() {
             self.provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
         }
@@ -1013,15 +1019,17 @@ impl Agent {
         let previous_mode = self.provider.speed_mode();
         crate::cache_keepalive::invalidate(self.session.id());
         let next = Self::apply_speed_to_provider(self.provider.as_ref(), mode)?;
-        let previous = self.session.replace_speed_selection(next);
-        let previous_worker_speed = self.session.worker_speed().cloned();
+        let previous = self.session.speed_state();
+        self.session.apply_speed_state(crate::session::SpeedState {
+            selection: next,
+            ..previous.clone()
+        });
         if mode == SpeedMode::Standard {
             self.session
                 .record_worker_standard_speed("Standard selected for this worker");
         }
         if let Err(error) = self.session.save_prepared() {
-            self.session.set_speed_selection(previous);
-            self.session.set_worker_speed(previous_worker_speed);
+            self.session.apply_speed_state(previous);
             let _ = self.provider.set_speed_mode(previous_mode);
             return Err(error);
         }
@@ -1205,7 +1213,11 @@ impl Agent {
     }
 
     pub fn set_subagent_model(&mut self, model: Option<String>) -> Result<()> {
-        self.session.set_subagent_model(model);
+        self.session
+            .apply_worker_routing(crate::session::WorkerRouting {
+                subagent_model: model,
+                ..self.session.worker_routing()
+            });
         self.log_env_snapshot("set_subagent_model");
         self.session.save()?;
         Ok(())
@@ -1280,7 +1292,10 @@ impl Agent {
     }
 
     pub fn set_autoreview_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.session.set_autoreview_enabled(Some(enabled));
+        self.session.apply_autonomy(crate::session::Autonomy {
+            autoreview_enabled: Some(enabled),
+            ..self.session.autonomy()
+        });
         self.log_env_snapshot("set_autoreview_enabled");
         self.session.save()?;
         Ok(())
@@ -1291,7 +1306,10 @@ impl Agent {
     }
 
     pub fn set_autojudge_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.session.set_autojudge_enabled(Some(enabled));
+        self.session.apply_autonomy(crate::session::Autonomy {
+            autojudge_enabled: Some(enabled),
+            ..self.session.autonomy()
+        });
         self.log_env_snapshot("set_autojudge_enabled");
         self.session.save()?;
         Ok(())
@@ -1302,17 +1320,7 @@ impl Agent {
         if self.session.working_dir() == Some(dir) {
             return;
         }
-        if self.session.original_working_dir().is_none()
-            && self
-                .session
-                .messages()
-                .iter()
-                .any(|message| message.role == Role::User)
-        {
-            self.session
-                .set_original_working_dir(self.session.working_dir().map(str::to_owned));
-        }
-        self.session.set_working_dir(Some(dir.to_string()));
+        self.session.move_working_dir(Some(dir.to_string()));
         self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");

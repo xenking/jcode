@@ -1,4 +1,4 @@
-use super::{Session, SessionStatus, active_pids_dir, session_exists, session_path};
+use super::{Inherit, Session, SessionStatus, active_pids_dir, session_exists, session_path};
 use crate::id::extract_session_name;
 use crate::message::{ContentBlock, Role};
 use crate::storage;
@@ -42,9 +42,9 @@ fn recover_crashed_sessions_for_allowed_ids(allowed_ids: &HashSet<String>) -> Re
             && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
             && stem.starts_with("session_recovery_")
             && let Ok(session) = Session::load_startup_stub(stem)
-            && let Some(parent) = session.parent_id
+            && let Some(parent) = session.recovered_from()
         {
-            recovered_parents.insert(parent);
+            recovered_parents.insert(parent.to_owned());
         }
     }
 
@@ -57,7 +57,7 @@ fn recover_crashed_sessions_for_allowed_ids(allowed_ids: &HashSet<String>) -> Re
         if session.detect_crash() {
             let _ = session.save();
         }
-        if matches!(session.status, SessionStatus::Crashed { .. }) {
+        if session.is_crashed() {
             crashed.push(session);
         }
     }
@@ -87,23 +87,14 @@ fn recover_crashed_sessions_matching(allowed_ids: Option<&HashSet<String>>) -> R
     }
 
     // Track existing recovery sessions to avoid duplicates
-    let mut recovered_parents: HashSet<String> = HashSet::new();
-    for s in &sessions {
-        if s.id.starts_with("session_recovery_")
-            && let Some(parent) = s.parent_id.as_ref()
-        {
-            recovered_parents.insert(parent.clone());
-        }
-    }
-
+    let recovered_parents = recovered_parents(&sessions);
     let mut crashed: Vec<Session> = sessions
         .into_iter()
-        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
-        .filter(|s| !recovered_parents.contains(&s.id))
+        .filter(|s| s.is_unrecovered_crash(&recovered_parents))
         .collect();
 
     if let Some(allowed_ids) = allowed_ids {
-        crashed.retain(|s| allowed_ids.contains(&s.id));
+        crashed.retain(|s| allowed_ids.contains(s.id()));
     }
 
     if crashed.is_empty() {
@@ -118,41 +109,82 @@ fn recover_crashed_sessions_matching(allowed_ids: Option<&HashSet<String>>) -> R
 }
 
 fn recover_loaded_crashed_sessions(mut crashed: Vec<Session>) -> Result<Vec<String>> {
-    crashed.sort_by_key(|session| std::cmp::Reverse(crash_timestamp(session)));
+    crashed.sort_by_key(|session| std::cmp::Reverse(session.last_seen_at()));
 
     let mut new_ids = Vec::new();
     for mut old in crashed {
         let new_id = format!("session_recovery_{}", crate::id::new_id("rec"));
-        let mut new_session =
-            Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
-        new_session.custom_title = old.custom_title.clone();
-        new_session.working_dir = old.working_dir.clone();
-        new_session.provider_key = old.provider_key.clone();
-        new_session.route_api_method = old.route_api_method.clone();
-        new_session.model = old.model.clone();
-        new_session.improve_mode = old.improve_mode;
-        new_session.is_canary = old.is_canary;
-        new_session.is_debug = old.is_debug;
-        new_session.testing_build = old.testing_build.clone();
-        new_session.saved = old.saved;
-        new_session.save_label = old.save_label.clone();
-        new_session.provider_session_id = None;
-        new_session.status = SessionStatus::Closed;
+        let mut new_session = old.recovery_copy(new_id.clone());
+        new_session.save()?;
+        new_ids.push(new_id);
+    }
 
-        // Add a recovery header
-        new_session.add_message(
+    Ok(new_ids)
+}
+
+/// Parents of the recovery sessions among `sessions`: crashes already restored.
+fn recovered_parents(sessions: &[Session]) -> HashSet<String> {
+    sessions
+        .iter()
+        .filter_map(|s| s.recovered_from().map(str::to_owned))
+        .collect()
+}
+
+/// What crash recovery needs to know about a session and to make of it.
+impl Session {
+    fn is_crashed(&self) -> bool {
+        matches!(self.status, SessionStatus::Crashed { .. })
+    }
+
+    /// Crashed, and no recovery session has taken its transcript yet.
+    fn is_unrecovered_crash(&self, recovered_parents: &HashSet<String>) -> bool {
+        self.is_crashed() && !recovered_parents.contains(&self.id)
+    }
+
+    /// For a recovery session, the crashed session it was made from.
+    fn recovered_from(&self) -> Option<&str> {
+        self.id
+            .starts_with("session_recovery_")
+            .then_some(self.parent_id.as_deref())
+            .flatten()
+    }
+
+    /// When the session last showed signs of life.
+    fn last_seen_at(&self) -> DateTime<Utc> {
+        self.last_active_at.unwrap_or(self.updated_at)
+    }
+
+    /// A closed child named `new_id` that keeps this session's identity, route
+    /// and the text of its transcript behind a recovery notice. The provider
+    /// handle is not carried over and this session's messages are taken.
+    fn recovery_copy(&mut self, new_id: String) -> Session {
+        let mut copy = Session::create_with_id(new_id, Some(self.id.clone()), None);
+        copy.inherit_from(
+            self,
+            Inherit::TITLES
+                | Inherit::WORKING_DIR
+                | Inherit::ROUTE
+                | Inherit::IMPROVE_MODE
+                | Inherit::BUILD_UNDER_TEST
+                | Inherit::DEBUG_FLAG
+                | Inherit::BOOKMARK,
+        );
+        copy.provider_session_id = None;
+        copy.status = SessionStatus::Closed;
+
+        copy.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: format!(
                     "Recovered from crashed session `{}` ({})",
-                    old.id,
-                    old.display_name()
+                    self.id,
+                    self.display_name()
                 ),
                 cache_control: None,
             }],
         );
 
-        for msg in old.messages.drain(..) {
+        for msg in self.messages.drain(..) {
             let kept_blocks: Vec<ContentBlock> = msg
                 .content
                 .into_iter()
@@ -161,25 +193,17 @@ fn recover_loaded_crashed_sessions(mut crashed: Vec<Session>) -> Result<Vec<Stri
             if kept_blocks.is_empty() {
                 continue;
             }
-            new_session.add_message(msg.role, kept_blocks);
+            copy.add_message(msg.role, kept_blocks);
         }
-
-        new_session.save()?;
-        new_ids.push(new_id);
+        copy
     }
-
-    Ok(new_ids)
-}
-
-fn crash_timestamp(session: &Session) -> DateTime<Utc> {
-    session.last_active_at.unwrap_or(session.updated_at)
 }
 
 fn retain_relevant_crash_group(crashed: &mut Vec<Session>) -> Option<DateTime<Utc>> {
-    let most_recent = crashed.iter().map(crash_timestamp).max()?;
+    let most_recent = crashed.iter().map(Session::last_seen_at).max()?;
     let crash_window = Duration::seconds(RELEVANT_CRASH_GROUP_WINDOW_SECS);
     crashed.retain(|s| {
-        let delta = most_recent.signed_duration_since(crash_timestamp(s));
+        let delta = most_recent.signed_duration_since(s.last_seen_at());
         delta >= Duration::zero() && delta <= crash_window
     });
     Some(most_recent)
@@ -223,20 +247,11 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     }
 
     // Track existing recovery sessions to avoid showing already-recovered crashes
-    let mut recovered_parents: HashSet<String> = HashSet::new();
-    for s in &sessions {
-        if s.id.starts_with("session_recovery_")
-            && let Some(parent) = s.parent_id.as_ref()
-        {
-            recovered_parents.insert(parent.clone());
-        }
-    }
-
     // Filter to crashed sessions that haven't been recovered
+    let recovered_parents = recovered_parents(&sessions);
     let mut crashed: Vec<Session> = sessions
         .into_iter()
-        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
-        .filter(|s| !recovered_parents.contains(&s.id))
+        .filter(|s| s.is_unrecovered_crash(&recovered_parents))
         .collect();
 
     if crashed.is_empty() {
@@ -251,9 +266,9 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     }
 
     // Sort by most recent first
-    crashed.sort_by_key(|session| std::cmp::Reverse(crash_timestamp(session)));
+    crashed.sort_by_key(|session| std::cmp::Reverse(session.last_seen_at()));
 
-    let session_ids: Vec<String> = crashed.iter().map(|s| s.id.clone()).collect();
+    let session_ids: Vec<String> = crashed.iter().map(|s| s.id().to_owned()).collect();
     let display_names: Vec<String> = crashed
         .iter()
         .map(|s| s.display_name().to_string())
@@ -287,6 +302,33 @@ struct SessionHeader {
 }
 
 impl SessionHeader {
+    fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+
+    fn recovered_parent(&self) -> Option<&str> {
+        self.id
+            .starts_with("session_recovery_")
+            .then_some(self.parent_id.as_deref())
+            .flatten()
+    }
+
+    /// Crashed, not yet recovered, and seen alive after `cutoff`.
+    fn is_recent_unrecovered_crash(
+        &self,
+        recovered_parents: &HashSet<String>,
+        cutoff: DateTime<Utc>,
+    ) -> bool {
+        matches!(self.status, SessionStatus::Crashed { .. })
+            && !recovered_parents.contains(&self.id)
+            && self.last_active_at.unwrap_or(self.updated_at) > cutoff
+    }
+
+    /// The session id and the name to show for it.
+    fn resume_hint(&self) -> (String, String) {
+        (self.id.clone(), self.display_name().to_string())
+    }
+
     fn display_name(&self) -> &str {
         if let Some(ref name) = self.short_name {
             name
@@ -369,7 +411,7 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
                     session.mark_closed();
                 }
                 let _ = session.save();
-                let ts = session.last_active_at.unwrap_or(session.updated_at);
+                let ts = session.last_seen_at();
                 if ts <= cutoff {
                     continue;
                 }
@@ -475,10 +517,8 @@ fn find_crashed_legacy_scan() -> Vec<(String, String)> {
         }
 
         if let Ok(header) = serde_json::from_str::<SessionHeader>(&content) {
-            if header.id.starts_with("session_recovery_")
-                && let Some(parent) = header.parent_id.as_ref()
-            {
-                recovered_parents.insert(parent.clone());
+            if let Some(parent) = header.recovered_parent() {
+                recovered_parents.insert(parent.to_owned());
             }
             if has_crashed {
                 candidates.push(header);
@@ -488,24 +528,12 @@ fn find_crashed_legacy_scan() -> Vec<(String, String)> {
 
     let mut crashed: Vec<SessionHeader> = candidates
         .into_iter()
-        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
-        .filter(|s| !recovered_parents.contains(&s.id))
-        .filter(|s| {
-            let ts = s.last_active_at.unwrap_or(s.updated_at);
-            ts > cutoff
-        })
+        .filter(|s| s.is_recent_unrecovered_crash(&recovered_parents, cutoff))
         .collect();
 
-    crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    crashed.sort_by_key(|header| std::cmp::Reverse(header.updated_at()));
 
-    crashed
-        .into_iter()
-        .map(|s| {
-            let name = s.display_name().to_string();
-            let id = s.id.clone();
-            (id, name)
-        })
-        .collect()
+    crashed.iter().map(SessionHeader::resume_hint).collect()
 }
 
 /// Extract the epoch-ms timestamp embedded in a session filename.

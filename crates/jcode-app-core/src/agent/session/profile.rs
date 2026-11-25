@@ -56,11 +56,9 @@ impl Agent {
             crate::agent_profile::resolve_profile(name, &crate::config::config().agents)
                 .map_err(anyhow::Error::msg)?;
         }
-        if self.session.agent_profile() == profile.as_deref() {
-            return Ok(());
+        if self.session.adopt_agent_profile(profile) {
+            self.refresh_profile_tool_policy();
         }
-        self.session.set_agent_profile(profile);
-        self.refresh_profile_tool_policy();
         Ok(())
     }
 

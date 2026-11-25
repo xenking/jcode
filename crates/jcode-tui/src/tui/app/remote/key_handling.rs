@@ -491,7 +491,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     .clone()
                     .unwrap_or_else(|| app.provider.model());
                 remote.set_subagent_model(None).await?;
-                app.session.set_subagent_model(None);
+                app.session
+                    .apply_worker_routing(crate::session::WorkerRouting {
+                        subagent_model: None,
+                        ..app.session.worker_routing()
+                    });
                 app.push_display_message(DisplayMessage::system(format!(
                     "Subagent model reset to inherit the current model ({}).",
                     current_model
@@ -500,7 +504,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             remote.set_subagent_model(Some(rest.to_string())).await?;
-            app.session.set_subagent_model(Some(rest.to_string()));
+            app.session
+                .apply_worker_routing(crate::session::WorkerRouting {
+                    subagent_model: Some(rest.to_string()),
+                    ..app.session.worker_routing()
+                });
             app.push_display_message(DisplayMessage::system(format!(
                 "Subagent model pinned to {} for this session.",
                 rest
@@ -1578,9 +1586,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(Some(
-                            app_mod::commands::session_improve_mode_for(mode),
-                        ));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_improve_resume_prompt(mode, &incomplete);
@@ -1635,7 +1644,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(None);
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: None,
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::improve_stop_prompt();
@@ -1666,9 +1678,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::ImproveCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::improve_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(Some(
-                            app_mod::commands::session_improve_mode_for(mode),
-                        ));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =
@@ -1736,9 +1749,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(Some(
-                            app_mod::commands::session_improve_mode_for(mode),
-                        ));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_refactor_resume_prompt(mode, &incomplete);
@@ -1793,7 +1807,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(None);
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: None,
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::refactor_stop_prompt();
@@ -1824,9 +1841,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::RefactorCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::refactor_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.set_improve_mode(Some(
-                            app_mod::commands::session_improve_mode_for(mode),
-                        ));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =

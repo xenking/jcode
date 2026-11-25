@@ -158,8 +158,8 @@ fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
         Some("Old Crash".to_string()),
     );
     let old_ts = Utc::now() - chrono::Duration::hours(AUTO_RESTORE_CRASH_MAX_AGE_HOURS + 2);
-    crashed.set_updated_at(old_ts);
-    crashed.set_last_active_at(Some(old_ts));
+    crashed.set_updated_at_for_tests(old_ts);
+    crashed.set_last_active_at_for_tests(Some(old_ts));
     crashed.set_status(crate::session::SessionStatus::Active);
     crashed.last_pid = Some(dead_pid);
     crashed.save().expect("save stale active session");

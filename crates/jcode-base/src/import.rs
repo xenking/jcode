@@ -818,7 +818,6 @@ fn import_session_from_file_with_target(
     session.set_provider_key(Some("claude-code".to_string()));
     session.set_working_dir(working_dir);
     session.set_model(model);
-    session.set_created_at(created_at);
 
     for message in imported_messages {
         session.append_stored_message(message);
@@ -986,9 +985,10 @@ fn finalize_imported_session(
     }
 
     let original_messages = session.messages().len();
-    session.set_created_at(created_at);
-    session.set_updated_at(updated_at.unwrap_or(created_at));
-    session.set_last_active_at(updated_at.or(Some(created_at)));
+    session.restamp_imported(crate::session::ImportedStamps {
+        created_at,
+        updated_at,
+    });
     session.set_status(SessionStatus::Closed);
     normalize_imported_history(&mut session, true);
     session.save()?;

@@ -133,7 +133,10 @@ fn test_improve_status_summarizes_current_todos() {
 #[test]
 fn test_improve_stop_without_active_run_reports_idle() {
     let mut app = create_test_app();
-    app.session.set_improve_mode(None);
+    app.session.apply_autonomy(crate::session::Autonomy {
+        improve_mode: None,
+        ..app.session.autonomy()
+    });
     app.input = "/improve stop".to_string();
     app.submit_input();
 
@@ -148,8 +151,10 @@ fn test_improve_stop_without_active_run_reports_idle() {
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     let mut app = create_test_app();
     app.improve_mode = Some(ImproveMode::ImproveRun);
-    app.session
-        .set_improve_mode(Some(crate::session::SessionImproveMode::ImproveRun));
+    app.session.apply_autonomy(crate::session::Autonomy {
+        improve_mode: Some(crate::session::SessionImproveMode::ImproveRun),
+        ..app.session.autonomy()
+    });
     app.input = "/improve stop".to_string();
     app.submit_input();
 
@@ -186,8 +191,10 @@ fn test_improve_resume_requires_saved_mode() {
 fn test_improve_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        app.session
-            .set_improve_mode(Some(crate::session::SessionImproveMode::ImproveRun));
+        app.session.apply_autonomy(crate::session::Autonomy {
+            improve_mode: Some(crate::session::SessionImproveMode::ImproveRun),
+            ..app.session.autonomy()
+        });
         app.session.save().expect("save session");
         crate::todo::save_todos(
             app.session.id(),

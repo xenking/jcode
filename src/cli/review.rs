@@ -185,7 +185,7 @@ async fn capture_review(
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
     let provider = super::provider_init::init_provider_for_run(choice, model, false).await?;
     let mut session = Session::create(None, None);
-    session.set_system_prompt(Some(REVIEW_PROMPT.into()));
+    session.override_system_prompt(REVIEW_PROMPT);
     session.rename_title(Some("Git review".into()));
     // Supply the initial context so Agent does not probe the live working tree.
     session.add_message_with_display_role(
