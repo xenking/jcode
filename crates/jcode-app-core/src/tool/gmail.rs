@@ -49,7 +49,9 @@ impl GmailTool {
                 )
             })?;
         let header_id = msg.header("Message-ID").map(str::to_string);
-        let resolved_thread = thread_id.map(str::to_string).or(msg.thread_id.clone());
+        let resolved_thread = thread_id
+            .map(str::to_string)
+            .or_else(|| msg.thread().map(str::to_string));
         if header_id.is_none() && resolved_thread.is_none() {
             anyhow::bail!(
                 "Message '{}' has no Message-ID header or threadId; cannot thread the reply. \
@@ -308,7 +310,7 @@ impl Tool for GmailTool {
                     Err(thread_err) => {
                         match self.client.get_message(id, MessageFormat::Metadata).await {
                             Ok(msg) => {
-                                let tid = msg.thread_id.ok_or(thread_err)?;
+                                let tid = msg.thread().map(str::to_string).ok_or(thread_err)?;
                                 self.client.get_thread(&tid).await?
                             }
                             Err(_) => return Err(thread_err),
@@ -521,7 +523,7 @@ impl Tool for GmailTool {
                 Ok(ToolOutput::new(format!(
                     "Email sent successfully.\nMessage ID: {}\nThread ID: {}\n{}\nSubject: {}\nAttachments: {}",
                     msg.id,
-                    msg.thread_id.as_deref().unwrap_or("(new thread)"),
+                    msg.thread().unwrap_or("(new thread)"),
                     recipient_summary(&recipients),
                     subject,
                     attachments.len()
@@ -579,7 +581,7 @@ impl Tool for GmailTool {
                         params
                             .thread_id
                             .clone()
-                            .or_else(|| current.and_then(|m| m.thread_id.clone())),
+                            .or_else(|| current.and_then(|m| m.thread().map(str::to_string))),
                     )
                 };
 

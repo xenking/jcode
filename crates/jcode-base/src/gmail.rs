@@ -848,6 +848,11 @@ pub struct Message {
 }
 
 impl Message {
+    /// The conversation this message belongs to, when Gmail reported one.
+    pub fn thread(&self) -> Option<&str> {
+        self.thread_id.as_deref()
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.payload.as_ref().and_then(|p| {
             p.headers.as_ref().and_then(|headers| {

@@ -22,7 +22,7 @@ pub(super) fn destructive_command_refusal(
         risk_ctx.scratch_dir = super::tool_scratch_dir();
     }
     let assessment = jcode_command_risk::assess(command, &risk_ctx);
-    if assessment.level.runs_immediately() {
+    if assessment.runs_immediately() {
         return None;
     }
 

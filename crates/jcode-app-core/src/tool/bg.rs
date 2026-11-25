@@ -581,7 +581,7 @@ impl AwaitWaitState {
     /// is gone (expired, superseded, or never written) is unknown, not finished.
     fn observe(id: &str) -> Option<Self> {
         let dependency = crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id)?;
-        let summary = await_dependency_summary(&dependency);
+        let summary = dependency.outcome_summary();
         let status = match (summary.is_some(), dependency.is_running()) {
             (true, _) => AwaitWaitStatus::Resolved,
             (false, true) => AwaitWaitStatus::Running,
@@ -1637,27 +1637,9 @@ fn load_await_dependency(id: &str) -> Result<crate::todo::await_dependency::Awai
     })
 }
 
-fn await_dependency_summary(
-    dependency: &crate::todo::await_dependency::AwaitDependency,
-) -> Option<String> {
-    let result = dependency.final_response.as_ref()?;
-    let completed = result
-        .get("completed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let summary = result
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("(no summary)");
-    Some(format!(
-        "{}: {summary}",
-        if completed { "completed" } else { "timed out" }
-    ))
-}
-
 fn await_dependency_status_text(id: &str) -> Result<String> {
     let dependency = load_await_dependency(id)?;
-    Ok(match await_dependency_summary(&dependency) {
+    Ok(match dependency.outcome_summary() {
         Some(summary) => format!("Await dependency {id}\nStatus: {summary}"),
         None if dependency.is_running() => {
             format!("Await dependency {id}\nStatus: running (waiting on swarm members)")

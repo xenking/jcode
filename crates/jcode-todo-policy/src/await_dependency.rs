@@ -34,6 +34,23 @@ impl AwaitDependency {
     pub fn is_running(&self) -> bool {
         self.is_running_at(now_unix_ms())
     }
+
+    /// One line describing how the wait ended, once a result was committed.
+    pub fn outcome_summary(&self) -> Option<String> {
+        let result = self.final_response.as_ref()?;
+        let completed = result
+            .get("completed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let summary = result
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(no summary)");
+        Some(format!(
+            "{}: {summary}",
+            if completed { "completed" } else { "timed out" }
+        ))
+    }
 }
 
 pub fn now_unix_ms() -> u64 {

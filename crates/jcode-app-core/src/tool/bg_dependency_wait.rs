@@ -18,7 +18,7 @@ pub(super) async fn wait_on_await_dependency(
     };
     loop {
         let dependency = load_await_dependency(id)?;
-        if let Some(summary) = await_dependency_summary(&dependency) {
+        if let Some(summary) = dependency.outcome_summary() {
             return Ok(
                 ToolOutput::new(format!("Await dependency {id} resolved.\n{summary}"))
                     .with_title(format!("bg wait {id}"))

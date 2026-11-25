@@ -99,6 +99,11 @@ pub struct RiskAssessment {
 }
 
 impl RiskAssessment {
+    /// Whether the command may run without confirmation or refusal.
+    pub fn runs_immediately(&self) -> bool {
+        self.level.runs_immediately()
+    }
+
     fn safe() -> Self {
         Self {
             level: RiskLevel::Safe,
