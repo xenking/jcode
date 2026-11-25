@@ -1,5 +1,3 @@
-use super::*;
-
 pub(super) fn open_swarm_agent_window(
     session_id: &str,
     is_ssh_remote: bool,

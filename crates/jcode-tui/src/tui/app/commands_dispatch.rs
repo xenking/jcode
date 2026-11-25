@@ -448,7 +448,13 @@ mod tests {
     #[test]
     fn both_entry_points_use_the_shared_dispatch_table() {
         for (path, source) in [
-            ("input.rs", include_str!("input.rs")),
+            (
+                "input.rs",
+                concat!(
+                    include_str!("input.rs"),
+                    include_str!("input/submission.rs")
+                ),
+            ),
             ("remote.rs", include_str!("remote.rs")),
         ] {
             assert!(
