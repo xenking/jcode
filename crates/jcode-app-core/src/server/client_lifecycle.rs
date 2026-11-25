@@ -1,3 +1,4 @@
+use super::available_models_cache::PublishedCatalog;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -444,7 +445,7 @@ pub(super) async fn handle_client(
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
-    let mut last_available_models_snapshot: Option<Arc<str>> = None;
+    let mut last_available_models_snapshot = PublishedCatalog::default();
     let mut model_catalog_retry = ModelCatalogRetry::default();
 
     // Create a new session for this client
@@ -2198,9 +2199,7 @@ pub(super) async fn handle_client(
                                 &soft_interrupt_queues,
                             )
                             .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                                last_available_models_snapshot = Some(snapshot);
-                            }
+                            record_available_models(&agent, &mut last_available_models_snapshot).await;
                         } else {
                             crate::logging::warn(&format!(
                                 "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
@@ -2277,7 +2276,7 @@ pub(super) async fn handle_client(
                     // records the baseline right after). Building the snapshot
                     // here cost ~200ms on a cold server and sat directly in
                     // front of the client's GetHistory, delaying first paint.
-                    last_available_models_snapshot = None;
+                    last_available_models_snapshot.forget();
                 }
                 if requested_continuation {
                     super::runtime_ssh_loops::initialize_remote_session(
@@ -2323,9 +2322,7 @@ pub(super) async fn handle_client(
                 // instead of leaving the graph blank until the next plan
                 // mutation broadcast.
                 send_swarm_plan_to_session(&client_session_id, &swarm_members, &swarm_plans).await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                    last_available_models_snapshot = Some(snapshot);
-                }
+                record_available_models(&agent, &mut last_available_models_snapshot).await;
             }
 
             Request::GetModelCatalog { id, subscribe_usage_updates } => {
@@ -2336,9 +2333,7 @@ pub(super) async fn handle_client(
                 {
                     break;
                 }
-                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                    last_available_models_snapshot = Some(snapshot);
-                }
+                record_available_models(&agent, &mut last_available_models_snapshot).await;
             }
 
             Request::GetHistoryPage { id, before, limit } => {
@@ -2467,9 +2462,7 @@ pub(super) async fn handle_client(
                     &soft_interrupt_queues,
                 )
                 .await;
-                if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                    last_available_models_snapshot = Some(snapshot);
-                }
+                record_available_models(&agent, &mut last_available_models_snapshot).await;
                 super::background_tasks::schedule_detached_completion_replay(&client_session_id);
             }
 
@@ -4200,7 +4193,7 @@ use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
     reconcile_processing_completions, record_processing_completion, start_next_queued_prompt,
-    start_processing_message, try_available_models_snapshot,
+    record_available_models, start_processing_message,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)
@@ -4323,15 +4316,13 @@ pub(super) async fn process_reserved_message_with_role(
 async fn publish_available_models_for_client(
     agent: &Arc<Mutex<Agent>>,
     tx: &mpsc::UnboundedSender<ServerEvent>,
-    last: &mut Option<Arc<str>>,
+    last: &mut PublishedCatalog,
     connection_id: &str,
 ) -> bool {
     let Some(catalog) = try_available_models_catalog_offloaded(agent).await else {
         return false;
     };
-    if last.as_ref().is_some_and(|previous| {
-        Arc::ptr_eq(previous, &catalog.dedup_key) || previous.as_ref() == catalog.dedup_key.as_ref()
-    }) {
+    if last.covers(&catalog) {
         return true;
     }
     if let Some(event) = catalog.live_event() {
@@ -4342,7 +4333,7 @@ async fn publish_available_models_for_client(
             connection_id, catalog.encoded_len
         ));
     }
-    *last = Some(Arc::clone(&catalog.dedup_key));
+    last.record(&catalog);
     true
 }
 

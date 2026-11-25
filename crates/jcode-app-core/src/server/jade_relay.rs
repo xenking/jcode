@@ -392,8 +392,7 @@ impl RelayClient {
         soft_interrupt_queues: &SessionInterruptQueues,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) -> Result<()> {
-        let text = event.text.unwrap_or_default();
-        let text = text.trim();
+        let text = event.text().trim();
         if text.is_empty() {
             return Ok(());
         }
@@ -1047,16 +1046,17 @@ struct LaunchRequest {
 
 impl LaunchRequest {
     fn from_event(event: &RelayEvent, default_working_dir: Option<&str>) -> Result<Self> {
-        let data = event.data.as_ref();
-        let text = event.text.clone().unwrap_or_default();
-        let working_dir = data_string(data, "working_dir")
-            .or_else(|| data_string(data, "cwd"))
+        let text = event.text().to_string();
+        let working_dir = event
+            .data_string("working_dir")
+            .or_else(|| event.data_string("cwd"))
             .or_else(|| default_working_dir.map(str::to_string));
-        let model = data_string(data, "model");
+        let model = event.data_string("model");
         let provider_key = provider_key_for_launch_model(
             model.as_deref(),
-            data_string(data, "provider")
-                .or_else(|| data_string(data, "provider_key"))
+            event
+                .data_string("provider")
+                .or_else(|| event.data_string("provider_key"))
                 .as_deref(),
         );
         Ok(Self {
@@ -1064,23 +1064,9 @@ impl LaunchRequest {
             working_dir,
             model,
             provider_key,
-            selfdev: data_bool(data, "selfdev"),
+            selfdev: event.data_bool("selfdev"),
         })
     }
-}
-
-fn data_string(data: Option<&serde_json::Value>, key: &str) -> Option<String> {
-    data.and_then(|value| value.get(key))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn data_bool(data: Option<&serde_json::Value>, key: &str) -> bool {
-    data.and_then(|value| value.get(key))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
 }
 
 fn provider_key_for_launch_model(
@@ -1309,6 +1295,29 @@ struct RelayEvent {
 }
 
 impl RelayEvent {
+    /// The prompt text, empty when the event carries none.
+    fn text(&self) -> &str {
+        self.text.as_deref().unwrap_or_default()
+    }
+
+    fn data_string(&self, key: &str) -> Option<String> {
+        self.data
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    fn data_bool(&self, key: &str) -> bool {
+        self.data
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
     fn event_type(&self) -> &str {
         if self.event_type.trim().is_empty() {
             "prompt"

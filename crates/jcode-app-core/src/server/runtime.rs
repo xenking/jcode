@@ -36,6 +36,10 @@ struct RuntimeTaskScope {
 }
 
 impl RuntimeTaskScope {
+    fn child_token(&self) -> CancellationToken {
+        self.cancellation.child_token()
+    }
+
     async fn spawn<F, Fut>(&self, task: F) -> bool
     where
         F: FnOnce(CancellationToken) -> Fut,
@@ -121,7 +125,7 @@ pub(super) struct ServerRuntime {
 
 impl ServerRuntime {
     pub(super) fn cancellation_token(&self) -> CancellationToken {
-        self.tasks.cancellation.child_token()
+        self.tasks.child_token()
     }
     pub(super) fn from_server(server: &super::Server) -> Self {
         Self {
@@ -159,7 +163,7 @@ impl ServerRuntime {
 
     pub(super) fn spawn_main_accept_loop(&self, listener: Listener) -> tokio::task::JoinHandle<()> {
         let runtime = self.clone();
-        let cancellation = self.tasks.cancellation.child_token();
+        let cancellation = self.tasks.child_token();
         let trace_accepts = crate::logging::LogLevel::Debug.is_enabled();
         tokio::spawn(async move {
             #[cfg(windows)]
@@ -198,7 +202,7 @@ impl ServerRuntime {
         server_start_time: Instant,
     ) -> tokio::task::JoinHandle<()> {
         let runtime = self.clone();
-        let cancellation = self.tasks.cancellation.child_token();
+        let cancellation = self.tasks.child_token();
         tokio::spawn(async move {
             #[cfg(windows)]
             let mut listener = listener;

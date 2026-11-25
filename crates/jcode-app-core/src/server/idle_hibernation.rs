@@ -35,6 +35,15 @@ impl IdleState {
         }
     }
 
+    /// The agent declined to hibernate: restart the idle window.
+    fn restart_window(&mut self, now: Instant) {
+        self.since = now;
+    }
+
+    fn mark_released(&mut self) {
+        self.released = true;
+    }
+
     fn due(
         &self,
         now: Instant,
@@ -146,10 +155,10 @@ async fn reclaim_idle_caches(
         });
         let Some(released) = agent.hibernate_idle_caches() else {
             // Pending input, alerts, compaction or tools reset the idle window.
-            state.since = now;
+            state.restart_window(now);
             continue;
         };
-        state.released = true;
+        state.mark_released();
         releases.push((id, released));
     }
     if !releases.is_empty() {

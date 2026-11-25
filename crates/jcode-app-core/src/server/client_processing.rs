@@ -940,12 +940,11 @@ pub(super) async fn cancel_processing_message(
     }
 }
 
-pub(super) async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<Arc<str>> {
-    Some(Arc::clone(
-        &try_available_models_catalog_offloaded(agent)
-            .await?
-            .dedup_key,
-    ))
+/// Remember the agent's current catalog as already delivered to this client.
+pub(super) async fn record_available_models(agent: &Arc<Mutex<Agent>>, last: &mut PublishedCatalog) {
+    if let Some(catalog) = try_available_models_catalog_offloaded(agent).await {
+        last.record(&catalog);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

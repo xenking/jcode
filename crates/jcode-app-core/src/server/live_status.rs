@@ -177,6 +177,45 @@ impl Projection {
         }
     }
 
+    /// Fold one event into a live projection. Returns whether the visible
+    /// status changed.
+    fn observe_live(&mut self, event: &ServerEvent, now: Instant) -> bool {
+        let previous = self.value.clone();
+        let final_phase = self.ended.map(|ended| (ended, self.value.phase.clone()));
+        self.observe(event, now);
+        // The forwarding task can drain trailing usage after the lifecycle
+        // completed. Keep those counts without reviving a stopped spinner.
+        if let Some((ended, phase)) = final_phase {
+            self.pause(ended);
+            self.value.phase = phase;
+        }
+        previous != self.value
+    }
+
+    fn finish(&mut self, status: &str, reason: Option<&str>, now: Instant) {
+        self.pause(now);
+        self.ended.get_or_insert(now);
+        self.value.phase = status.into();
+        self.value.tool_name = None;
+        self.value.tool_intent = None;
+        if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+            self.value.stop_reason = Some(reason.into());
+        } else {
+            self.value.stop_reason = Some(self.interruption_reason.clone().unwrap_or_else(|| {
+                match status {
+                    "ready" | "idle" => "Waiting for work",
+                    "done" | "completed" => "Completed",
+                    "stopped" => "Stopped",
+                    "failed" | "crashed" => "Failed",
+                    "cancelled" => "Cancelled",
+                    "blocked" | "waiting" => "Waiting",
+                    _ => status,
+                }
+                .into()
+            }));
+        }
+    }
+
     fn snapshot(&self, now: Instant) -> SwarmLiveStatus {
         let mut value = self.value.clone();
         value.elapsed_ms = self
@@ -200,19 +239,9 @@ pub(super) fn observe(session_id: &str, event: &ServerEvent) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_mut(session_id)
+        && p.observe_live(event, Instant::now())
     {
-        let previous = p.value.clone();
-        let final_phase = p.ended.map(|ended| (ended, p.value.phase.clone()));
-        p.observe(event, Instant::now());
-        // The forwarding task can drain trailing usage after the lifecycle
-        // completed. Keep those counts without reviving a stopped spinner.
-        if let Some((ended, phase)) = final_phase {
-            p.pause(ended);
-            p.value.phase = phase;
-        }
-        if previous != p.value {
-            CHANGED.send_modify(|generation| *generation = generation.wrapping_add(1));
-        }
+        CHANGED.send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 }
 
@@ -222,28 +251,7 @@ pub(super) fn finish(session_id: &str, status: &str, reason: Option<&str>) {
         .unwrap_or_else(|e| e.into_inner())
         .get_mut(session_id)
     {
-        let now = Instant::now();
-        p.pause(now);
-        p.ended.get_or_insert(now);
-        p.value.phase = status.into();
-        p.value.tool_name = None;
-        p.value.tool_intent = None;
-        if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
-            p.value.stop_reason = Some(reason.into());
-        } else {
-            p.value.stop_reason = Some(p.interruption_reason.clone().unwrap_or_else(|| {
-                match status {
-                    "ready" | "idle" => "Waiting for work",
-                    "done" | "completed" => "Completed",
-                    "stopped" => "Stopped",
-                    "failed" | "crashed" => "Failed",
-                    "cancelled" => "Cancelled",
-                    "blocked" | "waiting" => "Waiting",
-                    _ => status,
-                }
-                .into()
-            }));
-        }
+        p.finish(status, reason, Instant::now());
     }
 }
 

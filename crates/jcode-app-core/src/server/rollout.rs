@@ -271,6 +271,13 @@ impl Store {
         save_at(&self.path, journal)
     }
 
+    fn desktop_handoff(&self, journal: &Journal, direction: &str) -> PathBuf {
+        self.path
+            .with_file_name("desktop")
+            .join(&journal.id)
+            .join(format!("{direction}.json"))
+    }
+
     fn phase(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
         journal.phase = phase;
         self.save(journal)?;
@@ -910,7 +917,7 @@ fn inode(_path: &Path) -> Result<u64> {
 }
 
 async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
-    let handoff = desktop_handoff(store, journal, "forward");
+    let handoff = store.desktop_handoff(journal, "forward");
     if journal.desktop_swapped
         || match journal.incoming_inode {
             Some(expected) => {
@@ -960,14 +967,6 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     launch_desktop(store, journal, &handoff).await
 }
 
-fn desktop_handoff(store: &Store, journal: &Journal, direction: &str) -> PathBuf {
-    store
-        .path
-        .with_file_name("desktop")
-        .join(&journal.id)
-        .join(format!("{direction}.json"))
-}
-
 async fn launch_desktop(store: &Store, journal: &mut Journal, handoff: &Path) -> Result<()> {
     store.before(journal, "launch_desktop")?;
     super::rollout_desktop::launch(&journal.intent.app, handoff).await?;
@@ -976,8 +975,8 @@ async fn launch_desktop(store: &Store, journal: &mut Journal, handoff: &Path) ->
 
 async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
     store.phase(journal, Phase::RollingBack)?;
-    let forward_handoff = desktop_handoff(store, journal, "forward");
-    let rollback_handoff = desktop_handoff(store, journal, "rollback");
+    let forward_handoff = store.desktop_handoff(journal, "forward");
+    let rollback_handoff = store.desktop_handoff(journal, "rollback");
     let installed_incoming = journal.incoming_inode.is_some_and(|incoming| {
         inode(&journal.intent.app).is_ok_and(|installed| installed == incoming)
     });

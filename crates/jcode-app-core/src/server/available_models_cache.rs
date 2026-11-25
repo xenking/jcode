@@ -14,9 +14,32 @@ const MAX_LIVE_BYTES: usize = 64 * 1024;
 
 pub(super) struct Catalog {
     pub event: ServerEvent,
-    pub dedup_key: Arc<str>,
+    dedup_key: Arc<str>,
     pub encoded_len: usize,
     slim: Option<ServerEvent>,
+}
+
+/// The last catalog a client connection received, so an identical catalog is
+/// not sent twice.
+#[derive(Default)]
+pub(super) struct PublishedCatalog(Option<Arc<str>>);
+
+impl PublishedCatalog {
+    /// Forget what was sent, so the next catalog is published again.
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    pub fn covers(&self, catalog: &Catalog) -> bool {
+        self.0.as_ref().is_some_and(|previous| {
+            Arc::ptr_eq(previous, &catalog.dedup_key)
+                || previous.as_ref() == catalog.dedup_key.as_ref()
+        })
+    }
+
+    pub fn record(&mut self, catalog: &Catalog) {
+        self.0 = Some(Arc::clone(&catalog.dedup_key));
+    }
 }
 
 impl Catalog {
