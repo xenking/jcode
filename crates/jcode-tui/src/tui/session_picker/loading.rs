@@ -627,12 +627,10 @@ mod session_candidates;
 #[allow(unused_imports)]
 pub(crate) use session_candidates::*;
 
-
 #[path = "loading/session_summary.rs"]
 mod session_summary;
 #[allow(unused_imports)]
 pub(crate) use session_summary::*;
-
 
 fn load_session_summary(path: &Path) -> Result<SessionSummary> {
     let bytes = std::fs::read(path)?;
@@ -1059,7 +1057,6 @@ fn limit_sessions_by_recency(sessions: &mut Vec<SessionInfo>, limit: usize) {
 mod external_sessions;
 #[allow(unused_imports)]
 pub(crate) use external_sessions::*;
-
 
 #[path = "loading/pi_sessions.rs"]
 mod pi_sessions;

@@ -1411,6 +1411,85 @@ mod paste_attachment_tests {
 #[path = "input/submission.rs"]
 mod submission;
 
+impl App {
+    /// Remove reasoning display messages at the given (pre-removal) indices.
+    /// Returns how many were removed.
+    pub(in self::super) fn remove_reasoning_trace_messages(
+        &mut self,
+        indices: impl Iterator<Item = usize>,
+    ) -> usize {
+        let mut sorted: Vec<usize> = indices.collect();
+        sorted.sort_unstable();
+        let mut removed = 0usize;
+        for idx in sorted {
+            let idx = idx.saturating_sub(removed);
+            if idx < self.display_messages.len() && self.display_messages[idx].role == "reasoning" {
+                self.display_messages.remove(idx);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    pub(in self::super) fn append_streaming_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        // Invariant: answer text is never appended *into* an open reasoning
+        // region. If a region is still open when real (non-whitespace) answer
+        // text arrives, close it first so the next `open_reasoning_region` still
+        // inserts its blank-line separator. Without this, a stale
+        // `reasoning_streaming` flag makes `open_reasoning_region` early-return
+        // and the answer tail gets glued directly onto the next reasoning run
+        // (e.g. `...patch + build.Ah, I see...`). Whitespace-only appends (the
+        // separators emitted by the reasoning helpers themselves) never trip
+        // this. `open_reasoning_region` only appends its separator *before*
+        // setting the flag, so this cannot recurse.
+        if self.reasoning_streaming && !text.trim().is_empty() {
+            self.close_reasoning_region(None);
+        }
+        // A whitespace-only append skips the close above, so it pushes text
+        // *past* the live reasoning tail while `reasoning_partial_len` still
+        // claims the tail sits at the end of the buffer. That offset then no
+        // longer describes the buffer, which is the same desync class as
+        // #632/#633/#635. The tail is only rebuildable while it is still the
+        // suffix, so drop it here rather than leave a stale length behind.
+        if self.reasoning_partial_len > 0 {
+            self.reasoning_partial_len = 0;
+        }
+        self.streaming.streaming_text_mut().push_str(text);
+        self.refresh_split_view_if_needed();
+    }
+
+    /// In `current` reasoning display mode, reasoning is shown live but collapsed
+    /// once the assistant commits a message or runs a tool. Strip any
+    /// reasoning-marked lines (identified by [`REASONING_SENTINEL`]) from text
+    /// about to be committed to the transcript. Other modes pass through.
+    pub(in self::super) fn collapse_reasoning_for_commit(&self, content: String) -> String {
+        if !matches!(
+            crate::config::config().display.reasoning_display(),
+            crate::config::ReasoningDisplayMode::Current
+        ) {
+            return content;
+        }
+        strip_reasoning_lines(&content)
+    }
+
+    pub(in self::super) fn take_streaming_text(&mut self) -> String {
+        let content = std::mem::take(self.streaming.streaming_text_mut());
+        self.stream_message_ended = false;
+        self.deferred_stream_done_id = None;
+        self.reasoning_streaming = false;
+        self.reasoning_pending_line.clear();
+        self.reasoning_partial_len = 0;
+        self.reasoning_block_start = None;
+        self.refresh_split_view_if_needed();
+        self.streaming_md_renderer.borrow_mut().reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+        content
+    }
+}
+
 #[path = "input/streaming_text.rs"]
 mod streaming_text;
 

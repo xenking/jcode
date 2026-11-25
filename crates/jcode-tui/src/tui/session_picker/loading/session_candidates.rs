@@ -120,7 +120,11 @@ pub(super) fn collect_files_recursive(root: &Path, extension: &str) -> Vec<PathB
     files
 }
 
-pub(super) fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
+pub(super) fn collect_recent_files_recursive(
+    root: &Path,
+    extension: &str,
+    limit: usize,
+) -> Vec<PathBuf> {
     fn modified_sort_key(path: &Path) -> u64 {
         path.metadata()
             .and_then(|meta| meta.modified())

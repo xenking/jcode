@@ -55,6 +55,15 @@ pub(super) use auto_poke_errors::{
     is_non_retryable_auto_poke_error,
 };
 
+fn derive_subagent_description(prompt: &str) -> String {
+    let words: Vec<&str> = prompt.split_whitespace().take(4).collect();
+    if words.is_empty() {
+        "Manual subagent".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
 #[path = "commands/info_commands.rs"]
 mod info_commands;
 #[allow(unused_imports)]

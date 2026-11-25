@@ -56,7 +56,11 @@ pub(super) fn render_compact_swarm_background_completion(
     render_compact_swarm_operation_line(&text, width, color)
 }
 
-pub(super) fn render_compact_swarm_operation_line(text: &str, width: u16, color: Color) -> Vec<Line<'static>> {
+pub(super) fn render_compact_swarm_operation_line(
+    text: &str,
+    width: u16,
+    color: Color,
+) -> Vec<Line<'static>> {
     let mut lines = vec![super::super::truncate_line_with_ellipsis_to_width(
         &Line::from(vec![
             Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
@@ -750,7 +754,10 @@ pub(super) fn render_compact_agent_notification(
 
 /// "time since this agent's previous message, approx tokens" for a swarm
 /// notification. Time is omitted when unknown (first message, replay).
-pub(super) fn swarm_notification_usage_label(content: &str, since_last_secs: Option<f32>) -> Option<String> {
+pub(super) fn swarm_notification_usage_label(
+    content: &str,
+    since_last_secs: Option<f32>,
+) -> Option<String> {
     let tokens = swarm_notification_token_count(content);
     if tokens == 0 {
         return None;
@@ -765,13 +772,6 @@ pub(super) fn swarm_notification_usage_label(content: &str, since_last_secs: Opt
             None => tokens,
         },
     )
-}
-
-pub(super) fn swarm_notification_token_count(content: &str) -> usize {
-    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
-        .map(|parsed| parsed.body)
-        .unwrap_or(content);
-    crate::util::estimate_tokens(body.trim())
 }
 
 pub(super) fn render_compact_swarm_await(
@@ -806,7 +806,11 @@ pub(super) fn render_compact_swarm_await(
     Some(lines)
 }
 
-pub(super) fn render_compact_plan_graph(title: &str, content: &str, width: u16) -> Option<Vec<Line<'static>>> {
+pub(super) fn render_compact_plan_graph(
+    title: &str,
+    content: &str,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
     let version = title.strip_prefix("Plan graph · ")?.trim();
     let centered = markdown::center_code_blocks();
     let body_width = width.saturating_sub(3).max(1) as usize;

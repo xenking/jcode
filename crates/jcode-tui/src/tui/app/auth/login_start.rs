@@ -83,13 +83,6 @@ impl App {
         }
     }
 
-    pub(super) fn begin_pending_login(&mut self, pending: PendingLogin) {
-        if let Some((provider, method)) = pending.telemetry_context() {
-            crate::telemetry::record_auth_started(&provider, &method);
-        }
-        self.pending_login = Some(pending);
-    }
-
     pub(in super::super) fn start_claude_login(&mut self) {
         let label = crate::auth::claude::login_target_label(None)
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());

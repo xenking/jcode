@@ -253,14 +253,20 @@ pub(crate) fn render_todos_message(
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
 /// user's authorization and per goal declared impossible.
-pub(in super::super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line<'static>> {
+pub(in super::super) fn todo_blocker_footer(
+    payload: Option<&str>,
+    width: u16,
+) -> Vec<Line<'static>> {
     let Some(payload) = payload.and_then(cached_todo_payload) else {
         return Vec::new();
     };
     render_todo_blocker_footer(&payload, width)
 }
 
-pub(super) fn render_todo_blocker_footer(payload: &TodoCardPayload, width: u16) -> Vec<Line<'static>> {
+pub(super) fn render_todo_blocker_footer(
+    payload: &TodoCardPayload,
+    width: u16,
+) -> Vec<Line<'static>> {
     let row = |text: String| {
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
         super::super::truncate_line_with_ellipsis_to_width(
@@ -1473,7 +1479,8 @@ pub(super) fn render_todo_item_line_with_background(
     let progress_width = progress.width();
     if progress_width > 0 {
         let left_width = inner_width.saturating_sub(progress_width + 2);
-        let mut left = super::super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
+        let mut left =
+            super::super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
         let pad = inner_width.saturating_sub(left.width() + progress_width);
         left.spans.push(Span::raw(" ".repeat(pad)));
         left.spans.extend(progress.spans);
@@ -1485,7 +1492,10 @@ pub(super) fn render_todo_item_line_with_background(
 /// Reuse the info widget's bar cells, colors and used/remaining convention.
 /// Labels and separators are fitted separately so Unicode task names cannot
 /// wrap, even though the shared renderer's fixed label is ASCII-oriented.
-pub(super) fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> Line<'static> {
+pub(super) fn todo_dependency_progress(
+    tasks: &[&TodoCardBackgroundTask],
+    width: usize,
+) -> Line<'static> {
     if width < 10 {
         return Line::default();
     }
@@ -1549,7 +1559,10 @@ pub(super) fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width:
 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
 /// (optionally) the confidence suffix. Callers own indent and truncation.
-pub(super) fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
+pub(super) fn todo_card_item_spans(
+    todo: &crate::todo::TodoItem,
+    with_confidence: bool,
+) -> Vec<Span<'static>> {
     let blocked = crate::todo::is_incomplete_todo(todo) && !todo.blocked_by.is_empty();
     let is_completely_blocked = crate::todo::todo_requires_user_auth(todo);
     let (glyph, glyph_color) = if is_completely_blocked {

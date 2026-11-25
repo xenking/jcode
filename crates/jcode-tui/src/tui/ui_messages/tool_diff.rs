@@ -133,7 +133,11 @@ pub(super) fn expanded_diff_row(
     rows
 }
 
-pub(super) fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Line<'static> {
+pub(super) fn render_tool_failure_reason(
+    content: &str,
+    width: usize,
+    indent: usize,
+) -> Line<'static> {
     let clean = strip_ansi_escape_sequences(content);
     let summary = tools_ui::parse_tool_failure(&clean)
         .map(|failure| failure.reason)

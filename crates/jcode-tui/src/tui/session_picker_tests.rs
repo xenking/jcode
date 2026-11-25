@@ -327,7 +327,6 @@ mod selection_and_filter_tests;
 #[allow(unused_imports)]
 pub(crate) use selection_and_filter_tests::*;
 
-
 #[test]
 fn saved_placement_expiry_keeps_bookmarks_in_saved_filter() {
     let mut saved = make_session(
@@ -373,7 +372,6 @@ fn saved_placement_expiry_keeps_bookmarks_in_saved_filter() {
 mod preview_and_scroll_tests;
 #[allow(unused_imports)]
 pub(crate) use preview_and_scroll_tests::*;
-
 
 #[test]
 fn test_reseed_grouped_keeps_selection_when_list_changes() {

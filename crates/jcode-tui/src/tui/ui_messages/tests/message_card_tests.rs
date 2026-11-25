@@ -481,7 +481,8 @@ pub(super) fn transcript_assistant_message_omits_tool_summary_restored_from_hist
 }
 
 #[test]
-pub(super) fn render_assistant_message_centered_mode_keeps_markdown_unpadded_for_center_alignment() {
+pub(super) fn render_assistant_message_centered_mode_keeps_markdown_unpadded_for_center_alignment()
+{
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage::assistant(
@@ -697,7 +698,10 @@ pub(super) fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
         .join("\n");
 
     assert!(plain.contains("fixed the flaky test"), "{plain}");
-    assert!(plain.contains(super::super::SWARM_COLLAPSE_BADGE), "{plain}");
+    assert!(
+        plain.contains(super::super::SWARM_COLLAPSE_BADGE),
+        "{plain}"
+    );
     assert!(plain.contains("race in the setup helper"), "{plain}");
     crate::tui::markdown::set_center_code_blocks(saved);
 }
@@ -1257,8 +1261,6 @@ pub(super) fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() 
     assert!(plain.contains("nested.rs"), "{plain}");
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
-
-
 
 pub(super) fn compaction_divider_message(expanded: bool) -> DisplayMessage {
     let mut message = DisplayMessage::compaction(

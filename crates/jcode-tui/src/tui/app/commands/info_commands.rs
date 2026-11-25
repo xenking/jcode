@@ -7,15 +7,6 @@ pub(in super::super) fn current_subagent_model_summary(app: &App) -> String {
     }
 }
 
-pub(super) fn derive_subagent_description(prompt: &str) -> String {
-    let words: Vec<&str> = prompt.split_whitespace().take(4).collect();
-    if words.is_empty() {
-        "Manual subagent".to_string()
-    } else {
-        words.join(" ")
-    }
-}
-
 pub(in super::super) fn parse_manual_subagent_spec(
     rest: &str,
 ) -> Result<ManualSubagentSpec, String> {

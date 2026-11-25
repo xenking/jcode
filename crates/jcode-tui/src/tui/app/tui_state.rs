@@ -162,6 +162,21 @@ fn remote_oauth_widget_usage(
     }
 }
 
+impl App {
+    pub(in self::super) fn openai_widget_account_email(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else {
+            self.provider.active_oauth_account_email()
+        }
+    }
+}
+
 #[path = "tui_state/remote_widget_info.rs"]
 mod remote_widget_info;
 

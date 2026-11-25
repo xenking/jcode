@@ -104,7 +104,9 @@ pub(super) fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<Sessi
 }
 
 #[cfg(test)]
-pub(in super::super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+pub(in super::super) fn load_claude_code_preview_from_path(
+    path: &Path,
+) -> Option<Vec<PreviewMessage>> {
     load_claude_code_external_preview(path).map(|preview| preview.messages)
 }
 
@@ -169,7 +171,9 @@ pub(in super::super) fn load_claude_code_preview(session_id: &str) -> Option<Vec
     load_claude_code_preview_from_path(Path::new(&session.full_path))
 }
 
-pub(in super::super) fn load_claude_code_external_preview_by_id(session_id: &str) -> Option<ExternalPreview> {
+pub(in super::super) fn load_claude_code_external_preview_by_id(
+    session_id: &str,
+) -> Option<ExternalPreview> {
     let session = crate::import::list_claude_code_sessions()
         .ok()?
         .into_iter()
@@ -367,6 +371,8 @@ pub(in super::super) fn load_codex_external_preview(path: &Path) -> Option<Exter
     out.non_empty()
 }
 
-pub(in super::super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<ExternalPreview> {
+pub(in super::super) fn load_codex_external_preview_by_id(
+    session_id: &str,
+) -> Option<ExternalPreview> {
     load_codex_external_preview(&find_codex_session_file(session_id)?)
 }

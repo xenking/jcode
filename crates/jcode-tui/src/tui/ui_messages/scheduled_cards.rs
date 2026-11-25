@@ -74,7 +74,9 @@ pub(super) fn push_wrapped_kv_line(
     }
 }
 
-pub(super) fn format_overnight_task_counts(card: &crate::overnight::OvernightProgressCard) -> String {
+pub(super) fn format_overnight_task_counts(
+    card: &crate::overnight::OvernightProgressCard,
+) -> String {
     let counts = &card.task_summary.counts;
     format!(
         "{} complete, {} active, {} blocked, {} deferred · {} total, {} validated",
@@ -137,7 +139,9 @@ pub(super) fn push_card_section(
     }
 }
 
-pub(super) fn parse_scheduled_session_message(content: &str) -> Option<ParsedScheduledSessionMessage> {
+pub(super) fn parse_scheduled_session_message(
+    content: &str,
+) -> Option<ParsedScheduledSessionMessage> {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines = normalized.lines().map(str::trim);
     if lines.next()? != "[Scheduled task]" {
@@ -279,7 +283,9 @@ pub(super) fn render_scheduled_session_message(
     Some(lines)
 }
 
-pub(super) fn parse_scheduled_tool_message(msg: &DisplayMessage) -> Option<ParsedScheduledToolMessage> {
+pub(super) fn parse_scheduled_tool_message(
+    msg: &DisplayMessage,
+) -> Option<ParsedScheduledToolMessage> {
     let task = msg
         .title
         .as_deref()?
@@ -333,7 +339,10 @@ pub(super) fn parse_scheduled_tool_message(msg: &DisplayMessage) -> Option<Parse
     })
 }
 
-pub(super) fn render_scheduled_tool_message(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+pub(super) fn render_scheduled_tool_message(
+    msg: &DisplayMessage,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
     let parsed = parse_scheduled_tool_message(msg)?;
     let centered = markdown::center_code_blocks();
     let max_box_width = if centered {
@@ -406,7 +415,6 @@ pub(super) fn render_scheduled_tool_message(msg: &DisplayMessage, width: u16) ->
     }
     Some(lines)
 }
-
 
 pub(crate) fn render_background_task_message(
     msg: &DisplayMessage,
@@ -579,7 +587,8 @@ pub(crate) fn render_background_task_message(
             ));
         }
         let timing = Line::from(Span::styled(format!(" · {timing}"), muted));
-        header = super::super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
+        header =
+            super::super::truncate_line_preserving_suffix_to_width(&header, &timing, row_width);
         let reason = Line::from(vec![
             Span::styled("  ╰─", muted),
             Span::styled(detail, muted),

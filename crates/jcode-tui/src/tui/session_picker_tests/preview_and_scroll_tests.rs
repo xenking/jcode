@@ -171,7 +171,10 @@ pub(super) fn buffer_text(picker: &mut SessionPicker, w: u16, h: u16) -> String 
 /// alternating user prompts and multi-paragraph markdown assistant replies. The
 /// assistant content includes markdown (headers, lists, code) so it exercises
 /// the same markdown render + wrap path as the real preview.
-pub(super) fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) -> Vec<PreviewMessage> {
+pub(super) fn bench_preview_messages(
+    turns: usize,
+    assistant_paragraphs: usize,
+) -> Vec<PreviewMessage> {
     let mut preview = Vec::with_capacity(turns * 2);
     for turn in 0..turns {
         preview.push(PreviewMessage {
@@ -215,7 +218,11 @@ pub(super) fn bench_preview_messages(turns: usize, assistant_paragraphs: usize) 
 
 /// A session whose preview is large enough to overflow the viewport and require
 /// scrolling (the case the user reported as slow).
-pub(super) fn bench_large_session(id: &str, turns: usize, assistant_paragraphs: usize) -> SessionInfo {
+pub(super) fn bench_large_session(
+    id: &str,
+    turns: usize,
+    assistant_paragraphs: usize,
+) -> SessionInfo {
     let mut session = make_session(id, id, false, SessionStatus::Closed);
     let preview = bench_preview_messages(turns, assistant_paragraphs);
     session.first_user_prompt = preview.first().map(|m| m.content.clone());
@@ -237,7 +244,10 @@ pub(super) fn bench_render_full(picker: &mut SessionPicker, w: u16, h: u16) -> s
     start.elapsed()
 }
 
-pub(super) fn bench_render_preview_only(picker: &mut SessionPicker, area: Rect) -> std::time::Duration {
+pub(super) fn bench_render_preview_only(
+    picker: &mut SessionPicker,
+    area: Rect,
+) -> std::time::Duration {
     // Render into a backend sized exactly to the area, placing it at the origin
     // (the preview/list rendering only depends on width/height, not x/y).
     let area = Rect::new(0, 0, area.width, area.height);
@@ -250,7 +260,10 @@ pub(super) fn bench_render_preview_only(picker: &mut SessionPicker, area: Rect) 
     start.elapsed()
 }
 
-pub(super) fn bench_render_list_only(picker: &mut SessionPicker, area: Rect) -> std::time::Duration {
+pub(super) fn bench_render_list_only(
+    picker: &mut SessionPicker,
+    area: Rect,
+) -> std::time::Duration {
     let area = Rect::new(0, 0, area.width, area.height);
     let backend = ratatui::backend::TestBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");

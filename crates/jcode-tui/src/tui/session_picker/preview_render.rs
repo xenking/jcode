@@ -275,48 +275,6 @@ impl SessionPicker {
         )
     }
 
-    pub(super) fn preview_content_hash_with_transcript(
-        &self,
-        session: &SessionInfo,
-        diff_mode: crate::config::DiffDisplayMode,
-        transcript_hash: u64,
-    ) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        session.id.hash(&mut h);
-        session.short_name.hash(&mut h);
-        session.model.hash(&mut h);
-        session.provider_key.hash(&mut h);
-        session.server_name.hash(&mut h);
-        session.server_icon.hash(&mut h);
-        session.is_canary.hash(&mut h);
-        // Transcript and selected-session header inputs invalidate this cache.
-        let is_loading = session.messages_preview.is_empty()
-            && self
-                .pending_preview_load
-                .as_ref()
-                .is_some_and(|pending| pending.session_id == session.id);
-        (session.messages_preview.is_empty() && self.preview_load_failures.contains(&session.id))
-            .hash(&mut h);
-        is_loading.hash(&mut h);
-        diff_mode.hash(&mut h);
-        crate::config::config()
-            .display
-            .todo_header_mode()
-            .hash(&mut h);
-        crate::config::config()
-            .display
-            .compact_thinking
-            .hash(&mut h);
-        super::super::mermaid::deferred_render_epoch().hash(&mut h);
-        if let Some(extras) = self.preview_extras.get(&session.id) {
-            extras.hidden_prompts.hash(&mut h);
-            extras.todos_payload.hash(&mut h);
-        }
-        transcript_hash.hash(&mut h);
-        h.finish()
-    }
-
     /// Build the fully-wrapped preview content for the current selection. This
     /// is the expensive path (markdown render + wrap of every preview message);
     /// it only runs on a cache miss (selection change, resize, preview load,

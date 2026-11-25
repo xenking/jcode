@@ -900,7 +900,6 @@ mod todo_cards;
 #[allow(unused_imports)]
 pub(crate) use todo_cards::*;
 
-
 fn compact_run_id(run_id: &str) -> String {
     if run_id.width() <= 22 {
         run_id.to_string()
@@ -915,7 +914,6 @@ mod scheduled_cards;
 #[allow(unused_imports)]
 pub(crate) use scheduled_cards::*;
 
-
 fn compact_swarm_operation_label(label: &str) -> String {
     label
         .split_once(" (")
@@ -924,11 +922,17 @@ fn compact_swarm_operation_label(label: &str) -> String {
         .replace('_', " ")
 }
 
+fn swarm_notification_token_count(content: &str) -> usize {
+    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
+        .map(|parsed| parsed.body)
+        .unwrap_or(content);
+    crate::util::estimate_tokens(body.trim())
+}
+
 #[path = "ui_messages/swarm_cards.rs"]
 mod swarm_cards;
 #[allow(unused_imports)]
 pub(crate) use swarm_cards::*;
-
 
 fn edit_tool_inline_diff_lines(tc: &ToolCall, content: &str) -> Option<Vec<ParsedDiffLine>> {
     let from_content = collect_diff_lines(content);
@@ -948,7 +952,6 @@ pub(super) fn edit_tool_has_inline_diff(tc: &ToolCall, content: &str) -> bool {
 mod tool_diff;
 #[allow(unused_imports)]
 pub(crate) use tool_diff::*;
-
 
 struct ToolOutputTokenBadge {
     label: String,

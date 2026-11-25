@@ -387,19 +387,6 @@ impl App {
         }
     }
 
-    pub(in super::super) fn openai_widget_account_email(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return None;
-        }
-        if self.is_remote {
-            self.remote_provider_oauth_email
-                .as_ref()
-                .map(|email| email.as_str().to_string())
-        } else {
-            self.provider.active_oauth_account_email()
-        }
-    }
-
     /// Masked email of the OAuth account this session's requests use. Comes
     /// from the session's own credential, never the global active login.
     pub(super) fn widget_account_hint(&self, provider: WidgetProviderKind) -> Option<String> {
