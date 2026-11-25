@@ -287,6 +287,10 @@ python3 scripts/accept-smoke.py \
   --desktop-sha "$(git -C ../jcode-desktop rev-parse origin/main)"
 ```
 
+After acquiring the build lock, the runner checks for a valid `PASS` receipt for
+the same SHA pair and, if found, prints its path without rebuilding. Use
+`--force` to remove that receipt and run the smoke again.
+
 The runner requires a macOS graphical login, Xcode, and `justrust`. Install
 `tesseract` to verify painted text when Desktop does not expose visible rows.
 The runner builds

@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Test receipt reuse without building Jcode or Desktop."""
+
+from contextlib import redirect_stdout
+import fcntl
+import importlib.util
+import io
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+
+SPEC = importlib.util.spec_from_file_location(
+    "accept_smoke", Path(__file__).with_name("accept-smoke.py")
+)
+SMOKE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(SMOKE)
+CLI = "a" * 40
+DESKTOP = "b" * 40
+PASS_FLOWS = dict.fromkeys((
+    "send", "queue_while_busy", "btw", "ask_answer", "image_paste",
+    "transcript_scroll", "restart_restore",
+), "PASS")
+
+
+class ReceiptReuseTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name).resolve()
+        self.path = self.directory / f"{CLI}-{DESKTOP}.json"
+
+    def write_receipt(self, **fields):
+        receipt = dict(schema=1, pair=dict(cli=CLI, desktop=DESKTOP),
+                       flows=PASS_FLOWS, result="PASS",
+                       finished_at="2026-11-25T04:00:00.123456789Z")
+        receipt.update(fields)
+        text = json.dumps(receipt) + "\n"
+        self.path.write_text(text)
+        return text
+
+    def run_smoke(self, *flags, during_run=None):
+        def fake_smoke(_args, _run, results):
+            if during_run is not None:
+                during_run()
+            results.update(PASS_FLOWS)
+
+        argv = ["accept-smoke.py", "--jcode-sha", CLI, "--desktop-sha", DESKTOP,
+                "--receipt-dir", str(self.directory), *flags]
+        stdout = io.StringIO()
+        with (patch.object(sys, "argv", argv),
+              patch.object(sys, "dont_write_bytecode"),
+              patch.object(SMOKE, "smoke", side_effect=fake_smoke),
+              redirect_stdout(stdout)):
+            self.assertEqual(SMOKE.main(), 0)
+        self.assertIn(f"PASS receipt: {self.path}", stdout.getvalue())
+
+    def test_reuses_existing_pass_unchanged(self):
+        original = self.write_receipt()
+        self.run_smoke()
+        self.assertEqual(self.path.read_text(), original)
+        self.assertEqual(list(self.directory.glob("smoke-*")), [])
+
+    def test_reuses_pass_published_while_waiting_for_lock(self):
+        flock = fcntl.flock
+        original = None
+
+        def first_run_finishes(lock, operation):
+            nonlocal original
+            original = self.write_receipt()
+            flock(lock, operation)
+
+        with patch.object(fcntl, "flock", side_effect=first_run_finishes):
+            self.run_smoke()
+        self.assertEqual(self.path.read_text(), original)
+        self.assertEqual(list(self.directory.glob("smoke-*")), [])
+
+    def test_force_removes_pass_while_rerunning(self):
+        self.write_receipt()
+        self.run_smoke("--force", during_run=lambda: self.assertFalse(self.path.exists()))
+        self.assert_new_pass()
+
+    def test_blocked_receipt_reruns(self):
+        original = self.write_receipt(result="BLOCKED", flows=dict(PASS_FLOWS, send="BLOCKED"))
+        self.run_smoke(during_run=lambda: self.assertEqual(self.path.read_text(), original))
+        self.assert_new_pass()
+
+    def test_no_receipt_until_run_finishes(self):
+        self.run_smoke(during_run=lambda: self.assertFalse(self.path.exists()))
+        self.assert_new_pass()
+
+    def test_invalid_pass_receipts_rerun(self):
+        missing_flow = {name: status for name, status in PASS_FLOWS.items() if name != "send"}
+        for fields in (
+            {"schema": True},
+            {"pair": {"cli": DESKTOP, "desktop": CLI}},
+            {"flows": missing_flow},
+            {"flows": dict(PASS_FLOWS, send="BLOCKED")},
+            {"flows": dict(PASS_FLOWS, unexpected="PASS")},
+            {"finished_at": "2026-11-25T04:00:00"},
+            {"finished_at": "2026-02-30T04:00:00Z"},
+        ):
+            with self.subTest(fields=fields):
+                original = self.write_receipt(**fields)
+                self.run_smoke()
+                self.assertNotEqual(self.path.read_text(), original)
+                self.assert_new_pass()
+
+    def test_duplicate_result_reruns(self):
+        original = self.write_receipt().replace('"result": "PASS"', '"result": "BLOCKED", "result": "PASS"')
+        self.path.write_text(original)
+        self.run_smoke()
+        self.assert_new_pass()
+
+    def assert_new_pass(self):
+        receipt = json.loads(self.path.read_text())
+        self.assertEqual(receipt["result"], "PASS")
+        self.assertTrue(Path(receipt["evidence"]).is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()

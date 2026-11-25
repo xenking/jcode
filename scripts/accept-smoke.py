@@ -22,6 +22,7 @@ import traceback
 from http.server import ThreadingHTTPServer
 
 
+RECEIPT_SCHEMA = 1
 CORE_FLOWS = (
     "send", "queue_while_busy", "btw", "ask_answer", "image_paste",
     "transcript_scroll", "restart_restore",
@@ -368,6 +369,44 @@ def smoke(args, run, results):
         exercise(verify, btw, ask, run, cli, desktop, results)
 
 
+def has_passing_receipt(path, pair):
+    def unique_object(items):
+        value = dict(items)
+        if len(value) != len(items):
+            raise ValueError("duplicate JSON key")
+        return value
+
+    def reject_constant(value):
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    # Keep the acceptance checks in sync with src/cli/rollout_acceptance.rs.
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"),
+                             object_pairs_hook=unique_object, parse_constant=reject_constant)
+        if (not isinstance(receipt, dict)
+                or type(receipt.get("schema")) is not int
+                or receipt["schema"] != RECEIPT_SCHEMA
+                or receipt.get("result") != "PASS"
+                or receipt.get("flows") != dict.fromkeys(CORE_FLOWS, "PASS")):
+            return False
+        saved_pair = receipt.get("pair")
+        if not isinstance(saved_pair, dict) or any(saved_pair.get(key) != sha for key, sha in pair.items()):
+            return False
+        timestamp = receipt.get("finished_at")
+        if not isinstance(timestamp, str):
+            return False
+        match = re.fullmatch(
+            r"([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2})"
+            r"(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", timestamp
+        )
+        if not match:
+            return False
+        datetime.fromisoformat(match[1])
+    except (OSError, ValueError, RecursionError):
+        return False
+    return True
+
+
 def main():
     import fcntl
     sys.dont_write_bytecode = True
@@ -380,6 +419,7 @@ def main():
     parser.add_argument("--receipt-dir", type=Path,
                         default=Path(os.environ.get("JCODE_HOME", Path.home() / ".jcode")) / "rollout-acceptance")
     parser.add_argument("--dev-build", action="store_true", help="use the repo's local development profiles")
+    parser.add_argument("--force", action="store_true", help="rerun even if this pair already passed")
     args = parser.parse_args()
     for sha in (args.jcode_sha, args.desktop_sha):
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
@@ -390,14 +430,18 @@ def main():
     args.desktop_repo = (args.desktop_repo or args.jcode_repo.with_name("jcode-desktop")).resolve()
     args.receipt_dir = args.receipt_dir.expanduser().resolve()
     args.receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    pair = f"{args.jcode_sha}-{args.desktop_sha}"
-    path = args.receipt_dir / f"{pair}.json"
+    pair = dict(cli=args.jcode_sha, desktop=args.desktop_sha)
+    path = args.receipt_dir / f"{pair['cli']}-{pair['desktop']}.json"
     with (args.receipt_dir / ".build.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if not args.force and has_passing_receipt(path, pair):
+            print(f"PASS receipt: {path}")
+            return 0
         run = Path(tempfile.mkdtemp(prefix="smoke-", dir=args.receipt_dir))
         results = dict.fromkeys(CORE_FLOWS, "BLOCKED")
-        # Do not allow an old green receipt to authorize a new run that is still in flight.
-        path.unlink(missing_ok=True)
+        if args.force:
+            # Do not let an old PASS authorize rollout while the forced run is in flight.
+            path.unlink(missing_ok=True)
         blocked = False
         try:
             smoke(args, run, results)
@@ -409,7 +453,7 @@ def main():
                 if status == "BLOCKED":
                     print(f"BLOCKED {flow}: run did not reach this flow", flush=True)
         result = "ISSUES" if "ISSUES" in results.values() else "BLOCKED" if blocked or "BLOCKED" in results.values() else "PASS"
-        receipt = dict(schema=1, pair=dict(cli=args.jcode_sha, desktop=args.desktop_sha), flows=results,
+        receipt = dict(schema=RECEIPT_SCHEMA, pair=pair, flows=results,
                        result=result, finished_at=datetime.now(timezone.utc).isoformat(), evidence=str(run))
         with tempfile.NamedTemporaryFile(mode="w", dir=args.receipt_dir, delete=False) as stream:
             json.dump(receipt, stream, indent=2)
