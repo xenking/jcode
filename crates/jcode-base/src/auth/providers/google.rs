@@ -97,7 +97,7 @@ impl GoogleService {
 }
 
 /// Sort and dedupe a service list so stored tokens and scope strings are stable.
-fn normalize_services(mut services: Vec<GoogleService>) -> Vec<GoogleService> {
+pub fn normalize_services(mut services: Vec<GoogleService>) -> Vec<GoogleService> {
     services.sort();
     services.dedup();
     services
