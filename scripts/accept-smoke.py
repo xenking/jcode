@@ -53,11 +53,34 @@ def checkout(repo, path, sha):
         git(repo, "worktree", "remove", "--force", path)
 
 
-def build(repo, target, package, profile, env, log):
+XCODE_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"
+COMMAND_LINE_TOOLS = "/Library/Developer/CommandLineTools"
+RUNTIME_SHADERS = "gpui_platform/runtime_shaders"
+
+
+def developer_dir(environ=os.environ, xcode=XCODE_DEVELOPER_DIR):
+    """An explicit DEVELOPER_DIR, else Xcode when installed, else the Command Line Tools."""
+    return environ.get("DEVELOPER_DIR") or (xcode if Path(xcode).is_dir() else COMMAND_LINE_TOOLS)
+
+
+def has_metal(directory):
+    """Whether `xcrun` finds the Metal compiler, as Desktop's shader build will."""
+    try:
+        return subprocess.run(
+            ["xcrun", "--sdk", "macosx", "--find", "metal"],
+            env=dict(os.environ, DEVELOPER_DIR=directory), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def build(repo, target, package, profile, env, log, features=()):
+    extra = ["--features", ",".join(features)] if features else []
     with log.open("w") as stream:
         subprocess.run(
             ["justrust", "build", "-p", package, "--bin", package, "--profile", profile,
-             "--target-dir", str(target)], cwd=repo, env=env, stdout=stream,
+             "--target-dir", str(target), *extra], cwd=repo, env=env, stdout=stream,
             stderr=subprocess.STDOUT, check=True, timeout=3600,
         )
     return target / ("debug" if profile == "dev" else profile) / package
@@ -348,12 +371,14 @@ def smoke(args, run, results):
         btw = load_script(scripts / "accept-btw-model.py", "btw_fixture")
         build_env = {k: v for k, v in os.environ.items() if not k.startswith(("JCODE_", "RUSTFLAGS", "CARGO_BUILD_TARGET"))}
         build_env.pop("SDKROOT", None)
-        build_env["DEVELOPER_DIR"] = "/Applications/Xcode.app/Contents/Developer"
+        build_env["DEVELOPER_DIR"] = developer_dir()
+        # Without Xcode's Metal compiler, Desktop compiles its shaders at start.
+        desktop_features = () if has_metal(build_env["DEVELOPER_DIR"]) else (RUNTIME_SHADERS,)
         target = args.receipt_dir / "target"
         cli = build(cli_repo, target / "cli", "jcode", "selfdev" if args.dev_build else "release",
                     dict(build_env, JCODE_BUILD_GIT_HASH=args.jcode_sha), run / "cli-build.log")
         desktop = build(desktop_repo, target / "desktop", "jcode-desktop", "dev" if args.dev_build else "release",
-                        build_env, run / "desktop-build.log")
+                        build_env, run / "desktop-build.log", desktop_features)
         with tempfile.TemporaryDirectory(prefix="j-smoke-version-", dir="/tmp") as directory:
             env = verify.environment(Path(directory), Path(directory) / "control")
             env["JCODE_TEST_SESSION"] = "1"

@@ -1,7 +1,7 @@
 //! The real machine behind `jcode rollout`: git, cargo, the package script,
 //! `~/.jcode/builds`, the daemon socket and `/Applications/Jcode.app`.
 
-use super::rollout::{Deployed, Host, Layout, Pair, Repo, version_label_of};
+use super::rollout::{Deployed, Host, Layout, Pair, Repo, Shaders, version_label_of};
 use super::rollout_owner::{Admission, Lease, Request};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -9,9 +9,11 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 mod reviewed;
+mod toolchain;
 
 const TARGET: &str = "aarch64-apple-darwin";
-const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
+/// Variable `scripts/package-macos.sh` reads for extra Desktop cargo features.
+const DESKTOP_FEATURES_ENV: &str = "DESKTOP_CARGO_FEATURES";
 
 /// Prepare a selected pair, submit its durable intent, or inspect its journal.
 pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
@@ -103,6 +105,7 @@ fn control_socket(socket: &Path) -> Result<PathBuf> {
 
 pub struct MacHost {
     layout: Layout,
+    developer_dir: PathBuf,
     jcode_home: PathBuf,
     /// The initiating session, used for durable reload recovery attribution.
     own_session: Option<String>,
@@ -124,12 +127,14 @@ impl MacHost {
             .unwrap_or_else(|| jcode_home.join("shared-build/target"));
         let target_dir = std::path::absolute(target_dir)?;
         let desktop_worktree = worktrees.join("jcode-desktop");
+        let toolchain = toolchain::Toolchain::detect();
         let runtime_dir = rollout_runtime_dir()?;
         let daemon_socket = std::env::var_os("JCODE_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|| runtime_dir.join("jcode.sock"));
         Ok(Self {
             layout: Layout {
+                shaders: toolchain.shaders,
                 jcode_repo: projects.join("jcode"),
                 desktop_repo: projects.join("jcode-desktop"),
                 // Sibling directories: the Desktop workspace depends on
@@ -143,6 +148,7 @@ impl MacHost {
                 builds: crate::build::builds_dir()?,
                 acceptance_dir: jcode_home.join("rollout-acceptance"),
             },
+            developer_dir: toolchain.developer_dir,
             jcode_home,
             own_session: std::env::var_os("JCODE_SESSION_ID")
                 .map(|value| {
@@ -276,7 +282,7 @@ impl MacHost {
             .args(["--cargo", "--", "cargo"])
             .current_dir(&self.layout.jcode_worktree)
             .env("CARGO_TARGET_DIR", &self.layout.target_dir)
-            .env("DEVELOPER_DIR", DEVELOPER_DIR);
+            .env("DEVELOPER_DIR", &self.developer_dir);
         // build-meta watches this input. Pinning it also refreshes git date,
         // tag and changelog when the detached checkout advances.
         command.env("JCODE_BUILD_GIT_HASH", &pair.cli).args([
@@ -288,6 +294,58 @@ impl MacHost {
             "jcode",
         ]);
         command
+    }
+
+    /// The Desktop package script for the checked out pair. Without a Metal
+    /// toolchain it builds with runtime shaders, which a script older than
+    /// that option would silently ignore and then fail on `metal`.
+    fn desktop_package_command(&self) -> Result<Command> {
+        let worktree = &self.layout.desktop_worktree;
+        let script = worktree.join("scripts/package-macos.sh");
+        let features = match self.layout.shaders {
+            Shaders::Precompiled => None,
+            Shaders::Runtime => {
+                let supported = std::fs::read_to_string(&script)
+                    .is_ok_and(|text| text.contains(DESKTOP_FEATURES_ENV));
+                if !supported {
+                    bail!(
+                        "this Mac has no Metal toolchain and {} cannot build Desktop with runtime shaders; roll out a newer Desktop commit or install Xcode",
+                        script.display()
+                    );
+                }
+                Some(Shaders::RUNTIME_FEATURE)
+            }
+        };
+        let mut command = disk_admission_command("rollout-desktop", "desktop");
+        command
+            .arg("--path")
+            .arg(&self.layout.dist_dir)
+            .arg("--path")
+            .arg(
+                std::env::var_os("SPARKLE_ROOT")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.layout.dist_dir.join("sparkle")),
+            )
+            .arg("--workspace")
+            .arg(worktree.join("Cargo.toml"))
+            .arg("--workspace")
+            .arg(self.layout.jcode_worktree.join("Cargo.toml"))
+            .arg("--")
+            .arg(&script)
+            .current_dir(worktree)
+            .env("JCODE_BUILD_ADMISSION_PYTHON", BUILD_ADMISSION)
+            .env("JCODE_REPO", &self.layout.jcode_worktree)
+            .env("OUT_DIR", &self.layout.dist_dir)
+            .env("PACKAGE_TARGETS", TARGET)
+            .env("CARGO_TARGET_DIR", &self.layout.target_dir)
+            .env("DEVELOPER_DIR", &self.developer_dir);
+        match features {
+            Some(features) => command.env(DESKTOP_FEATURES_ENV, features),
+            // The plan promised precompiled shaders. A stray variable must not change that.
+            None => command.env_remove(DESKTOP_FEATURES_ENV),
+        };
+        Ok(command)
     }
 
     fn control_socket(&self) -> Result<PathBuf> {
@@ -550,33 +608,8 @@ impl Host for MacHost {
         self.checkout(Repo::Jcode, &pair.cli)?;
         self.checkout(Repo::Desktop, &pair.desktop)?;
         let worktree = self.layout.desktop_worktree.clone();
-        let mut command = disk_admission_command("rollout-desktop", "desktop");
-        command
-            .arg("--path")
-            .arg(&self.layout.dist_dir)
-            .arg("--path")
-            .arg(
-                std::env::var_os("SPARKLE_ROOT")
-                    .filter(|path| !path.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.layout.dist_dir.join("sparkle")),
-            )
-            .arg("--workspace")
-            .arg(worktree.join("Cargo.toml"))
-            .arg("--workspace")
-            .arg(self.layout.jcode_worktree.join("Cargo.toml"));
-        let packaged = self.run_admitted(
-            command
-                .arg("--")
-                .arg(worktree.join("scripts/package-macos.sh"))
-                .current_dir(&worktree)
-                .env("JCODE_BUILD_ADMISSION_PYTHON", BUILD_ADMISSION)
-                .env("JCODE_REPO", &self.layout.jcode_worktree)
-                .env("OUT_DIR", &self.layout.dist_dir)
-                .env("PACKAGE_TARGETS", TARGET)
-                .env("CARGO_TARGET_DIR", &self.layout.target_dir)
-                .env("DEVELOPER_DIR", DEVELOPER_DIR),
-        );
+        let mut command = self.desktop_package_command()?;
+        let packaged = self.run_admitted(&mut command);
         // Cargo may rewrite the tracked lockfile even when packaging fails.
         // Restore only an unstaged lockfile change, never other modifications.
         let status =
@@ -990,7 +1023,9 @@ mod tests {
             .arg(&sha))
         .unwrap();
         let host = MacHost {
+            developer_dir: "/Applications/Xcode.app/Contents/Developer".into(),
             layout: Layout {
+                shaders: Shaders::Precompiled,
                 jcode_repo: repo.clone(),
                 desktop_repo: repo,
                 jcode_worktree: worktree.clone(),
@@ -1168,6 +1203,53 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn env_of(command: &Command, key: &str) -> Option<std::ffi::OsString> {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == key)
+            .and_then(|(_, value)| value.map(ToOwned::to_owned))
+    }
+
+    #[test]
+    fn precompiled_shaders_package_without_extra_features_even_with_a_stray_variable() {
+        let (_dir, host, _) = checkout_fixture();
+        let command = host.desktop_package_command().unwrap();
+        assert_eq!(
+            env_of(&command, "DEVELOPER_DIR").as_deref(),
+            Some(host.developer_dir.as_os_str())
+        );
+        let entry = command
+            .get_envs()
+            .find(|(name, _)| *name == DESKTOP_FEATURES_ENV);
+        assert_eq!(entry, Some((DESKTOP_FEATURES_ENV.as_ref(), None)));
+    }
+
+    #[test]
+    fn a_mac_without_metal_packages_desktop_with_runtime_shaders() {
+        let (_dir, mut host, _) = checkout_fixture();
+        host.layout.shaders = Shaders::Runtime;
+        host.developer_dir = "/Library/Developer/CommandLineTools".into();
+        let script = host.worktree(Repo::Desktop).join("scripts/package-macos.sh");
+        std::fs::write(&script, "#!/bin/sh\n: ${DESKTOP_CARGO_FEATURES:-}\n").unwrap();
+        let command = host.desktop_package_command().unwrap();
+        assert_eq!(
+            env_of(&command, DESKTOP_FEATURES_ENV).as_deref(),
+            Some(std::ffi::OsStr::new("gpui_platform/runtime_shaders"))
+        );
+        assert_eq!(
+            env_of(&command, "DEVELOPER_DIR").as_deref(),
+            Some(Path::new("/Library/Developer/CommandLineTools").as_os_str())
+        );
+    }
+
+    #[test]
+    fn runtime_shaders_refuse_a_package_script_that_would_ignore_them() {
+        let (_dir, mut host, _) = checkout_fixture();
+        host.layout.shaders = Shaders::Runtime;
+        let error = host.desktop_package_command().unwrap_err().to_string();
+        assert!(error.contains("no Metal toolchain"), "{error}");
     }
 
     #[test]

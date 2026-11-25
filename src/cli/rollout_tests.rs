@@ -28,6 +28,7 @@ impl Fake {
         acceptance::write_fixture(receipts.path(), &pair(), None);
         Self {
             layout: Layout {
+                shaders: Shaders::Precompiled,
                 jcode_repo: "/repos/jcode".into(),
                 desktop_repo: "/repos/jcode-desktop".into(),
                 jcode_worktree: "/wt/jcode".into(),
@@ -200,6 +201,29 @@ fn dry_run_prints_every_phase_without_build_submit_or_host_mutations() {
     }
     assert!(text.contains("atomic exchange"));
     assert!(text.contains("daemon journal"));
+}
+
+#[test]
+fn dry_run_names_runtime_shaders_only_without_a_metal_toolchain() {
+    let plan = |shaders| {
+        let mut host = Fake::new();
+        host.layout.shaders = shaders;
+        let mut out = Vec::new();
+        run(
+            &mut host,
+            &RolloutOptions {
+                dry_run: true,
+                ..RolloutOptions::default()
+            },
+            &mut out,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let runtime = plan(Shaders::Runtime);
+    assert!(runtime.contains("runtime shaders"), "{runtime}");
+    assert!(runtime.contains(Shaders::RUNTIME_FEATURE), "{runtime}");
+    assert!(!plan(Shaders::Precompiled).contains("runtime shaders"));
 }
 
 #[test]

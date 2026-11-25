@@ -97,9 +97,34 @@ pub struct Deployed {
     pub desktop_version: Option<String>,
 }
 
+/// How Desktop's GPU shaders are produced. Precompiling needs Xcode's Metal
+/// toolchain on the build machine. Without it the shaders compile when the app
+/// starts, which a Command Line Tools only Mac can still build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shaders {
+    Precompiled,
+    Runtime,
+}
+
+impl Shaders {
+    /// Cargo feature that moves shader compilation to app start.
+    pub const RUNTIME_FEATURE: &'static str = "gpui_platform/runtime_shaders";
+
+    /// What the plan says when the Desktop build deviates from the default.
+    fn note(self) -> Option<String> {
+        (self == Self::Runtime).then(|| {
+            format!(
+                "no Metal toolchain here, so Desktop builds with runtime shaders (--features {})",
+                Self::RUNTIME_FEATURE
+            )
+        })
+    }
+}
+
 /// Where things live, for the plan and the dry run.
 #[derive(Debug, Clone)]
 pub struct Layout {
+    pub shaders: Shaders,
     pub jcode_repo: PathBuf,
     pub desktop_repo: PathBuf,
     pub jcode_worktree: PathBuf,
@@ -344,10 +369,14 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
             "package-desktop",
             "ok",
             format!(
-                "desktop {} against jcode {}: {}",
+                "desktop {} against jcode {}: {}{}",
                 pair.desktop_short(),
                 pair.label(),
-                app.display()
+                app.display(),
+                layout
+                    .shaders
+                    .note()
+                    .map_or(String::new(), |note| format!("; {note}"))
             ),
         )?;
         Some(app)
@@ -386,11 +415,15 @@ fn dry_run_plan<H: Host, W: Write>(
             "package-desktop",
             "plan",
             format!(
-                "{} @ {}: scripts/package-macos.sh with JCODE_REPO={} PACKAGE_TARGETS=aarch64-apple-darwin -> {}",
+                "{} @ {}: scripts/package-macos.sh with JCODE_REPO={} PACKAGE_TARGETS=aarch64-apple-darwin -> {}{}",
                 layout.desktop_worktree.display(),
                 pair.desktop_short(),
                 layout.jcode_worktree.display(),
-                layout.dist_dir.display()
+                layout.dist_dir.display(),
+                layout
+                    .shaders
+                    .note()
+                    .map_or(String::new(), |note| format!("; {note}"))
             ),
         )?;
     } else {

@@ -121,5 +121,32 @@ class ReceiptReuseTests(unittest.TestCase):
         self.assertTrue(Path(receipt["evidence"]).is_dir())
 
 
+class ToolchainTests(unittest.TestCase):
+    def test_explicit_developer_dir_wins(self):
+        self.assertEqual(SMOKE.developer_dir({"DEVELOPER_DIR": "/custom"}, xcode="/"), "/custom")
+
+    def test_missing_xcode_uses_command_line_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            absent = str(Path(directory) / "Xcode")
+            self.assertEqual(SMOKE.developer_dir({}, xcode=absent), SMOKE.COMMAND_LINE_TOOLS)
+            self.assertEqual(SMOKE.developer_dir({"DEVELOPER_DIR": ""}, xcode=directory), directory)
+
+    @unittest.skipUnless(sys.platform == "darwin", "xcrun is a macOS tool")
+    def test_directory_without_toolchains_has_no_metal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertFalse(SMOKE.has_metal(directory))
+
+    def test_runtime_shaders_become_a_desktop_build_feature(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(SMOKE.subprocess, "run") as run:
+            SMOKE.build(Path(directory), Path(directory) / "t", "jcode-desktop", "dev", {},
+                        Path(directory) / "log", (SMOKE.RUNTIME_SHADERS,))
+            SMOKE.build(Path(directory), Path(directory) / "t", "jcode", "dev", {},
+                        Path(directory) / "log")
+        with_features, without = (call.args[0] for call in run.call_args_list)
+        self.assertEqual(with_features[-2:], ["--features", "gpui_platform/runtime_shaders"])
+        self.assertNotIn("--features", without)
+
+
 if __name__ == "__main__":
     unittest.main()
