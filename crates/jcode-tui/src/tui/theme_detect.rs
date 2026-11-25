@@ -107,9 +107,10 @@ pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
 /// one typo can never leave the TUI unstyled. Safe to call repeatedly; the TUI
 /// calls it again after `/colors` edits so changes apply without a restart.
 pub fn init_palette() {
-    let configured = &crate::config::config().display.colors;
+    let colors = crate::config::config().display.color_prefs();
     let (overrides, errors) = jcode_tui_style::Palette::from_pairs(
-        configured
+        colors
+            .overrides
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );

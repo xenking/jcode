@@ -1144,7 +1144,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
     };
     let arg = rest.trim();
 
-    let current = crate::config::config().display.latex_rendering;
+    let current = crate::config::config().display.render_prefs().latex;
     if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
         app.push_display_message(DisplayMessage::system(format!(
             "LaTeX rendering: {} (use /latex [on|off|none|unicode|image|status])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
@@ -1167,7 +1167,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
 
     match crate::config::Config::set_latex_rendering(mode) {
         Ok(()) => {
-            let effective = crate::config::config().display.latex_rendering;
+            let effective = crate::config::config().display.render_prefs().latex;
             app.set_status_notice(format!("LaTeX rendering: {}", effective.as_str()));
             let override_note = if effective != mode {
                 " JCODE_LATEX_RENDERING overrides the saved mode."
@@ -1185,7 +1185,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
             "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
             mode.as_str(),
             error,
-            crate::config::config().display.latex_rendering.as_str()
+            crate::config::config().display.render_prefs().latex.as_str()
         ))),
     }
     true

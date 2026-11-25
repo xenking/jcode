@@ -202,7 +202,8 @@ where
 }
 
 fn disabled_animation_names() -> HashSet<String> {
-    expand_disabled_animation_names(crate::config::config().display.disabled_animations.iter())
+    let prefs = crate::config::config().display.animation_prefs();
+    expand_disabled_animation_names(prefs.disabled.iter())
 }
 
 fn choose_animation_variant_from_disabled<'a>(

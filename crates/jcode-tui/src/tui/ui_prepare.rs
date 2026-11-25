@@ -546,7 +546,7 @@ pub(super) fn prepare_messages(
         },
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
-        latex_rendering: crate::config::config().display.latex_rendering,
+        latex_rendering: crate::config::config().display.render_prefs().latex,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
 
@@ -1040,7 +1040,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         inline_images_visible: app.inline_images_visible(),
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
-        latex_rendering: crate::config::config().display.latex_rendering,
+        latex_rendering: crate::config::config().display.render_prefs().latex,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
     let msg_count = app.display_messages().len();

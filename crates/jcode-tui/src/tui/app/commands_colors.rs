@@ -244,7 +244,7 @@ fn persist(
     mutate: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
 ) -> anyhow::Result<()> {
     let mut config = crate::config::Config::load();
-    mutate(&mut config.display.colors);
+    config.display.update_colors(mutate);
     config.save()?;
     crate::tui::theme_detect::init_palette();
     Ok(())

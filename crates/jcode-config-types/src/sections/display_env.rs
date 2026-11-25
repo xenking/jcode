@@ -43,7 +43,58 @@ impl DisplayPreference {
     }
 }
 
+/// How the TUI renders math: plain data built by [`DisplayConfig::render_prefs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderPrefs {
+    pub latex: LatexRenderingMode,
+}
+
+/// Animations the user turned off, from [`DisplayConfig::animation_prefs`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnimationPrefs {
+    pub disabled: Vec<String>,
+}
+
+/// The user's `[display.colors]` overrides, from [`DisplayConfig::color_prefs`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColorPrefs {
+    pub overrides: Vec<(String, String)>,
+}
+
 impl DisplayConfig {
+    /// Render preferences for the TUI.
+    pub fn render_prefs(&self) -> RenderPrefs {
+        RenderPrefs {
+            latex: self.latex_rendering,
+        }
+    }
+
+    /// Animation preferences for the TUI.
+    pub fn animation_prefs(&self) -> AnimationPrefs {
+        AnimationPrefs {
+            disabled: self.disabled_animations.clone(),
+        }
+    }
+
+    /// Color overrides for the TUI palette.
+    pub fn color_prefs(&self) -> ColorPrefs {
+        ColorPrefs {
+            overrides: self
+                .colors
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        }
+    }
+
+    /// Edit the `[display.colors]` table in place.
+    pub fn update_colors(
+        &mut self,
+        edit: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
+    ) {
+        edit(&mut self.colors);
+    }
+
     /// Apply `JCODE_*` display environment overrides.
     pub fn apply_env_overrides(&mut self) {
         self.apply_behavior_env();
