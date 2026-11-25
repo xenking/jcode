@@ -35,6 +35,8 @@ mod parallel_reads;
 #[path = "agent/session/profile.rs"]
 mod profile;
 use profile::profile_tool_selection;
+#[path = "agent/context/prompt_context.rs"]
+mod prompt_context;
 #[path = "agent/context/prompting.rs"]
 mod prompting;
 #[path = "agent/session/provider.rs"]
@@ -405,22 +407,8 @@ pub struct Agent {
     /// Before/after token counts from the last context-limit auto-recovery,
     /// consumed when the turn loop announces the compaction to clients.
     last_recovery_compaction: Option<(u64, u64, usize)>,
-    /// AGENTS.md is session bootstrap input. Keep the captured text stable so
-    /// tool writes do not mutate the provider's cacheable prefix mid-session.
-    agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
-    /// The "Available Skills" system-prompt section is session bootstrap input
-    /// too. Installing a skill mid-session must not rewrite the cached system
-    /// prefix (that forces a KV cache miss on everything after it), so the
-    /// list is frozen here and later installs are announced in the transcript.
-    prompt_skills_snapshot: Vec<crate::prompt::SkillInfo>,
-    static_prompt: prompting::StaticPromptState,
-    /// Skill names already described to the model, either in the frozen
-    /// system-prompt list or by a late-skill transcript announcement.
-    announced_skills: HashSet<String>,
-    /// Transcript index already scanned for late-skill announcements.
-    announced_skills_scan_index: usize,
-    /// Whether the current prompt inputs have been recorded for reload.
-    prompt_inputs_recorded: bool,
+    /// Frozen system-prompt inputs and the skills announced since.
+    prompt: prompt_context::PromptContext,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -469,22 +457,15 @@ impl Agent {
 
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self.session.working_dir().map(std::path::Path::new);
-        self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
-        self.static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
+        self.prompt.reset_sources(crate::prompt::load_agents_md_files_from_dir(working_dir), working_dir);
         self.refresh_prompt_skills_snapshot();
-        self.prompt_inputs_recorded = false;
     }
 
     /// Re-capture the frozen skills list. Only called at session boundaries
     /// (new/restored session, working directory change), never mid-turn.
     fn refresh_prompt_skills_snapshot(&mut self) {
-        self.prompt_skills_snapshot = self.current_prompt_skill_infos();
-        self.announced_skills = self
-            .prompt_skills_snapshot
-            .iter()
-            .map(|skill| skill.name.clone())
-            .collect();
-        self.announced_skills_scan_index = 0;
+        let skills = self.current_prompt_skill_infos();
+        self.prompt.set_skills(skills);
     }
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
@@ -527,8 +508,9 @@ impl Agent {
         let working_dir = session.working_dir().map(std::path::Path::new);
         let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
-        let static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
+        let static_prompt = prompt_context::StaticPromptState::bootstrap(working_dir);
         let agents_md_ms = t.elapsed().as_millis();
+        let prompt = prompt_context::PromptContext::new(agents_md_snapshot, static_prompt);
         let initial_provider_model = provider.model();
         let base_tool_selection = (allowed_tools, disabled_tools);
         let (allowed_tools, disabled_tools) =
@@ -569,12 +551,7 @@ impl Agent {
             sent_tool_surface: None,
             compaction_persist_pending: false,
             last_recovery_compaction: None,
-            agents_md_snapshot,
-            prompt_skills_snapshot: Vec::new(),
-            static_prompt,
-            announced_skills: HashSet::new(),
-            announced_skills_scan_index: 0,
-            prompt_inputs_recorded: false,
+            prompt,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,

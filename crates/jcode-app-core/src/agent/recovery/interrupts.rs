@@ -394,8 +394,8 @@ impl Agent {
             "agent": {
                 "frozen_snapshots": frozen_snapshot_memory_profile(
                     self.tool_lock.locked(),
-                    self.agents_md_snapshot.0.as_ref(),
-                    &self.prompt_skills_snapshot,
+                    self.prompt.agents_md().0.as_ref(),
+                    self.prompt.skills(),
                 ),
                 "memory_enabled": self.memory_enabled,
                 "allowed_tools_count": self.allowed_tools.as_ref().map(|tools| tools.len()),

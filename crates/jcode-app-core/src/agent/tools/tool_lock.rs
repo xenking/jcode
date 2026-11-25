@@ -156,9 +156,9 @@ impl ToolLock {
     /// loaded by a tool reference (`mcp connect` / `mcp search` results carry
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
-    pub(in crate::agent) fn seed_announced_from_transcript(&mut self, messages: &[StoredMessage]) {
-        let start = self.announced_mcp_scanned.min(messages.len());
-        for message in &messages[start..] {
+    pub(in crate::agent) fn seed_announced_from_transcript<'a>(&mut self, len: usize, messages_from: impl FnOnce(usize) -> std::slice::Iter<'a, StoredMessage>) {
+        let start = self.announced_mcp_scanned.min(len);
+        for message in messages_from(start) {
             for block in &message.content {
                 match block {
                     ContentBlock::ToolReference { tool_name, .. } => {
@@ -181,6 +181,6 @@ impl ToolLock {
                 }
             }
         }
-        self.announced_mcp_scanned = messages.len();
+        self.announced_mcp_scanned = len;
     }
 }

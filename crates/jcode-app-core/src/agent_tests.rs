@@ -1643,9 +1643,9 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
     assert_eq!(agent.build_system_prompt_split(None).static_part, before);
 
     // A restored agent (fresh in-memory state) must not re-announce.
-    agent.announced_skills.clear();
-    agent.announced_skills.insert("early-skill".to_string());
-    agent.announced_skills_scan_index = 0;
+    agent
+        .prompt
+        .forget_announced_skills_except(&["early-skill"]);
     agent.announce_late_skills();
     let count = transcript_texts(&agent)
         .into_iter()

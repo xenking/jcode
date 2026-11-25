@@ -10,9 +10,7 @@ const MAX_ANNOUNCED_DESCRIPTION_CHARS: usize = 120;
 
 pub(super) use super::tool_lock::LATE_MCP_ANNOUNCEMENT_MARKER;
 
-/// Stable header of the late-skill transcript announcement; used to recognize
-/// earlier announcements when a session is restored.
-pub(super) const LATE_SKILL_ANNOUNCEMENT_MARKER: &str = "New skills were installed.";
+pub(super) use super::prompt_context::LATE_SKILL_ANNOUNCEMENT_MARKER;
 
 impl Agent {
     pub fn add_manual_tool_error(
@@ -156,7 +154,7 @@ impl Agent {
         let fresh: Vec<crate::prompt::SkillInfo> = self
             .current_prompt_skill_infos()
             .into_iter()
-            .filter(|skill| !self.announced_skills.contains(&skill.name))
+            .filter(|skill| !self.prompt.is_skill_announced(&skill.name))
             .collect();
         if fresh.is_empty() {
             return;
@@ -176,7 +174,7 @@ impl Agent {
         }
         text.push_str("</system-reminder>");
         for skill in &fresh {
-            self.announced_skills.insert(skill.name.clone());
+            self.prompt.announce_skill(skill.name.clone());
         }
         logging::info(&format!(
             "Announcing {} late skill(s) in the transcript (system prompt stays cache-stable)",
@@ -190,7 +188,7 @@ impl Agent {
             }],
             Some(crate::session::StoredDisplayRole::System),
         );
-        self.announced_skills_scan_index = self.session.message_count();
+        self.prompt.mark_skills_scanned(self.session.message_count());
     }
 
     /// Replace per-server MCP definitions with the fixed search/call surface
@@ -435,27 +433,7 @@ impl Agent {
     /// Mark skills named in earlier announcements as announced, so a
     /// restored session does not describe them again.
     pub(super) fn seed_announced_skills_from_transcript(&mut self) {
-        let start = self
-            .announced_skills_scan_index
-            .min(self.session.message_count());
-        for message in self.session.iter_messages_from(start) {
-            for block in &message.content {
-                if let ContentBlock::Text { text, .. } = block
-                    && text.contains(LATE_SKILL_ANNOUNCEMENT_MARKER)
-                {
-                    for line in text.lines() {
-                        if let Some(name) = line
-                            .strip_prefix("- `/")
-                            .and_then(|rest| rest.split(' ').next())
-                            .filter(|name| !name.is_empty())
-                        {
-                            self.announced_skills.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        self.announced_skills_scan_index = self.session.message_count();
+        self.prompt.seed_announced_skills_from_transcript(self.session.message_count(), |start| self.session.iter_messages_from(start));
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {

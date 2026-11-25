@@ -173,7 +173,9 @@ mod tests {
             defer_loading: false,
         }];
         agent.tool_lock.lock_snapshot(&frozen_tools);
-        agent.agents_md_snapshot.0 = Some("Frozen instructions, not recaptured on wake".into());
+        agent
+            .prompt
+            .set_agents_md_text(Some("Frozen instructions, not recaptured on wake".into()));
         agent.provider_session_id = Some("upstream-live-session".into());
         agent.rewind_undo_snapshot = Some(RewindUndoSnapshot {
             messages: agent.session.cloned_messages(),
@@ -202,7 +204,7 @@ mod tests {
         );
         assert_eq!(agent.tool_lock.locked().unwrap()[0].name, "frozen");
         assert_eq!(
-            agent.agents_md_snapshot.0.as_deref(),
+            agent.prompt.agents_md().0.as_deref(),
             Some("Frozen instructions, not recaptured on wake")
         );
         assert_eq!(

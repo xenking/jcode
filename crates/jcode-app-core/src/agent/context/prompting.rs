@@ -2,17 +2,7 @@ use super::*;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
-
-pub(super) enum StaticPromptState {
-    Bootstrap(crate::prompt::StaticPromptSources),
-    Frozen(crate::prompt::StaticPromptSnapshot),
-}
-
-impl StaticPromptState {
-    pub(super) fn bootstrap(working_dir: Option<&std::path::Path>) -> Self {
-        Self::Bootstrap(crate::prompt::StaticPromptSources::load(working_dir))
-    }
-}
+use super::prompt_context::StaticPromptState;
 
 impl Agent {
     /// Adopt the exact bytes this session sent, and its AGENTS.md and skill
@@ -25,55 +15,24 @@ impl Agent {
         if recorded.working_dir != self.session.working_dir().map(str::to_owned) {
             return false;
         }
-        let info = crate::prompt::ContextInfo {
-            has_project_agents_md: recorded.has_project_agents_md,
-            project_agents_md_chars: recorded.project_agents_md_chars,
-            has_global_agents_md: recorded.has_global_agents_md,
-            global_agents_md_chars: recorded.global_agents_md_chars,
-            ..Default::default()
-        };
-        self.agents_md_snapshot = (recorded.agents_md, info);
-        self.prompt_skills_snapshot = recorded.skills;
-        self.prompt_inputs_recorded = recorded.static_prompt.is_some();
-        self.static_prompt = match recorded.static_prompt {
-            Some(snapshot) => StaticPromptState::Frozen(snapshot),
-            None => {
-                StaticPromptState::bootstrap(self.session.working_dir().map(std::path::Path::new))
-            }
-        };
-        // Skills installed since then are announced in the transcript, which
-        // leaves the cached system prefix untouched.
-        self.announced_skills = self
-            .prompt_skills_snapshot
-            .iter()
-            .map(|skill| skill.name.clone())
-            .collect();
-        self.announced_skills_scan_index = 0;
+        self.prompt.adopt(recorded, self.session.working_dir().map(std::path::Path::new));
         true
     }
 
     /// Record the inputs of the system prompt about to be sent, once per
     /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
     pub(super) fn record_prompt_inputs(&mut self) -> anyhow::Result<()> {
-        if self.prompt_inputs_recorded || self.session.is_ephemeral() {
+        if self.session.is_ephemeral() {
             return Ok(());
         }
-        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+        let Some(inputs) = self
+            .prompt
+            .unrecorded_inputs(self.session.working_dir.clone())
+        else {
             return Ok(());
         };
-        let (agents_md, info) = &self.agents_md_snapshot;
-        let inputs = crate::session::PersistedPromptInputs {
-            working_dir: self.session.working_dir().map(str::to_owned),
-            agents_md: agents_md.clone(),
-            has_project_agents_md: info.has_project_agents_md,
-            project_agents_md_chars: info.project_agents_md_chars,
-            has_global_agents_md: info.has_global_agents_md,
-            global_agents_md_chars: info.global_agents_md_chars,
-            skills: self.prompt_skills_snapshot.clone(),
-            static_prompt: Some(snapshot.clone()),
-        };
         crate::session::save_prompt_inputs(self.session.id(), &inputs)?;
-        self.prompt_inputs_recorded = true;
+        self.prompt.mark_recorded();
         Ok(())
     }
 
@@ -216,12 +175,12 @@ impl Agent {
         memory_prompt: Option<&str>,
         account_skills: bool,
     ) -> (SplitSystemPrompt, Option<usize>) {
-        let (static_part, custom_prompt, skills_chars) = match &self.static_prompt {
+        let (static_part, custom_prompt, skills_chars) = match self.prompt.static_prompt() {
             StaticPromptState::Frozen(snapshot) => (
                 snapshot.text.clone(),
                 snapshot.file_versions.is_none(),
                 account_skills
-                    .then(|| snapshot.skills_chars(&self.prompt_skills_snapshot))
+                    .then(|| snapshot.skills_chars(self.prompt.skills()))
                     .flatten(),
             ),
             StaticPromptState::Bootstrap(sources) => {
@@ -275,12 +234,12 @@ impl Agent {
         };
         let (split, info) = crate::prompt::build_system_prompt_split_composed(
             None,
-            &self.prompt_skills_snapshot,
+            self.prompt.skills(),
             self.session.is_canary(),
             None,
             working_dir,
             sources,
-            self.agents_md_snapshot.clone(),
+            self.prompt.agents_md().clone(),
             &composition,
         );
         (
@@ -303,9 +262,9 @@ impl Agent {
     /// commit the prefix.
     pub(super) fn freeze_static_prompt(&mut self) {
         self.rerender_after_model_prompt_change();
-        if let StaticPromptState::Bootstrap(sources) = &self.static_prompt {
+        if let Some(sources) = self.prompt.bootstrap_sources() {
             let (text, skills_chars) = self.render_static_prompt(sources);
-            self.static_prompt = StaticPromptState::Frozen(crate::prompt::StaticPromptSnapshot {
+            let snapshot = crate::prompt::StaticPromptSnapshot {
                 text,
                 file_versions: self
                     .session
@@ -315,7 +274,8 @@ impl Agent {
                 skills_chars: Some(skills_chars),
                 model_prompt_key: self.model_prompt().key,
                 rendered_for_model: self.provider.model(),
-            });
+            };
+            self.prompt.freeze(snapshot);
         }
     }
 
@@ -324,7 +284,7 @@ impl Agent {
     /// new model. A switch within the same rules keeps the frozen bytes, and
     /// a config edit alone never changes a running session.
     fn rerender_after_model_prompt_change(&mut self) {
-        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+        let Some(snapshot) = self.prompt.frozen() else {
             return;
         };
         if self.session.system_prompt().is_some()
@@ -334,13 +294,11 @@ impl Agent {
         {
             return;
         }
-        self.static_prompt =
-            StaticPromptState::bootstrap(self.session.working_dir().map(std::path::Path::new));
-        self.prompt_inputs_recorded = false;
+        self.prompt.rebootstrap(self.session.working_dir().map(std::path::Path::new));
     }
 
     pub(super) fn announce_prompt_file_changes(&mut self) -> anyhow::Result<()> {
-        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+        let Some(snapshot) = self.prompt.frozen() else {
             return Ok(());
         };
         let Some(previous) = snapshot.file_versions.as_ref() else {
@@ -361,10 +319,7 @@ impl Agent {
         );
         // Persist the model-visible message before committing its baseline.
         self.session.save()?;
-        if let StaticPromptState::Frozen(snapshot) = &mut self.static_prompt {
-            snapshot.file_versions = Some(versions);
-        }
-        self.prompt_inputs_recorded = false;
+        self.prompt.set_file_versions(versions);
         self.record_prompt_inputs()
     }
 
