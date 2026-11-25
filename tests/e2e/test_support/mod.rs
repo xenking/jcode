@@ -262,6 +262,7 @@ fn pair_test_device(token: &str) -> Result<()> {
     let token_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
     registry.devices.retain(|d| d.id != "test-device-ws");
     registry.devices.push(jcode::gateway::PairedDevice {
+        scope: Default::default(),
         id: "test-device-ws".to_string(),
         name: "WS Test Device".to_string(),
         token_hash,
@@ -707,6 +708,7 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
                 port: gateway_port,
                 bind_addr: "127.0.0.1".to_string(),
                 enabled: true,
+                harness_enabled: false,
             });
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
