@@ -215,11 +215,11 @@ pub(super) async fn execute(
         }
         RuntimeCommand::Info => {
             status_only(args)?;
-            let compaction = agent.effective_compaction_config().await;
+            let compaction = agent.effective_compaction_config().await.summary();
             let compaction_budget = agent.effective_context_budget().await;
-            json!({"compaction": {"mode": compaction.mode.as_str(),
+            json!({"compaction": {"mode": compaction.mode,
                     "reactive_threshold": compaction.reactive_threshold,
-                    "reactive_threshold_tokens": compaction.jcode_reactive_threshold_tokens(),
+                    "reactive_threshold_tokens": compaction.reactive_threshold_tokens,
                     "proactive_floor": compaction.proactive_floor,
                     "max_context_tokens": compaction.max_context_tokens,
                     "budget": compaction_budget},"session_id": agent.session_id(), "working_dir": agent.working_dir(),

@@ -25,22 +25,9 @@ fn worker_effort_cap<'a>(
     provider_name: &str,
     model: &str,
 ) -> Option<&'a String> {
-    let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
-    [model, unpinned]
+    agents
+        .worker_effort_caps(provider_key, provider_name, model)
         .into_iter()
-        .flat_map(|model| {
-            let route = provider_key.map(|key| format!("{key}:{model}"));
-            let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
-            [
-                agents.swarm_effort_caps.get(model),
-                route
-                    .as_ref()
-                    .and_then(|key| agents.swarm_effort_caps.get(key)),
-                agents.swarm_effort_caps.get(&provider_route),
-            ]
-            .into_iter()
-            .flatten()
-        })
         .min_by_key(|cap| jcode_provider_core::reasoning_effort_rank(cap))
 }
 
@@ -189,21 +176,19 @@ impl Agent {
         provider_key: Option<&str>,
     ) -> jcode_provider_core::SpeedMode {
         use jcode_provider_core::{AuthMode, AuthRoute, ResolvedCredential, SpeedMode};
-        let caps = &crate::config::config().agents.swarm_speed_caps;
-        if caps.is_empty() {
+        let agents = &crate::config::config().agents;
+        if !agents.has_worker_speed_caps() {
             return SpeedMode::Ultrafast;
         }
         let model = provider.model();
         let provider_name = provider.name().to_ascii_lowercase();
         let credential_route = std::cell::OnceCell::new();
-        let model_suffix = format!(":{model}");
-        caps.iter()
-            .filter(|(key, _)| {
-                if key.as_str() == model {
+        agents
+            .worker_speed_caps(&model)
+            .into_iter()
+            .filter(|(prefix, _)| {
+                let Some(prefix) = *prefix else {
                     return true;
-                }
-                let Some(prefix) = key.strip_suffix(&model_suffix) else {
-                    return false;
                 };
                 if prefix == provider_name || Some(prefix) == provider_key {
                     return true;
@@ -223,7 +208,7 @@ impl Agent {
                     }
                 }) == Some(route)
             })
-            .map(|(_, mode)| *mode)
+            .map(|(_, mode)| mode)
             .min_by_key(|mode| speed_rank(*mode))
             .unwrap_or(SpeedMode::Ultrafast)
     }
@@ -694,14 +679,14 @@ impl Agent {
                 let model = self.provider.model();
                 manager.set_active_model(Some(self.provider.name()), Some(&model));
                 manager.set_budget(self.provider.context_window());
-                let cfg = manager.effective_config();
+                let cfg = manager.effective_config().summary();
                 crate::logging::info(&format!(
                     "compaction effective: provider={} model={} mode={} reactive_threshold={} reactive_threshold_tokens={} max_context_tokens={} budget={}",
                     self.provider.name(),
                     model,
-                    cfg.mode.as_str(),
+                    cfg.mode,
                     cfg.reactive_threshold,
-                    cfg.jcode_reactive_threshold_tokens(),
+                    cfg.reactive_threshold_tokens,
                     cfg.max_context_tokens,
                     manager.token_budget()
                 ));
