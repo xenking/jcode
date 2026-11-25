@@ -22,7 +22,7 @@ fn env_precedes_render(body: &str, env_call: &str) -> bool {
 #[test]
 fn inline_images_persistence_locks_env_before_render() {
     let body = test_body(
-        include_str!("../src/tui/app/tests/scroll_copy_02/part_02.rs"),
+        include_str!("../src/tui/app/tests/parts/scroll_copy_02/part_02.rs"),
         "test_alt_shift_i_toggles_inline_images_and_persists",
     );
     assert!(

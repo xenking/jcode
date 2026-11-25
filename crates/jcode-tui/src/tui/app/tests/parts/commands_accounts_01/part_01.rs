@@ -1162,7 +1162,7 @@ fn test_split_command_local_is_alias_for_fork() {
     }
 }
 
-include!("../git_diff.rs");
+include!("../../git_diff.rs");
 
 fn submit_git_command_and_wait_for_response(app: &mut App, command: &str) {
     let expected_session_id = if app.is_remote {
