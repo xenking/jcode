@@ -33,8 +33,8 @@ fn waits_are_replayed_but_mutating_tools_are_not() {
         json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
     );
 
-    assert!(tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input));
-    assert!(!tool_handoff::is_reload_replayable_wait(
+    assert!(crate::agent::tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input));
+    assert!(!crate::agent::tool_handoff::is_reload_replayable_wait(
         "bg",
         &json!({"action":"cancel"})
     ));
@@ -44,7 +44,7 @@ fn waits_are_replayed_but_mutating_tools_are_not() {
 fn reload_interrupted_non_wait_tool_remains_error() {
     let tc = tool_call("bash", json!({"command": "sleep 10"}));
 
-    let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
+    let (message, is_error) = crate::agent::tool_handoff::reload_interrupted_tool_result(&tc, 1.2);
 
     assert!(is_error);
     assert!(message.contains("interrupted by server reload"));
