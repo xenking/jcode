@@ -6,9 +6,10 @@ use super::{
     broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
     broadcast_swarm_status_now, monitor_wait_status, parse_swarm_tasks,
     refresh_swarm_task_staleness, remove_session_from_swarm, salvage_assignments_of_dead_member,
-    swarm_ancestors, swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress,
+    swarm_spawn_depth, touch_swarm_task_progress,
     update_member_status, update_member_status_with_report,
 };
+use crate::server::swarm_ancestry::{swarm_ancestors, swarm_is_self_or_ancestor};
 use crate::plan::PlanItem;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::server::{SwarmMember, VersionedPlan};

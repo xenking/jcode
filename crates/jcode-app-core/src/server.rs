@@ -82,6 +82,7 @@ mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
 mod swarm;
+mod swarm_ancestry;
 mod swarm_channels;
 mod swarm_event_history;
 mod swarm_labels;
@@ -111,12 +112,13 @@ use self::headless::create_headless_session;
 use self::reload::await_reload_signal;
 use self::runtime::ServerRuntime;
 use self::swarm::{
-    MAX_SWARM_MEMBERS, remove_session_from_swarm, run_swarm_message, swarm_is_self_or_ancestor,
+    MAX_SWARM_MEMBERS, remove_session_from_swarm, run_swarm_message,
 };
 use self::swarm_channels::{
     remove_session_channel_subscriptions, subscribe_session_to_channel,
     unsubscribe_session_from_channel,
 };
+use self::swarm_ancestry::swarm_is_self_or_ancestor;
 use self::swarm_event_history::{record_swarm_event, record_swarm_event_for_session};
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{

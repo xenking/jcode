@@ -90,7 +90,7 @@ pub(super) fn install_bridge_and_then(
             let members = Arc::clone(&members);
             let session = session.to_string();
             Box::pin(async move {
-                super::swarm::swarm_ancestors(&*members.read().await, &session).pop()
+                super::swarm_ancestry::swarm_ancestors(&*members.read().await, &session).pop()
             })
         })
     };
@@ -246,7 +246,7 @@ async fn handle_escalation(
             _ = &mut cancelled => return Err(withdrawal()),
             members = members.read() => members,
         };
-        let ancestors = super::swarm::swarm_ancestors(&members, &worker_session_id);
+        let ancestors = super::swarm_ancestry::swarm_ancestors(&members, &worker_session_id);
         let root_session_id = ancestors
             .last()
             .cloned()

@@ -1382,7 +1382,7 @@ pub(super) async fn ensure_spawn_coordinator_swarm(
             .get(req_session_id)
             .and_then(|member| member.report_back_to_session_id.clone())
             .is_none();
-        let root_session_id = super::swarm::swarm_ancestors(&members, req_session_id)
+        let root_session_id = super::swarm_ancestry::swarm_ancestors(&members, req_session_id)
             .last()
             .cloned()
             .unwrap_or_else(|| req_session_id.to_string());
