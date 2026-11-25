@@ -16,7 +16,6 @@ use super::{
     pending_color, queued_color, rainbow_prompt_color, user_color,
 };
 use crate::message::ConnectionPhase;
-use crate::tui::app;
 use crate::tui::color_support::rgb;
 use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
@@ -43,13 +42,13 @@ impl ComposerMode {
 }
 
 fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
-    if app::extract_input_shell_command(input).is_some() {
+    if crate::tui::composer_grammar::extract_input_shell_command(input).is_some() {
         if is_remote_mode {
             ComposerMode::ShellRemote
         } else {
             ComposerMode::ShellLocal
         }
-    } else if app::has_safe_slash_command_token(input) {
+    } else if crate::tui::composer_grammar::has_safe_slash_command_token(input) {
         ComposerMode::SlashCommand
     } else {
         ComposerMode::Chat
@@ -69,13 +68,13 @@ fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
 }
 
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
-    if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
+    if suggestion_count <= crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT {
         0
     } else {
         selected
             .saturating_add(1)
-            .saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .min(suggestion_count.saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT))
+            .saturating_sub(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT)
+            .min(suggestion_count.saturating_sub(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT))
     }
 }
 
@@ -1731,7 +1730,7 @@ fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
         return None;
     }
     if crate::prompt::is_swarm_mode_effort(effort) {
-        return Some(crate::tui::app::effort_display_label(effort));
+        return Some(crate::tui::effort_labels::effort_display_label(effort));
     }
     match jcode_provider_core::reasoning_effort_glyph(effort) {
         Some(glyph) => Some(glyph),

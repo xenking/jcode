@@ -125,7 +125,7 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
         },
         None => (entry.name.as_str(), String::new()),
     };
-    match crate::tui::app::helpers::model_names::pretty_known_model_family(base) {
+    match jcode_provider_core::model_names::pretty_known_model_family(base) {
         Some(pretty) => format!("{pretty}{suffix}"),
         None => entry.name.clone(),
     }
@@ -481,7 +481,7 @@ pub(super) fn model_suggestion_lines(
     let hint = model_picker_top_hint(picker);
     let hint_rows = usize::from(available_rows > 1);
     let notice_rows = usize::from(notice.is_some() && available_rows > hint_rows + 1);
-    let visible = crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+    let visible = crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT
         .min(available_rows - hint_rows - notice_rows)
         .min(picker.filtered.len());
     let start = selected.saturating_sub(visible - 1);

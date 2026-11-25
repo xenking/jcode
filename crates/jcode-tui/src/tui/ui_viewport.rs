@@ -188,7 +188,7 @@ pub(crate) fn pick_copy_badge_line(
 
 pub(crate) fn copy_badge_reserved_width(
     key: char,
-    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    copy_badge_ui: &crate::tui::CopyBadgeUiState,
     now: std::time::Instant,
 ) -> usize {
     let mut reserved = copy_badge_shortcut_width("A");
@@ -206,7 +206,7 @@ pub(crate) fn reserve_copy_badge_margins(
     scroll: usize,
     visible_end: usize,
     badge_assignments: &[(usize, char)],
-    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    copy_badge_ui: &crate::tui::CopyBadgeUiState,
     now: std::time::Instant,
 ) {
     for &(badge_line, key) in badge_assignments {

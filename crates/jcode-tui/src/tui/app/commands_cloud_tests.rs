@@ -28,7 +28,7 @@ fn mobile_is_registered_once_and_visible_in_command_help() {
             .count(),
         1
     );
-    let (_, help) = crate::tui::app::registered_command_entries()
+    let (_, help) = crate::tui::command_registry::registered_command_entries()
         .find(|(name, _)| *name == "/mobile")
         .expect("/mobile should be discoverable in command help");
     assert!(!help.is_empty());

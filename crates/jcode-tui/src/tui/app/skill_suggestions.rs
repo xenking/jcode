@@ -104,7 +104,7 @@ impl App {
     /// Details for a palette row that names a skill, by its command text.
     pub(crate) fn skill_suggestion_info(&self, command: &str) -> Option<CommandSuggestionInfo> {
         let registered = |command: &str| {
-            super::state_ui_input_helpers::registered_command_names().any(|name| name == command)
+            crate::tui::command_registry::registered_command_names().any(|name| name == command)
         };
         let name = command
             .strip_prefix("/mode toggle ")

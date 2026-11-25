@@ -60,7 +60,7 @@ pub(super) fn command_suggestion_lines(
     let limited: Vec<_> = suggestions
         .iter()
         .skip(window_start)
-        .take(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
+        .take(crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT)
         .collect();
     let window_end = window_start + limited.len();
     let more_count = suggestions.len().saturating_sub(window_end);

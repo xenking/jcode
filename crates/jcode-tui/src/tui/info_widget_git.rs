@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn porcelain_pairs_collapse_to_one_letter() {
-        use crate::tui::app::helpers::porcelain_status_letter as l;
+        use crate::tui::git_porcelain::porcelain_status_letter as l;
         assert_eq!(l(b'?', b'?'), '?');
         assert_eq!(l(b' ', b'M'), 'M');
         assert_eq!(l(b'M', b' '), 'M');
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn numstat_parses_plain_binary_and_renamed_paths() {
-        let m = crate::tui::app::helpers::parse_numstat(
+        let m = crate::tui::git_porcelain::parse_numstat(
             "84\t12\tsrc/a.rs\n-\t-\tlogo.png\n3\t1\tsrc/{old => new}/b.rs\n2\t2\told.rs => new.rs\n",
         );
         assert_eq!(m["src/a.rs"], (Some(84), Some(12)));

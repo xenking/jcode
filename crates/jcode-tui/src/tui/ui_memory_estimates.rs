@@ -283,7 +283,8 @@ impl DiagnosticAllocations {
     }
 }
 
-pub(crate) fn debug_memory_profile() -> serde_json::Value {
+/// `aux` is the assistant auxiliary cache profile, supplied by the owner of that cache.
+pub(super) fn debug_memory_profile(aux: serde_json::Value) -> serde_json::Value {
     // Keep roots alive throughout the walk so pointer identities cannot be
     // recycled between the body and full-frame snapshots. Lock order matches
     // idle_render_caches_empty.
@@ -292,7 +293,6 @@ pub(crate) fn debug_memory_profile() -> serde_json::Value {
     let mut profile = prepared_cache_profile(&body, &full);
     drop(full);
     drop(body);
-    let aux = super::prepare::debug_assistant_aux_memory_profile();
     let aux_bytes = aux["unique_prepared_bytes"].as_u64().unwrap_or(0);
     let visible_bytes = {
         #[cfg(test)]

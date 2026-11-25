@@ -1,4 +1,24 @@
-use super::*;
+//! Which copy/expand shortcut badges are lit or flashing, driven by held modifiers and click feedback.
+use std::time::Instant;
+
+#[derive(Clone, Default)]
+pub struct CopyBadgeUiState {
+    pub alt_active: bool,
+    pub shift_active: bool,
+    pub alt_pulse_until: Option<Instant>,
+    pub shift_pulse_until: Option<Instant>,
+    pub key_active: Option<(char, Instant)>,
+    pub copied_feedback: Option<CopyBadgeFeedback>,
+    pub expand_feedback_until: Option<Instant>,
+    pub expand_feedback_line: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct CopyBadgeFeedback {
+    pub key: char,
+    pub success: bool,
+    pub expires_at: Instant,
+}
 
 impl CopyBadgeUiState {
     fn pulse_active(expires_at: Option<Instant>, now: Instant) -> bool {

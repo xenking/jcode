@@ -17,6 +17,9 @@ pub(crate) use todo_stages::animate_lane_spinners;
 use todo_stages::{agent_roster_spans, push_stage_pips, render_todo_item_line};
 
 use super::*;
+
+/// Heading the `/git diff` command puts on its output so the transcript renders it as a diff card.
+pub(crate) const GIT_DIFF_HEADING: &str = "/git diff (";
 #[path = "ui_messages_cache.rs"]
 mod cache_support;
 #[path = "ui_messages/decision.rs"]
@@ -131,7 +134,7 @@ fn render_single_line_system_notice(
         || msg.content.starts_with("Authentication Status:")
         || msg
             .content
-            .starts_with(crate::tui::app::commands::GIT_DIFF_HEADING)
+            .starts_with(GIT_DIFF_HEADING)
         || msg.content.starts_with("/git\n")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
@@ -591,7 +594,7 @@ pub(crate) fn render_system_message(
     let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
     if msg
         .content
-        .starts_with(crate::tui::app::commands::GIT_DIFF_HEADING)
+        .starts_with(GIT_DIFF_HEADING)
     {
         let mut lines = render_git_diff_lines(&msg.content, wrap_width);
         if centered {

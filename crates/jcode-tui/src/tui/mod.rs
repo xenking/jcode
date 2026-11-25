@@ -32,9 +32,16 @@ pub struct BackgroundTaskRow {
 
 pub mod backend;
 mod cloud_git;
+pub(crate) mod clipboard;
 mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
+mod command_registry;
+mod commit_log;
+mod composer_grammar;
+mod copy_badge_state;
+mod effort_labels;
+mod git_porcelain;
 mod core;
 pub(crate) mod fuzzy;
 pub mod herdr;
@@ -82,6 +89,7 @@ mod terminal_events;
 pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
+mod todo_card_payload;
 mod ui;
 mod ui_diff;
 pub mod usage_overlay;
@@ -95,7 +103,9 @@ pub use crate::generated_image::{
     generated_image_side_panel_markdown, generated_image_side_panel_page_id,
     write_generated_image_side_panel_page,
 };
-pub use app::{App, CloudHandoff, CopyBadgeUiState, ProcessingStatus, RunResult};
+pub use app::{App, CloudHandoff, RunResult};
+pub use copy_badge_state::CopyBadgeUiState;
+pub use self::core::ProcessingStatus;
 
 use crate::message::ToolCall;
 use ratatui::prelude::Frame;
@@ -1209,7 +1219,7 @@ pub trait TuiState {
         None
     }
     /// Project commit log overlay (None = not showing)
-    fn commit_log_overlay(&self) -> Option<&app::CommitLogOverlay> {
+    fn commit_log_overlay(&self) -> Option<&commit_log::CommitLogOverlay> {
         None
     }
     /// Session picker overlay for /resume command

@@ -1,4 +1,8 @@
 use super::App;
+use crate::tui::todo_card_payload::{
+    load_current_session_goals, load_current_session_plan, load_current_session_todos,
+    todo_card_payload_json, todo_card_payload_json_with_agents, visible_todos,
+};
 use crate::config::{Config, TodoHeaderMode, config};
 use crate::side_panel::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
@@ -559,57 +563,6 @@ fn apply_todo_header_mode(app: &mut App, mode: TodoHeaderMode) {
     }
 }
 
-/// Pinned-todo-band payload for any session, read from disk. Used by the
-/// `/resume` preview so it shows the same band as the live chat. `None` when the
-/// session has no todos.
-pub(crate) fn pinned_todos_payload_for_session(session_id: &str) -> Option<String> {
-    let todos = load_current_session_todos(Some(session_id));
-    if todos.is_empty() {
-        return None;
-    }
-    let goals = load_current_session_goals(Some(session_id));
-    let plan = load_current_session_plan(Some(session_id));
-    Some(todo_card_payload_json(&todos, &plan, &goals))
-}
-
-fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
-    let Some(session_id) = session_id else {
-        return Vec::new();
-    };
-    visible_todos(crate::todo::load_todos(session_id).unwrap_or_else(|error| {
-        crate::logging::debug(&format!("Could not load current todos: {error}"));
-        Vec::new()
-    }))
-}
-
-// Project live lists without rewriting old snapshots or replay events.
-fn visible_todos(mut items: Vec<TodoItem>) -> Vec<TodoItem> {
-    items.retain(|item| !crate::todo::todo_status_is_cancelled(&item.status));
-    items
-}
-
-fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::TodoGoal> {
-    let Some(session_id) = session_id else {
-        return Vec::new();
-    };
-    crate::todo::load_goals(session_id).unwrap_or_default()
-}
-
-fn load_current_session_plan(session_id: Option<&str>) -> crate::todo::TodoPlan {
-    let Some(session_id) = session_id else {
-        return crate::todo::TodoPlan::default();
-    };
-    crate::todo::load_plan(session_id).unwrap_or_default()
-}
-
-fn todo_card_payload_json(
-    todos: &[TodoItem],
-    plan: &crate::todo::TodoPlan,
-    goals: &[crate::todo::TodoGoal],
-) -> String {
-    todo_card_payload_json_with_agents(todos, plan, goals, &[])
-}
-
 fn with_background_tasks(
     content: String,
     tasks: &[crate::tui::ui::TodoCardBackgroundTask],
@@ -643,28 +596,6 @@ fn hash_background_tasks(tasks: &[crate::tui::ui::TodoCardBackgroundTask]) -> u6
         }
     }
     hasher.finish()
-}
-
-fn todo_card_payload_json_with_agents(
-    todos: &[TodoItem],
-    plan: &crate::todo::TodoPlan,
-    goals: &[crate::todo::TodoGoal],
-    agents: &[crate::tui::ui::TodoCardAgent],
-) -> String {
-    let mut payload = serde_json::json!({
-        "todos": todos,
-        "plan": plan,
-        "goals": goals,
-    });
-    if !agents.is_empty() {
-        match serde_json::to_value(agents) {
-            Ok(agents) => payload["agents"] = agents,
-            Err(error) => {
-                crate::logging::warn(&format!("Cannot encode todo agents: {error}"));
-            }
-        }
-    }
-    serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
 }
 
 fn advance_todo_agent_elapsed(
@@ -908,7 +839,6 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn live_status_elapsed_and_tokens_invalidate_pinned_payload() {
         let mut agent = crate::tui::ui::TodoCardAgent {

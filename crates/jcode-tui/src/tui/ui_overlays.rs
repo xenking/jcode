@@ -138,7 +138,7 @@ pub(super) fn draw_changelog_overlay(
 pub(super) fn draw_commit_log_overlay(
     frame: &mut Frame,
     area: Rect,
-    overlay: &crate::tui::app::CommitLogOverlay,
+    overlay: &crate::tui::commit_log::CommitLogOverlay,
 ) {
     clear_area(frame, area);
 
@@ -519,7 +519,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
                 .to_string()
         })
         .collect();
-    let uncovered: Vec<(&str, &str)> = crate::tui::app::registered_command_entries()
+    let uncovered: Vec<(&str, &str)> = crate::tui::command_registry::registered_command_entries()
         .filter(|(name, _)| !shown.contains(*name))
         .collect();
     if !uncovered.is_empty() {

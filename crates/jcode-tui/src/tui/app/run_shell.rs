@@ -250,21 +250,7 @@ pub(crate) fn slash_command_palette_may_be_visible(
     is_slash_command_input(input) && has_suggestions()
 }
 
-/// Statuses whose full status line starts with the primary green circular spinner.
-///
-/// Keep this in sync with `ui_input::draw_status`: these statuses can be safely
-/// refreshed by the one-cell spinner fast path when the status line is left aligned.
-/// Network waits use a static amber retry marker, so they do not belong here.
-pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
-    matches!(
-        status,
-        ProcessingStatus::Sending
-            | ProcessingStatus::Connecting(_)
-            | ProcessingStatus::Thinking(_)
-            | ProcessingStatus::Streaming
-            | ProcessingStatus::RunningTool(_)
-    )
-}
+use crate::tui::core::status_uses_primary_spinner;
 
 /// How the next full frame should invalidate ratatui's diff state, if at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

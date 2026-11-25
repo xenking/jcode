@@ -66,9 +66,7 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
     }
 }
 
-pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
-    input.trim().strip_prefix('!').map(str::trim)
-}
+pub(super) use crate::tui::composer_grammar::extract_input_shell_command;
 
 pub(super) struct PreparedInput {
     pub raw_input: String,

@@ -728,9 +728,9 @@ fn test_command_suggestion_navigation_moves_through_all_rows_and_allows_shift_ar
     app.input = "/".to_string();
     app.cursor_pos = app.input.len();
     let suggestion_count = app.command_suggestions().len();
-    assert!(suggestion_count > crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT);
+    assert!(suggestion_count > crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT);
 
-    for expected in 1..=crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
+    for expected in 1..=crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT {
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
         assert_eq!(app.command_suggestion_selected, expected);
@@ -739,12 +739,12 @@ fn test_command_suggestion_navigation_moves_through_all_rows_and_allows_shift_ar
     app.handle_key(KeyCode::Down, KeyModifiers::SHIFT).unwrap();
     assert_eq!(
         app.command_suggestion_selected,
-        crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT + 1
+        crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT + 1
     );
     app.handle_key(KeyCode::Up, KeyModifiers::SHIFT).unwrap();
     assert_eq!(
         app.command_suggestion_selected,
-        crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+        crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT
     );
 
     for _ in 0..suggestion_count {
@@ -753,7 +753,7 @@ fn test_command_suggestion_navigation_moves_through_all_rows_and_allows_shift_ar
     }
     assert_eq!(
         app.command_suggestion_selected,
-        crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+        crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT
     );
 }
 
@@ -892,7 +892,7 @@ fn test_command_suggestion_render_window_scrolls_with_selection() {
     app.input = "/".to_string();
     app.cursor_pos = app.input.len();
     let suggestions = app.command_suggestions();
-    let limit = crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT;
+    let limit = crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT;
     assert!(suggestions.len() > limit);
     let first = suggestions[0].0.clone();
     let selected_after_scroll = suggestions[limit].0.clone();

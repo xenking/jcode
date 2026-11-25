@@ -35,7 +35,7 @@ use debug::DebugTrace;
 use futures::StreamExt;
 use helpers::*;
 pub(crate) use helpers::{
-    effort_compact, effort_display_label, effort_glyph_label, effort_menu_label,
+    effort_display_label, effort_glyph_label, effort_menu_label,
 };
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
@@ -71,7 +71,7 @@ mod cache_diagnostics;
 mod catchup;
 pub(super) mod commands;
 mod commit_log;
-pub(crate) use commit_log::CommitLogOverlay;
+pub(crate) use crate::tui::commit_log::CommitLogOverlay;
 mod cloud_environment;
 mod commands_cloud;
 mod commands_colors;
@@ -132,7 +132,7 @@ mod update_rehearsal;
 mod update_sim;
 mod usage_reset;
 mod voice_input;
-pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
+pub(crate) use crate::tui::command_registry::registered_command_names;
 mod binary_watch;
 mod justrust_status;
 mod state_ui_history_marker;
@@ -149,7 +149,7 @@ mod terminal_title;
 mod todo_completion;
 mod todos_view;
 mod wake_stats;
-pub(crate) use todos_view::pinned_todos_payload_for_session;
+
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
@@ -160,15 +160,7 @@ mod ui_prefs;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
-pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
-    self::input::extract_input_shell_command(input)
-}
-
-pub(crate) fn has_safe_slash_command_token(input: &str) -> bool {
-    self::slash_command_parser::active_token_before_cursor(input, input.len()).is_some()
-}
-
-pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
+pub(crate) use crate::tui::composer_grammar::has_safe_slash_command_token;
 
 fn active_runtime_provider_key() -> Option<String> {
     std::env::var("JCODE_RUNTIME_PROVIDER")
@@ -523,24 +515,7 @@ const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
 /// How long a transient status notice stays on screen.
 const STATUS_NOTICE_TTL: Duration = Duration::from_secs(3);
 
-/// Current processing status
-#[derive(Clone, Default, Debug)]
-pub enum ProcessingStatus {
-    #[default]
-    Idle,
-    /// Sending request to API (with optional connection phase detail)
-    Sending,
-    /// Connection phase update from transport layer
-    Connecting(crate::message::ConnectionPhase),
-    /// Model is reasoning/thinking (real-time duration tracking)
-    Thinking(Instant),
-    /// Receiving streaming response
-    Streaming,
-    /// Waiting for network connectivity before retrying an interrupted request
-    WaitingForNetwork { listener: String },
-    /// Executing a tool
-    RunningTool(String),
-}
+pub use crate::tui::core::ProcessingStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteStartupPhase {
@@ -582,27 +557,7 @@ pub(super) fn reload_persisted_background_tasks_note(session_id: &str) -> String
     crate::tool::selfdev::persisted_background_tasks_note(session_id)
 }
 
-#[derive(Clone, Default)]
-pub struct CopyBadgeUiState {
-    pub alt_active: bool,
-    pub shift_active: bool,
-    pub alt_pulse_until: Option<Instant>,
-    pub shift_pulse_until: Option<Instant>,
-    pub key_active: Option<(char, Instant)>,
-    pub copied_feedback: Option<CopyBadgeFeedback>,
-    pub expand_feedback_until: Option<Instant>,
-    pub expand_feedback_line: Option<usize>,
-}
-
-#[derive(Clone)]
-pub struct CopyBadgeFeedback {
-    pub key: char,
-    pub success: bool,
-    pub expires_at: Instant,
-}
-
-#[path = "app/copy_badge_state.rs"]
-mod copy_badge_state;
+pub use crate::tui::copy_badge_state::{CopyBadgeFeedback, CopyBadgeUiState};
 /// Result from running the TUI
 #[derive(Debug, Default)]
 pub struct RunResult {
@@ -2035,7 +1990,7 @@ pub struct App {
     model_status_scroll: Option<usize>,
     model_status_content: String,
     /// Commit log overlay (None = not visible)
-    commit_log_overlay: Option<commit_log::CommitLogOverlay>,
+    commit_log_overlay: Option<CommitLogOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,

@@ -1084,7 +1084,7 @@ impl SessionPicker {
                 search: None,
                 extras: PreviewExtras {
                     hidden_prompts,
-                    todos_payload: crate::tui::app::pinned_todos_payload_for_session(session_id),
+                    todos_payload: crate::tui::todo_card_payload::pinned_todos_payload_for_session(session_id),
                     info_data: Some(info_data),
                     loaded_at: None,
                 },
@@ -1572,7 +1572,7 @@ impl SessionPicker {
             }
             KeyCode::Char('q') => return Ok(OverlayAction::Close),
             KeyCode::Char('y') if modifiers.is_empty() => {
-                self.copy_selected_session_with(super::app::helpers::copy_to_clipboard);
+                self.copy_selected_session_with(super::clipboard::copy_to_clipboard);
             }
             KeyCode::Char(' ') => {
                 self.toggle_selected_session();

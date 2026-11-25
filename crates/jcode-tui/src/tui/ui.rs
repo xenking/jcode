@@ -146,8 +146,13 @@ pub(crate) use inline_ui::inline_ui_height as inline_ui_height_for_tests;
 use inline_ui::{draw_inline_ui, inline_ui_height};
 pub(crate) use layout_support::{SIDE_PANEL_DISMISSED_HINT, side_panel_restore_area};
 pub(crate) use layout_support::side_panel_dismiss_area;
+pub(crate) use messages::GIT_DIFF_HEADING;
 pub(crate) use pinned_ui::draw_side_panel_markdown;
-pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
+pub(crate) use memory_estimates::debug_side_panel_memory_profile;
+
+pub(crate) fn debug_memory_profile() -> serde_json::Value {
+    memory_estimates::debug_memory_profile(prepare::debug_assistant_aux_memory_profile())
+}
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
 #[cfg(test)]
 use memory_ui::{

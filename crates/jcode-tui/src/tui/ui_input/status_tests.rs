@@ -690,7 +690,7 @@ fn session_history_warning_is_clear_and_occasional() {
 
 #[test]
 fn command_suggestion_window_start_scrolls_after_visible_limit() {
-    let limit = app::COMMAND_SUGGESTION_VISIBLE_LIMIT;
+    let limit = crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT;
     assert_eq!(command_suggestion_window_start(0, limit + 3), 0);
     assert_eq!(command_suggestion_window_start(limit - 1, limit + 3), 0);
     assert_eq!(command_suggestion_window_start(limit, limit + 3), 1);

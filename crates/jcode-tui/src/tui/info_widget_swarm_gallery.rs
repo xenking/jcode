@@ -8,7 +8,7 @@
 //! [`GalleryMember`] (label + body lines).
 
 use crate::protocol::SwarmMemberStatus;
-use crate::tui::app::effort_compact;
+use crate::tui::effort_labels::effort_compact;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, display_order, humanize_age, is_active_status, render_gallery,

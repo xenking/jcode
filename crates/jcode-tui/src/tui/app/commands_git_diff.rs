@@ -154,7 +154,7 @@ pub(in crate::tui::app) fn git_suggestions() -> Vec<(String, &'static str)> {
     ]
 }
 
-pub(in crate::tui) const GIT_DIFF_HEADING: &str = "/git diff (";
+pub(in crate::tui) use crate::tui::ui::GIT_DIFF_HEADING;
 const MAX_DIFF_BYTES: usize = 64 * 1024;
 const MAX_UNTRACKED_FILES: usize = 128;
 

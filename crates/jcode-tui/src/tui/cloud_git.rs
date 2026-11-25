@@ -343,14 +343,14 @@ fn parse(bytes: &[u8]) -> Option<GitInfo> {
         info.dirty_total += 1;
         if info.dirty_files.len() < 10 {
             info.dirty_files.push(DirtyFile::new(
-                super::app::helpers::porcelain_status_letter(x, y),
+                super::git_porcelain::porcelain_status_letter(x, y),
                 path,
             ));
         }
     }
     let numstat = records.collect::<Vec<_>>().join(&0);
     let text = String::from_utf8_lossy(&numstat);
-    let stats = super::app::helpers::parse_numstat(&text);
+    let stats = super::git_porcelain::parse_numstat(&text);
     for (added, removed) in stats.values() {
         info.added_total += added.unwrap_or(0);
         info.removed_total += removed.unwrap_or(0);
