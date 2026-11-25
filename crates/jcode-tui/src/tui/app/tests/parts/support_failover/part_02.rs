@@ -1104,7 +1104,11 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
             ),
         ] {
             app.remote_resolved_credential = Some(credential);
-            // Stalebookkeepingmustnotmaketheliveroutelooklikeanalternative.app.session.apply_route(crate::session::Route { route_api_method: Some(alternative.to_string()), ..Stalebookkeepingmustnotmaketheliveroutelooklikeanalternative.app.session.route() });
+            // Stale bookkeeping must not make the live route look like an alternative.
+            app.session.apply_route(crate::session::Route {
+                route_api_method: Some(alternative.to_string()),
+                ..app.session.route()
+            });
             assert_eq!(
                 app.current_route_api_method().as_deref(),
                 Some(active_method)
@@ -1120,7 +1124,11 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
             );
 
             // With no historical selection, the reported credential still lets
-            // us offer a genuine same-modelalternativeinsteadofexcludingboth.app.session.apply_route(crate::session::Route { route_api_method: None, ..modelalternativeinsteadofexcludingboth.app.session.route() });
+            // us offer a genuine same-model alternative instead of excluding both.
+            app.session.apply_route(crate::session::Route {
+                route_api_method: None,
+                ..app.session.route()
+            });
             assert_eq!(
                 app.current_route_api_method().as_deref(),
                 Some(active_method)
@@ -1178,7 +1186,11 @@ fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
                 "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
             );
             let (mut app, active_provider) = create_switchable_test_app(initial_provider);
-            // Deliberatelystalemetadatamustnotoverrideruntimeidentity.app.session.apply_route(crate::session::Route { route_api_method: Some("claude-oauth@stale-account".into()), ..Deliberatelystalemetadatamustnotoverrideruntimeidentity.app.session.route() });
+            // Deliberately stale metadata must not override runtime identity.
+            app.session.apply_route(crate::session::Route {
+                route_api_method: Some("claude-oauth@stale-account".into()),
+                ..app.session.route()
+            });
             let prompt = crate::provider::ProviderFailoverPrompt {
                 from_provider: "stale-provider".into(),
                 from_label: "Previous account".into(),

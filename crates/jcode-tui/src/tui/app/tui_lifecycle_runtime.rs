@@ -389,7 +389,8 @@ impl App {
                 self.session.id(),
                 &self.session.injected_memory_ids(),
             );
-            // Clear the saved provider_session_id since it'snolongervalidself.session.forget_provider_session();
+            // Clear the saved provider_session_id since it's no longer valid
+            self.session.forget_provider_session();
             let mut restored_model = false;
             if let Some(model) = self.session.model().map(str::to_owned) {
                 match crate::provider::restore_session_model(

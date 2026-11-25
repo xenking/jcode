@@ -2265,7 +2265,11 @@ mod tests {
                 );
                 // A worker spawned before this allowlist existed still runs on
                 // fable. Its server-initiated turns must stay inside the list
-                // insteadofturningintoanunrestrictedsession.session.apply_route(crate::session::Route { model: Some("claude-fable-5".into()), ..insteadofturningintoanunrestrictedsession.session.route() });
+                // instead of turning into an unrestricted session.
+                session.apply_route(crate::session::Route {
+                    model: Some("claude-fable-5".into()),
+                    ..session.route()
+                });
                 session.mark_swarm_worker();
                 let worker = Agent::new_with_session(
                     Arc::clone(&provider),

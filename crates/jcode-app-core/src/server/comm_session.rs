@@ -114,7 +114,11 @@ fn create_visible_spawn_session(
     if let Some(effort) = effort_override.map(str::trim).filter(|e| !e.is_empty()) {
         // Persisted effort is restored (and validated against the resolved
         // provider/model) by `restore_reasoning_effort_from_session` when the
-        // headedclientattachestothissession.session.apply_limits(crate::session::Limits { reasoning_effort: Some(effort.to_string()), ..headedclientattachestothissession.session.limits() });
+        // headed client attaches to this session.
+        session.apply_limits(crate::session::Limits {
+            reasoning_effort: Some(effort.to_string()),
+            ..session.limits()
+        });
     }
     if selfdev_requested {
         session.set_canary("self-dev");

@@ -1911,7 +1911,11 @@ pub(super) async fn run_swarm_task(
     });
     // Inherit the coordinator's exact auth identity so the forked worker keeps
     // the same provider/auth route (OAuth vs API, openai-compatible profile)
-    // insteadofsilentlyfallingbacktotheconfigdefaultonpersistence.session.apply_route(crate::session::Route { provider_key: provider_key, ..insteadofsilentlyfallingbacktotheconfigdefaultonpersistence.session.route() });
+    // instead of silently falling back to the config default on persistence.
+    session.apply_route(crate::session::Route {
+        provider_key,
+        ..session.route()
+    });
     session.apply_route(crate::session::Route {
         route_api_method: route,
         ..session.route()

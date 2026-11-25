@@ -2569,7 +2569,11 @@ async fn sdk_socket_cancel_workflow(
         ..other_session.workspace()
     });
     // An existing session, not an empty panel: empty untitled sessions are
-    // neverwrittentodiskandgeta30sreconnectgraceondisconnect.other_session.apply_titles(crate::session::Titles { title: Some("sdk other session".into()), ..neverwrittentodiskandgeta30sreconnectgraceondisconnect.other_session.titles() });
+    // never written to disk and get a 30s reconnect grace on disconnect.
+    other_session.apply_titles(crate::session::Titles {
+        title: Some("sdk other session".into()),
+        ..other_session.titles()
+    });
     for index in 0..8 {
         other_session.append_stored_message(crate::session::StoredMessage {
             codemode: None,

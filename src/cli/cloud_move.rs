@@ -679,7 +679,11 @@ pub(crate) fn run_move(
                 label: credentials.label().to_string(),
             });
             if let Some(account) = &auth_account {
-                // PinanimplicitOAuthroutetotheexactaccountbeingtransferred.sess.apply_route(crate::session::Route { route_api_method: Some(account.route()), ..PinanimplicitOAuthroutetotheexactaccountbeingtransferred.sess.route() });
+                // Pin an implicit OAuth route to the exact account being transferred.
+                sess.apply_route(crate::session::Route {
+                    route_api_method: Some(account.route()),
+                    ..sess.route()
+                });
             }
             let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
@@ -720,7 +724,11 @@ pub(crate) fn run_move(
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
-            // tellstheagentwhereitnowrunsandwhatdidnotcomealong.sess.apply_lineage(crate::session::Lineage { migration_epoch: epoch, ..tellstheagentwhereitnowrunsandwhatdidnotcomealong.sess.lineage() });
+            // tells the agent where it now runs and what did not come along.
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: epoch,
+                ..sess.lineage()
+            });
             let dangling = dangling_tool_use_ids(&sess);
             append_arrival(&mut sess, &dangling, &host, &arrival_notice(&manifest));
             let session_json = serde_json::to_vec(&sess)?;
