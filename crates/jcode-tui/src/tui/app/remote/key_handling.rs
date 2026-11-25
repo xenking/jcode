@@ -562,6 +562,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed == "/model cancel" {
+            if let Err(error) = remote.cancel_pending_model_change().await {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to cancel the model switch: {error}"
+                )));
+            }
+            return Ok(());
+        }
+
         if trimmed == "/model" || trimmed == "/models" {
             // Opening the picker is a read-only UI action. The session
             // bootstrap and explicit `/model refresh` command own

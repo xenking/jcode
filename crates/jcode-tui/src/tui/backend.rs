@@ -1047,6 +1047,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Withdraw a model switch the daemon deferred until the turn ends.
+    pub async fn cancel_pending_model_change(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::CancelPendingModelChange { id })
+            .await?;
+        Ok(id)
+    }
+
     pub async fn set_route_selection(
         &mut self,
         selection: crate::provider::RouteSelection,

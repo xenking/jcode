@@ -1732,6 +1732,10 @@ pub struct App {
     // prompts submitted in this window are held so the first request cannot race
     // the model switch and use stale provider/model state.
     remote_model_switch_in_flight: bool,
+    // A model switch the daemon accepted but deferred until the running turn
+    // ends: (request id, requested model). The session keeps its current
+    // model meanwhile, so this is shown beside it and never replaces it.
+    queued_model_switch: Option<(u64, String)>,
     pending_prompt_after_model_switch: Option<input::PreparedInput>,
     // A manually submitted prompt that arrived before the remote session's
     // bootstrap History payload was applied. Submitting in that window is racy:

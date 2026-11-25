@@ -2766,6 +2766,40 @@ fn handle_server_event_inner(
             }
             false
         }
+        ServerEvent::ModelChangePending { id, model } => {
+            // The turn owns the session, so the switch waits for it. The
+            // session keeps the model it has, which stays in the header, and
+            // the held prompt (if any) goes out on the new model afterwards.
+            let current = app
+                .remote_provider_model
+                .clone()
+                .unwrap_or_else(|| app.provider.model());
+            app.queued_model_switch = Some((id, model.clone()));
+            app.push_display_message(DisplayMessage::system(format!(
+                "⏳ Model switch to {model} is queued. It applies when this turn ends. \
+                 Until then the session keeps running {current}. Cancel with /model cancel."
+            )));
+            app.set_status_notice(format!("Model → {model} queued"));
+            true
+        }
+        ServerEvent::ModelChangeCancelled { model, .. } => {
+            app.queued_model_switch = None;
+            app.remote_model_switch_in_flight = false;
+            match model {
+                Some(model) => {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Model switch to {model} cancelled. The session stays on its current model."
+                    )));
+                    app.set_status_notice("Model switch cancelled");
+                }
+                None => {
+                    app.push_display_message(DisplayMessage::system(
+                        "No model switch is waiting.".to_string(),
+                    ));
+                }
+            }
+            true
+        }
         ServerEvent::ModelChanged {
             id,
             model,
@@ -2778,6 +2812,13 @@ fn handle_server_event_inner(
             context_window,
             ..
         } => {
+            if app
+                .queued_model_switch
+                .as_ref()
+                .is_some_and(|(queued_id, _)| *queued_id == id)
+            {
+                app.queued_model_switch = None;
+            }
             // The user chose a model, possibly on a provider the routing
             // policy does not cover. The next routing decision confirms
             // ownership again. Routing's own moves report with id 0.
