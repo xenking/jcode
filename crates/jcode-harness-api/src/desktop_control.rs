@@ -104,7 +104,15 @@ pub enum RevealRow {
 #[serde(rename_all = "snake_case")]
 pub enum OpenDestination {
     NewWindow,
-    BackgroundPanel { window_id: String },
+    BackgroundPanel {
+        window_id: String,
+        /// One-based workspace number as the user sees it. Absent means the
+        /// window's active workspace. A workspace that does not exist yet is
+        /// created empty. The window's active workspace, focus and visibility
+        /// never change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<usize>,
+    },
 }
 
 /// Both IDs are required, so a stale panel cannot silently target a different session.
@@ -167,5 +175,33 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn background_panel_workspace_is_optional_and_round_trips() {
+        let legacy: OpenDestination =
+            serde_json::from_value(serde_json::json!({"background_panel":{"window_id":"w"}}))
+                .unwrap();
+        assert_eq!(
+            legacy,
+            OpenDestination::BackgroundPanel {
+                window_id: "w".into(),
+                workspace: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"background_panel":{"window_id":"w"}})
+        );
+        let chosen = serde_json::json!({"background_panel":{"window_id":"w","workspace":4}});
+        let parsed: OpenDestination = serde_json::from_value(chosen.clone()).unwrap();
+        assert_eq!(
+            parsed,
+            OpenDestination::BackgroundPanel {
+                window_id: "w".into(),
+                workspace: Some(4)
+            }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), chosen);
     }
 }
