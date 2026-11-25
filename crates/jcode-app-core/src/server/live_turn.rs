@@ -250,6 +250,15 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
         }
         match result {
+            Ok(()) if interrupted_for_reload(&session_id) => {
+                // The reload stopped this turn and persisted an intent so the
+                // next daemon resumes it. A terminal status here would tell
+                // `await_members` the worker finished, and this task keeps
+                // running until the exec replaces the process image.
+                crate::logging::info(&format!(
+                    "Live turn for {session_id} interrupted by reload; leaving status for the recovered turn"
+                ));
+            }
             Ok(()) => {
                 update_member_status_with_report(
                     &session_id,
@@ -306,6 +315,14 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
         drop(turn_lease);
     })
     .is_some()
+}
+
+/// A reload closes admission and persists a recovery intent for every turn it
+/// interrupts before it signals them. Both together mean this turn's tail is
+/// racing the exec, not reporting a finished turn.
+fn interrupted_for_reload(session_id: &str) -> bool {
+    crate::turn_activity::global().snapshot().admissions_closed
+        && super::reload_recovery::has_pending_for_session(session_id)
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and
