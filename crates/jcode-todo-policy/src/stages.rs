@@ -80,7 +80,24 @@ pub fn lane_id(todo: &TodoItem) -> String {
 /// Lay out `todos` into stages and lanes. Every index appears exactly once.
 pub fn stage_layout(todos: &[&TodoItem]) -> Vec<TodoStage> {
     let mut stages: Vec<TodoStage> = Vec::new();
+    // The user's requests are not part of the plan's sequence. They share one
+    // leading unnumbered lane so no later stage waits on them.
+    let requests: Vec<usize> = (0..todos.len())
+        .filter(|&i| todos[i].is_request())
+        .collect();
+    if !requests.is_empty() {
+        stages.push(TodoStage {
+            number: None,
+            lanes: vec![TodoLane {
+                group: Some(crate::REQUESTS_GROUP.to_string()),
+                items: requests,
+            }],
+        });
+    }
     for (index, todo) in todos.iter().enumerate() {
+        if todo.is_request() {
+            continue;
+        }
         let stage_index = match todo.stage {
             Some(number) => match stages.iter().position(|s| s.number == Some(number)) {
                 Some(found) => found,
@@ -671,5 +688,42 @@ mod spawn_lane_tests {
         assert_eq!(out.last().unwrap().content, "docs (2)");
         let (out, _) = ensure_spawn_lane(&out, "docs", Some(3), "docs", None, "s2");
         assert_eq!(out.last().unwrap().content, "docs (3)");
+    }
+}
+
+#[cfg(test)]
+mod request_layout_tests {
+    use super::*;
+
+    fn item(id: &str, stage: Option<u32>, group: Option<&str>) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: id.into(),
+            status: "pending".into(),
+            priority: "high".into(),
+            stage,
+            group: group.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn requests_share_one_leading_lane_wherever_they_sit_in_the_list() {
+        let todos = [
+            item("p1", Some(1), Some("parser")),
+            item("r1", None, Some(crate::REQUESTS_GROUP)),
+            item("p2", Some(2), Some("parser")),
+            item("r2", None, Some(crate::REQUESTS_GROUP)),
+        ];
+        let refs: Vec<&TodoItem> = todos.iter().collect();
+        let stages = stage_layout(&refs);
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0].number, None);
+        assert_eq!(stages[0].lanes.len(), 1);
+        assert_eq!(stages[0].lanes[0].group.as_deref(), Some("requests"));
+        assert_eq!(stages[0].lanes[0].items, vec![1, 3]);
+        assert_eq!(stages[1].number, Some(1));
+        assert_eq!(stages[2].number, Some(2));
+        assert_eq!(default_phase(&todos), Some(1));
     }
 }

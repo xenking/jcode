@@ -467,7 +467,7 @@ impl Agent {
         let initial_message_count = self.session.messages.len();
         let initial_active_skill = self.active_skill.clone();
         let initial_pinned_skills = self.session.pinned_skill_names().to_vec();
-        let initial_asks = self.session.user_asks.clone();
+        let initial_ask_id = self.session.user_asks.last_id;
         let messages: Vec<SoftInterruptMessage> = {
             if queue.is_empty() {
                 return Vec::new();
@@ -683,7 +683,7 @@ impl Agent {
             self.session.truncate_messages(initial_message_count);
             self.active_skill = initial_active_skill;
             self.session.set_pinned_skill_names(initial_pinned_skills);
-            self.session.user_asks = initial_asks;
+            self.discard_user_asks_after(initial_ask_id);
             *queue = previous_queue;
             logging::warn(&format!(
                 "Failed to persist soft interrupt injection for {}: {}",

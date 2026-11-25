@@ -1,16 +1,12 @@
 use super::*;
-use crate::session::OpenUserAsk;
 use std::fmt::Write as _;
 
-const STATUS_FORMAT: &str = "End your reply with one status line per open user request. Use `- [x] Ask #ID: result` for a finished or withdrawn request, or `- [ ] Ask #ID: status and next step` for a request that remains open. Report what is known; do not claim unfinished work is done.";
-
-pub(super) enum AskReport {
-    Accept,
-    Retry,
-    Unreported(String),
-}
+/// Open requests listed per turn. A longer backlog is summarized by count.
+const MAX_LISTED_REQUESTS: usize = 8;
 
 impl Agent {
+    /// Turn a user message into a request todo, so the user's requests share
+    /// the todo list, its pushes and its views. Returns whether one was made.
     pub(super) fn record_user_ask(
         &mut self,
         role: Option<StoredDisplayRole>,
@@ -29,21 +25,63 @@ impl Agent {
             return false;
         }
         let redacted = crate::message::redact_secrets(text);
-        let mut chars = redacted.chars();
-        let shortened: String = chars.by_ref().take(320).collect();
-        let mut preview = shortened.split_whitespace().collect::<Vec<_>>().join(" ");
-        if chars.next().is_some() {
-            preview.push('…');
-        } else if preview.is_empty() {
-            preview.push_str("(attachment)");
+        let preview = if redacted.trim().is_empty() {
+            "(attachment)"
+        } else {
+            redacted.as_str()
+        };
+        let number = self.session.user_asks.last_id + 1;
+        if let Err(error) = crate::todo::record_request(&self.session.id, number, preview) {
+            logging::warn(&format!(
+                "Failed to record request #{number} for {}: {error}",
+                self.session.id
+            ));
+            return false;
         }
-        let ledger = &mut self.session.user_asks;
-        ledger.last_id += 1;
-        ledger.open.push(OpenUserAsk {
-            id: ledger.last_id,
-            preview,
-        });
+        self.session.user_asks.last_id = number;
         true
+    }
+
+    /// Undo requests numbered above `last_id`, for a message that was never
+    /// persisted.
+    pub(super) fn discard_user_asks_after(&mut self, last_id: u64) {
+        if self.session.user_asks.last_id == last_id {
+            return;
+        }
+        if let Err(error) = crate::todo::discard_requests_after(&self.session.id, last_id) {
+            logging::warn(&format!(
+                "Failed to discard requests after #{last_id} for {}: {error}",
+                self.session.id
+            ));
+        }
+        self.session.user_asks.last_id = last_id;
+    }
+
+    /// Sessions saved before requests were todos kept them in the session
+    /// file. Move the open ones into the todo list, once.
+    pub(super) fn migrate_legacy_user_asks(&mut self) {
+        if self.session.user_asks.legacy_open.is_empty() {
+            return;
+        }
+        let legacy = std::mem::take(&mut self.session.user_asks.legacy_open);
+        if !self.is_swarm_worker() {
+            for ask in &legacy {
+                if let Err(error) =
+                    crate::todo::record_request(&self.session.id, ask.id, &ask.preview)
+                {
+                    logging::warn(&format!(
+                        "Failed to migrate request #{} for {}: {error}",
+                        ask.id, self.session.id
+                    ));
+                }
+            }
+        }
+        if let Err(error) = self.session.save() {
+            logging::warn(&format!(
+                "Failed to save migrated requests for {}: {error}",
+                self.session.id
+            ));
+        }
     }
 
     fn uses_user_ask_reports(&self) -> bool {
@@ -58,87 +96,27 @@ impl Agent {
                 .is_some_and(crate::prompt::is_swarm_mode_effort)
     }
 
+    /// Short per-turn reminder of the requests still open. It never asks for a
+    /// reply format: the model reports through the todo tool.
     pub(super) fn user_ask_instructions(&self) -> Option<Message> {
-        let ledger = &self.session.user_asks;
-        if self.is_swarm_worker() || ledger.open.is_empty() {
+        if self.is_swarm_worker() {
             return None;
         }
-        let mut text = format!("<system-reminder>\n{STATUS_FORMAT}\nOpen user requests:\n");
-        list_asks(&mut text, ledger.open.iter());
+        let todos = crate::todo::load_todos(&self.session.id).ok()?;
+        let open: Vec<_> = crate::todo::open_requests(&todos).collect();
+        if open.is_empty() {
+            return None;
+        }
+        let mut text = String::from(
+            "<system-reminder>\nOpen user requests. When one is finished, set it completed with the todo tool, or cancel it with a reason. Do not repeat this list in your reply.\n",
+        );
+        for todo in open.iter().take(MAX_LISTED_REQUESTS) {
+            let _ = writeln!(text, "- {} [{}]", todo.content, todo.status);
+        }
+        if open.len() > MAX_LISTED_REQUESTS {
+            let _ = writeln!(text, "- … {} more", open.len() - MAX_LISTED_REQUESTS);
+        }
         text.push_str("</system-reminder>");
         Some(Message::user(&text).into_request_only())
-    }
-
-    pub(super) fn finish_user_asks(&mut self, reply: &str) -> Result<AskReport> {
-        if self.is_swarm_worker() || self.session.user_asks.open.is_empty() {
-            return Ok(AskReport::Accept);
-        }
-
-        let ledger = &mut self.session.user_asks;
-        let mut statuses = std::collections::HashMap::new();
-        let mut in_code = false;
-        for line in reply.lines() {
-            let line = line.trim();
-            if line.starts_with("```") || line.starts_with("~~~") {
-                in_code = !in_code;
-            }
-            if !in_code && let Some((id, done)) = parse_status(line) {
-                statuses
-                    .entry(id)
-                    .and_modify(|old| *old &= done)
-                    .or_insert(done);
-            }
-        }
-        let missing = ledger
-            .open
-            .iter()
-            .filter(|ask| !statuses.contains_key(&ask.id));
-        let mut unreported = String::new();
-        list_asks(&mut unreported, missing);
-
-        if !unreported.is_empty() && !ledger.reminder_sent {
-            ledger.reminder_sent = true;
-            self.append_model_reminder(&format!(
-                "<system-reminder>\n[user-asks feedback] Your last reply did not report the requests below. Give one complete user-facing update, including requests already covered in your last reply. Do not wait for background work to finish before giving its current status.\n{STATUS_FORMAT}\nUnreported requests:\n{unreported}</system-reminder>"
-            ));
-            self.session.save()?;
-            return Ok(AskReport::Retry);
-        }
-
-        ledger.reminder_sent = false;
-        ledger
-            .open
-            .retain(|ask| statuses.get(&ask.id) != Some(&true));
-        let outcome = if unreported.is_empty() {
-            AskReport::Accept
-        } else {
-            let notice = format!("\n\nStill open without a status update:\n{unreported}");
-            self.add_message(
-                Role::Assistant,
-                vec![ContentBlock::Text {
-                    text: notice.clone(),
-                    cache_control: None,
-                }],
-            );
-            AskReport::Unreported(notice)
-        };
-        self.session.save()?;
-        Ok(outcome)
-    }
-}
-
-fn parse_status(line: &str) -> Option<(u64, bool)> {
-    let (done, line) = if let Some(line) = line.strip_prefix("- [x] Ask #") {
-        (true, line)
-    } else {
-        (false, line.strip_prefix("- [ ] Ask #")?)
-    };
-    let (id, status) = line.split_once(':')?;
-    (!status.trim().is_empty()).then_some((id.parse().ok()?, done))
-}
-
-fn list_asks<'a>(text: &mut String, asks: impl Iterator<Item = &'a OpenUserAsk>) {
-    for ask in asks {
-        let _ = writeln!(text, "- Ask #{}: {}", ask.id, ask.preview);
     }
 }

@@ -1299,28 +1299,6 @@ impl Agent {
                     if text_content.trim().is_empty() {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
-                } else if saw_message_end
-                    && !self.is_graceful_shutdown()
-                    && super::turn_streaming_mpsc::tool_handoff::incomplete_turn_stop(
-                        stop_reason.as_deref(),
-                    )
-                    .is_none()
-                {
-                    match self.finish_user_asks(&text_content)? {
-                        super::user_asks::AskReport::Accept => {}
-                        super::user_asks::AskReport::Retry => {
-                            if print_output {
-                                println!();
-                            }
-                            continue;
-                        }
-                        super::user_asks::AskReport::Unreported(notice) => {
-                            if print_output {
-                                print!("{notice}");
-                            }
-                            text_content.push_str(&notice);
-                        }
-                    }
                 }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {

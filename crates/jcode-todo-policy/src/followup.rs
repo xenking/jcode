@@ -321,7 +321,15 @@ impl FollowUpPolicy {
         snapshot: &TodoSnapshot,
         final_response_delivered: bool,
     ) -> Decision {
-        let todos = &snapshot.todos;
+        // Request todos track what the user asked, not work the agent owes a
+        // follow-up for. An unanswered one must never cost an extra turn.
+        let work: Vec<TodoItem> = snapshot
+            .todos
+            .iter()
+            .filter(|todo| !todo.is_request())
+            .cloned()
+            .collect();
+        let todos = &work;
         let goals = &snapshot.goals;
         // A circuit breaker clears `armed` while every todo is complete. Re-arm
         // for new open work, or one trip silences poking for the session.

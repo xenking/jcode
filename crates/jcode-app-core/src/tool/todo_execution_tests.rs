@@ -779,3 +779,64 @@ async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
 
 #[path = "todo_quality_tests.rs"]
 mod quality;
+
+#[tokio::test]
+async fn the_todo_tool_finishes_and_cancels_requests_and_a_rewrite_keeps_them() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let session = "todo-requests";
+    let tool = TodoTool::new();
+    crate::todo::record_request(session, 1, "Check the quota").unwrap();
+    crate::todo::record_request(session, 2, "Run the tests").unwrap();
+    crate::todo::record_request(session, 3, "Fix the build").unwrap();
+
+    // The agent plans its own work with a full rewrite. The requests stay.
+    tool.execute(
+        json!({"todos": [
+            {"content": "a", "status": "pending", "priority": "high", "id": "a",
+             "confidence": "plausible", "stage": 1, "group": "lane"},
+        ]}),
+        test_ctx(session),
+    )
+    .await
+    .expect("rewrite");
+    let todos = load_todos(session).unwrap();
+    let ids: Vec<_> = todos.iter().map(|todo| todo.id.as_str()).collect();
+    assert_eq!(ids, ["request_1", "request_2", "request_3", "a"]);
+
+    // A request ends like any todo: an update by its name.
+    tool.execute(
+        json!({"update": [{"name": "Ask #1: Check the quota", "status": "completed"}]}),
+        test_ctx(session),
+    )
+    .await
+    .expect("complete");
+    // Or a cancel with a reason, which really removes it.
+    tool.execute(
+        json!({"cancel": [{"name": "Ask #3: Fix the build", "reason": "The user withdrew it"}]}),
+        test_ctx(session),
+    )
+    .await
+    .expect("cancel");
+    let todos = load_todos(session).unwrap();
+    let state: Vec<_> = todos
+        .iter()
+        .map(|todo| (todo.id.as_str(), todo.status.as_str()))
+        .collect();
+    assert_eq!(
+        state,
+        [
+            ("request_1", "completed"),
+            ("request_2", "pending"),
+            ("a", "pending")
+        ]
+    );
+
+    if let Some(home) = previous_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

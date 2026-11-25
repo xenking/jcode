@@ -110,22 +110,25 @@ pub struct StoredSpeedSelection {
     pub route: String,
 }
 
+/// Numbering for the request todos created from user messages. The requests
+/// themselves live in the session's todo list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserAskLedger {
     pub last_id: u64,
-    pub open: Vec<OpenUserAsk>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reminder_sent: bool,
+    /// Open requests recorded before they became todos. Read once on load by
+    /// the agent's migration, which empties it; never written for new asks.
+    #[serde(default, rename = "open", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_open: Vec<LegacyOpenUserAsk>,
 }
 
 impl UserAskLedger {
     fn is_default(&self) -> bool {
-        self.last_id == 0
+        self.last_id == 0 && self.legacy_open.is_empty()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenUserAsk {
+pub struct LegacyOpenUserAsk {
     pub id: u64,
     pub preview: String,
 }

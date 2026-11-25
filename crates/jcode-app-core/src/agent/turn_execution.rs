@@ -50,9 +50,7 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        if self.record_user_ask(None, user_message, false) {
-            self.session.user_asks.reminder_sent = false;
-        }
+        self.record_user_ask(None, user_message, false);
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -98,9 +96,7 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        if self.record_user_ask(display_role, user_message, false) {
-            self.session.user_asks.reminder_sent = false;
-        }
+        self.record_user_ask(display_role, user_message, false);
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -258,7 +254,7 @@ impl Agent {
                 lease.identity(),
                 queued_client_id.as_deref(),
                 || {
-                    let previous_asks = self.session.user_asks.clone();
+                    let previous_ask_id = self.session.user_asks.last_id;
                     if !continues_turn && !has_queued_skills {
                         if queued_items.is_empty() {
                             self.record_user_ask(
@@ -279,9 +275,6 @@ impl Agent {
                                 );
                             }
                         }
-                        if self.session.user_asks.last_id != previous_asks.last_id {
-                            self.session.user_asks.reminder_sent = false;
-                        }
                     }
                     let result = if has_queued_skills {
                         let previous_count = self.session.messages.len();
@@ -297,16 +290,14 @@ impl Agent {
                                 } else {
                                     self.set_queued_active_skill(None);
                                 }
-                                if !continues_turn
-                                    && self.record_user_ask(
+                                if !continues_turn {
+                                    self.record_user_ask(
                                         super::interrupts::soft_interrupt_session_display_role(
                                             item.source,
                                         ),
                                         &item.content,
                                         !item.images.is_empty() || !item.attachments.is_empty(),
-                                    )
-                                {
-                                    self.session.user_asks.reminder_sent = false;
+                                    );
                                 }
                                 let ids: Vec<String> = item.client_id.into_iter().collect();
                                 let attachment_data = if item.attachments.is_empty() {
@@ -354,7 +345,7 @@ impl Agent {
                         )
                     };
                     if result.is_err() {
-                        self.session.user_asks = previous_asks;
+                        self.discard_user_asks_after(previous_ask_id);
                     }
                     result
                 },

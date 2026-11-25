@@ -1737,28 +1737,6 @@ impl Agent {
                     NoToolCallOutcome::Break => {
                         if saw_message_end
                             && !self.is_graceful_shutdown()
-                            && incomplete_turn_stop(stop_reason.as_deref()).is_none()
-                            && Self::provider_guardrail_notice(
-                                stop_reason.as_deref(),
-                                text_content.trim().is_empty(),
-                                reasoning.has_text(),
-                            )
-                            .is_none()
-                        {
-                            match self.finish_user_asks(&text_content)? {
-                                super::user_asks::AskReport::Accept => {}
-                                super::user_asks::AskReport::Retry => {
-                                    let _ = event_tx.send(ServerEvent::TextDone);
-                                    continue;
-                                }
-                                super::user_asks::AskReport::Unreported(text) => {
-                                    let _ = event_tx.send(ServerEvent::TextDelta { text });
-                                    let _ = event_tx.send(ServerEvent::TextDone);
-                                }
-                            }
-                        }
-                        if saw_message_end
-                            && !self.is_graceful_shutdown()
                             && matches!(stop_reason.as_deref(), Some("end_turn" | "stop_sequence"))
                             && let Some(turn) = &mut cache_turn
                         {
