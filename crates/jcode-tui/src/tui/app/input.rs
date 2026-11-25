@@ -29,6 +29,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
+#[path = "input/tests/drop_tests.rs"]
 mod drop_tests;
 /// Streaming reasoning region, split out to keep this file under the
 /// code-size budget. See the module docs for the byte-offset invariant.
@@ -91,12 +92,8 @@ fn input_exceeds_submit_limit(input: &str) -> Option<String> {
     (size > MAX_SUBMITTED_TEXT_BYTES).then(|| oversized_message_notice(size))
 }
 
-#[path = "input/clipboard_paste.rs"]
-mod clipboard_paste;
-#[allow(unused_imports)]
-pub(crate) use clipboard_paste::*;
-
 #[cfg(test)]
+#[path = "input/tests/inline_tests.rs"]
 mod inline_tests;
 
 pub(super) fn cut_input_line_to_clipboard(app: &mut App) -> bool {
@@ -1493,9 +1490,6 @@ impl App {
 #[path = "input/streaming_text.rs"]
 mod streaming_text;
 
-#[path = "input/copy_badge_keys.rs"]
-mod copy_badge_keys;
-
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
@@ -1668,7 +1662,9 @@ impl App {
 }
 
 #[cfg(test)]
+#[path = "input/tests/terminal_control_sequence_tests.rs"]
 mod terminal_control_sequence_tests;
 
 #[cfg(test)]
+#[path = "input/tests/ssh_loop_followup_tests.rs"]
 mod ssh_loop_followup_tests;

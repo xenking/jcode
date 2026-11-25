@@ -383,7 +383,10 @@ pub(super) fn overscroll_model_already_includes_effort(model: &str, effort: &str
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns
 /// the spans and whether they fit without last-resort character truncation.
-pub(super) fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<'static>>, bool) {
+pub(super) fn overscroll_fit_facts(
+    facts: &OverscrollFacts,
+    max_width: usize,
+) -> (Vec<Span<'static>>, bool) {
     use unicode_width::UnicodeWidthStr;
     let render = |levels: OverscrollLevels| {
         let mut out: Vec<Span<'static>> = Vec::new();
@@ -418,7 +421,10 @@ pub(super) fn overscroll_truncate_label(label: &str, max_width: usize) -> String
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a
 /// single-cell ellipsis when content is dropped. Preserves per-span styling.
-pub(super) fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+pub(super) fn overscroll_truncate_spans(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+) -> Vec<Span<'static>> {
     compact_status_fit(Line::from(spans), max_width).spans
 }
 
@@ -452,14 +458,15 @@ pub(super) fn overscroll_git_info(
 
 /// Compact git branch label for the status line and fact stack. Truncated so
 /// long branch names cannot crowd out the other facts.
-pub(super) fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
+pub(super) fn overscroll_git_branch(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<String> {
     let branch = overscroll_git_info(data)?.branch.trim();
     if branch.is_empty() {
         return None;
     }
     Some(overscroll_truncate_label(branch, 24))
 }
-
 
 /// Git status counts using the git widget palette. Level 0 is the full
 /// `~modified +staged ?untracked ↑ahead ↓behind` form, level 1 collapses the
@@ -642,7 +649,9 @@ pub(super) fn overscroll_context_usage(
 
 /// The tightest subscription window determines the remaining account allowance.
 /// Never turn missing usage or an API-key cost total into a fictional quota.
-pub(super) fn overscroll_account_remaining(data: &crate::tui::info_widget::InfoWidgetData) -> Option<u8> {
+pub(super) fn overscroll_account_remaining(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<u8> {
     use crate::tui::info_widget::{AuthMethod, UsageProvider};
     let info = data.usage_info.as_ref()?;
     if !matches!(
@@ -665,7 +674,9 @@ pub(super) fn overscroll_account_remaining(data: &crate::tui::info_widget::InfoW
     Some(100u8.saturating_sub(info.max_usage_pct()))
 }
 
-pub(super) fn overscroll_usage_windows(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
+pub(super) fn overscroll_usage_windows(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<String> {
     overscroll_account_remaining(data)?;
     let info = data.usage_info.as_ref()?;
     if !info.available {

@@ -1138,7 +1138,6 @@ mod overscroll_status;
 #[allow(unused_imports)]
 pub(crate) use overscroll_status::*;
 
-
 /// The idle resume composer uses the live input wrapper, but never reads the
 /// currently open session's draft, queue, selection, or cursor state.
 #[cfg(test)]

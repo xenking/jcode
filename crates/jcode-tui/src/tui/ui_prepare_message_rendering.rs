@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn todo_header_render_tag() -> u64 {
+pub(in super::super) fn todo_header_render_tag() -> u64 {
     u64::from(
         crate::config::config()
             .display
@@ -15,7 +15,7 @@ pub(super) fn todo_header_render_tag() -> u64 {
 /// per-message renderer; the full and incremental body builders both call it so
 /// their output cannot drift (which previously caused subtle text-selection and
 /// spacing differences on the incremental path).
-pub(super) fn render_message_into(
+pub(in super::super) fn render_message_into(
     ctx: &BodyRenderCtx<'_>,
     acc: &mut BodyAcc,
     msg: &DisplayMessage,

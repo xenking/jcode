@@ -1,4 +1,7 @@
 use super::*;
+#[path = "../ui_prepare_message_rendering.rs"]
+mod message_rendering;
+pub(super) use message_rendering::{render_message_into, todo_header_render_tag};
 
 /// Immutable per-build render context shared by the full and incremental body
 /// builders. Holding this in one place keeps the single per-message renderer
@@ -31,7 +34,6 @@ pub(crate) fn prepare_history_preview(
     prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
         .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
-
 
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
@@ -113,7 +115,6 @@ pub(super) fn prepare_history_preview_bounded(
         ))
     })
 }
-
 
 /// Mutable accumulator for one body build. Both `prepare_body` (full) and
 /// `prepare_body_incremental` (tail only) push into one of these via the shared
@@ -378,7 +379,10 @@ pub(in super::super) fn prepare_body_incremental(
 ///
 /// Requires message-contiguous raws (guaranteed by the shared body renderer),
 /// which lets the raw array be truncated too rather than leaked.
-pub(in super::super) fn truncate_prepared_to_boundary(prepared: &mut PreparedMessages, keep_msgs: usize) {
+pub(in super::super) fn truncate_prepared_to_boundary(
+    prepared: &mut PreparedMessages,
+    keep_msgs: usize,
+) {
     if keep_msgs >= prepared.message_boundaries.len() {
         return;
     }
@@ -432,7 +436,10 @@ pub(in super::super) fn truncate_prepared_to_boundary(prepared: &mut PreparedMes
 /// hashes match the first `k` messages of `messages`. Returns `0` when nothing
 /// matches (caller then does a full rebuild). Bounded by the shorter of the two
 /// lengths.
-pub(in super::super) fn matching_prefix_len(base: &PreparedMessages, messages: &[DisplayMessage]) -> usize {
+pub(in super::super) fn matching_prefix_len(
+    base: &PreparedMessages,
+    messages: &[DisplayMessage],
+) -> usize {
     let limit = base.message_boundaries.len().min(messages.len());
     let mut k = 0;
     while k < limit && base.message_boundaries[k].msg_hash == messages[k].stable_cache_hash() {
@@ -449,7 +456,10 @@ pub(in super::super) fn matching_prefix_len(base: &PreparedMessages, messages: &
 /// Longest message suffix length `s` such that the last `s` boundaries of
 /// `base` hash-match the last `s` entries of `messages`. Used to detect a
 /// prepend (older compacted history loaded above an unchanged tail).
-pub(in super::super) fn matching_suffix_len(base: &PreparedMessages, messages: &[DisplayMessage]) -> usize {
+pub(in super::super) fn matching_suffix_len(
+    base: &PreparedMessages,
+    messages: &[DisplayMessage],
+) -> usize {
     let base_n = base.message_boundaries.len();
     let msg_n = messages.len();
     let limit = base_n.min(msg_n);
@@ -877,7 +887,10 @@ thread_local! {
 /// Join two separately wrapped runs of lines into what wrapping them together
 /// would have produced. Only valid for plain lines (no user prompts, edit
 /// ranges or copy targets), which is all `wrap_lines` emits for streaming.
-pub(super) fn append_wrapped_tail(head: &PreparedMessages, tail: PreparedMessages) -> PreparedMessages {
+pub(super) fn append_wrapped_tail(
+    head: &PreparedMessages,
+    tail: PreparedMessages,
+) -> PreparedMessages {
     let head_rows = head.wrapped_lines.len();
     let head_raw = head.raw_plain_lines.len();
 

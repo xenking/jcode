@@ -128,7 +128,9 @@ pub(super) fn copy_snapshot_slot_mut(
     }
 }
 
-pub(super) fn copy_snapshot_for_pane(pane: crate::tui::CopySelectionPane) -> Option<CopyViewportSnapshot> {
+pub(super) fn copy_snapshot_for_pane(
+    pane: crate::tui::CopySelectionPane,
+) -> Option<CopyViewportSnapshot> {
     #[cfg(test)]
     {
         TEST_COPY_VIEWPORT.with(|snapshots| {
@@ -601,7 +603,10 @@ pub(crate) fn side_pane_point_from_screen(
     (point.pane == crate::tui::CopySelectionPane::SidePane).then_some(point)
 }
 
-pub(super) fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
+pub(super) fn copy_pane_line_text(
+    pane: crate::tui::CopySelectionPane,
+    abs_line: usize,
+) -> Option<String> {
     copy_snapshot_for_pane(pane)?
         .wrapped_plain_line(abs_line)
         .map(str::to_owned)

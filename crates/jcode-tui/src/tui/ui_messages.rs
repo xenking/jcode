@@ -10,11 +10,7 @@ mod todo_completion;
 #[cfg(test)]
 #[path = "ui_messages/todo_payload_cache_tests.rs"]
 mod todo_payload_cache_tests;
-#[path = "ui_todo_stages.rs"]
-mod todo_stages;
-pub(crate) use todo_stages::TodoCardAgent;
-pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{agent_roster_spans, push_stage_pips, render_todo_item_line};
+pub(crate) use todo_cards::{TodoCardAgent, animate_lane_spinners};
 
 use super::*;
 
