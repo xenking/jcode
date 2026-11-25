@@ -908,6 +908,7 @@ impl InfoWidgetData {
 mod placement_state;
 #[allow(unused_imports)]
 pub use placement_state::*;
+pub(crate) use layout::calculate_widget_height;
 
 /// Shrink a text widget's box so its bottom border hugs the rendered body.
 /// The slot can be taller than the body (Overview reserves its tallest page,

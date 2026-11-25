@@ -65,7 +65,7 @@ fn render_with_gate_diagnostics(
         spans.push(Span::styled(
             format!(
                 "  finished {}",
-                crate::tui::session_picker::format_time_ago(completed_at)
+                crate::tui::time_labels::format_time_ago(completed_at)
             ),
             Style::default().fg(todo_meta_color()),
         ));

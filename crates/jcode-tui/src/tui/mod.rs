@@ -42,9 +42,10 @@ mod composer_grammar;
 mod copy_badge_state;
 mod core;
 mod idle_donut;
+mod time_labels;
 mod picker_overlay;
 mod redraw_reason;
-pub(crate) use idle_donut::idle_donut_active;
+pub(crate) use idle_donut::{REDRAW_DEEP_IDLE_AFTER, idle_donut_active};
 mod effort_labels;
 pub(crate) mod fuzzy;
 mod git_info;
@@ -75,7 +76,7 @@ mod redraw_schedule;
 mod secondary_render;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
-    REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
+    REDRAW_DEEP_IDLE, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
     REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
     current_full_frame_redraw_reason, periodic_redraw_required,
     periodic_redraw_required_excluding_idle_animation, redraw_interval,

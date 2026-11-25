@@ -286,7 +286,7 @@ fn genuinely_empty_completed_preview_remains_loaded_and_removed_sessions_release
 
 #[test]
 fn resume_time_modes_pick_expected_timestamp() {
-    use super::super::time_labels::session_resume_time_for;
+    use crate::tui::time_labels::session_resume_time_for;
     use crate::config::ResumeTimeMode;
     use chrono::Duration;
 

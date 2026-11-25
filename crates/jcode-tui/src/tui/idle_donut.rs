@@ -1,8 +1,11 @@
 //! Whether the idle screen wants its decorative donut, shared by the renderer
 //! (which lays the donut out) and the redraw scheduler (which paces repaints).
 
-use super::redraw_schedule::REDRAW_DEEP_IDLE_AFTER;
 use super::*;
+
+/// How long a session must see no stream activity and no user interaction
+/// before every deep-idle consumer treats it as dormant.
+pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether this session has been left alone long enough to be treated as
 /// dormant (deep idle): no stream activity *and* no user interaction for

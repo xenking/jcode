@@ -11,7 +11,7 @@
 //!   changed" from "only the decorative animation advanced", so the latter is
 //!   served by an animation-only partial repaint instead of a full frame.
 
-use super::idle_donut::{deep_idle_dormant, idle_donut_active_with_policy};
+use super::idle_donut::{REDRAW_DEEP_IDLE_AFTER, deep_idle_dormant, idle_donut_active_with_policy};
 use super::picker_overlay::SessionPickerOverlay;
 use super::redraw_reason::record_full_frame_redraw_reason;
 #[cfg(test)]
@@ -24,7 +24,6 @@ pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
 /// Tick cadence while a drag-held edge autoscroll runs (one line per tick).
 pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
-pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 /// Tick cadence while a turn is live but its streamed text is fully revealed.
 /// Matches the status spinner glyph cadence so the spinner stays smooth.
 pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);

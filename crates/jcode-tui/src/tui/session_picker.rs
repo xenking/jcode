@@ -191,10 +191,7 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Format duration since a time in a human-readable way
-#[path = "session_picker/time_labels.rs"]
-mod time_labels;
-pub(crate) use time_labels::{format_time_ago, session_resume_time};
+use super::time_labels::{format_time_ago, session_resume_time};
 
 /// Which pane has keyboard focus
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
