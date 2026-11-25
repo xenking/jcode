@@ -35,7 +35,7 @@ impl PublishedCatalog {
     }
 
     pub fn record(&mut self, catalog: &Catalog) {
-        catalog.remember_as_last(&mut self.0);
+        self.0 = Some(catalog.key());
     }
 }
 
@@ -47,8 +47,9 @@ impl Catalog {
         })
     }
 
-    fn remember_as_last(&self, last: &mut Option<Arc<str>>) {
-        *last = Some(Arc::clone(&self.dedup_key));
+    /// What a client would compare to tell this catalog from the last one.
+    fn key(&self) -> Arc<str> {
+        Arc::clone(&self.dedup_key)
     }
 
     fn new(snapshot: ModelCatalogSnapshot) -> Self {

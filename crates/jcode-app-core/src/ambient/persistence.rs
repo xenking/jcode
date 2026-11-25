@@ -297,6 +297,12 @@ impl ScheduledQueue {
         self.items.is_empty()
     }
 
+    /// A copy of the queued items, in storage order.
+    pub fn snapshot(&self) -> Vec<ScheduledItem> {
+        self.items.clone()
+    }
+
+    #[cfg(test)]
     pub fn items(&self) -> &[ScheduledItem] {
         &self.items
     }

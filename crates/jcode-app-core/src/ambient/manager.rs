@@ -173,7 +173,7 @@ impl AmbientManager {
 
     /// A copy of the queued items, in storage order.
     pub fn scheduled_items(&self) -> Vec<ScheduledItem> {
-        self.queue.items().to_vec()
+        self.queue.snapshot()
     }
 
     pub fn queued_count(&self) -> usize {
