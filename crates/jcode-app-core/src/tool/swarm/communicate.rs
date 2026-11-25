@@ -1821,3 +1821,7 @@ mod tests;
 #[cfg(test)]
 #[path = "communicate_status_target_tests.rs"]
 mod status_target_tests;
+
+#[cfg(test)]
+#[path = "communicate_command_tests.rs"]
+mod command_tests;
