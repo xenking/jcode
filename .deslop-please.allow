@@ -210,11 +210,6 @@ field-leak jcode_companion::server::CompanionOptions::voice_notifications
 field-leak jcode_companion::server::CompanionOptions::voice_waveform
 field-leak jcode_computer::native::target::Identity::label
 field-leak jcode_computer::native::target::Identity::role
-field-leak jcode_config_types::agents::AgentsConfig::swarm_model_fallbacks
-field-leak jcode_config_types::compaction::CompactionConfig::mode
-field-leak jcode_config_types::display::DisplayConfig::colors
-field-leak jcode_config_types::display::DisplayConfig::disabled_animations
-field-leak jcode_config_types::display::DisplayConfig::latex_rendering
 field-leak jcode_harness_api::worker_meta::Usage::cache_creation_input_tokens
 field-leak jcode_harness_api::worker_meta::Usage::cache_read_input_tokens
 field-leak jcode_harness_api::worker_meta::Usage::output_tokens
