@@ -595,7 +595,7 @@ impl App {
                                         ) {
                                             let ops = self.stream_buffer.flush();
                                             self.apply_stream_ops(ops);
-                                            let mut corrected = self.streaming.streaming_text.clone();
+                                            let mut corrected = self.streaming.streaming_text.to_string();
                                             if crate::message::replace_text_suffix(
                                                 &mut corrected, &old_text, &new_text,
                                             ).is_some() {
@@ -1313,7 +1313,7 @@ impl App {
                 // (text before each tool was already committed in ToolUseEnd handler)
                 if !self.streaming.streaming_text.is_empty() {
                     let content =
-                        self.collapse_reasoning_for_commit(self.streaming.streaming_text.clone());
+                        self.collapse_reasoning_for_commit(self.streaming.streaming_text.to_string());
                     if !content.trim().is_empty() {
                         self.push_display_message(DisplayMessage {
                             role: "assistant".to_string(),

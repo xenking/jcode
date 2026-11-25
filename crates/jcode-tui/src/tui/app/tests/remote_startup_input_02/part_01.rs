@@ -1245,7 +1245,7 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
         },
     ));
     app.bump_display_messages_version();
-    app.streaming.streaming_text = "Here is the final paragraph".to_string();
+    app.streaming.streaming_text = "Here is the final paragraph".to_string().into();
     // Mirror the real streaming caller: append any paced chunk the buffer reveals.
     // The paced StreamBuffer may reveal part of the text immediately, so commit
     // (below) must still flush the remainder.

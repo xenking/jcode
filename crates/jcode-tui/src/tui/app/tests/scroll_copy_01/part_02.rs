@@ -89,13 +89,13 @@ fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
 
     app.push_display_message(DisplayMessage::user("FRESH PROMPT MARKER"));
     app.is_processing = true;
-    app.streaming.streaming_text = "FRESH STREAM MARKER".to_string();
+    app.streaming.streaming_text = "FRESH STREAM MARKER".to_string().into();
     let streaming = render_and_snap(&app, &mut terminal);
     assert!(streaming.contains("FRESH STREAM MARKER"), "{streaming}");
     assert!(!streaming.contains("OLD PROMPT MARKER"), "{streaming}");
     assert!(!streaming.contains("OLD RESPONSE MARKER"), "{streaming}");
 
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.is_processing = false;
     app.push_display_message(DisplayMessage::assistant("FRESH ANSWER MARKER"));
     for (width, height) in [(80, 25), (60, 40), (100, 20)] {

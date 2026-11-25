@@ -349,7 +349,7 @@ fn handle_server_event_inner(
             // marker again. Preserve retained reasoning and earlier messages.
             let ops = app.stream_buffer.flush();
             app.apply_stream_ops(ops);
-            let mut corrected = app.streaming.streaming_text.clone();
+            let mut corrected = app.streaming.streaming_text.to_string();
             if crate::message::replace_text_suffix(&mut corrected, &old_text, &new_text).is_some() {
                 app.replace_streaming_text(corrected);
             }

@@ -949,7 +949,7 @@ impl App {
                     tool_data: m.tool_data.clone(),
                 })
                 .collect(),
-            streaming_text: self.streaming.streaming_text.clone(),
+            streaming_text: self.streaming.streaming_text.to_string(),
             streaming_tool_calls: self.streaming_tool_calls.clone(),
             input: self.input.clone(),
             cursor_pos: self.cursor_pos,

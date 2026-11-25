@@ -24,7 +24,7 @@ fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Test
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
     let backend = ratatui::backend::TestBackend::new(100, 30);

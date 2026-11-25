@@ -396,10 +396,10 @@ fn resize_keeps_a_reader_parked_in_live_output_on_the_same_text() {
     app.status = ProcessingStatus::Streaming;
     app.is_processing = true;
     app.session.short_name = Some("test".to_string());
-    app.streaming.streaming_text = (0..120)
+    app.streaming.streaming_text = ((0..120)
         .map(|i| format!("STREAM{i:03} - {}", "filler ".repeat(12)))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")).into();
 
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
     render_and_snap(&app, &mut wide);

@@ -333,7 +333,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
 
     app.remote_session_id = Some("session_old".to_string());
     // Simulate a mid-stream turn: in-flight streaming text and processing on.
-    app.streaming.streaming_text = "```mermaid\ngraph TD; A-->B\n```".to_string();
+    app.streaming.streaming_text = ("```mermaid\ngraph TD; A-->B\n```".to_string()).into();
     app.is_processing = true;
     // The streaming markdown renderer registered a preview for the in-flight
     // fenced block (markdown_render_full.rs set_streaming_preview_diagram).
@@ -572,7 +572,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
 
     // Mid-stream state on this (non-rewinding) client.
     app.push_display_message(DisplayMessage::user("kept local message".to_string()));
-    app.streaming.streaming_text = "```mermaid\ngraph TD; A-->B\n```".to_string();
+    app.streaming.streaming_text = ("```mermaid\ngraph TD; A-->B\n```".to_string()).into();
     app.is_processing = true;
     let preview_hash: u64 = 0xDEAD_BEEF_5EAF_0003;
     crate::tui::mermaid::set_streaming_preview_diagram(
@@ -780,7 +780,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(7);
-    app.streaming.streaming_text = "rewound-away assistant text".to_string();
+    app.streaming.streaming_text = ("rewound-away assistant text".to_string()).into();
     app.streaming_tool_calls.push(crate::message::ToolCall {
         id: "tool_stale".to_string(),
         name: "bash".to_string(),
@@ -1199,7 +1199,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
     app.status = ProcessingStatus::Streaming;
     app.processing_started = Some(Instant::now());
     app.current_message_id = Some(42);
-    app.streaming.streaming_text = "partial".to_string();
+    app.streaming.streaming_text = "partial".to_string().into();
     app.streaming_tool_calls.push(crate::message::ToolCall {
         id: "tool_1".to_string(),
         name: "bash".to_string(),

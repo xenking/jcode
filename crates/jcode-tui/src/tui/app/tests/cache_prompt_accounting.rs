@@ -46,7 +46,7 @@ fn cache_accounting_cancelled_request_without_usage_keeps_previous_cache_state()
         if remote_mode {
             app.current_message_id = Some(42);
             app.is_processing = true;
-            app.streaming.streaming_text = "partial response without a usage report".to_string();
+            app.streaming.streaming_text = "partial response without a usage report".to_string().into();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
         } else {

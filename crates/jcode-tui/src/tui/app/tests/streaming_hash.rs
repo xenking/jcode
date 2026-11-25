@@ -10,11 +10,11 @@ fn streaming_hash_unchanged_frames_hash_once() {
     let mut app = create_test_app();
     let text = "streamed text 漢字\n".repeat(16_384);
     app.replace_streaming_text(text.clone());
-    let before = app.streaming.streaming_hash_work.get();
+    let before = app.streaming.hash_work();
     for _ in 0..120 {
         assert_streaming_hash_matches_content(&app);
     }
-    let after = app.streaming.streaming_hash_work.get();
+    let after = app.streaming.hash_work();
     assert_eq!(after.0 - before.0, 1, "119 repeated hashes eliminated");
     assert_eq!(after.1 - before.1, text.len(), "only one buffer scanned");
     // Baseline was 120 scans, so 119 * text.len() bytes are avoided.

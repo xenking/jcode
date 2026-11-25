@@ -875,36 +875,95 @@ enum ColdCacheWarningTrigger {
 
 impl StreamingProgress {
     fn text_hash(&self) -> u64 {
-        if let Some(hash) = self.streaming_text_hash.get() {
-            return hash;
-        }
-        let hash = super::ui::hash_text_for_cache(&self.streaming_text);
-        self.streaming_text_hash.set(Some(hash));
-        #[cfg(test)]
-        {
-            let (calls, bytes) = self.streaming_hash_work.get();
-            self.streaming_hash_work
-                .set((calls + 1, bytes + self.streaming_text.len()));
-        }
-        hash
+        self.streaming_text.hash()
     }
 
     /// Invalidate before mutable access, including take, split_off and replacement.
     fn streaming_text_mut(&mut self) -> &mut String {
-        self.streaming_text_hash.set(None);
-        &mut self.streaming_text
+        self.streaming_text.text_mut()
+    }
+
+    #[cfg(test)]
+    fn hash_work(&self) -> (usize, usize) {
+        self.streaming_text.hash_work.get()
+    }
+}
+
+/// Streamed assistant text with its content hash cached between frames.
+/// Reads deref to the text. Every write goes through `text_mut`, which
+/// invalidates the hash, including reasoning tail edits.
+#[derive(Clone, Debug, Default)]
+struct StreamText {
+    text: String,
+    hash: std::cell::Cell<Option<u64>>,
+    #[cfg(test)]
+    hash_work: std::cell::Cell<(usize, usize)>,
+}
+
+impl StreamText {
+    fn hash(&self) -> u64 {
+        if let Some(hash) = self.hash.get() {
+            return hash;
+        }
+        let hash = super::ui::hash_text_for_cache(&self.text);
+        self.hash.set(Some(hash));
+        #[cfg(test)]
+        {
+            let (calls, bytes) = self.hash_work.get();
+            self.hash_work.set((calls + 1, bytes + self.text.len()));
+        }
+        hash
+    }
+
+    fn text_mut(&mut self) -> &mut String {
+        self.hash.set(None);
+        &mut self.text
+    }
+}
+
+impl std::fmt::Display for StreamText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl From<String> for StreamText {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T: AsRef<str> + ?Sized> PartialEq<T> for StreamText {
+    fn eq(&self, other: &T) -> bool {
+        self.text == other.as_ref()
+    }
+}
+
+impl From<&str> for StreamText {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            ..Self::default()
+        }
+    }
+}
+
+impl std::ops::Deref for StreamText {
+    type Target = String;
+
+    fn deref(&self) -> &String {
+        &self.text
     }
 }
 
 /// Live streaming/turn progress, grouped because these fields reset together.
 #[derive(Clone, Debug, Default)]
 struct StreamingProgress {
-    streaming_text: String,
-    /// Content hash reused between frames. All production writes to the text
-    /// must go through `streaming_text_mut`, including reasoning tail edits.
-    streaming_text_hash: std::cell::Cell<Option<u64>>,
-    #[cfg(test)]
-    streaming_hash_work: std::cell::Cell<(usize, usize)>,
+    streaming_text: StreamText,
     response_output: response_output::ResponseOutput,
     // Live token usage (per turn)
     streaming_input_tokens: u64,

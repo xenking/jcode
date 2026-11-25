@@ -624,7 +624,7 @@ impl App {
                 self.scroll_offset = saved_scroll;
                 self.auto_scroll_paused = saved_auto_scroll;
                 self.is_processing = saved_processing;
-                self.streaming.streaming_text = saved_streaming;
+                self.streaming.streaming_text = saved_streaming.into();
                 self.queued_messages = saved_queued;
                 self.interleave_message = saved_interleave;
                 self.pending_soft_interrupts = saved_soft;

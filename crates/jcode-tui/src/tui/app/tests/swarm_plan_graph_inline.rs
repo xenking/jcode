@@ -1756,7 +1756,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
 /// set_streaming_preview_diagram on a complete fenced block).
 fn seed_streaming_preview(app: &mut App, hash: u64) {
     crate::tui::mermaid::clear_active_diagrams();
-    app.streaming.streaming_text = "```mermaid\ngraph TD; A-->B\n```".to_string();
+    app.streaming.streaming_text = ("```mermaid\ngraph TD; A-->B\n```".to_string()).into();
     app.is_processing = true;
     crate::tui::mermaid::set_streaming_preview_diagram(hash, 320, 240, Some("preview".to_string()));
     assert_eq!(

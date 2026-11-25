@@ -34,7 +34,7 @@ fn unfocused_streaming_keeps_the_one_cell_spinner_path() {
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     app.processing_started = Some(Instant::now());
-    app.streaming.streaming_text = "partial reply".to_string();
+    app.streaming.streaming_text = "partial reply".to_string().into();
 
     app.set_client_focused(true);
     assert!(

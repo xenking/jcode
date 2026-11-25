@@ -916,7 +916,7 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 12);
@@ -1038,7 +1038,7 @@ fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 12);
@@ -1133,7 +1133,7 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 16);
@@ -1236,7 +1236,7 @@ fn test_copy_selection_drag_to_bottom_edge_when_pinned_does_not_snap_or_autoscro
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 16);
@@ -1346,7 +1346,7 @@ fn test_copy_selection_drag_below_last_line_fully_selects_last_line() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
 
     // Tall terminal so there is empty space below the content-sized chat pane.

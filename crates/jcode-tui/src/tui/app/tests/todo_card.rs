@@ -712,7 +712,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
 

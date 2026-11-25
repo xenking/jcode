@@ -245,7 +245,7 @@ fn test_handle_server_event_tool_start_flushes_streaming_text_before_tool_messag
 
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
-    app.streaming.streaming_text = "Let me inspect those files first.".to_string();
+    app.streaming.streaming_text = "Let me inspect those files first.".to_string().into();
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolStart {
@@ -991,7 +991,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
         retry_attempts: 0,
         retry_at: None,
     });
-    app.streaming.streaming_text = "partial response being streamed".to_string();
+    app.streaming.streaming_text = "partial response being streamed".to_string().into();
 
     let mut state = remote::RemoteRunState::default();
     remote::handle_disconnect(&mut app, &mut state, None);
