@@ -283,6 +283,7 @@ fn split_response(
 #[tokio::test]
 async fn split_empty_live_session_without_persisted_parent() {
     let _guard = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = SplitTestHome::new();
     let agent = new_split_test_agent().await;
     let parent = agent.lock().await.session_for_split().clone();
@@ -374,6 +375,7 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
 #[tokio::test]
 async fn split_busy_unsaved_session_returns_error_without_waiting() {
     let _guard = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = SplitTestHome::new();
     let agent = new_split_test_agent().await;
     let busy = agent.lock().await;

@@ -574,6 +574,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 )]
 async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     let _env_guard = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let temp_home = tempfile::TempDir::new().unwrap();
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp_home.path());

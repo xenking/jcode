@@ -82,6 +82,7 @@ async fn live_agent(id: &str, root: &str) -> Arc<Mutex<Agent>> {
 #[tokio::test]
 async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
     let _lock = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = Home::new();
     let id = "session_live_empty_attach";
     let agent = live_agent(id, "/workspace/live-original").await;

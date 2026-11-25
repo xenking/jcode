@@ -316,6 +316,7 @@ async fn continued_turn_remains_live_after_owner_finishes() {
 #[tokio::test]
 async fn unsaved_idle_session_retains_same_agent_for_reattachment() {
     let _lock = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = Home::new();
     let fixture = Fixture::new(false).await;
     let ((), ()) = tokio::join!(fixture.cleanup(false, Duration::from_secs(2)), async {
@@ -341,6 +342,7 @@ async fn unsaved_idle_session_retains_same_agent_for_reattachment() {
 #[tokio::test]
 async fn unsaved_idle_session_expires_without_persisting_or_leaking() {
     let _lock = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = Home::new();
     let fixture = Fixture::new(false).await;
     let grace = Duration::from_millis(60);
@@ -377,6 +379,7 @@ async fn unsaved_idle_session_without_swarm_member_still_expires() {
 #[tokio::test]
 async fn old_grace_cannot_remove_successor_that_already_detached_again() {
     let _lock = crate::storage::lock_test_env();
+    let _real_sessions = crate::storage::RealSessionSemantics::pin();
     let _home = Home::new();
     let fixture = Fixture::new(false).await;
     tokio::join!(fixture.cleanup(false, Duration::from_millis(100)), async {

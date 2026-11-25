@@ -95,5 +95,32 @@ pub fn lock_test_env() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Makes sessions created while it lives behave like a user's, not a test run's.
+///
+/// A session created with `JCODE_TEST_SESSION` set is flagged as a test session
+/// and skips persistence and cleanup paths that tests about saved versus
+/// unsaved sessions exercise. Those tests must not inherit the flag from the
+/// caller's shell. The caller must hold [`lock_test_env`] for its lifetime.
+#[cfg(any(test, feature = "test-support"))]
+pub struct RealSessionSemantics(Option<std::ffi::OsString>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl RealSessionSemantics {
+    pub fn pin() -> Self {
+        let previous = std::env::var_os("JCODE_TEST_SESSION");
+        crate::env::remove_var("JCODE_TEST_SESSION");
+        Self(previous)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for RealSessionSemantics {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            crate::env::set_var("JCODE_TEST_SESSION", previous);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
