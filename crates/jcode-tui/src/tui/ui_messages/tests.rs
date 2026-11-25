@@ -824,13 +824,48 @@ fn render_system_message_centered_mode_left_aligns_with_padding() {
     crate::tui::markdown::set_center_code_blocks(saved);
 }
 
+/// Sets process env vars and restores them on drop, even when an assertion
+/// panics. Field order matters: restore the vars before releasing the locks.
+struct TermEnv {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _env: std::sync::MutexGuard<'static, ()>,
+    _glyph: std::sync::MutexGuard<'static, ()>,
+}
+
+impl TermEnv {
+    fn set(vars: &[(&'static str, &str)]) -> Self {
+        // Same order everywhere: glyph lock, then the process-wide env lock.
+        let glyph = system_glyph_env_lock();
+        let env = crate::storage::lock_test_env();
+        let saved = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            crate::env::set_var(key, value);
+        }
+        Self {
+            saved,
+            _env: env,
+            _glyph: glyph,
+        }
+    }
+}
+
+impl Drop for TermEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+    }
+}
+
 #[test]
 fn render_system_message_uses_width_stable_titles_on_kitty() {
-    let _guard = system_glyph_env_lock();
-    let prev_term_program = std::env::var("TERM_PROGRAM").ok();
-    let prev_term = std::env::var("TERM").ok();
-    crate::env::set_var("TERM_PROGRAM", "kitty");
-    crate::env::set_var("TERM", "xterm-kitty");
+    let _term = TermEnv::set(&[("TERM_PROGRAM", "kitty"), ("TERM", "xterm-kitty")]);
 
     let msg = DisplayMessage::system(
         "⚡ Connection lost - retrying (attempt 2, 7s) - connection reset by server",
@@ -846,15 +881,6 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
 
     assert!(plain.contains("Connection lost - retrying"));
     assert!(!plain.contains('⚡'));
-
-    match prev_term_program {
-        Some(value) => crate::env::set_var("TERM_PROGRAM", value),
-        None => crate::env::remove_var("TERM_PROGRAM"),
-    }
-    match prev_term {
-        Some(value) => crate::env::set_var("TERM", value),
-        None => crate::env::remove_var("TERM"),
-    }
 }
 
 #[test]

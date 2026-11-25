@@ -44,7 +44,7 @@ fn typing_prepares_cold_text_for_the_latest_query_without_waiting() {
     let path = dir.path().join("during-typing.jsonl");
     std::fs::write(&path, "{\"text\":\"deploy configuration\"}\n".repeat(200)).unwrap();
     let session = external_session("typing", &path);
-    assert!(!text_cache::is_cached_hint(&path));
+    assert!(!text_cache::is_resident(&path));
     let mut search = TranscriptSearch::default();
     search.reset("dep", std::iter::once(&session));
     let old_cancel = search.cancel.clone();
@@ -88,7 +88,7 @@ fn uncached_streaming_search_does_not_wait_for_a_typing_timer() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(search.contains_literal("cold"));
-    assert!(!text_cache::is_cached_hint(&path));
+    assert!(!text_cache::is_resident(&path));
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn warm_hint_cannot_publish_stale_content_after_file_change() {
     std::fs::write(&path, r#"{"text":"oldneedle"}"#).unwrap();
     text_cache::segments(&path, &cancel).unwrap();
     std::fs::write(&path, r#"{"text":"replacement words"}"#).unwrap();
-    assert!(text_cache::is_cached_hint(&path));
+    assert!(text_cache::is_resident(&path));
     assert_eq!(
         cached_paths_scan(
             std::slice::from_ref(&path),

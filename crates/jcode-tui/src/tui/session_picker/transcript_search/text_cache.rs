@@ -158,6 +158,15 @@ pub(super) fn is_cached_hint(path: &Path) -> bool {
         .is_ok_and(|cache| cache.entries.contains_key(path))
 }
 
+/// Exact residency for tests. [`is_cached_hint`] answers `false` whenever any
+/// other thread holds the process-wide cache, which parallel tests do, so it
+/// cannot back an assertion in either direction.
+#[cfg(test)]
+pub(super) fn is_resident(path: &Path) -> bool {
+    preview_result(cache().lock(), "text cache lock")
+        .is_some_and(|cache| cache.entries.contains_key(path))
+}
+
 /// Validate a resident entry on the search worker without opening a transcript.
 pub(super) fn cached_segments(path: &Path, cancel: &AtomicBool) -> Option<Arc<Segments>> {
     if cancel.load(Ordering::Relaxed) {

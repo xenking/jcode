@@ -26,7 +26,7 @@ fn scoped(generation: &str, turn_id: u64, event: ServerEvent) -> ServerEvent {
 }
 
 #[test]
-fn newer_queued_turn_settles_when_previous_done_was_paced() {
+fn newer_queued_turn_settles_after_previous_done() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.auto_poke_incomplete_todos = false;
@@ -51,7 +51,10 @@ fn newer_queued_turn_settles_when_previous_done_was_paced() {
         scoped("runtime", 1, ServerEvent::Done { id: 42 }),
         &mut remote,
     );
-    assert!(app.deferred_stream_done_id.is_some());
+    // Done flushes the stream backlog and settles its turn immediately, so a
+    // queued turn that starts next has nothing left to settle first.
+    assert!(!app.is_processing);
+    assert_eq!(app.deferred_stream_done_id, None);
     start(&mut app, &mut remote, "runtime", 2);
     assert!(app.is_processing);
     assert!(app.current_message_id.is_none());
@@ -76,15 +79,7 @@ fn newer_queued_turn_settles_when_previous_done_was_paced() {
         scoped("runtime", 2, ServerEvent::Done { id: 0 }),
         &mut remote,
     );
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
-    if let Some(id) = app.deferred_stream_done_id.take() {
-        handle_server_event(
-            &mut app,
-            scoped("runtime", 2, ServerEvent::Done { id }),
-            &mut remote,
-        );
-    }
+    assert!(!app.is_processing);
     assert!(
         app.display_messages
             .iter()
