@@ -51,7 +51,7 @@ impl AgentsConfig {
         provider_name: &str,
         model: &str,
     ) -> Vec<&String> {
-        effort_cap_keys(provider_key, provider_name, model)
+        Self::effort_cap_keys(provider_key, provider_name, model)
             .iter()
             .filter_map(|key| self.swarm_effort_caps.get(key))
             .collect()
@@ -63,7 +63,7 @@ impl AgentsConfig {
     pub fn worker_speed_caps(&self, model: &str) -> Vec<(Option<&str>, SpeedMode)> {
         self.swarm_speed_caps
             .iter()
-            .filter_map(|(key, mode)| Some((speed_cap_prefix(key, model)?, *mode)))
+            .filter_map(|(key, mode)| Some((Self::speed_cap_prefix(key, model)?, *mode)))
             .collect()
     }
 
@@ -77,91 +77,98 @@ impl AgentsConfig {
         self.model_prompts
             .iter()
             .enumerate()
-            .filter(|(_, rule)| prompt_rule_matches(rule, provider, model))
+            .filter(|(_, rule)| Self::prompt_rule_matches(rule, provider, model))
             .collect()
     }
-}
 
-/// Every config key a cap for this worker may be stored under: the bare
-/// model, `provider_key:model` and `provider_name:model`, each for the pinned
-/// and unpinned spelling of the model.
-fn effort_cap_keys(provider_key: Option<&str>, provider_name: &str, model: &str) -> Vec<String> {
-    let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
-    [model, unpinned]
-        .into_iter()
-        .flat_map(|model| {
-            [
-                Some(model.to_string()),
-                provider_key.map(|key| format!("{key}:{model}")),
-                Some(format!("{}:{model}", provider_name.to_ascii_lowercase())),
-            ]
-        })
-        .flatten()
-        .collect()
-}
-
-/// `Some(None)` for a bare model key, `Some(Some(prefix))` for `prefix:model`,
-/// `None` when the key names another model.
-fn speed_cap_prefix<'a>(key: &'a str, model: &str) -> Option<Option<&'a str>> {
-    if key == model {
-        return Some(None);
+    /// Every config key a cap for this worker may be stored under: the bare
+    /// model, `provider_key:model` and `provider_name:model`, each for the pinned
+    /// and unpinned spelling of the model.
+    fn effort_cap_keys(
+        provider_key: Option<&str>,
+        provider_name: &str,
+        model: &str,
+    ) -> Vec<String> {
+        let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
+        [model, unpinned]
+            .into_iter()
+            .flat_map(|model| {
+                [
+                    Some(model.to_string()),
+                    provider_key.map(|key| format!("{key}:{model}")),
+                    Some(format!("{}:{model}", provider_name.to_ascii_lowercase())),
+                ]
+            })
+            .flatten()
+            .collect()
     }
-    key.strip_suffix(&format!(":{model}")).map(Some)
-}
 
-fn prompt_pattern_matches(pattern: &str, provider: &str, model: &str) -> bool {
-    let pattern = pattern.trim();
-    if pattern.contains(':') {
-        glob_match(pattern, &format!("{}:{model}", provider.trim()))
-    } else {
-        glob_match(pattern, model)
+    /// `Some(None)` for a bare model key, `Some(Some(prefix))` for `prefix:model`,
+    /// `None` when the key names another model.
+    fn speed_cap_prefix<'a>(key: &'a str, model: &str) -> Option<Option<&'a str>> {
+        if key == model {
+            return Some(None);
+        }
+        key.strip_suffix(&format!(":{model}")).map(Some)
     }
-}
 
-fn prompt_rule_matches(rule: &ModelPromptConfig, provider: &str, model: &str) -> bool {
-    rule.patterns
-        .iter()
-        .any(|pattern| prompt_pattern_matches(pattern, provider, model))
-}
-
-/// Case-insensitive glob with `*` (any run) and `?` (one character).
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
-    let text: Vec<char> = text.to_lowercase().chars().collect();
-    let (mut p, mut t) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some((p, t));
-            p += 1;
-        } else if let Some((star_p, star_t)) = star {
-            p = star_p + 1;
-            t = star_t + 1;
-            star = Some((star_p, star_t + 1));
+    fn prompt_pattern_matches(pattern: &str, provider: &str, model: &str) -> bool {
+        let pattern = pattern.trim();
+        if pattern.contains(':') {
+            Self::glob_match(pattern, &format!("{}:{model}", provider.trim()))
         } else {
-            return false;
+            Self::glob_match(pattern, model)
         }
     }
-    pattern[p..].iter().all(|c| *c == '*')
+
+    fn prompt_rule_matches(rule: &ModelPromptConfig, provider: &str, model: &str) -> bool {
+        rule.patterns
+            .iter()
+            .any(|pattern| Self::prompt_pattern_matches(pattern, provider, model))
+    }
+
+    /// Case-insensitive glob with `*` (any run) and `?` (one character).
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+        let text: Vec<char> = text.to_lowercase().chars().collect();
+        let (mut p, mut t) = (0usize, 0usize);
+        let mut star: Option<(usize, usize)> = None;
+        while t < text.len() {
+            if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+                p += 1;
+                t += 1;
+            } else if p < pattern.len() && pattern[p] == '*' {
+                star = Some((p, t));
+                p += 1;
+            } else if let Some((star_p, star_t)) = star {
+                p = star_p + 1;
+                t = star_t + 1;
+                star = Some((star_p, star_t + 1));
+            } else {
+                return false;
+            }
+        }
+        pattern[p..].iter().all(|c| *c == '*')
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::glob_match;
+    use crate::AgentsConfig;
 
     #[test]
     fn glob_matches_families_and_exact_ids() {
-        assert!(glob_match("claude-*", "claude-opus-5-5"));
-        assert!(glob_match("CLAUDE-*", "claude-sonnet-5-5"));
-        assert!(glob_match("gpt-6*-sol", "gpt-6.2-sol"));
-        assert!(glob_match("gpt-6.?-sol", "gpt-6.2-sol"));
-        assert!(!glob_match("gpt-6*-sol", "gpt-6.1-terra"));
-        assert!(glob_match("*deepseek*", "deepseek-v4.1-flash"));
-        assert!(glob_match("gpt-6-luna", "gpt-6-luna"));
-        assert!(!glob_match("gpt-6-luna", "gpt-6-luna-mini"));
-        assert!(glob_match("*", ""));
+        assert!(AgentsConfig::glob_match("claude-*", "claude-opus-5-5"));
+        assert!(AgentsConfig::glob_match("CLAUDE-*", "claude-sonnet-5-5"));
+        assert!(AgentsConfig::glob_match("gpt-6*-sol", "gpt-6.2-sol"));
+        assert!(AgentsConfig::glob_match("gpt-6.?-sol", "gpt-6.2-sol"));
+        assert!(!AgentsConfig::glob_match("gpt-6*-sol", "gpt-6.1-terra"));
+        assert!(AgentsConfig::glob_match(
+            "*deepseek*",
+            "deepseek-v4.1-flash"
+        ));
+        assert!(AgentsConfig::glob_match("gpt-6-luna", "gpt-6-luna"));
+        assert!(!AgentsConfig::glob_match("gpt-6-luna", "gpt-6-luna-mini"));
+        assert!(AgentsConfig::glob_match("*", ""));
     }
 }
