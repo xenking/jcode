@@ -687,6 +687,45 @@ mod tests {
         assert!(!same_route("claude-oauth", "anthropic-api"));
     }
 
+    fn pool_with_api_key_second() -> AccountPool {
+        AccountPool {
+            members: vec!["claude:claude-otter".into(), "anthropic-api".into()],
+            excluded: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Pins the config -> account pool wiring: saving a new default route
+    /// through the setter reorders the pool before the setter returns.
+    #[test]
+    fn saving_a_default_route_reorders_the_pool() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        pool_with_api_key_second().save().unwrap();
+
+        crate::config::Config::set_default_model(None, Some("anthropic-api")).unwrap();
+
+        assert_eq!(AccountPool::load().members[0], "anthropic-api");
+    }
+
+    /// Pins the same wiring for a direct edit of config.toml: the next config
+    /// reload in the same home notices the changed default and reorders.
+    #[test]
+    fn editing_the_default_route_in_config_toml_reorders_the_pool_on_reload() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Settle the cache on this home so the edit below is compared with it.
+        crate::config::invalidate_config_cache();
+        let _ = crate::config::config();
+        pool_with_api_key_second().save().unwrap();
+
+        let path = crate::config::Config::path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[provider]\ndefault_provider = \"anthropic-api\"\n").unwrap();
+        crate::config::invalidate_config_cache();
+        let _ = crate::config::config();
+
+        assert_eq!(AccountPool::load().members[0], "anthropic-api");
+    }
+
     #[test]
     fn defaults_put_subscriptions_in_and_api_keys_out() {
         let pool = AccountPool::default();
