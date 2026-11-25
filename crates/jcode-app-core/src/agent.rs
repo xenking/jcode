@@ -19,6 +19,8 @@ mod conversation_reset;
 mod environment;
 #[path = "agent/recovery/idle_hibernation.rs"]
 mod idle_hibernation;
+#[path = "agent/context/inline_output.rs"]
+mod inline_output;
 #[path = "agent/context/inline_tail.rs"]
 mod inline_tail;
 #[path = "agent/recovery/interrupts.rs"]
@@ -451,12 +453,10 @@ pub struct Agent {
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
     /// Canonical reducer-backed view of runtime provider/model selection.
     provider_runtime_state: ProviderRuntimeState,
-    /// Inline workers publish a throttled output tail to the coordinator gallery.
-    inline_output_tap: bool,
+    /// Presentation layer: the worker output tail published to a swarm coordinator.
+    inline_output: inline_tail::InlineOutput,
     /// A daemon wake may drive a runtime restored after idle unload without a client.
     pub(crate) restored_from_idle_unload: bool,
-    /// Rolling activity tail across turns, including long tool calls.
-    inline_tail: inline_tail::InlineTailBuffer,
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
     transcript_telemetry_sent: bool,
@@ -608,9 +608,8 @@ impl Agent {
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
-            inline_output_tap: false,
+            inline_output: inline_tail::InlineOutput::default(),
             restored_from_idle_unload: false,
-            inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
             reasoning_effort_user_override: false,

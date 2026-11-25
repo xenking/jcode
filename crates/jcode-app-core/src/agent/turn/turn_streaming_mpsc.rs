@@ -766,7 +766,7 @@ impl Agent {
                             &new_text,
                         ) {
                             if inline_output_tap {
-                                self.inline_tail.set_live(&text_content);
+                                self.inline_output.set_live(&text_content);
                                 self.publish_inline_tail();
                             }
                             let _ = event_tx
@@ -862,7 +862,7 @@ impl Agent {
                         }
                         text_content.push_str(&text);
                         if inline_output_tap {
-                            self.inline_tail.set_live(&text_content);
+                            self.inline_output.set_live(&text_content);
                             if inline_tap_last.elapsed() >= std::time::Duration::from_millis(200) {
                                 inline_tap_last = Instant::now();
                                 self.publish_inline_tail();
@@ -1158,7 +1158,7 @@ impl Agent {
                         if inline_output_tap {
                             // The provider replays from the top; drop the
                             // discarded partial from the live tail too.
-                            self.inline_tail.clear_live();
+                            self.inline_output.clear_live();
                         }
                         tool_calls.clear();
                         current_tool = None;
@@ -1187,8 +1187,8 @@ impl Agent {
                         if inline_output_tap {
                             // Fold the finished text into the rolling tail so
                             // it survives the next turn/continuation.
-                            self.inline_tail.set_live(&text_content);
-                            self.inline_tail.commit_live();
+                            self.inline_output.set_live(&text_content);
+                            self.inline_output.commit_live();
                         }
                         // Close any still-open reasoning region (e.g. a reasoning-only
                         // step) so the client flushes its live partial line.

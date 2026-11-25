@@ -9,12 +9,11 @@
 //! 2. `text_content` resets on every API call, so the viewport blanked at
 //!    each turn/continuation boundary.
 //!
-//! [`InlineTailBuffer`] fixes both: it keeps a rolling, capped buffer of
+//! [`InlineOutput`] fixes both: it keeps a rolling, capped buffer of
 //! *committed* activity lines (finished text segments and tool markers) that
 //! survives across turns, plus the current *live* streaming text segment.
 //! Tool executions are interleaved as `⚙ name · summary` markers, updated in
 //! place with a duration or error state on completion.
-use super::Agent;
 
 use std::collections::VecDeque;
 
@@ -25,10 +24,13 @@ const MAX_CHARS: usize = 1400;
 /// Max characters of a tool marker's input summary.
 const MAX_SUMMARY_CHARS: usize = 60;
 
-/// Rolling tail of a worker's recent activity: committed lines (text +
-/// tool markers) plus the live in-progress assistant text.
+/// Presentation layer of an agent: the rolling tail of a worker's recent
+/// activity (committed lines, text + tool markers, plus the live in-progress
+/// assistant text) and whether it is published to a swarm coordinator.
 #[derive(Debug, Default)]
-pub(crate) struct InlineTailBuffer {
+pub(crate) struct InlineOutput {
+    /// Whether this session was marked as an inline swarm worker.
+    tapped: bool,
     /// Finished activity lines, oldest first, capped to [`MAX_LINES`].
     committed: VecDeque<String>,
     /// In-progress assistant text for the current stream (replaced wholesale
@@ -39,7 +41,32 @@ pub(crate) struct InlineTailBuffer {
     pending_tool_marker: bool,
 }
 
-impl InlineTailBuffer {
+impl InlineOutput {
+    /// Mark this session as an inline swarm worker.
+    pub(crate) fn tap(&mut self) {
+        self.tapped = true;
+    }
+
+    /// Whether the tail is published. Owned workers (`is_worker`) retain and
+    /// publish a tail in every spawn mode.
+    pub(crate) fn is_tapped(&self, is_worker: bool) -> bool {
+        self.tapped || is_worker
+    }
+
+    /// Publish the rolling tail for `session_id` to the bus for the
+    /// coordinator's inline gallery. No-op unless the tail is tapped.
+    pub(crate) fn publish(&self, session_id: &str, is_worker: bool) {
+        if !self.is_tapped(is_worker) {
+            return;
+        }
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmOutputTail(
+            crate::bus::SwarmOutputTail {
+                session_id: session_id.to_string(),
+                tail: self.render(),
+            },
+        ));
+    }
+
     /// Replace the live streaming text with the accumulated `text` so far.
     pub(crate) fn set_live(&mut self, text: &str) {
         self.live.clear();
@@ -185,7 +212,7 @@ mod tests {
 
     #[test]
     fn live_text_renders_and_survives_commit() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.set_live("thinking about the fix\nsecond line");
         assert_eq!(tail.render(), "thinking about the fix\nsecond line");
         tail.commit_live();
@@ -196,7 +223,7 @@ mod tests {
 
     #[test]
     fn tool_markers_interleave_and_complete_in_place() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.set_live("Let me check the render pipeline.");
         tail.start_tool(
             "bash",
@@ -223,7 +250,7 @@ mod tests {
 
     #[test]
     fn marker_prefers_intent_over_raw_input() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.start_tool(
             "bash",
             &serde_json::json!({"command": "x", "intent": "run the ui tests"}),
@@ -233,7 +260,7 @@ mod tests {
 
     #[test]
     fn rollback_discards_live_but_keeps_committed() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.start_tool("read", &serde_json::json!({"file_path": "a.rs"}));
         tail.finish_tool(0.1, false);
         tail.set_live("partial output that gets replayed");
@@ -245,7 +272,7 @@ mod tests {
 
     #[test]
     fn caps_lines_and_chars_and_summary_length() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         for i in 0..40 {
             tail.set_live(&format!("line number {i}"));
             tail.commit_live();
@@ -259,7 +286,7 @@ mod tests {
         tail.set_live(&huge);
         assert!(tail.render().len() <= MAX_CHARS);
 
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         let long_cmd = "cargo test ".repeat(30);
         tail.start_tool("bash", &serde_json::json!({ "command": long_cmd }));
         let line = tail.render();
@@ -269,49 +296,19 @@ mod tests {
 
     #[test]
     fn finish_without_pending_marker_is_noop() {
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.set_live("hello");
         tail.commit_live();
         tail.finish_tool(1.0, false);
         assert_eq!(tail.render(), "hello");
         // Committing new lines invalidates a pending marker: finish after
         // commit must not append a duration to unrelated text.
-        let mut tail = InlineTailBuffer::default();
+        let mut tail = InlineOutput::default();
         tail.start_tool("bash", &serde_json::json!({"command": "ls"}));
         tail.set_live("output line");
         tail.commit_live();
         tail.finish_tool(2.0, false);
         let out = tail.render();
         assert!(!out.contains("output line (2.0s)"), "{out}");
-    }
-}
-
-impl Agent {
-    /// Whether this session streams a public output tail to the bus. Owned
-    /// workers retain a tail in every spawn mode so forced stops can still
-    /// deliver recent output when transcript collection cannot finish.
-    pub(crate) fn inline_output_tap(&self) -> bool {
-        self.inline_output_tap || self.session.parent_id().is_some()
-    }
-
-    /// Publish the current rolling activity tail to the bus for the
-    /// coordinator's inline gallery. No-op unless the inline tap is enabled.
-    pub(crate) fn publish_inline_tail(&self) {
-        if !self.inline_output_tap() {
-            return;
-        }
-        crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmOutputTail(
-            crate::bus::SwarmOutputTail {
-                session_id: self.session.id().to_string(),
-                tail: self.inline_tail.render(),
-            },
-        ));
-    }
-
-    /// Mark this session as an inline swarm worker. The streaming loop then
-    /// publishes a throttled output tail to the global bus so a coordinator can
-    /// render a live inline gallery viewport for it.
-    pub fn tap_inline_output(&mut self) {
-        self.inline_output_tap = true;
     }
 }

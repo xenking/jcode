@@ -186,7 +186,7 @@ impl Agent {
                 // Surface the tool execution on the coordinator's inline
                 // viewport immediately: workers spend most wall-clock time
                 // here, where no assistant text streams.
-                self.inline_tail.start_tool(&tc.name, &tc.input);
+                self.inline_output.start_tool(&tc.name, &tc.input);
                 self.publish_inline_tail();
             }
             let tool_start = Instant::now();
@@ -307,7 +307,7 @@ impl Agent {
                 });
                 if inline_output_tap {
                     // Update the tool marker in place with duration/error.
-                    self.inline_tail
+                    self.inline_output
                         .finish_tool(tool_elapsed.as_secs_f64(), result.is_err());
                     self.publish_inline_tail();
                 }
