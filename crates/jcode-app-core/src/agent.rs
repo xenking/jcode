@@ -28,7 +28,6 @@ mod routing;
 mod runtime_recovery;
 mod session_title;
 mod shake_tools;
-mod skills;
 mod status;
 mod streaming;
 #[cfg(test)]

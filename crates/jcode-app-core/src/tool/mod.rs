@@ -96,7 +96,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "name_policy.rs"]
 mod name_policy;
-use name_policy::{is_fixed_mcp_tool, is_mcp_tool_name};
+use name_policy::is_fixed_mcp_tool;
 pub(crate) use name_policy::{tool_name_is_allowed, tool_name_is_disabled};
 
 mod session_policy;
