@@ -37,7 +37,7 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
 #[cfg(unix)]
 #[tokio::test]
 async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
-    use crate::server::{Server, reload, reload_recovery::RecoveryOwner};
+    use crate::server::{Server, recovery_owner::RecoveryOwner, reload};
 
     struct QuestionProvider;
     #[async_trait]
@@ -297,7 +297,7 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
         .insert(worker.into(), member);
     let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = reload_recovery::RecoveryOwner::new(&server.handles)
+    let recovery = crate::server::recovery_owner::RecoveryOwner::new(&server.handles)
         .reconcile_once()
         .await;
     assert_eq!(

@@ -63,6 +63,7 @@ mod reload;
 mod routing_requests;
 mod routing_turn;
 pub use routing_turn::route_unattached_turn;
+mod recovery_owner;
 pub(crate) mod reload_recovery;
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
@@ -966,7 +967,7 @@ impl Server {
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
         let recovery = self.recover_headless_sessions_on_startup().await;
-        reload_recovery::RecoveryOwner::new(&self.handles)
+        recovery_owner::RecoveryOwner::new(&self.handles)
             .spawn(runtime.cancellation_token(), recovery);
 
         // Keep interrupted workers busy while recovery admits their turns.

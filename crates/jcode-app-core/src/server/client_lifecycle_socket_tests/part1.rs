@@ -1090,7 +1090,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
     );
     let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = reload_recovery::RecoveryOwner::new(&server.handles);
+    let recovery = crate::server::recovery_owner::RecoveryOwner::new(&server.handles);
 
     for (role, content, should_resume) in [
         (
