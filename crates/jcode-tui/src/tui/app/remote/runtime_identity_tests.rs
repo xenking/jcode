@@ -1,5 +1,6 @@
+use super::super::auto_reload_guard::{auto_reload_loop_guard_tripped_at, format_next_auto_reload_loop_guard};
 use super::{
-    auto_reload_loop_guard_tripped_at, format_next_auto_reload_loop_guard, parse_release_semver,
+    parse_release_semver,
     server_release_is_older_than_client, should_defer_history_for_runtime_identity_with_allow,
 };
 

@@ -8,6 +8,7 @@ use event_dispatch::should_defer_history_for_runtime_identity_with_allow;
 #[path = "turn_identity_tests.rs"]
 mod turn_identity_tests;
 
+use super::auto_reload_guard::{auto_reload_loop_guard_tripped, clear_auto_reload_loop_guard};
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
@@ -18,57 +19,6 @@ use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
-const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
-const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
-const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
-
-fn parse_auto_reload_loop_guard(raw: &str) -> Option<(u64, u32)> {
-    let (ts, count) = raw.split_once(':')?;
-    Some((ts.parse().ok()?, count.parse().ok()?))
-}
-
-fn format_next_auto_reload_loop_guard(prev: Option<&str>, now_secs: u64) -> String {
-    let next_count = prev
-        .and_then(parse_auto_reload_loop_guard)
-        .filter(|(ts, _)| now_secs.saturating_sub(*ts) <= AUTO_RELOAD_LOOP_WINDOW_SECS)
-        .map(|(_, count)| count.saturating_add(1))
-        .unwrap_or(1);
-    format!("{now_secs}:{next_count}")
-}
-
-fn auto_reload_loop_guard_tripped_at(raw: Option<&str>, now_secs: u64) -> bool {
-    raw.and_then(parse_auto_reload_loop_guard)
-        .is_some_and(|(ts, count)| {
-            now_secs.saturating_sub(ts) <= AUTO_RELOAD_LOOP_WINDOW_SECS
-                && count >= AUTO_RELOAD_LOOP_MAX_ATTEMPTS
-        })
-}
-
-pub(super) fn record_auto_reload_attempt() {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let prev = std::env::var(AUTO_RELOAD_LOOP_GUARD_ENV).ok();
-    let next = format_next_auto_reload_loop_guard(prev.as_deref(), now_secs);
-    crate::env::set_var(AUTO_RELOAD_LOOP_GUARD_ENV, next);
-}
-
-fn auto_reload_loop_guard_tripped() -> bool {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let raw = std::env::var(AUTO_RELOAD_LOOP_GUARD_ENV).ok();
-    auto_reload_loop_guard_tripped_at(raw.as_deref(), now_secs)
-}
-
-fn clear_auto_reload_loop_guard() {
-    if std::env::var_os(AUTO_RELOAD_LOOP_GUARD_ENV).is_some() {
-        crate::env::remove_var(AUTO_RELOAD_LOOP_GUARD_ENV);
-    }
 }
 
 /// Parse a jcode version string into an orderable `(major, minor, patch)`, but
