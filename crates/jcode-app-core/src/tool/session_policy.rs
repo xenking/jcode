@@ -55,7 +55,7 @@ impl Drop for SessionToolPolicyRegistration {
             .is_some_and(|policy| policy.owner == Some(self.owner))
         {
             policies.remove(&self.session_id);
-            bash::clear_read_hint_session(&self.session_id);
+            read_hint::clear_session(&self.session_id);
             sdk::remove_session(&self.session_id);
         }
     }

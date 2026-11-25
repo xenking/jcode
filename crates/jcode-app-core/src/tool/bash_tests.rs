@@ -225,13 +225,13 @@ fn read_hint_respects_session_tool_policy() {
             .contains("read")
     );
     super::super::clear_session_tool_policy(session);
-    super::clear_read_hint_session(session);
+    super::super::read_hint::clear_session(session);
 }
 
 #[test]
 fn read_hints_are_rate_limited_and_ignore_mutating_shell() {
     let session = "search-hint-interval-test";
-    super::clear_read_hint_session(session);
+    super::super::read_hint::clear_session(session);
     assert!(super::search_read_hint(session, "rg foo src").is_some());
     for _ in 0..9 {
         assert!(super::search_read_hint(session, "cat file").is_none());
@@ -255,7 +255,7 @@ fn read_hints_are_rate_limited_and_ignore_mutating_shell() {
             .unwrap()
             .contains("read")
     );
-    super::clear_read_hint_session(session);
+    super::super::read_hint::clear_session(session);
 }
 
 #[cfg(not(windows))]

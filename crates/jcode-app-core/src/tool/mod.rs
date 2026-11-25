@@ -99,6 +99,7 @@ mod name_policy;
 use name_policy::is_fixed_mcp_tool;
 pub(crate) use name_policy::{tool_name_is_allowed, tool_name_is_disabled};
 
+mod read_hint;
 mod session_policy;
 pub(crate) use session_policy::{
     SessionToolPolicyRegistration, register_session_tool_policy, session_allows_tool,

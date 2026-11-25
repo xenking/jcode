@@ -1078,22 +1078,11 @@ impl Tool for BashTool {
 }
 
 const READ_HINT_INTERVAL: usize = 10;
-type ReadHintCounts = std::collections::HashMap<String, (usize, Option<usize>)>;
-static READ_HINT_COUNTS: LazyLock<std::sync::Mutex<ReadHintCounts>> =
-    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-pub(super) fn clear_read_hint_session(session_id: &str) {
-    READ_HINT_COUNTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(session_id);
-}
-
 fn search_read_hint(session_id: &str, command: &str) -> Option<&'static str> {
     let hint = pure_read_hint(command);
     let policy = super::session_tool_policy(session_id);
     let sdk = super::sdk::config(session_id);
-    let mut counts = READ_HINT_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut counts = super::read_hint::counts();
     // Bound memory for direct invocations without Agent lifecycle registration.
     if counts.len() >= 4096 && !counts.contains_key(session_id) {
         return None;
