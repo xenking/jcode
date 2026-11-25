@@ -17,6 +17,30 @@ impl AuthActivationRequest {
         }
     }
 
+    /// Whether this change plausibly saved a credential to an API-key env file.
+    ///
+    /// OAuth logins do not touch API-key env files, and process-env-preseeded
+    /// auth means the env var itself is the intended source of truth.
+    pub fn may_have_written_env_file(&self) -> bool {
+        match self.auth.as_ref() {
+            Some(auth) => {
+                matches!(
+                    auth.credential_source,
+                    Some(crate::protocol::AuthCredentialSource::ApiKeyFile) | None
+                ) && !matches!(
+                    auth.auth_method,
+                    Some(crate::protocol::AuthMethod::ProcessEnvPreseeded)
+                        | Some(crate::protocol::AuthMethod::OAuthBrowser)
+                        | Some(crate::protocol::AuthMethod::DeviceCode)
+                )
+            }
+            // Legacy hint-only notifications carry no source metadata; syncing
+            // is still the safe default because it only runs when the file has
+            // a value that differs from the env var.
+            None => true,
+        }
+    }
+
     pub fn provider_id(&self) -> Option<String> {
         self.auth
             .as_ref()

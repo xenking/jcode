@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const CLAUDE_CODE_AUTH_SOURCE_ID: &str = "claude_code_credentials";
-pub const OPENCODE_AUTH_SOURCE_ID: &str = "opencode_anthropic_auth";
 /// Source id used to remember that the user approved importing Claude Code's
 /// native credentials (macOS Keychain item or `CLAUDE_CODE_OAUTH_TOKEN`). These
 /// have no stable on-disk path, so they are tracked as a source-level trust
@@ -29,7 +28,7 @@ impl ExternalClaudeAuthSource {
     pub fn source_id(self) -> &'static str {
         match self {
             Self::ClaudeCode => CLAUDE_CODE_AUTH_SOURCE_ID,
-            Self::OpenCode => OPENCODE_AUTH_SOURCE_ID,
+            Self::OpenCode => crate::auth::external::OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
         }
     }
 
@@ -455,7 +454,7 @@ pub fn remove_account(label: &str) -> Result<()> {
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_anthropic_account.clone());
     }
-    crate::auth::account_identity::forget("claude", label);
+    crate::auth::account_names::forget("claude", label);
 
     Ok(())
 }
@@ -659,7 +658,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         .ok()
         .map(|path| {
             crate::config::Config::external_auth_source_allowed_for_path_cached(
-                OPENCODE_AUTH_SOURCE_ID,
+                crate::auth::external::OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
                 &path,
             ) || crate::config::Config::external_auth_source_allowed_for_path_cached(
                 crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,

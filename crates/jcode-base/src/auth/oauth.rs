@@ -618,7 +618,7 @@ pub async fn update_claude_account_profile(
     claude_auth::update_account_profile_metadata(label, email.clone(), subscription_type)?;
     // The organization only names the login in the UI. Failing to save it must
     // not fail the login.
-    if let Err(error) = crate::auth::account_identity::set_org("claude", label, org.as_deref()) {
+    if let Err(error) = crate::auth::account_names::set_org("claude", label, org.as_deref()) {
         crate::logging::debug(&format!("Could not save organization name: {error}"));
     }
     Ok(email)

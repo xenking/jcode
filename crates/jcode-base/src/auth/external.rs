@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub const OPENCODE_AUTH_JSON_SOURCE_ID: &str = "opencode_auth_json";
+/// Trust id for OpenCode's Anthropic OAuth source, honoured alongside
+/// [`OPENCODE_AUTH_JSON_SOURCE_ID`].
+pub const OPENCODE_ANTHROPIC_AUTH_SOURCE_ID: &str = "opencode_anthropic_auth";
 pub const PI_AUTH_JSON_SOURCE_ID: &str = "pi_auth_json";
 pub const OPENCLAW_AUTH_JSON_SOURCE_ID: &str = "openclaw_auth_json";
 pub const HERMES_AUTH_JSON_SOURCE_ID: &str = "hermes_auth_json";
@@ -285,7 +288,7 @@ pub fn source_allowed(source: ExternalAuthSource) -> bool {
     match source {
         ExternalAuthSource::OpenCode => {
             crate::config::Config::external_auth_source_allowed_for_path(
-                crate::auth::claude::OPENCODE_AUTH_SOURCE_ID,
+                OPENCODE_ANTHROPIC_AUTH_SOURCE_ID,
                 &path,
             )
         }

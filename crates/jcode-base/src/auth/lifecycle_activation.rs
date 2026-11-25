@@ -106,27 +106,7 @@ pub(super) fn sync_process_env_from_saved_credentials(
     let Some(provider_id) = provider_id else {
         return;
     };
-    // Only do this for auth changes that plausibly wrote an env file. OAuth
-    // logins do not touch API-key env files, and process-env-preseeded auth
-    // means the env var itself is the intended source of truth.
-    let explicit_env_file_login = match request.auth.as_ref() {
-        Some(auth) => {
-            matches!(
-                auth.credential_source,
-                Some(crate::protocol::AuthCredentialSource::ApiKeyFile) | None
-            ) && !matches!(
-                auth.auth_method,
-                Some(crate::protocol::AuthMethod::ProcessEnvPreseeded)
-                    | Some(crate::protocol::AuthMethod::OAuthBrowser)
-                    | Some(crate::protocol::AuthMethod::DeviceCode)
-            )
-        }
-        // Legacy hint-only notifications carry no source metadata; syncing is
-        // still the safe default because it only runs when the file has a
-        // value that differs from the env var.
-        None => true,
-    };
-    if !explicit_env_file_login {
+    if !request.may_have_written_env_file() {
         return;
     }
 
