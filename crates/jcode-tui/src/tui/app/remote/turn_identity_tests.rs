@@ -272,7 +272,7 @@ fn idle_bootstrap_settles_observer_after_disconnected_completion() {
         &mut remote,
     );
     assert!(!app.is_processing);
-    assert!(app.remote_turn_fence.active.is_none());
+    assert!(!app.remote_turn_fence.has_active_turn());
     handle_server_event(
         &mut app,
         scoped("runtime", 1, ServerEvent::Done { id: 1 }),
@@ -308,7 +308,7 @@ fn local_send_rejection_preserves_running_observer_and_restores_prompt() {
     assert_eq!(app.input, "rejected local prompt");
     assert_eq!(app.last_stream_activity, activity);
     assert_eq!(
-        app.remote_turn_fence.active.as_ref(),
+        app.remote_turn_fence.diagnostic_identity(),
         Some(&identity("runtime", 1))
     );
     assert!(
@@ -409,7 +409,7 @@ fn explicit_session_switch_can_revisit_previous_runtime() {
             &mut remote,
         );
         assert_eq!(
-            app.remote_turn_fence.active.as_ref(),
+            app.remote_turn_fence.diagnostic_identity(),
             Some(&identity(generation, 1))
         );
     }
@@ -485,7 +485,7 @@ fn old_runtime_start_output_and_terminal_rejected_after_bootstrap() {
     assert!(app.is_processing);
     assert!(app.streaming_text().is_empty());
     assert_eq!(
-        app.remote_turn_fence.active.as_ref(),
+        app.remote_turn_fence.diagnostic_identity(),
         Some(&identity("new", 1))
     );
 }
@@ -527,7 +527,7 @@ fn reconnect_same_turn_accepts_current_terminal_but_idle_snapshot_blocks_replay(
     );
     start(&mut app, &mut remote, "runtime", 7);
     assert!(!app.is_processing);
-    assert!(app.remote_turn_fence.active.is_none());
+    assert!(!app.remote_turn_fence.has_active_turn());
 }
 
 #[test]

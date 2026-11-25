@@ -7,8 +7,8 @@ use crossterm::event::KeyCode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AskPickerState {
-    pub request_id: String,
-    pub tool_call_id: String,
+    request_id: String,
+    tool_call_id: String,
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently shown.
     pub current: usize,
@@ -27,16 +27,35 @@ pub(crate) enum AskKeyOutcome {
 
 impl AskPickerState {
     pub fn new(request_id: String, questions: Vec<AskQuestion>) -> Self {
+        Self::for_tool_call(request_id, String::new(), questions)
+    }
+
+    pub fn for_tool_call(
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<AskQuestion>,
+    ) -> Self {
         let n = questions.len();
         Self {
             request_id,
-            tool_call_id: String::new(),
+            tool_call_id,
             questions,
             current: 0,
             cursor: 0,
             chosen: vec![Vec::new(); n],
             other: vec![String::new(); n],
         }
+    }
+
+    /// Whether this picker is the open question for tool call `id`.
+    pub(crate) fn answers_tool_call(&self, id: &str) -> bool {
+        self.tool_call_id == id
+    }
+
+    /// Approval prompts raised by the client itself. They must be answered at the terminal.
+    pub(crate) fn needs_terminal_input(&self) -> bool {
+        self.request_id.starts_with("ask-premium-spawn-")
+            || self.request_id.starts_with("ask-mcp-approval-")
     }
 
     fn question(&self) -> &AskQuestion {
@@ -212,8 +231,7 @@ impl super::App {
         if questions.is_empty() {
             return;
         }
-        let mut picker = AskPickerState::new(request_id, questions);
-        picker.tool_call_id = tool_call_id;
+        let picker = AskPickerState::for_tool_call(request_id, tool_call_id, questions);
         self.inline_interactive_state = None;
         self.set_inline_view(picker.view());
         self.ask_picker = Some(picker);

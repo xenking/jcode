@@ -6,7 +6,7 @@
 
 use super::onboarding_flow::{
     ExternalCli, ImportReview, OnboardingFlow, OnboardingPendingValidation, OnboardingPhase,
-    SummaryPill,
+    ReviewKey,
 };
 use super::{App, DisplayMessage, SessionPickerMode};
 use crate::import::repo_ranking::{self, SessionLocation};
@@ -553,82 +553,13 @@ impl App {
     ///     - Space -> toggle the highlighted login between Yes and No
     ///     - Enter -> import every "Yes" login and finish
     fn handle_onboarding_import_review_key(&mut self, code: KeyCode) -> bool {
-        // `finished` means the user committed the import (so we kick it off
-        // outside the borrow).
-        let mut finished = false;
-        {
-            let Some(review) = self.onboarding_import_review_mut() else {
-                return false;
-            };
-            if review.telemetry.is_some() {
-                // Telemetry sub-page: informational only (telemetry is removed
-                // in this build). Esc/Enter/Space return to the summary.
-                match code {
-                    KeyCode::Esc => review.close_telemetry(),
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        review.close_telemetry();
-                        review.summary_pill = SummaryPill::Continue;
-                        review.continue_focused = true;
-                    }
-                    _ => return false,
-                }
-            } else if !review.choosing {
-                // Summary: Continue, Import less, and Telemetry pills.
-                // Arrows/Tab move; Enter/Space commits the focused one.
-                match code {
-                    KeyCode::Left
-                    | KeyCode::Up
-                    | KeyCode::BackTab
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('k') => review.summary_step(false),
-                    KeyCode::Right
-                    | KeyCode::Down
-                    | KeyCode::Tab
-                    | KeyCode::Char('j')
-                    | KeyCode::Char('l') => review.summary_step(true),
-                    // c is a direct shortcut into choose mode.
-                    KeyCode::Char('c') | KeyCode::Char('C') => review.enter_choose_mode(),
-                    // t jumps straight to the telemetry page.
-                    KeyCode::Char('t') | KeyCode::Char('T') => review.open_telemetry(),
-                    // y = "yes, import everything" regardless of pill focus, so
-                    // the timeout is never a forced wait.
-                    KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
-                    KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
-                        SummaryPill::Continue => finished = true,
-                        SummaryPill::ImportLess => review.enter_choose_mode(),
-                        SummaryPill::Telemetry => review.open_telemetry(),
-                    },
-                    _ => return false,
-                }
-            } else {
-                match code {
-                    KeyCode::Up | KeyCode::Char('k') => review.cursor_up(),
-                    KeyCode::Down | KeyCode::Char('j') => review.cursor_down(),
-                    // Left = Yes (import), Right = No (skip), for the highlighted row.
-                    KeyCode::Left
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('y')
-                    | KeyCode::Char('Y') => review.set_current(true),
-                    KeyCode::Right
-                    | KeyCode::Char('l')
-                    | KeyCode::Char('n')
-                    | KeyCode::Char('N') => review.set_current(false),
-                    // Space toggles the highlighted row between Yes and No.
-                    KeyCode::Char(' ') => review.toggle_current(),
-                    // Enter on a login row selects/deselects that row, so
-                    // "picking an option" never commits the whole import out
-                    // from under the user. Only Enter on the Continue pill
-                    // (or `c`) commits.
-                    KeyCode::Enter if !review.continue_focused => review.toggle_current(),
-                    KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => finished = true,
-                    _ => return false,
-                }
-            }
-        }
-        if finished {
-            self.onboarding_finish_import_review();
-        } else {
-            self.update_onboarding_import_review_status();
+        let Some(review) = self.onboarding_import_review_mut() else {
+            return false;
+        };
+        match review.handle_key(code) {
+            ReviewKey::Ignored => return false,
+            ReviewKey::Commit => self.onboarding_finish_import_review(),
+            ReviewKey::Handled => self.update_onboarding_import_review_status(),
         }
         true
     }
@@ -801,31 +732,14 @@ impl App {
             self.onboarding_phase(),
             Some(OnboardingPhase::Login {
                 import: Some(review)
-            }) if review.telemetry.is_some()
+            }) if review.telemetry_page_open()
         )
     }
 
     /// Refresh the status notice to reflect the current import-list selection.
     fn update_onboarding_import_review_status(&mut self) {
         if let Some(review) = self.onboarding_import_review_mut() {
-            let checked = review.checked_count();
-            let total = review.total();
-            let secs = review.seconds_remaining();
-            let notice = if !review.choosing {
-                if review.telemetry.is_some() {
-                    "Telemetry is disabled in this build - Enter or Esc goes back".to_string()
-                } else {
-                    format!(
-                        "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
-                        if total == 1 { "" } else { "s" },
-                    )
-                }
-            } else {
-                format!(
-                    "Import {checked} of {total} login{} - Enter/Space toggles, arrows move, Continue imports",
-                    if total == 1 { "" } else { "s" },
-                )
-            };
+            let notice = review.status_notice();
             self.set_status_notice(notice);
         }
     }
@@ -836,7 +750,7 @@ impl App {
         // Take the candidates and approved indices out of the phase, then clear
         // the import sub-state so the welcome card stops rendering the prompt.
         let (candidates, approved) = match self.onboarding_import_review_mut() {
-            Some(review) => (review.candidates.clone(), review.approved_indices()),
+            Some(review) => review.approved_candidates(),
             None => return,
         };
         if let Some(flow) = self.onboarding_flow.as_mut()

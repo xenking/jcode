@@ -473,7 +473,7 @@ fn handle_server_event_inner(
                 && app
                     .ask_picker
                     .as_ref()
-                    .is_some_and(|picker| picker.tool_call_id == id)
+                    .is_some_and(|picker| picker.answers_tool_call(&id))
             {
                 app.dismiss_ask_picker();
             }
@@ -1077,7 +1077,7 @@ fn handle_server_event_inner(
             // An accepted scoped turn can finish during connection setup,
             // before text, usage or MessageEnd. Its identity is authoritative
             // even if ConnectionPhase replaced the initial Streaming status.
-            let has_resumed_turn_evidence = app.remote_turn_fence.active.is_some()
+            let has_resumed_turn_evidence = app.remote_turn_fence.has_active_turn()
                 || had_remote_resume_activity
                 || app.stream_message_ended
                 || app.has_streaming_footer_stats()
@@ -1095,7 +1095,7 @@ fn handle_server_event_inner(
                 // This catches hidden continuation dedup/no-op completions at
                 // the boundary that originally looked like a successful stop.
                 if app.remote_turn_fence.scoped()
-                    && app.remote_turn_fence.active.is_none()
+                    && !app.remote_turn_fence.has_active_turn()
                     && app
                         .rate_limit_pending_message
                         .as_ref()
@@ -1261,7 +1261,7 @@ fn handle_server_event_inner(
             {
                 remote.clear_pending();
                 app.current_message_id = None;
-                if app.remote_turn_fence.scoped() && app.remote_turn_fence.active.is_none() {
+                if app.remote_turn_fence.scoped() && !app.remote_turn_fence.has_active_turn() {
                     // Done was already observed. The owner can still hold its
                     // finalization pin briefly, but no second terminal will
                     // arrive to release this queue. Retry from idle instead.
@@ -2213,7 +2213,7 @@ fn handle_server_event_inner(
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
                 let activity = if app.remote_turn_fence.scoped() {
-                    app.remote_turn_fence.active.as_ref().map(|_| {
+                    app.remote_turn_fence.diagnostic_identity().map(|_| {
                         crate::protocol::SessionActivitySnapshot {
                             is_processing: true,
                             current_tool_name: activity

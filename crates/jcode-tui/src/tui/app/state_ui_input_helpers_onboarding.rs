@@ -7,39 +7,10 @@ impl App {
     /// the active guided flow phase. Defaults to the starter suggestion cards.
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill};
+        use crate::tui::app::onboarding_flow::{ImportReview, OnboardingPhase};
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
-                let prompt = import.as_ref().map(|review| {
-                    let rows = review
-                        .candidates
-                        .iter()
-                        .enumerate()
-                        .map(|(i, candidate)| crate::tui::LoginImportRow {
-                            provider_summary: candidate.provider_summary().to_string(),
-                            source_name: candidate.source_name().to_string(),
-                            checked: review.checked.get(i).copied().unwrap_or(false),
-                        })
-                        .collect();
-                    crate::tui::LoginImportPrompt {
-                        rows,
-                        cursor: review.cursor,
-                        continue_focused: review.continue_focused,
-                        choosing: review.choosing,
-                        summary_pill: match review.summary_pill {
-                            SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
-                            SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
-                            SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
-                        },
-                        telemetry: review.telemetry.map(|t| crate::tui::TelemetryPage {
-                            cursor: t.cursor,
-                            checked: t.checked,
-                        }),
-                        telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
-                        checked_count: review.checked_count(),
-                        seconds_left: review.seconds_remaining(),
-                    }
-                });
+                let prompt = import.as_ref().map(ImportReview::welcome_prompt);
                 OnboardingWelcomeKind::Login {
                     import: prompt,
                     importing: self.onboarding_import_in_progress.is_some(),

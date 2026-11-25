@@ -9,12 +9,16 @@ pub(in crate::tui::app) struct TurnFence {
     retired: HashSet<String>,
     latest: u64,
     completed: u64,
-    pub(super) active: Option<TurnIdentity>,
+    active: Option<TurnIdentity>,
 }
 
 impl TurnFence {
     pub(in crate::tui::app) fn diagnostic_identity(&self) -> Option<&TurnIdentity> {
         self.active.as_ref()
+    }
+
+    pub(super) fn has_active_turn(&self) -> bool {
+        self.active.is_some()
     }
 
     pub(super) fn scoped(&self) -> bool {

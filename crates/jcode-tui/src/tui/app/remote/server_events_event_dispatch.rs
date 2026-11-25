@@ -78,7 +78,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.deferred_stream_done_id = None;
                     app.deferred_stream_done_identity = None;
                 }
-                if app.remote_turn_fence.active.is_none()
+                if !app.remote_turn_fence.has_active_turn()
                     && app.current_message_id.is_none()
                     && app.deferred_stream_done_id.is_none()
                 {
@@ -196,7 +196,7 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event {
             if app.current_message_id == Some(*id) {
-                if app.remote_turn_fence.active.is_none() {
+                if !app.remote_turn_fence.has_active_turn() {
                     // Validation/auth failures and synthetic control completions
                     // occur before turn acceptance, so they have no turn scope.
                     let rejected_id = *id;

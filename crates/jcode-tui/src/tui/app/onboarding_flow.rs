@@ -18,6 +18,7 @@
 //! Session history is intentionally excluded from onboarding and remains
 //! available later through `/resume`.
 
+use crossterm::event::KeyCode;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,16 @@ use std::time::{Duration, Instant};
 pub(crate) const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) use crate::tui::session_picker::ExternalCli;
+
+/// Result of applying a key to the import walkthrough.
+pub(crate) enum ReviewKey {
+    /// The screen does not use this key.
+    Ignored,
+    /// The key changed the walkthrough.
+    Handled,
+    /// The user committed the import.
+    Commit,
+}
 
 /// State of the informational "Telemetry" page (telemetry is removed in this
 /// build): just the focused "Continue" button.
@@ -287,6 +298,144 @@ impl ImportReview {
         DECISION_TIMEOUT
             .saturating_sub(self.shown_at.elapsed())
             .as_secs()
+    }
+
+    /// Apply one key to the walkthrough.
+    pub(crate) fn handle_key(&mut self, code: KeyCode) -> ReviewKey {
+    if self.telemetry.is_some() {
+        // Telemetry sub-page: informational only (telemetry is removed
+        // in this build). Esc/Enter/Space return to the summary.
+        match code {
+            KeyCode::Esc => self.close_telemetry(),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.close_telemetry();
+                self.summary_pill = SummaryPill::Continue;
+                self.continue_focused = true;
+            }
+            _ => return ReviewKey::Ignored,
+        }
+    } else if !self.choosing {
+        // Summary: Continue, Import less, and Telemetry pills.
+        // Arrows/Tab move; Enter/Space commits the focused one.
+        match code {
+            KeyCode::Left
+            | KeyCode::Up
+            | KeyCode::BackTab
+            | KeyCode::Char('h')
+            | KeyCode::Char('k') => self.summary_step(false),
+            KeyCode::Right
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::Char('j')
+            | KeyCode::Char('l') => self.summary_step(true),
+            // c is a direct shortcut into choose mode.
+            KeyCode::Char('c') | KeyCode::Char('C') => self.enter_choose_mode(),
+            // t jumps straight to the telemetry page.
+            KeyCode::Char('t') | KeyCode::Char('T') => self.open_telemetry(),
+            // y = "yes, import everything" regardless of pill focus, so
+            // the timeout is never a forced wait.
+            KeyCode::Char('y') | KeyCode::Char('Y') => return ReviewKey::Commit,
+            KeyCode::Enter | KeyCode::Char(' ') => match self.summary_pill {
+                SummaryPill::Continue => return ReviewKey::Commit,
+                SummaryPill::ImportLess => self.enter_choose_mode(),
+                SummaryPill::Telemetry => self.open_telemetry(),
+            },
+            _ => return ReviewKey::Ignored,
+        }
+    } else {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.cursor_up(),
+            KeyCode::Down | KeyCode::Char('j') => self.cursor_down(),
+            // Left = Yes (import), Right = No (skip), for the highlighted row.
+            KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Char('y')
+            | KeyCode::Char('Y') => self.set_current(true),
+            KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N') => self.set_current(false),
+            // Space toggles the highlighted row between Yes and No.
+            KeyCode::Char(' ') => self.toggle_current(),
+            // Enter on a login row selects/deselects that row, so
+            // "picking an option" never commits the whole import out
+            // from under the user. Only Enter on the Continue pill
+            // (or `c`) commits.
+            KeyCode::Enter if !self.continue_focused => self.toggle_current(),
+            KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => return ReviewKey::Commit,
+            _ => return ReviewKey::Ignored,
+        }
+    }
+        ReviewKey::Handled
+    }
+
+    /// Status-line text for the current screen of the walkthrough.
+    pub(crate) fn status_notice(&self) -> String {
+        let checked = self.checked_count();
+        let total = self.total();
+        let secs = self.seconds_remaining();
+        if !self.choosing {
+            if self.telemetry.is_some() {
+                "Telemetry is disabled in this build - Enter or Esc goes back".to_string()
+            } else {
+                format!(
+                    "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
+                    if total == 1 { "" } else { "s" },
+                )
+            }
+        } else {
+            format!(
+                "Import {checked} of {total} login{} - Enter/Space toggles, arrows move, Continue imports",
+                if total == 1 { "" } else { "s" },
+            )
+        }
+    }
+
+    /// Whether the telemetry sub-page is showing.
+    pub(crate) fn telemetry_page_open(&self) -> bool {
+        self.telemetry.is_some()
+    }
+
+    /// The candidates and the indices the user approved, for running the import.
+    pub(crate) fn approved_candidates(
+        &self,
+    ) -> (
+        Vec<crate::external_auth::ExternalAuthReviewCandidate>,
+        Vec<usize>,
+    ) {
+        (self.candidates.clone(), self.approved_indices())
+    }
+
+    /// What the welcome card renders for this walkthrough.
+    pub(crate) fn welcome_prompt(&self) -> crate::tui::LoginImportPrompt {
+        let rows = self
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, candidate)| crate::tui::LoginImportRow {
+                provider_summary: candidate.provider_summary().to_string(),
+                source_name: candidate.source_name().to_string(),
+                checked: self.checked.get(i).copied().unwrap_or(false),
+            })
+            .collect();
+        crate::tui::LoginImportPrompt {
+            rows,
+            cursor: self.cursor,
+            continue_focused: self.continue_focused,
+            choosing: self.choosing,
+            summary_pill: match self.summary_pill {
+                SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
+                SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
+                SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
+            },
+            telemetry: self.telemetry.map(|t| crate::tui::TelemetryPage {
+                cursor: t.cursor,
+                checked: t.checked,
+            }),
+            telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
+            checked_count: self.checked_count(),
+            seconds_left: self.seconds_remaining(),
+        }
     }
 
     /// Whether the decision countdown has elapsed. Paused while the telemetry
