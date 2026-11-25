@@ -295,6 +295,25 @@ pub fn jcode_path() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("auth.json"))
 }
 
+pub(super) fn auth_file_is_borrowed(path: &std::path::Path) -> Result<bool> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !meta.is_file() {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ---- Multi-account helpers ----
 
 /// Read the jcode auth file, auto-migrating from legacy format if needed.
@@ -305,7 +324,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
     if !path.exists() {
         return Ok(JcodeAuthFile::default());
     }
-    let borrowed = std::fs::symlink_metadata(&path)?.file_type().is_symlink();
+    let borrowed = auth_file_is_borrowed(&path)?;
 
     crate::storage::harden_secret_file_permissions(&path);
 
@@ -349,6 +368,11 @@ pub fn save_auth_file(auth: &JcodeAuthFile) -> Result<()> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let auth_path = jcode_path()?;
+    // Never replace an inherited link with an independent copy of the grant.
+    anyhow::ensure!(
+        !auth_file_is_borrowed(&auth_path)?,
+        "This Claude login is inherited. Modify it in the daemon that owns it."
+    );
 
     let clean = JcodeAuthFile {
         anthropic_accounts: auth.anthropic_accounts.clone(),

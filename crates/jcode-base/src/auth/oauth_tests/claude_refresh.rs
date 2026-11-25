@@ -59,13 +59,39 @@ async fn claude_wire_rejection_fingerprints_only_the_grant_sent_to_anthropic() -
 }
 
 #[tokio::test]
+async fn claude_server_error_does_not_reject_or_log_the_grant() -> Result<()> {
+    let _home = AuthTestSandbox::new()?;
+    seed()?;
+    let body = format!(r#"{{"error":"invalid_grant","error_description":"{OLD}"}}"#);
+    let (port, endpoint) = super::super::tests::mock_token_server(503, &body).await;
+    let error = refresh_with(OLD, LABEL, move |token, _| async move {
+        exchange_at(
+            &reqwest::Client::builder().no_proxy().build()?,
+            &format!("http://127.0.0.1:{port}/token"),
+            &token,
+        )
+        .await
+    })
+    .await
+    .unwrap_err();
+    endpoint.await?;
+    assert!(error.to_string().contains("503"));
+    assert!(!error.to_string().contains(OLD));
+    assert!(!refresh_state::refresh_token_is_known_rejected(
+        "claude", OLD
+    ));
+    assert!(!std::fs::read_to_string(refresh_state::status_path()?)?.contains(OLD));
+    Ok(())
+}
+
+#[tokio::test]
 async fn claude_concurrent_login_wins_over_late_refresh_success_or_rejection() -> Result<()> {
     let _home = AuthTestSandbox::new()?;
     for result in [
         Ok(tokens("late-access", "late-refresh", true)),
         Err(ClaudeTokenEndpointError {
-            scope: "test",
-            body: "invalid_grant".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            scope_rejected: false,
             rejected: true,
         }
         .into()),
@@ -143,6 +169,10 @@ async fn claude_symlinked_login_cannot_consume_its_owners_refresh_token() -> Res
     let owner = external.path().join("auth.json");
     std::fs::rename(&link, &owner)?;
     std::os::unix::fs::symlink(&owner, &link)?;
+    assert!(
+        claude_auth::update_account_profile(LABEL, Some("probe@example.invalid".into())).is_err()
+    );
+    assert!(std::fs::symlink_metadata(&link)?.file_type().is_symlink());
     let error = refresh_with(OLD, LABEL, |_, _| async {
         panic!("a borrowed token must never reach the endpoint")
     })

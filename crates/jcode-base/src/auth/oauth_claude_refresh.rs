@@ -71,25 +71,27 @@ struct ClaudeOAuthError {
 
 #[derive(Debug)]
 struct ClaudeTokenEndpointError {
-    scope: &'static str,
-    body: String,
+    status: reqwest::StatusCode,
+    scope_rejected: bool,
     rejected: bool,
 }
 
 impl fmt::Display for ClaudeTokenEndpointError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Token refresh failed with scope '{}': {}",
-            self.scope, self.body
-        )
+        write!(f, "Claude token refresh failed (HTTP {})", self.status)?;
+        if self.rejected {
+            f.write_str(": invalid_grant")?;
+        } else if self.scope_rejected {
+            f.write_str(": invalid_scope")?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for ClaudeTokenEndpointError {}
 
-pub(super) fn claude_refresh_error_is_invalid_scope(err: &anyhow::Error) -> bool {
-    let text = format!("{err:#}").to_ascii_lowercase();
+pub(super) fn claude_refresh_error_is_invalid_scope(error_body: &str) -> bool {
+    let text = error_body.to_ascii_lowercase();
     text.contains("invalid_scope")
         || text.contains("requested scope is invalid")
         || text.contains("scope is invalid")
@@ -127,8 +129,9 @@ async fn send_refresh(
             )
         });
         return Err(ClaudeTokenEndpointError {
-            scope: scope.unwrap_or("<omitted>"),
-            body,
+            status,
+            scope_rejected: status.is_client_error()
+                && claude_refresh_error_is_invalid_scope(&body),
             rejected,
         }
         .into());
@@ -153,7 +156,11 @@ async fn exchange_at(
 ) -> Result<OAuthTokens> {
     let tokens = match send_refresh(client, url, refresh_token, Some(claude::REFRESH_SCOPES)).await
     {
-        Err(error) if claude_refresh_error_is_invalid_scope(&error) => {
+        Err(error)
+            if error
+                .downcast_ref::<ClaudeTokenEndpointError>()
+                .is_some_and(|error| error.scope_rejected && !error.rejected) =>
+        {
             crate::logging::warn(
                 "Claude token refresh rejected Claude Code scopes; retrying without explicit scopes",
             );
@@ -175,21 +182,8 @@ async fn exchange_at(
     })
 }
 
-/// A symlinked SDK login is borrowed. Refreshing it and replacing the symlink
-/// with a private copy consumes the owner's token without updating their store.
-fn owns_auth_file() -> Result<bool> {
-    let meta = std::fs::symlink_metadata(claude_auth::jcode_path()?)?;
-    if !meta.is_file() {
-        return Ok(false);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() != 1 {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn borrowed_auth_file() -> Result<bool> {
+    claude_auth::auth_file_is_borrowed(&claude_auth::jcode_path()?)
 }
 
 /// Refresh Claude OAuth tokens for the active stored account.
@@ -205,7 +199,7 @@ pub async fn refresh_claude_tokens_for_account(
     observed_refresh: &str,
     label: &str,
 ) -> Result<OAuthTokens> {
-    if !daemon_can_refresh() || !owns_auth_file()? {
+    if !daemon_can_refresh() || borrowed_auth_file()? {
         let stored = load_claude_tokens_for_account(label)?;
         if rotated_fresh(&stored, observed_refresh) {
             return Ok(stored);
@@ -251,7 +245,7 @@ where
             return Ok(stored);
         }
         ensure_refresh_allowed(&stored)?;
-        if !owns_auth_file()? {
+        if borrowed_auth_file()? {
             return Err(ClaudeRefreshDeferred.into());
         }
         stored
@@ -264,7 +258,7 @@ where
         let _flight = flight;
         let reply = exchange(stored.refresh_token.clone(), label.clone()).await;
         let _auth = account_store::lock_store(&home, "auth.json")?;
-        if !owns_auth_file()? {
+        if borrowed_auth_file()? {
             return Err(ClaudeRefreshDeferred.into());
         }
         let current = load_claude_tokens_for_account(&label)?;
