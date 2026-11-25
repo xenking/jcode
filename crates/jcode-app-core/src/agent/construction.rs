@@ -139,6 +139,21 @@ impl Agent {
         agent
     }
 
+    /// Reopen a persisted worker session: soft interrupts queued before the
+    /// previous runtime went away are restored, and a runtime brought back
+    /// after an idle unload may be driven by a daemon wake without a client.
+    pub fn reopen_session(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+        restored_from_idle_unload: bool,
+    ) -> Self {
+        let mut agent = Self::new_with_session(provider, registry, session, None);
+        agent.restore_persisted_soft_interrupts();
+        agent.restored_from_idle_unload = restored_from_idle_unload;
+        agent
+    }
+
     pub fn new_with_session(
         provider: Arc<dyn Provider>,
         registry: Registry,

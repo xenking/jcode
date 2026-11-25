@@ -226,7 +226,7 @@ pub(super) async fn execute(
                 "provider": agent.provider_name(), "model": agent.provider_model(),
                 "reasoning_effort": agent.provider_reasoning_effort(),
                 "context_window": agent.provider_context_window(),
-                "last_usage": agent.last_usage(), "token_usage_totals": agent.token_usage_totals(),
+                "last_usage": agent.last_usage_json(), "token_usage_totals": agent.token_usage_totals(),
                 "memory_enabled": agent.memory_enabled(), "swarm_enabled": swarm_enabled,
                 "autoreview_enabled": agent.autoreview_enabled().unwrap_or(config.autoreview.enabled),
                 "autojudge_enabled": agent.autojudge_enabled().unwrap_or(config.autojudge.enabled),
@@ -246,7 +246,7 @@ pub(super) async fn execute(
             }
             json!({"anthropic_cache_ttl": if crate::provider::anthropic::is_cache_ttl_1h() { "1h" } else { "5m" },
                 "setting_scope": "Anthropic, subsequent requests only", "provider": agent.provider_name(),
-                "last_usage": agent.last_usage(), "token_usage_totals": agent.token_usage_totals(),
+                "last_usage": agent.last_usage_json(), "token_usage_totals": agent.token_usage_totals(),
                 "expiry": null, "expiry_available": false})
         }
         RuntimeCommand::Memory => {

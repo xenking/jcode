@@ -332,9 +332,7 @@ pub(super) async fn cleanup_client_connection(
                     // the server-wide connections lock for ~250ms on every
                     // disconnect, stalling the next client's attach. Detach
                     // the guard and finish it on a blocking worker instead.
-                    if let Some(mut concurrency) = agent.take_concurrency_session() {
-                        tokio::task::spawn_blocking(move || concurrency.finish());
-                    }
+                    agent.finish_concurrency_tracking_in_background();
                     match disposition {
                         DisconnectDisposition::Closed => {
                             agent.mark_closed();

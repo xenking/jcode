@@ -142,18 +142,12 @@ pub(super) async fn maybe_handle_server_state_command(
                 Option<String>,
                 Option<serde_json::Value>,
             ) = if let Ok(agent) = agent_arc.try_lock() {
-                let usage = agent.last_usage();
                 (
                     Some(agent.provider_name()),
                     Some(agent.provider_model()),
                     member_status == Some("running"),
                     agent.working_dir().map(|p| p.to_string()),
-                    Some(serde_json::json!({
-                        "input": usage.input_tokens,
-                        "output": usage.output_tokens,
-                        "cache_read": usage.cache_read_input_tokens,
-                        "cache_write": usage.cache_creation_input_tokens,
-                    })),
+                    Some(agent.last_usage_brief()),
                 )
             } else {
                 (None, None, member_status == Some("running"), None, None)

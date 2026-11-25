@@ -739,7 +739,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
                     "soft_interrupt_count": agent.soft_interrupt_count(),
                     "soft_interrupts": agent.soft_interrupts_preview(),
                     "has_urgent_interrupt": agent.has_urgent_interrupt(),
-                    "last_usage": agent.last_usage(),
+                    "last_usage": agent.last_usage_json(),
                 }))
             } else {
                 None

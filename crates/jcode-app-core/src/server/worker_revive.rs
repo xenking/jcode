@@ -94,9 +94,7 @@ pub(super) async fn live_or_revived_agent(
                 session.working_dir.as_ref().map(std::path::PathBuf::from),
             )
             .await;
-        let mut agent = Agent::new_with_session(provider, registry, session, None);
-        agent.restore_persisted_soft_interrupts();
-        agent.restored_from_idle_unload = was_idle_unloaded;
+        let mut agent = Agent::reopen_session(provider, registry, session, was_idle_unloaded);
         if is_headless_member {
             agent.set_debug(true);
         }

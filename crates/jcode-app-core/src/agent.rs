@@ -1845,13 +1845,13 @@ impl Agent {
         }
     }
 
-    /// Detach the concurrency telemetry guard so the caller can finish it off
-    /// a latency-sensitive path. `finish` performs a blocking delivery (up to
-    /// ~800ms) that must not run under server-wide locks.
-    pub(crate) fn take_concurrency_session(
-        &mut self,
-    ) -> Option<crate::telemetry::ConcurrencySession> {
-        self.concurrency_session.take()
+    /// Finish concurrency telemetry on a blocking worker. `finish` performs a
+    /// blocking delivery (up to ~800ms) that must not run on a latency-sensitive
+    /// path or under server-wide locks.
+    pub(crate) fn finish_concurrency_tracking_in_background(&mut self) {
+        if let Some(mut concurrency) = self.concurrency_session.take() {
+            tokio::task::spawn_blocking(move || concurrency.finish());
+        }
     }
 
     #[cfg(test)]
@@ -1882,9 +1882,27 @@ impl Agent {
         }
     }
 
-    /// Get the last token usage from the most recent API request
-    pub fn last_usage(&self) -> &TokenUsage {
-        &self.last_usage
+    /// The most recent API request's token usage, as reported to debug and
+    /// runtime-command clients.
+    pub fn last_usage_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.last_usage).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// [`Self::last_usage_json`] pretty-printed with the usage fields in
+    /// declaration order.
+    pub fn last_usage_pretty(&self) -> String {
+        serde_json::to_string_pretty(&self.last_usage).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// The most recent request's usage under the short keys the swarm
+    /// member list uses.
+    pub fn last_usage_brief(&self) -> serde_json::Value {
+        serde_json::json!({
+            "input": self.last_usage.input_tokens,
+            "output": self.last_usage.output_tokens,
+            "cache_read": self.last_usage.cache_read_input_tokens,
+            "cache_write": self.last_usage.cache_creation_input_tokens,
+        })
     }
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {

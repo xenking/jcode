@@ -535,8 +535,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "usage" {
         let agent = agent.lock().await;
-        let usage = agent.last_usage();
-        return Ok(serde_json::to_string_pretty(&usage).unwrap_or_else(|_| "{}".to_string()));
+        return Ok(agent.last_usage_pretty());
     }
 
     if trimmed == "help" {
