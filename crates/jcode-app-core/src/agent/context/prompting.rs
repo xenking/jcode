@@ -437,7 +437,7 @@ impl Agent {
             return Ok(());
         }
         self.session.set_pinned_skill_names(next);
-        self.active_skill = self.session.pinned_skill.clone();
+        self.active_skill = self.session.pinned_skill().map(str::to_owned);
         if self.active_skill.is_some() {
             self.announce_active_skill();
         } else {
@@ -491,18 +491,18 @@ impl Agent {
     }
 
     pub(super) fn restore_pinned_skill(&mut self) {
-        self.active_skill = self.session.pinned_skill.clone();
+        self.active_skill = self.session.pinned_skill().map(str::to_owned);
         let Some(announcement) = self.active_skill_announcement() else {
             return;
         };
         let start = self
             .session
-            .compaction
+            .compaction()
             .as_ref()
             .map_or(0, |state| state.compacted_count);
         let announced = self
             .session
-            .messages
+            .messages()
             .iter()
             .skip(start)
             .rev()
@@ -543,7 +543,7 @@ impl Agent {
                 skill.render_prompt(
                     self.session.pinned_skill_arguments(name),
                     self.session
-                        .working_dir
+                        .working_dir()
                         .as_deref()
                         .map(std::path::Path::new),
                 )

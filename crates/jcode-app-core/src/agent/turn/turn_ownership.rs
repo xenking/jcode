@@ -322,9 +322,8 @@ impl Agent {
         self.enforce_worker_request()?;
         let account_route = self
             .session
-            .route_api_method
-            .as_deref()
-            .or(self.session.provider_key.as_deref());
+            .route_api_method()
+            .or(self.session.provider_key());
         if let Some(expected) = account_route.and_then(jcode_provider_core::oauth_account_label)
             && self.provider.oauth_account_label().as_deref() != Some(expected)
         {

@@ -216,7 +216,7 @@ impl Agent {
 
     /// Drop the display-only reload marker from the truncated assistant text.
     pub(super) fn strip_reload_interruption_marker(&mut self) -> Result<bool> {
-        let Some(message) = self
+        let changed = self
             .session
             .strip_reload_interruption_marker_from_last_assistant();
         if changed {

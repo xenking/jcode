@@ -20,7 +20,7 @@ async fn assert_snapcompact_breakdown(supports_images: bool) {
             cache_control: None,
         }],
     );
-    agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+    agent.session.adopt_compaction(Some(crate::session::StoredCompactionState {
         summary_text: "archive".into(),
         plan_context: None,
         openai_encrypted_content: None,
@@ -170,8 +170,7 @@ async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
 
     let state = agent
         .session
-        .compaction
-        .as_ref()
+        .compaction()
         .expect("compaction should be persisted");
     assert!(state.openai_encrypted_content.is_none());
     assert!(
@@ -220,7 +219,9 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     }
 
     agent.provider_session_id = Some("stale-provider-session".to_string());
-    agent.session.provider_session_id = Some("stale-provider-session".to_string());
+    let mut route = agent.session.route();
+    route.provider_session_id = Some("stale-provider-session".to_string());
+    agent.session.apply_route(route);
 
     let (message, success) = agent.request_manual_compaction();
     assert!(success, "manual compaction should start: {message}");
@@ -240,10 +241,10 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
 
     let event = event.expect("manual compaction event should be applied");
     assert_eq!(event.trigger, "manual");
-    assert!(agent.session.compaction.is_some());
+    assert!(agent.session.compaction().is_some());
     assert!(agent.provider_session_id.is_none());
-    assert!(agent.session.provider_session_id.is_none());
-    assert!(agent.session.compaction.as_ref().unwrap().compacted_count > 0);
+    assert!(agent.session.provider_session_id().is_none());
+    assert!(agent.session.compaction().as_ref().unwrap().compacted_count > 0);
     let last_user_message = format!("turn 29 {}", "x".repeat(120));
     assert!(
         compacted_messages

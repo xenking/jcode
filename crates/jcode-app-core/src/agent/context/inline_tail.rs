@@ -291,7 +291,7 @@ impl Agent {
     /// workers retain a tail in every spawn mode so forced stops can still
     /// deliver recent output when transcript collection cannot finish.
     pub(crate) fn inline_output_tap(&self) -> bool {
-        self.inline_output_tap || self.session.parent_id.is_some()
+        self.inline_output_tap || self.session.parent_id().is_some()
     }
 
     /// Publish the current rolling activity tail to the bus for the
@@ -302,7 +302,7 @@ impl Agent {
         }
         crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmOutputTail(
             crate::bus::SwarmOutputTail {
-                session_id: self.session.id.clone(),
+                session_id: self.session.id().to_string(),
                 tail: self.inline_tail.render(),
             },
         ));

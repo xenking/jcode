@@ -428,15 +428,15 @@ mod output_tail_tests {
 impl Agent {
     /// Get the working directory for this session
     pub fn working_dir(&self) -> Option<&str> {
-        self.session.working_dir.as_deref()
+        self.session.working_dir()
     }
 
     pub fn is_canary(&self) -> bool {
-        self.session.is_canary
+        self.session.is_canary()
     }
 
     pub fn is_debug(&self) -> bool {
-        self.session.is_debug
+        self.session.is_debug()
     }
 
     pub fn set_debug(&mut self, is_debug: bool) {
@@ -457,7 +457,7 @@ impl Agent {
     pub fn set_memory_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory(&self.session.id);
+            crate::memory::clear_pending_memory(&self.session.id());
         }
     }
 }
@@ -466,6 +466,6 @@ impl Agent {
     /// Whether this session was created as a swarm worker. Persisted with the
     /// session, so a resumed or pre-existing worker is still recognized.
     pub(crate) fn is_swarm_worker(&self) -> bool {
-        self.session.is_swarm_worker
+        self.session.is_swarm_worker()
     }
 }

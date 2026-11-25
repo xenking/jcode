@@ -815,7 +815,7 @@ mod frozen_snapshot_memory_tests {
 
 impl Agent {
     pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
-        if let Some(message) = self.session.messages.get(index) {
+        if let Some(message) = self.session.messages().get(index) {
             let count = message
                 .content
                 .iter()

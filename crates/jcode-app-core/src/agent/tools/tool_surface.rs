@@ -151,7 +151,7 @@ impl Agent {
     /// KV cache miss on the whole conversation. New skills are instead
     /// described once, in a note appended before the next user message.
     pub(crate) fn announce_late_skills(&mut self) {
-        if self.session.system_prompt.is_some() {
+        if self.session.system_prompt().is_some() {
             return;
         }
         self.seed_announced_skills_from_transcript();
@@ -192,7 +192,7 @@ impl Agent {
             }],
             Some(crate::session::StoredDisplayRole::System),
         );
-        self.announced_skills_scan_index = self.session.messages.len();
+        self.announced_skills_scan_index = self.session.messages().len();
     }
 
     /// Replace per-server MCP definitions with the fixed search/call surface
@@ -278,7 +278,7 @@ impl Agent {
         &self,
         apply_mcp_exposure: bool,
     ) -> Vec<ToolDefinition> {
-        let sdk = crate::tool::sdk::config(&self.session.id);
+        let sdk = crate::tool::sdk::config(&self.session.id());
         let enabled = sdk
             .as_ref()
             .and_then(|c| c.enabled.as_ref())
@@ -306,13 +306,13 @@ impl Agent {
         }
         Self::apply_selfdev_tool_surface(
             &mut tools,
-            self.session.is_canary,
+            self.session.is_canary(),
             self.is_desktop_selfdev(),
         );
         if apply_mcp_exposure {
             self.apply_mcp_tool_exposure(&mut tools);
         }
-        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id, tools);
+        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id(), tools);
         if let Some(config) = sdk.as_ref() {
             let disabled = config.disabled.iter().cloned().collect();
             tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
@@ -332,7 +332,7 @@ impl Agent {
             &mut tools,
             self.native_deferred_mcp(),
             loader_allowed,
-            |name| crate::tool::sdk::custom(&self.session.id, name),
+            |name| crate::tool::sdk::custom(&self.session.id(), name),
         );
         tools
     }
@@ -349,8 +349,8 @@ impl Agent {
             .map(|d| format!("debug-{}", d.as_millis()))
             .unwrap_or_else(|_| "debug".to_string());
         let ctx = ToolContext {
-            session_id: self.session.id.clone(),
-            message_id: self.session.id.clone(),
+            session_id: self.session.id().to_string(),
+            message_id: self.session.id().to_string(),
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
             stdin_request_tx: self.stdin_request_tx.clone(),
@@ -435,8 +435,8 @@ impl Agent {
     pub(super) fn seed_announced_mcp_tools_from_transcript(&mut self) {
         let start = self
             .announced_mcp_scan_index
-            .min(self.session.messages.len());
-        for message in &self.session.messages[start..] {
+            .min(self.session.messages().len());
+        for message in &self.session.messages()[start..] {
             for block in &message.content {
                 match block {
                     ContentBlock::ToolReference { tool_name, .. } => {
@@ -459,7 +459,7 @@ impl Agent {
                 }
             }
         }
-        self.announced_mcp_scan_index = self.session.messages.len();
+        self.announced_mcp_scan_index = self.session.messages().len();
     }
 
     /// Mark skills named in earlier announcements as announced, so a
@@ -467,8 +467,8 @@ impl Agent {
     pub(super) fn seed_announced_skills_from_transcript(&mut self) {
         let start = self
             .announced_skills_scan_index
-            .min(self.session.messages.len());
-        for message in &self.session.messages[start..] {
+            .min(self.session.messages().len());
+        for message in &self.session.messages()[start..] {
             for block in &message.content {
                 if let ContentBlock::Text { text, .. } = block
                     && text.contains(LATE_SKILL_ANNOUNCEMENT_MARKER)
@@ -485,11 +485,11 @@ impl Agent {
                 }
             }
         }
-        self.announced_skills_scan_index = self.session.messages.len();
+        self.announced_skills_scan_index = self.session.messages().len();
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
-        if self.session.is_canary {
+        if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
 
@@ -595,7 +595,7 @@ impl Agent {
 
     /// Get full tool definitions for debug introspection (bypasses lock)
     pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
-        if self.session.is_canary {
+        if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
         self.build_filtered_tool_definitions().await
@@ -638,13 +638,13 @@ impl Agent {
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
         let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
-        let name = if crate::tool::sdk::custom(&self.session.id, unqualified_name) {
+        let name = if crate::tool::sdk::custom(&self.session.id(), unqualified_name) {
             unqualified_name
         } else {
             Registry::resolve_tool_name(unqualified_name)
         };
         let mut sdk_enabled = false;
-        if let Some(config) = crate::tool::sdk::config(&self.session.id) {
+        if let Some(config) = crate::tool::sdk::config(&self.session.id()) {
             let disabled = config.disabled.into_iter().collect();
             anyhow::ensure!(
                 !self.registry.tool_is_disabled(&disabled, name),
@@ -676,7 +676,7 @@ impl Agent {
                 "Tool 'desktop_selfdev' is only available in a Jcode Desktop source checkout."
             ));
         }
-        if (self.session.is_canary || is_desktop) && name == "jcode_docs" {
+        if (self.session.is_canary() || is_desktop) && name == "jcode_docs" {
             return Err(anyhow::anyhow!(
                 "Tool 'jcode_docs' is disabled in self-development mode. Read the working tree documentation instead."
             ));
@@ -710,7 +710,7 @@ impl Agent {
         {
             return Vec::new();
         }
-        let sdk = crate::tool::sdk::config(&self.session.id);
+        let sdk = crate::tool::sdk::config(&self.session.id());
         let enabled: Option<HashSet<String>> = sdk
             .as_ref()
             .and_then(|c| c.enabled.as_ref())

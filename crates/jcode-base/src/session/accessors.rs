@@ -7,7 +7,7 @@
 
 use super::{
     AgentModelOverrides, Session, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredMessage, StoredReplayEvent, StoredSpeedSelection, UserAskLedger,
+    StoredMessage, StoredReplayEvent, UserAskLedger,
 };
 use crate::kv_cache_monitor::RequestCacheDomain;
 use chrono::{DateTime, Utc};

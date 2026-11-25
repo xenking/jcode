@@ -20,7 +20,7 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
     assert_eq!(injected.len(), 1);
     let message = agent
         .session
-        .messages
+        .messages()
         .last()
         .expect("soft interrupt should append a user message");
     assert!(matches!(
@@ -87,7 +87,7 @@ async fn steering_recovery_filters_committed_ids_after_crash_window() {
     let saved = crate::session::Session::load(agent.session_id()).unwrap();
     assert_eq!(
         saved
-            .messages
+            .messages()
             .iter()
             .filter(|message| message.id.starts_with("queued:"))
             .count(),
@@ -237,7 +237,7 @@ async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
         SoftInterruptSource::FileActivity,
     );
     let injected = agent.inject_soft_interrupts();
-    let stored = agent.session.messages.last().unwrap();
+    let stored = agent.session.messages().last().unwrap();
     assert_eq!(
         stored.display_role,
         Some(crate::session::StoredDisplayRole::FileActivity)
@@ -268,7 +268,7 @@ async fn jarvis_voice_provenance_survives_history_without_marking_typed_lookalik
             if text == content && display_role.as_deref() == expected)
         );
     }
-    let stored = &agent.session.messages[agent.session.messages.len() - 2..];
+    let stored = &agent.session.messages()[agent.session.messages().len() - 2..];
     for msg in stored {
         assert!(matches!(msg.role, Role::User));
         assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == content));

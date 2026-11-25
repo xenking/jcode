@@ -1527,7 +1527,7 @@ mod worker_effort_cap_tests {
 
 impl Agent {
     pub(super) fn is_jarvis_root(&self, config: &crate::protocol::SessionToolConfig) -> bool {
-        self.session.parent_id.is_none()
+        self.session.parent_id().is_none()
             && config.custom.iter().any(|tool| tool.name == "speak")
             && config
                 .system_prompt_append

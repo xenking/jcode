@@ -81,11 +81,11 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.graceful_shutdown_signal().is_set());
 
     let status = agent
-        .restore_session(&restored_session.id)
+        .restore_session(&restored_session.id())
         .expect("restore session should succeed");
 
     assert_eq!(status, crate::session::SessionStatus::Active);
-    assert_eq!(agent.session_id(), restored_session.id);
+    assert_eq!(agent.session_id(), restored_session.id());
     assert_eq!(agent.soft_interrupt_count(), 0);
     assert!(!agent.background_tool_signal().is_set());
     assert!(!agent.graceful_shutdown_signal().is_set());
@@ -119,7 +119,7 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
         .expect("set explicitly pinned model");
     assert_eq!(agent.provider_model(), "z-ai/glm-5.2@Novita");
     let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
-    assert_eq!(persisted.model.as_deref(), Some("z-ai/glm-5.2@Novita"));
+    assert_eq!(persisted.model(), Some("z-ai/glm-5.2@Novita"));
 
     let restored_provider = Arc::new(ExplicitPinProvider::new("other/model"));
     let restored_provider_dyn: Arc<dyn Provider> = restored_provider.clone();
@@ -163,18 +163,18 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         .save_prepared()
         .expect("save restored session");
 
-    crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
+    crate::memory::mark_memories_injected(&restored_session.id(), &["memory-stale".to_string()]);
 
     agent
-        .restore_session(&restored_session.id)
+        .restore_session(&restored_session.id())
         .expect("restore session should succeed");
 
     assert!(crate::memory::is_memory_injected(
-        &restored_session.id,
+        &restored_session.id(),
         "memory-persisted"
     ));
     assert!(
-        !crate::memory::is_memory_injected(&restored_session.id, "memory-stale"),
+        !crate::memory::is_memory_injected(&restored_session.id(), "memory-stale"),
         "restore should replace stale in-memory dedup state with persisted session data"
     );
 
@@ -207,8 +207,10 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
     agent.memory_enabled = true;
     let project = home.path().join("project");
     std::fs::create_dir(&project).expect("isolated project");
-    agent.session.working_dir = Some(project.to_string_lossy().into_owned());
-    let session_id = agent.session.id.clone();
+    let mut workspace = agent.session.workspace();
+    workspace.working_dir = Some(project.to_string_lossy().into_owned());
+    agent.session.apply_workspace(workspace);
+    let session_id = agent.session.id().to_string();
 
     let entry =
         crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, "remember this later");
@@ -224,7 +226,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
         1,
         vec![entry.id.clone()],
         None,
-        agent.session.working_dir.as_deref(),
+        agent.session.working_dir(),
     );
     assert!(crate::memory::has_pending_memory(&session_id));
 
@@ -275,7 +277,7 @@ async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages.len();
+    let before = agent.session.messages().len();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Use ephemeral mode".to_string(),
         display_prompt: None,
@@ -289,7 +291,7 @@ async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
         .unwrap();
 
     assert!(!persisted);
-    assert_eq!(agent.session.messages.len(), before);
+    assert_eq!(agent.session.messages().len(), before);
     assert!(matches!(message.role, Role::User));
     assert!(message_text(&message).contains("Use ephemeral mode"));
 
@@ -310,7 +312,7 @@ async fn memory_injection_message_can_persist_to_history() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages.len();
+    let before = agent.session.messages().len();
     let memory = crate::memory::PendingMemory {
         prompt: "# Memory\n\n## Facts\n1. Persist for cache".to_string(),
         display_prompt: None,
@@ -324,13 +326,13 @@ async fn memory_injection_message_can_persist_to_history() {
         .unwrap();
 
     assert!(persisted);
-    assert_eq!(agent.session.messages.len(), before + 1);
+    assert_eq!(agent.session.messages().len(), before + 1);
     assert_eq!(
-        content_text(&agent.session.messages.last().unwrap().content),
+        content_text(&agent.session.messages().last().unwrap().content),
         message_text(&message)
     );
     assert!(
-        content_text(&agent.session.messages.last().unwrap().content).contains("Persist for cache")
+        content_text(&agent.session.messages().last().unwrap().content).contains("Persist for cache")
     );
 
     match previous {

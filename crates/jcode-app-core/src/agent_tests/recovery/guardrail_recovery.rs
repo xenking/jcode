@@ -252,7 +252,7 @@ async fn empty_post_tool_response_is_retried_in_shared_helper() {
     assert_eq!(attempts, 1);
     let recovery = agent
         .session
-        .messages
+        .messages()
         .last()
         .expect("recovery instruction must be persisted");
     assert_eq!(recovery.role, Role::User);
@@ -531,7 +531,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     let session = crate::session::Session::load(agent.session_id()).unwrap();
     assert!(
         !session
-            .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .any(
