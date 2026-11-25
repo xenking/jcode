@@ -398,7 +398,7 @@ async fn exchange_claude_code_at_url(
         state: state.as_str(),
     };
 
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")
@@ -584,7 +584,7 @@ async fn fetch_claude_profile_at_url(
     access_token: &str,
     profile_url: &str,
 ) -> Result<ClaudeProfileResponse> {
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let resp = client
         .get(profile_url)
         .header("Accept", "application/json")
@@ -1124,7 +1124,7 @@ async fn exchange_code_at_url(
         "state": effective_state,
     });
 
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")
@@ -1168,7 +1168,7 @@ async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<O
         "scope": claude::REFRESH_SCOPES,
     });
 
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")

@@ -40,7 +40,7 @@ pub(super) async fn exchange_openai_code_at_url(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<OAuthTokens> {
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -115,7 +115,7 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
         #[serde(default)]
         expires_at: Option<String>,
     }
-    let resp = crate::provider::shared_http_client()
+    let resp = jcode_provider_core::shared_http_client()
         .post(format!("{base}/api/accounts/deviceauth/usercode"))
         .json(&OpenAiDeviceStartRequest {
             client_id: openai::CLIENT_ID,
@@ -183,7 +183,7 @@ pub async fn poll_openai_device_login_at(
         authorization_code: String,
         code_verifier: String,
     }
-    let resp = crate::provider::shared_http_client()
+    let resp = jcode_provider_core::shared_http_client()
         .post(format!("{base}/api/accounts/deviceauth/token"))
         .json(&OpenAiDevicePollRequest {
             device_auth_id,
