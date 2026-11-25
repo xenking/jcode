@@ -108,7 +108,7 @@ impl Agent {
 
             if parallel_reads.is_empty() {
                 parallel_reads = self
-                    .start_parallel_reads(&tool_calls[tool_index..], &sdk_tool_results, &message_id)
+                    .start_parallel_reads(&tool_calls[tool_index..], sdk_tool_results, &message_id)
                     .await;
             }
 
@@ -325,7 +325,7 @@ impl Agent {
                         {
                             crate::provider::openai_request::freeze_deferred_tools(
                                 &mut blocks,
-                                &tools,
+                                tools,
                             );
                         }
                         let message_id = self.add_tool_result(
@@ -575,7 +575,7 @@ impl Agent {
             &malformed_calls,
             executed_valid_call,
             consecutive_malformed_tool_rounds,
-            &tools,
+            tools,
         )?;
 
         // === INJECTION POINT D: All tools done, before next API call ===

@@ -2634,7 +2634,7 @@ async fn run_single_message_with_agent(
                     ),
                     model: provider.model(),
                     text,
-                    usage: agent.last_usage().clone(),
+                    usage: agent.last_usage_report(),
                 };
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }

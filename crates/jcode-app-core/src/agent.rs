@@ -1921,6 +1921,11 @@ impl Agent {
         serde_json::to_value(&self.last_usage).unwrap_or(serde_json::Value::Null)
     }
 
+    /// The most recent request's usage as the typed run-report field.
+    pub fn last_usage_report(&self) -> TokenUsage {
+        self.last_usage.clone()
+    }
+
     /// [`Self::last_usage_json`] pretty-printed with the usage fields in
     /// declaration order.
     pub fn last_usage_pretty(&self) -> String {
