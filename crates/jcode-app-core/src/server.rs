@@ -93,6 +93,7 @@ mod swarm_plan;
 mod swarm_policy;
 mod swarm_salvage;
 mod swarm_status;
+mod swarm_todo_projection;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
