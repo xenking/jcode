@@ -48,7 +48,7 @@ pub fn enter_selfdev_session(
 
     let session_id = session.id.clone();
 
-    if SelfDevTool::is_test_session() {
+    if super::is_test_session() {
         return Ok(SelfDevLaunchResult {
             session_id,
             repo_dir,

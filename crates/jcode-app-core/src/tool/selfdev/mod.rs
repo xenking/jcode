@@ -869,16 +869,17 @@ impl Tool for SelfDevTool {
     }
 }
 
-impl SelfDevTool {
-    fn is_test_session() -> bool {
-        std::env::var("JCODE_TEST_SESSION")
-            .map(|value| {
-                let trimmed = value.trim();
-                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
-    }
+/// Whether this process runs under the synthetic-session test harness.
+fn is_test_session() -> bool {
+    std::env::var("JCODE_TEST_SESSION")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
 
+impl SelfDevTool {
     fn reload_timeout_secs() -> u64 {
         std::env::var("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS")
             .ok()
@@ -938,49 +939,6 @@ impl SelfDevTool {
         build::selfdev_build_command_for_target(repo_dir, target)
     }
 
-    fn build_lock_path(worktree_scope: &str) -> Result<PathBuf> {
-        let dir = storage::jcode_dir()?.join("selfdev-build-locks");
-        storage::ensure_dir(&dir)?;
-        Ok(dir.join(format!("{}.lock", worktree_scope)))
-    }
-
-    #[cfg(unix)]
-    fn try_acquire_build_lock(worktree_scope: &str) -> Result<Option<BuildLockGuard>> {
-        use std::fs::OpenOptions;
-        use std::os::fd::AsRawFd;
-
-        let path = Self::build_lock_path(worktree_scope)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
-            Ok(Some(BuildLockGuard {
-                file: Some(file),
-                path,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn try_acquire_build_lock(worktree_scope: &str) -> Result<Option<BuildLockGuard>> {
-        use std::fs::OpenOptions;
-
-        let path = Self::build_lock_path(worktree_scope)?;
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(file) => Ok(Some(BuildLockGuard {
-                file: Some(file),
-                path,
-            })),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-
     fn load_session_labels(session_id: &str) -> (Option<String>, Option<String>) {
         session::Session::load(session_id)
             .map(|session| {
@@ -991,7 +949,7 @@ impl SelfDevTool {
     }
 
     fn requested_source_state(repo_dir: &Path) -> Result<build::SourceState> {
-        if Self::is_test_session() {
+        if is_test_session() {
             return Ok(build::SourceState {
                 repo_scope: "test-repo-scope".to_string(),
                 worktree_scope: "test-worktree-scope".to_string(),

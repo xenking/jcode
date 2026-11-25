@@ -99,7 +99,7 @@ impl SelfDevTool {
             // Only attempt a clone when git is available and we're not in a
             // synthetic test session.
             let git_available = checks.iter().any(|check| check.name == "git" && check.ok);
-            if SelfDevTool::is_test_session() {
+            if super::is_test_session() {
                 clone_note = Some("Test mode: skipped cloning the jcode source.".to_string());
             } else if git_available {
                 match Self::clone_selfdev_source() {
@@ -280,7 +280,7 @@ impl SelfDevTool {
     /// it asks the shared server to exec into the newest installed build (if one
     /// is strictly newer than the running process).
     pub(super) async fn do_reload_to_newer_build(&self, _ctx: &ToolContext) -> Result<ToolOutput> {
-        if SelfDevTool::is_test_session() {
+        if super::is_test_session() {
             return Ok(ToolOutput::new("Test mode: skipped reload-to-newer-build."));
         }
 

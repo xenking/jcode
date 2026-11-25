@@ -149,7 +149,7 @@ fn terminal_request_history_is_archived_without_touching_active_requests() {
 
 #[test]
 fn optimized_test_shell_command_routes_compile_subcommands_only() {
-    let shell = SelfDevTool::optimized_test_shell_command(
+    let shell = super::build_queue::BuildRunner::optimized_test_shell_command(
         "cargo test -p jcode-base && cargo fmt --all -- --check",
     );
 
@@ -182,7 +182,9 @@ fn optimized_test_shell_command_executes_raw_cargo_test_through_wrapper() {
     let status = std::process::Command::new("bash")
         .args([
             "-lc",
-            &SelfDevTool::optimized_test_shell_command("cargo test -p demo --lib"),
+            &super::build_queue::BuildRunner::optimized_test_shell_command(
+                "cargo test -p demo --lib",
+            ),
         ])
         .env("JCODE_DEV_CARGO_SCRIPT", &wrapper)
         .env("JCODE_TEST_CAPTURE", &capture)

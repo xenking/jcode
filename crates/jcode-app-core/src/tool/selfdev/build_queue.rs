@@ -19,13 +19,13 @@ impl QueueJob {
     pub(crate) async fn run(self, request_id: String, output: PathBuf) -> Result<TaskResult> {
         match self {
             Self::Build(repo, command, reason) => {
-                SelfDevTool::run_build_request(request_id, repo, command, reason, output).await
+                BuildRunner::run_build_request(request_id, repo, command, reason, output).await
             }
             Self::Test(repo, command, reason) => {
-                SelfDevTool::run_test_request(request_id, repo, command, reason, output).await
+                BuildRunner::run_test_request(request_id, repo, command, reason, output).await
             }
             Self::Watch(existing) => {
-                SelfDevTool::follow_existing_build(request_id, existing, output).await
+                BuildRunner::follow_existing_build(request_id, existing, output).await
             }
         }
     }
@@ -107,7 +107,55 @@ async fn start_queue_job(
     Ok(info)
 }
 
-impl SelfDevTool {
+/// Runs queued builds and tests inside a worker. It owns the queue wait, the
+/// build lock and the command streaming, so jobs depend on it rather than on
+/// the tool that enqueues them.
+pub(super) struct BuildRunner;
+
+impl BuildRunner {
+    pub(super) fn build_lock_path(worktree_scope: &str) -> Result<PathBuf> {
+        let dir = storage::jcode_dir()?.join("selfdev-build-locks");
+        storage::ensure_dir(&dir)?;
+        Ok(dir.join(format!("{}.lock", worktree_scope)))
+    }
+
+    #[cfg(unix)]
+    pub(super) fn try_acquire_build_lock(worktree_scope: &str) -> Result<Option<BuildLockGuard>> {
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+
+        let path = Self::build_lock_path(worktree_scope)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret == 0 {
+            Ok(Some(BuildLockGuard {
+                file: Some(file),
+                path,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn try_acquire_build_lock(worktree_scope: &str) -> Result<Option<BuildLockGuard>> {
+        use std::fs::OpenOptions;
+
+        let path = Self::build_lock_path(worktree_scope)?;
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(file) => Ok(Some(BuildLockGuard {
+                file: Some(file),
+                path,
+            })),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub(super) fn optimized_test_shell_command(command: &str) -> String {
         format!(
             r#"cargo() {{
@@ -315,7 +363,7 @@ export -f cargo
         Self::append_output_line(&mut queue_file, format!("Test starting now: {}", reason)).await;
         drop(queue_file);
 
-        let result = if Self::is_test_session() {
+        let result = if is_test_session() {
             let mut file = tokio::fs::File::create(&output_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
@@ -465,7 +513,7 @@ export -f cargo
             .requested_source
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Missing requested source state for {}", request_id))?;
-        let actual_source = if Self::is_test_session() {
+        let actual_source = if is_test_session() {
             expected_source.clone()
         } else {
             build::ensure_source_state_matches(&repo_dir, &expected_source)?
@@ -479,7 +527,7 @@ export -f cargo
         Self::append_output_line(&mut queue_file, format!("Build starting now: {}", reason)).await;
         drop(queue_file);
 
-        let result = if Self::is_test_session() {
+        let result = if is_test_session() {
             Self::run_test_build(output_path.clone(), &reason).await?
         } else {
             let prerelease = build::linux_prerelease_candidate(&repo_dir, &actual_source);
@@ -565,7 +613,9 @@ export -f cargo
         request.save()?;
         Ok(result)
     }
+}
 
+impl SelfDevTool {
     pub(super) async fn do_build(
         &self,
         reason: Option<String>,
@@ -965,7 +1015,7 @@ export -f cargo
             program: "bash".to_string(),
             args: vec![
                 "-lc".to_string(),
-                SelfDevTool::optimized_test_shell_command(&command),
+                BuildRunner::optimized_test_shell_command(&command),
             ],
             display: command.clone(),
         };

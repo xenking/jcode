@@ -286,7 +286,7 @@ impl SelfDevTool {
         execution_mode: ToolExecutionMode,
         working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
-        let test_mode = SelfDevTool::is_test_session();
+        let test_mode = super::is_test_session();
         let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
