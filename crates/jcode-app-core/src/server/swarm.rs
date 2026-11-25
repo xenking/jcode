@@ -1627,10 +1627,12 @@ pub(super) async fn update_member_status_with_report_tldr(
     // await watcher can finalize concurrently and disappear from the pending
     // registry. Its result already carries the worker report, so starting a
     // second owner turn races that wake and can strand the queued result.
-    let covered_by_await = if matches!(
-        status,
-        "ready" | "completed" | "failed" | "stopped" | "crashed"
-    ) {
+    //
+    // A failure is never left to an await to report: the await's own delivery
+    // can be lost (state write failure, restart, long deadline), and a dead
+    // worker is the one result a coordinator cannot afford to learn late. At
+    // worst the coordinator hears twice.
+    let covered_by_await = if matches!(status, "ready" | "completed" | "stopped" | "crashed") {
         let owner_and_swarm = {
             let members = swarm_members.read().await;
             members.get(session_id).and_then(|member| {
@@ -1794,7 +1796,7 @@ pub(super) async fn update_member_status_with_report_tldr(
                 // (owner, else coordinator) whenever a member dies while it
                 // was doing or holding work, so worker deaths cannot pass
                 // silently.
-                || (status == "crashed"
+                || (matches!(status, "crashed" | "failed")
                     && matches!(
                         old_status.as_str(),
                         "running" | "running_stale" | "queued"
@@ -1834,7 +1836,10 @@ pub(super) async fn update_member_status_with_report_tldr(
                 // context. Deliver reports through the reliable runtime bus,
                 // which wakes idle owners and queues reports for busy ones.
                 // Explicit stops are cancellation, not permission to restart.
-                if report_back_to_session_id.is_some() && status != "stopped" && !covered_by_await {
+                if (report_back_to_session_id.is_some() || status == "failed")
+                    && status != "stopped"
+                    && !covered_by_await
+                {
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
                         crate::bus::SwarmWorkerReported {
                             session_id: recipient_session_id.clone(),
