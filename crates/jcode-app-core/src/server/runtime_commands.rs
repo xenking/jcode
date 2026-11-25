@@ -468,8 +468,9 @@ fn skills_report(data: &Value) -> String {
         } else {
             ""
         };
+        let mode = if skill["mode"] == true { " [mode]" } else { "" };
         report.push_str(&format!(
-            "- **/{name}{active}**: {}\n  Path: `{}`\n",
+            "- **/{name}{mode}{active}**: {}\n  Path: `{}`\n",
             skill["description"].as_str().unwrap_or(""),
             skill["path"].as_str().unwrap_or("")
         ));

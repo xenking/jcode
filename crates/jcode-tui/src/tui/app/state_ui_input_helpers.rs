@@ -519,6 +519,10 @@ impl App {
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
 
+        if prefix.starts_with("/mode ") {
+            return self.mode_picker_suggestions(input);
+        }
+
         if prefix.starts_with("/cloud ") {
             let mut candidates = vec![
                 (

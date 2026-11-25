@@ -170,6 +170,9 @@ struct TestState {
     pinned_todos_payload: Option<String>,
     justrust_status: Option<crate::tui::justrust_status::StatusRow>,
     swarm_panel_full_page: bool,
+    palette_rows: Vec<(String, &'static str)>,
+    palette_info: std::collections::HashMap<String, crate::tui::CommandSuggestionInfo>,
+    palette_selected: usize,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -283,7 +286,13 @@ impl crate::tui::TuiState for TestState {
         self.status.clone()
     }
     fn command_suggestions(&self) -> Vec<(String, &'static str)> {
-        Vec::new()
+        self.palette_rows.clone()
+    }
+    fn command_suggestion_info(&self, command: &str) -> Option<crate::tui::CommandSuggestionInfo> {
+        self.palette_info.get(command).cloned()
+    }
+    fn command_suggestion_selected(&self) -> usize {
+        self.palette_selected
     }
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
@@ -545,6 +554,8 @@ mod basic;
 mod diagrams;
 #[path = "expanded_diff.rs"]
 mod expanded_diff;
+#[path = "command_palette.rs"]
+mod command_palette;
 #[path = "inline_picker.rs"]
 mod inline_picker;
 #[path = "onboarding.rs"]

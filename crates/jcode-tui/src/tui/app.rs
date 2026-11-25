@@ -123,6 +123,7 @@ pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
 use jcode_slash_command as slash_command_parser;
+mod skill_suggestions;
 mod spinner_ticker;
 mod split_view;
 mod state_ui;

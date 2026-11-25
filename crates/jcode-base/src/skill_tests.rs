@@ -838,3 +838,19 @@ fn unloadable_skills_are_reported_instead_of_silently_skipped() {
     assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 2);
     assert_eq!(registry.load_errors().len(), 1);
 }
+
+#[test]
+fn mode_classification_is_explicit_frontmatter_then_name() {
+    for (name, explicit, expected) in [
+        ("poteto-mode", None, true),
+        ("selfdev", None, true),
+        ("swarm", None, true),
+        ("go-review", None, false),
+        ("go-review", Some(true), true),
+        ("poteto-mode", Some(false), false),
+    ] {
+        let mut skill = test_skill(name, "d", "c");
+        skill.mode = explicit;
+        assert_eq!(skill.is_mode(), expected, "{name} {explicit:?}");
+    }
+}

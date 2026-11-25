@@ -246,7 +246,7 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
     if !command_suggestions_active(app, &suggestions) {
         return;
     }
-    let mut lines = command_suggestion_lines(app, &suggestions);
+    let mut lines = command_suggestion_lines(app, &suggestions, area.width as usize);
     let Some(rect) = command_suggestions_overlay_rect(area, lines.len() as u16, frame.area())
     else {
         return;

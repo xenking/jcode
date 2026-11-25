@@ -919,6 +919,10 @@ impl crate::tui::TuiState for App {
         App::command_suggestions(self)
     }
 
+    fn command_suggestion_info(&self, command: &str) -> Option<crate::tui::CommandSuggestionInfo> {
+        self.skill_suggestion_info(command)
+    }
+
     fn advance_command_suggestions_epoch(&self) {
         App::advance_command_suggestions_epoch(self)
     }

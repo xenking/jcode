@@ -90,7 +90,7 @@ impl Agent {
                 serde_json::json!({
                     "name": skill.name, "description": skill.description,
                     "path": skill.path, "allowed_tools": skill.allowed_tools,
-                    "icon": skill.icon, "mode": skill.mode,
+                    "icon": skill.icon, "mode": skill.is_mode(),
                 })
             })
             .collect();

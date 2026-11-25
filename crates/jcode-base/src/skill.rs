@@ -1128,7 +1128,21 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
     ENDORSED_SKILLS
 }
 
+/// Whether a skill with this name and no explicit `mode:` frontmatter is a
+/// session mode. Every client (TUI picker, Desktop picker, runtime snapshot)
+/// classifies through this one rule, so a skill never shows as a mode in one
+/// place and as a plain skill in another.
+pub fn name_implies_mode(name: &str) -> bool {
+    matches!(name, "selfdev" | "swarm") || name.ends_with("-mode")
+}
+
 impl Skill {
+    /// Whether this skill acts as a session mode: an explicit `mode:`
+    /// frontmatter value wins, otherwise the name decides.
+    pub fn is_mode(&self) -> bool {
+        self.mode.unwrap_or_else(|| name_implies_mode(&self.name))
+    }
+
     /// Load additional files from the skill directory
     pub fn load_file(&self, filename: &str) -> Result<String> {
         let skill_dir = self

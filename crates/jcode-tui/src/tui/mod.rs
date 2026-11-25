@@ -897,6 +897,12 @@ pub trait TuiState {
     }
     fn status(&self) -> ProcessingStatus;
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
+    /// Live details for a suggestion row that stands for a skill: its real
+    /// description, whether it is a session mode, and whether it is pinned.
+    /// `None` for ordinary commands, which keep their registered help text.
+    fn command_suggestion_info(&self, _command: &str) -> Option<CommandSuggestionInfo> {
+        None
+    }
     /// Invalidate any per-frame memo backing [`Self::command_suggestions`].
     ///
     /// Called once at the top of each rendered frame. The suggestion list is
@@ -1456,6 +1462,16 @@ mod cache_diagnostics;
 #[cfg(test)]
 use cache_diagnostics::cache_expected_warm;
 pub(crate) use cache_diagnostics::detect_kv_cache_problem;
+
+/// What the command palette knows about a skill row beyond its static help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSuggestionInfo {
+    pub description: String,
+    /// The skill acts as a session mode (see `skill::name_implies_mode`).
+    pub mode: bool,
+    /// The skill is currently pinned to this session.
+    pub active: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
