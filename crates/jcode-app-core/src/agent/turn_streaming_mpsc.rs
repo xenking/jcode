@@ -44,7 +44,7 @@ impl Agent {
         };
         tokio::pin!(cancel_fut);
 
-        let raw_tx = event_tx.raw().clone();
+        let raw_tx = event_tx.unbatched();
         let mut rollback_emitted = false;
         let session_id = self.session.id.clone();
 
@@ -220,9 +220,9 @@ impl Agent {
             let memory_pending = self.build_memory_prompt_nonblocking_shared(
                 std::sync::Arc::clone(&messages),
                 Some(std::sync::Arc::new({
-                    let event_tx = event_tx.raw().clone();
+                    let event_tx = event_tx.unbatched();
                     move |event| {
-                        let _ = event_tx.send(event);
+                        event_tx.send(event);
                     }
                 })),
             );
@@ -382,7 +382,7 @@ impl Agent {
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
-                            send_stream_keepalive_mpsc(event_tx.raw());
+                            send_stream_keepalive_mpsc(&event_tx.unbatched());
                         }
                         _ = self.graceful_shutdown.notified() => {
                             logging::info(
@@ -545,7 +545,7 @@ impl Agent {
                 let next_event = std::pin::pin!(stream.next());
                 let event = tokio::select! {
                     _ = keepalive.tick() => {
-                        send_stream_keepalive_mpsc(event_tx.raw());
+                        send_stream_keepalive_mpsc(&event_tx.unbatched());
                         continue;
                     }
                     _ = async {
@@ -755,7 +755,7 @@ impl Agent {
                             // identical to a dead connection and the client stall
                             // guard would cancel a healthy stream (issue #451).
                             hidden_activity_last = Instant::now();
-                            send_stream_keepalive_mpsc(event_tx.raw());
+                            send_stream_keepalive_mpsc(&event_tx.unbatched());
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.

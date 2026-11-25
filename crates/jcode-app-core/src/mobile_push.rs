@@ -121,6 +121,31 @@ pub struct PushPayload {
     pub duration_secs: Option<u64>,
 }
 
+/// Compact todo progress for the bubble row: `done` completed, `active`
+/// in progress, out of `total` (cancelled items excluded).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TodoProgress {
+    pub done: u32,
+    pub active: u32,
+    pub total: u32,
+}
+
+impl TodoProgress {
+    pub fn from_items(items: &[jcode_task_types::TodoItem]) -> Option<Self> {
+        let mut p = Self::default();
+        for item in items {
+            match item.status.as_str() {
+                "cancelled" => continue,
+                "completed" => p.done += 1,
+                "in_progress" => p.active += 1,
+                _ => {}
+            }
+            p.total += 1;
+        }
+        (p.total > 0).then_some(p)
+    }
+}
+
 /// Context shown ahead of the session name so a notification says where it
 /// came from before anything else.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,7 +153,7 @@ pub struct PushLabels {
     pub origin: Option<String>,
     pub repo: Option<String>,
     pub elapsed: Option<Duration>,
-    pub todos: Option<crate::agents_status::TodoProgress>,
+    pub todos: Option<TodoProgress>,
 }
 
 impl PushLabels {
@@ -156,7 +181,7 @@ impl PushLabels {
             elapsed,
             todos: crate::todo::load_todos(session_id)
                 .ok()
-                .and_then(|items| crate::agents_status::TodoProgress::from_items(&items)),
+                .and_then(|items| TodoProgress::from_items(&items)),
         }
     }
 }
@@ -387,7 +412,7 @@ pub fn build_payload_with(
 }
 
 /// Keep large plans bounded while retaining their actual task count.
-fn todo_indicator(progress: crate::agents_status::TodoProgress) -> Option<String> {
+fn todo_indicator(progress: TodoProgress) -> Option<String> {
     let total = progress.total;
     if total == 0 {
         return None;

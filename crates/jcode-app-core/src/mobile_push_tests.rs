@@ -476,7 +476,7 @@ fn mobile_push_ios_sessions_and_cancel_markers() {
 
 #[test]
 fn mobile_push_todo_indicators_are_bounded_and_keep_counts() {
-    use crate::agents_status::TodoProgress;
+    use crate::mobile_push::TodoProgress;
     for (done, active, total, expected) in [
         (0, 0, 0, None),
         (2, 1, 5, Some("●●◐○○ 2/5")),
@@ -498,7 +498,7 @@ fn mobile_push_todo_indicators_are_bounded_and_keep_counts() {
 
 #[test]
 fn mobile_push_todos_exclude_cancelled_and_empty_plans() {
-    use crate::agents_status::TodoProgress;
+    use crate::mobile_push::TodoProgress;
     use jcode_task_types::TodoItem;
     let items: Vec<_> = ["completed", "in_progress", "pending", "cancelled"]
         .into_iter()
@@ -521,7 +521,7 @@ fn mobile_push_todos_exclude_cancelled_and_empty_plans() {
 fn mobile_push_progress_only_labels_requested_finished_turns() {
     let labels = PushLabels {
         elapsed: Some(Duration::from_secs(252)),
-        todos: Some(crate::agents_status::TodoProgress {
+        todos: Some(crate::mobile_push::TodoProgress {
             done: 1,
             active: 1,
             total: 3,
@@ -554,7 +554,7 @@ fn mobile_push_long_labels_preserve_progress_and_runtime() {
         origin: Some(" machine\n\t".repeat(100)),
         repo: Some(" repository\n\t".repeat(100)),
         elapsed: Some(Duration::from_secs(u64::MAX)),
-        todos: Some(crate::agents_status::TodoProgress {
+        todos: Some(crate::mobile_push::TodoProgress {
             done: u32::MAX,
             active: 0,
             total: u32::MAX,

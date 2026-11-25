@@ -168,6 +168,17 @@ struct Pending {
     flush_at: Instant,
 }
 
+/// Sends events that carry no ordering with held text, such as keepalives and
+/// progress notes. A disconnected receiver is the receiver's concern here.
+#[derive(Clone)]
+pub(crate) struct UnbatchedSender(mpsc::UnboundedSender<ServerEvent>);
+
+impl UnbatchedSender {
+    pub(crate) fn send(&self, event: ServerEvent) {
+        let _ = self.0.send(event);
+    }
+}
+
 /// A turn's event sender that holds back streamed text while the session is
 /// batched. Every other event flushes the held text first, so ordering between
 /// text and tool calls, completion and errors is unchanged.
@@ -203,9 +214,9 @@ impl BatchingSender {
         }
     }
 
-    /// The unbatched sender, for events that carry no ordering with the text.
-    pub(crate) fn raw(&self) -> &mpsc::UnboundedSender<ServerEvent> {
-        &self.tx
+    /// A handle for events that carry no ordering with the held text.
+    pub(crate) fn unbatched(&self) -> UnbatchedSender {
+        UnbatchedSender(self.tx.clone())
     }
 
     /// When held text must be flushed, if any is held.

@@ -7,6 +7,7 @@
 //! are included. Uses the same opt-out and credentials as mobile pushes, and
 //! never blocks a turn.
 
+use crate::mobile_push::{NO_DEVICES_SUPPRESS, TodoProgress};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -53,31 +54,6 @@ pub struct SessionStatus {
     pub plan: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todos: Option<TodoProgress>,
-}
-
-/// Compact todo progress for the bubble row: `done` completed, `active`
-/// in progress, out of `total` (cancelled items excluded).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct TodoProgress {
-    pub done: u32,
-    pub active: u32,
-    pub total: u32,
-}
-
-impl TodoProgress {
-    pub fn from_items(items: &[jcode_task_types::TodoItem]) -> Option<Self> {
-        let mut p = Self::default();
-        for item in items {
-            match item.status.as_str() {
-                "cancelled" => continue,
-                "completed" => p.done += 1,
-                "in_progress" => p.active += 1,
-                _ => {}
-            }
-            p.total += 1;
-        }
-        (p.total > 0).then_some(p)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -344,9 +320,18 @@ impl Tracker {
         }
     }
 
-    /// Back off without counting an error (e.g. no registered devices).
-    pub fn suppress_until(&mut self, until: Instant) {
-        self.backoff_until = Some(until);
+    /// Fold the result of delivering `snapshot` into the schedule. A host with
+    /// no registered devices delivered fine but backs off without counting an
+    /// error.
+    fn record_outcome(&mut self, snapshot: &Snapshot, outcome: PostOutcome, now: Instant) {
+        match outcome {
+            PostOutcome::Ok => self.record_result(snapshot, true, now),
+            PostOutcome::NoDevices => {
+                self.record_result(snapshot, true, now);
+                self.backoff_until = Some(now + NO_DEVICES_SUPPRESS);
+            }
+            PostOutcome::Failed => self.record_result(snapshot, false, now),
+        }
     }
 }
 
@@ -495,15 +480,7 @@ async fn worker() {
         let outcome = post(&snapshot).await;
         let mut guard = TRACKER.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(t) = guard.as_mut() {
-            let now = Instant::now();
-            match outcome {
-                PostOutcome::Ok => t.record_result(&snapshot, true, now),
-                PostOutcome::NoDevices => {
-                    t.record_result(&snapshot, true, now);
-                    t.suppress_until(now + crate::mobile_push::NO_DEVICES_SUPPRESS);
-                }
-                PostOutcome::Failed => t.record_result(&snapshot, false, now),
-            }
+            t.record_outcome(&snapshot, outcome, Instant::now());
         }
     }
 }

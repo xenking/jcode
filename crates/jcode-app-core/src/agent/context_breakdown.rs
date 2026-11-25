@@ -89,7 +89,7 @@ impl Agent {
         counts.tools(&tools, &projection.messages, |name| {
             crate::tool::sdk::custom(self.session_id(), name)
         });
-        counts.action_forecast = action_forecast;
+        counts.forecast(action_forecast);
         ContextBreakdownSnapshot {
             breakdown: counts.finish(Some(self.session.id.clone()), Some(model), meter),
             compact,
@@ -343,7 +343,7 @@ pub(crate) async fn inspect_draft(
     counts.prompt(&prompt, Some(skills_chars));
     counts.tools(&tools, &[], |_| false);
     // The draft has a local baseline, not a discovered per-session tool surface.
-    counts.dynamic_tokens = None;
+    counts.forget_dynamic_tools();
     let mut meter = ContextMeter {
         state: State::Draft,
         ..Default::default()
@@ -516,6 +516,14 @@ struct Counts {
 }
 
 impl Counts {
+    fn forecast(&mut self, action_forecast: Option<ContextActionForecast>) {
+        self.action_forecast = action_forecast;
+    }
+
+    fn forget_dynamic_tools(&mut self) {
+        self.dynamic_tokens = None;
+    }
+
     fn prompt(&mut self, prompt: &SplitSystemPrompt, skills_chars: Option<usize>) {
         self.prompt_present = true;
         let chars = prompt.chars();
