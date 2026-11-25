@@ -159,13 +159,10 @@ fn test_adaptive_scheduler_pause() {
         ..Default::default()
     };
 
-    let mut scheduler = AdaptiveScheduler::new(config);
+    let scheduler = AdaptiveScheduler::new(config);
 
-    assert!(!scheduler.should_pause());
-    scheduler.set_user_active(true);
-    assert!(scheduler.should_pause());
-    scheduler.set_user_active(false);
-    assert!(!scheduler.should_pause());
+    assert!(!scheduler.should_pause(false));
+    assert!(scheduler.should_pause(true));
 }
 
 /// Test ambient tools: end_ambient_cycle via mock agent
