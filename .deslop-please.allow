@@ -229,14 +229,7 @@ field-leak jcode_companion::server::CompanionOptions::voice_notifications
 field-leak jcode_companion::server::CompanionOptions::voice_waveform
 field-leak jcode_computer::native::target::Identity::label
 field-leak jcode_computer::native::target::Identity::role
-field-leak jcode_config_types::agents::AgentsConfig::memory_model
-field-leak jcode_config_types::agents::AgentsConfig::model_prompts
-field-leak jcode_config_types::agents::AgentsConfig::spawn_allowed_models
-field-leak jcode_config_types::agents::AgentsConfig::swarm_effort_caps
-field-leak jcode_config_types::agents::AgentsConfig::swarm_model
-field-leak jcode_config_types::agents::AgentsConfig::swarm_model_allowlist
 field-leak jcode_config_types::agents::AgentsConfig::swarm_model_fallbacks
-field-leak jcode_config_types::agents::AgentsConfig::swarm_speed_caps
 field-leak jcode_config_types::compaction::CompactionConfig::mode
 field-leak jcode_config_types::display::DisplayConfig::colors
 field-leak jcode_config_types::display::DisplayConfig::disabled_animations
