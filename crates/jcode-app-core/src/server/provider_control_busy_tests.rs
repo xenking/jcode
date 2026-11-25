@@ -881,7 +881,7 @@ async fn set_service_tier_configures_busy_session_immediately_with_one_confirmat
         );
     }
     drop(locked);
-    super::super::state::remove_background_tool_signal("session_busy_ultrafast_control");
+    super::super::session_control::remove_background_tool_signal("session_busy_ultrafast_control");
 }
 
 #[tokio::test]
@@ -913,7 +913,7 @@ async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecy
         &replacement
     ));
     assert_eq!(original.service_tier(), None);
-    super::super::state::rename_background_tool_signal(
+    super::super::session_control::rename_background_tool_signal(
         "tier_registry_original",
         "tier_registry_other",
     );
@@ -924,7 +924,7 @@ async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecy
         other.provider_handle().is_none(),
         "registry must not retain providers"
     );
-    super::super::state::remove_background_tool_signal("tier_registry_other");
+    super::super::session_control::remove_background_tool_signal("tier_registry_other");
 }
 
 #[tokio::test]

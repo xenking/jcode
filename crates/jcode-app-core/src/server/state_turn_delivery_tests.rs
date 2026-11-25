@@ -1,5 +1,6 @@
 #![allow(clippy::await_holding_lock)]
 use super::*;
+use crate::provider::Provider;
 
 // The pre-recovery helper, not the compatibility wrapper around the new
 // Result-returning helper. Keeping this separate exposes large-Result return

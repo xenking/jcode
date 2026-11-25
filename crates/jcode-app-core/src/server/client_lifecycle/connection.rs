@@ -67,7 +67,8 @@ pub(super) struct ClientConnection {
     pub(super) last_pushed_todos: Option<(String, String)>,
     pub(super) provisional_session: bool,
     pub(super) sdk_connection_guard: crate::tool::sdk::ConnectionGuard,
-    pub(super) focus_guard: crate::stream_batching::ConnectionFocusGuard,
+    /// Held for its `Drop`: it clears the connection's focus entry.
+    pub(super) _focus_guard: crate::stream_batching::ConnectionFocusGuard,
 }
 
 impl ClientConnection {
@@ -428,7 +429,7 @@ impl ClientConnection {
             last_pushed_todos,
             provisional_session,
             sdk_connection_guard,
-            focus_guard,
+            _focus_guard: focus_guard,
         })
     }
 

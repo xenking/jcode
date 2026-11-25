@@ -7,9 +7,81 @@ use anyhow::Context;
 use jcode_agent_runtime::{
     InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
 };
-use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 
 use super::state::*;
+
+/// Process-global registry mapping session id -> background-tool signal.
+///
+/// The background-tool ("move tool to background", Alt+B/Ctrl+B) signal lives on
+/// the `Agent`, so a `SessionControlHandle` can normally only obtain it by
+/// locking the agent mutex. When a turn is busy (e.g. running `await_members`),
+/// `refresh_session_control_handle` falls back to a lock-free `cancel_only`
+/// handle that historically dropped the background signal entirely, which made
+/// Alt+B/Ctrl+B silently no-op (`BACKGROUND_TOOL_SIGNAL_FIRE result=no_signal_handle`).
+///
+/// This registry is populated every time a full `SessionControlHandle` is built
+/// (which always has both the session id and the correct signal), so the
+/// lock-free fallback can still fire the background signal without the agent
+/// lock. Entries are keyed by session id; renames/removals reuse
+/// [`rename_background_tool_signal`]/[`remove_background_tool_signal`] alongside
+/// the existing shutdown-signal lifecycle.
+static BACKGROUND_TOOL_SIGNALS: LazyLock<StdMutex<HashMap<String, InterruptSignal>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+// The Agent keeps its provider Arc stable across model/account/route changes.
+// Key by session rather than connection so a busy reattachment cannot accidentally
+// configure the connection's provisional provider. Only weak references: a
+// registered control must not keep an idle session alive.
+pub(super) static SESSION_PROVIDERS: LazyLock<StdMutex<HashMap<String, Weak<dyn Provider>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Register (or replace) the background-tool signal for a session.
+pub(super) fn register_background_tool_signal(session_id: &str, signal: InterruptSignal) {
+    if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
+        map.insert(session_id.to_string(), signal);
+    }
+}
+
+/// Look up the registered background-tool signal for a session, if any.
+pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<InterruptSignal> {
+    BACKGROUND_TOOL_SIGNALS
+        .lock()
+        .unwrap_or_else(|poison| {
+            crate::logging::warn("Recovering poisoned background-tool signal registry");
+            poison.into_inner()
+        })
+        .get(session_id)
+        .cloned()
+}
+
+/// Move a session's out-of-band control registrations to a new session id.
+pub(super) fn rename_background_tool_signal(old_session_id: &str, new_session_id: &str) {
+    if old_session_id == new_session_id {
+        return;
+    }
+    if let Ok(mut map) = SESSION_PROVIDERS.lock()
+        && let Some(provider) = map.remove(old_session_id)
+    {
+        map.insert(new_session_id.to_string(), provider);
+    }
+    if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock()
+        && let Some(signal) = map.remove(old_session_id)
+    {
+        map.insert(new_session_id.to_string(), signal);
+    }
+}
+
+/// Drop a session's out-of-band control registrations.
+pub(super) fn remove_background_tool_signal(session_id: &str) {
+    if let Ok(mut map) = SESSION_PROVIDERS.lock() {
+        map.remove(session_id);
+    }
+    if let Ok(mut map) = BACKGROUND_TOOL_SIGNALS.lock() {
+        map.remove(session_id);
+    }
+}
 
 fn enqueue_soft_interrupt(
     queue: &SoftInterruptQueue,

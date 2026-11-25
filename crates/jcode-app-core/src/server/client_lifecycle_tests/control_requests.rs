@@ -216,7 +216,7 @@ async fn background_request_is_refused_while_a_prompt_waits_for_a_person() {
     );
     assert!(background_signal.is_set());
 
-    crate::server::state::remove_background_tool_signal(session_id);
+    crate::server::session_control::remove_background_tool_signal(session_id);
 }
 
 #[tokio::test]
@@ -266,7 +266,7 @@ async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
     assert!(background_signal.is_set());
 
     // Cleanup so the global registry does not leak across tests.
-    crate::server::state::remove_background_tool_signal(session_id);
+    crate::server::session_control::remove_background_tool_signal(session_id);
 }
 
 #[tokio::test]
