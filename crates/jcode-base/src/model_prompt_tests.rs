@@ -17,19 +17,6 @@ fn agents(rules: Vec<ModelPromptConfig>) -> AgentsConfig {
 }
 
 #[test]
-fn glob_matches_families_and_exact_ids() {
-    assert!(glob_match("claude-*", "claude-opus-5-5"));
-    assert!(glob_match("CLAUDE-*", "claude-sonnet-5-5"));
-    assert!(glob_match("gpt-6*-sol", "gpt-6.2-sol"));
-    assert!(glob_match("gpt-6.?-sol", "gpt-6.2-sol"));
-    assert!(!glob_match("gpt-6*-sol", "gpt-6.1-terra"));
-    assert!(glob_match("*deepseek*", "deepseek-v4.1-flash"));
-    assert!(glob_match("gpt-6-luna", "gpt-6-luna"));
-    assert!(!glob_match("gpt-6-luna", "gpt-6-luna-mini"));
-    assert!(glob_match("*", ""));
-}
-
-#[test]
 fn rules_stack_in_order_and_last_replace_wins() {
     let rules = vec![
         rule(&["claude-*"], ModelPromptMode::Append, "family"),

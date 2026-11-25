@@ -177,9 +177,6 @@ impl Agent {
     ) -> jcode_provider_core::SpeedMode {
         use jcode_provider_core::{AuthMode, AuthRoute, ResolvedCredential, SpeedMode};
         let agents = &crate::config::config().agents;
-        if !agents.has_worker_speed_caps() {
-            return SpeedMode::Ultrafast;
-        }
         let model = provider.model();
         let provider_name = provider.name().to_ascii_lowercase();
         let credential_route = std::cell::OnceCell::new();

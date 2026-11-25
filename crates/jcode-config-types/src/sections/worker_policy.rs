@@ -16,6 +16,15 @@ pub struct WorkerModelChoices {
     pub hard_boundary: bool,
 }
 
+impl WorkerModelChoices {
+    fn new(models: &[String], hard_boundary: bool) -> Self {
+        Self {
+            models: models.to_vec(),
+            hard_boundary,
+        }
+    }
+}
+
 impl AgentsConfig {
     /// The saved default model for a worker slot, if one is set.
     pub fn worker_model(&self, slot: WorkerModelSlot) -> Option<&str> {
@@ -28,17 +37,10 @@ impl AgentsConfig {
     /// Models a spawn tool may advertise, or `None` when agents may not choose.
     pub fn worker_model_choices(&self) -> Option<WorkerModelChoices> {
         if !self.spawn_allowed_models.is_empty() {
-            return Some(WorkerModelChoices {
-                models: self.spawn_allowed_models.clone(),
-                hard_boundary: true,
-            });
+            return Some(WorkerModelChoices::new(&self.spawn_allowed_models, true));
         }
-        (self.swarm_model_selection && !self.swarm_model_allowlist.is_empty()).then(|| {
-            WorkerModelChoices {
-                models: self.swarm_model_allowlist.clone(),
-                hard_boundary: false,
-            }
-        })
+        (self.swarm_model_selection && !self.swarm_model_allowlist.is_empty())
+            .then(|| WorkerModelChoices::new(&self.swarm_model_allowlist, false))
     }
 
     /// Effort caps that apply to a worker on `model` through `provider_key`
@@ -49,46 +51,20 @@ impl AgentsConfig {
         provider_name: &str,
         model: &str,
     ) -> Vec<&String> {
-        let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
-        [model, unpinned]
-            .into_iter()
-            .flat_map(|model| {
-                let route = provider_key.map(|key| format!("{key}:{model}"));
-                let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
-                [
-                    self.swarm_effort_caps.get(model),
-                    route
-                        .as_ref()
-                        .and_then(|key| self.swarm_effort_caps.get(key)),
-                    self.swarm_effort_caps.get(&provider_route),
-                ]
-                .into_iter()
-                .flatten()
-            })
+        effort_cap_keys(provider_key, provider_name, model)
+            .iter()
+            .filter_map(|key| self.swarm_effort_caps.get(key))
             .collect()
     }
 
     /// Speed caps that name `model`: the provider prefix of each entry, or
     /// `None` for a bare model entry. The caller decides which prefixes cover
-    /// its provider.
+    /// its provider. Empty when no cap names the model.
     pub fn worker_speed_caps(&self, model: &str) -> Vec<(Option<&str>, SpeedMode)> {
-        let suffix = format!(":{model}");
         self.swarm_speed_caps
             .iter()
-            .filter_map(|(key, mode)| {
-                if key == model {
-                    Some((None, *mode))
-                } else {
-                    key.strip_suffix(&suffix)
-                        .map(|prefix| (Some(prefix), *mode))
-                }
-            })
+            .filter_map(|(key, mode)| Some((speed_cap_prefix(key, model)?, *mode)))
             .collect()
-    }
-
-    /// Whether any worker speed cap is configured.
-    pub fn has_worker_speed_caps(&self) -> bool {
-        !self.swarm_speed_caps.is_empty()
     }
 
     /// `[[agents.model_prompts]]` rules that match `provider` / `model`, with
@@ -106,20 +82,50 @@ impl AgentsConfig {
     }
 }
 
+/// Every config key a cap for this worker may be stored under: the bare
+/// model, `provider_key:model` and `provider_name:model`, each for the pinned
+/// and unpinned spelling of the model.
+fn effort_cap_keys(provider_key: Option<&str>, provider_name: &str, model: &str) -> Vec<String> {
+    let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
+    [model, unpinned]
+        .into_iter()
+        .flat_map(|model| {
+            [
+                Some(model.to_string()),
+                provider_key.map(|key| format!("{key}:{model}")),
+                Some(format!("{}:{model}", provider_name.to_ascii_lowercase())),
+            ]
+        })
+        .flatten()
+        .collect()
+}
+
+/// `Some(None)` for a bare model key, `Some(Some(prefix))` for `prefix:model`,
+/// `None` when the key names another model.
+fn speed_cap_prefix<'a>(key: &'a str, model: &str) -> Option<Option<&'a str>> {
+    if key == model {
+        return Some(None);
+    }
+    key.strip_suffix(&format!(":{model}")).map(Some)
+}
+
+fn prompt_pattern_matches(pattern: &str, provider: &str, model: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.contains(':') {
+        glob_match(pattern, &format!("{}:{model}", provider.trim()))
+    } else {
+        glob_match(pattern, model)
+    }
+}
+
 fn prompt_rule_matches(rule: &ModelPromptConfig, provider: &str, model: &str) -> bool {
-    let routed = format!("{}:{model}", provider.trim());
-    rule.patterns.iter().any(|pattern| {
-        let pattern = pattern.trim();
-        if pattern.contains(':') {
-            glob_match(pattern, &routed)
-        } else {
-            glob_match(pattern, model)
-        }
-    })
+    rule.patterns
+        .iter()
+        .any(|pattern| prompt_pattern_matches(pattern, provider, model))
 }
 
 /// Case-insensitive glob with `*` (any run) and `?` (one character).
-pub fn glob_match(pattern: &str, text: &str) -> bool {
+fn glob_match(pattern: &str, text: &str) -> bool {
     let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = text.to_lowercase().chars().collect();
     let (mut p, mut t) = (0usize, 0usize);
@@ -140,4 +146,22 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
         }
     }
     pattern[p..].iter().all(|c| *c == '*')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn glob_matches_families_and_exact_ids() {
+        assert!(glob_match("claude-*", "claude-opus-5-5"));
+        assert!(glob_match("CLAUDE-*", "claude-sonnet-5-5"));
+        assert!(glob_match("gpt-6*-sol", "gpt-6.2-sol"));
+        assert!(glob_match("gpt-6.?-sol", "gpt-6.2-sol"));
+        assert!(!glob_match("gpt-6*-sol", "gpt-6.1-terra"));
+        assert!(glob_match("*deepseek*", "deepseek-v4.1-flash"));
+        assert!(glob_match("gpt-6-luna", "gpt-6-luna"));
+        assert!(!glob_match("gpt-6-luna", "gpt-6-luna-mini"));
+        assert!(glob_match("*", ""));
+    }
 }

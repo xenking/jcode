@@ -26,8 +26,6 @@ impl ModelPrompt {
     }
 }
 
-pub use jcode_config_types::glob_match;
-
 fn rule_text(rule: &ModelPromptConfig) -> Option<String> {
     let text = match rule.instructions_file.as_deref() {
         Some(path) => {

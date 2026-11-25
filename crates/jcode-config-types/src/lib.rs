@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 mod agents;
 #[path = "sections/worker_policy.rs"]
 mod worker_policy;
-pub use worker_policy::{WorkerModelChoices, glob_match};
+pub use worker_policy::WorkerModelChoices;
 #[path = "sections/ambient.rs"]
 mod ambient;
 #[path = "sections/compaction.rs"]
