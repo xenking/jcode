@@ -792,12 +792,6 @@ fn remove_api_key_account_local(app: &mut App, provider_id: &str, label: &str) {
     }
 }
 
-pub(crate) fn resolve_account_provider_descriptor(
-    input: &str,
-) -> Option<crate::provider_catalog::LoginProviderDescriptor> {
-    crate::provider_catalog::resolve_login_provider(input)
-}
-
 fn normalize_clearish_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || matches!(trimmed, "clear" | "unset" | "none" | "auto") {
@@ -1104,6 +1098,52 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
 mod diagnostics;
 use diagnostics::render_auth_doctor_markdown;
 use diagnostics::render_provider_settings_markdown;
+impl App {
+    pub(crate) fn handle_account_picker_command(
+        &mut self,
+        command: crate::tui::account_picker::AccountPickerCommand,
+    ) {
+        match command {
+            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
+                provider_filter,
+            } => self.open_account_center(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
+                provider_filter,
+            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
+                self.input = input;
+                self.cursor_pos = self.input.len();
+                self.submit_input();
+            }
+            crate::tui::account_picker::AccountPickerCommand::PromptValue {
+                prompt,
+                command_prefix,
+                empty_value,
+                status_notice,
+            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
+            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
+                match provider {
+                    crate::tui::account_picker::AccountProviderKind::Anthropic => {
+                        self.input = "/account claude add".to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                    }
+                    crate::tui::account_picker::AccountProviderKind::OpenAi => {
+                        self.input = "/account openai add".to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                    }
+                }
+            }
+            other => {
+                if let Some(command) = account_command_from_picker(&other) {
+                    execute_account_command_local(self, command);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,10 +14,15 @@ pub(super) use auth_muse as auth_muse_helpers;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
-    account_command_from_picker, execute_account_command_local, execute_account_command_remote,
-    handle_account_command_remote, handle_auth_command, handle_ssh_usage_command_remote,
-    resolve_account_provider_descriptor, save_openai_fast_setting_local,
+    account_command_from_picker, execute_account_command_remote, handle_account_command_remote,
+    handle_auth_command, handle_ssh_usage_command_remote, save_openai_fast_setting_local,
 };
+
+pub(crate) fn resolve_account_provider_descriptor(
+    input: &str,
+) -> Option<crate::provider_catalog::LoginProviderDescriptor> {
+    crate::provider_catalog::resolve_login_provider(input)
+}
 pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
 
 use super::*;

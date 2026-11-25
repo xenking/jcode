@@ -1059,50 +1059,6 @@ impl App {
         (models, selected)
     }
 
-    pub(crate) fn handle_account_picker_command(
-        &mut self,
-        command: crate::tui::account_picker::AccountPickerCommand,
-    ) {
-        match command {
-            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
-                provider_filter,
-            } => self.open_account_center(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
-                provider_filter,
-            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
-                self.input = input;
-                self.cursor_pos = self.input.len();
-                self.submit_input();
-            }
-            crate::tui::account_picker::AccountPickerCommand::PromptValue {
-                prompt,
-                command_prefix,
-                empty_value,
-                status_notice,
-            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
-            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
-                match provider {
-                    crate::tui::account_picker::AccountProviderKind::Anthropic => {
-                        self.input = "/account claude add".to_string();
-                        self.cursor_pos = self.input.len();
-                        self.submit_input();
-                    }
-                    crate::tui::account_picker::AccountProviderKind::OpenAi => {
-                        self.input = "/account openai add".to_string();
-                        self.cursor_pos = self.input.len();
-                        self.submit_input();
-                    }
-                }
-            }
-            other => {
-                if let Some(command) = crate::tui::app::auth::account_command_from_picker(&other) {
-                    crate::tui::app::auth::execute_account_command_local(self, command);
-                }
-            }
-        }
-    }
-
     pub(crate) fn prompt_new_account_label(
         &mut self,
         provider: crate::tui::account_picker::AccountProviderKind,
