@@ -278,6 +278,16 @@ async fn classify_missing_route(origin: &str) -> PairedFailure {
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Select one rustls provider before building a wss connector. When both `ring` and
+/// `aws-lc-rs` are enabled in the dependency graph (the Desktop build), rustls panics
+/// instead of choosing, which killed the connect thread and surfaced as
+/// "Paired Harness connection failed".
+fn ensure_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
     connect_within(base, token, CONNECT_DEADLINE)
 }
@@ -289,6 +299,7 @@ fn connect_within(base: &str, token: &str, deadline: Duration) -> Result<Box<dyn
             "Invalid pairing token",
         ));
     }
+    ensure_crypto_provider();
     let mut url = endpoint(base, "/harness/v1")?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
@@ -373,6 +384,12 @@ fn connect_within(base: &str, token: &str, deadline: Duration) -> Result<Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connect_installs_a_process_crypto_provider() {
+        ensure_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
     #[test]
     fn urls_require_tls_or_literal_loopback_and_no_extra_components() {
         assert!(endpoint("https://work.example", "/pair").is_ok());

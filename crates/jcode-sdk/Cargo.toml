@@ -24,6 +24,9 @@ futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"] }
+# tokio-tungstenite builds its wss connector from the process-level rustls provider.
+# The Desktop graph enables both ring and aws-lc-rs, so rustls cannot pick one itself.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Jcode Cloud control plane (feature `cloud`).
 ureq = { version = "3", features = ["json"], optional = true }
 jcode-logging = { path = "../jcode-logging", optional = true }

@@ -4671,6 +4671,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest 0.12.28",
  "russh",
+ "rustls",
  "serde",
  "serde_json",
  "socket2",
