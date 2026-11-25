@@ -11,7 +11,7 @@ impl JcodeClient {
         Self::connect_with(transport, options)
     }
 }
-use crate::errors::{Error, ErrorKind, Result};
+use crate::errors::{Error, ErrorKind, PairedFailure, Result};
 use futures::{SinkExt, StreamExt};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
@@ -159,7 +159,127 @@ fn local_pair() -> std::io::Result<(LocalStream, LocalStream)> {
     Ok((client, peer))
 }
 
+type Socket = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+fn paired_error(failure: PairedFailure) -> Error {
+    let message = match failure {
+        PairedFailure::Unresolved => "The gateway's name did not resolve",
+        PairedFailure::Refused => "The gateway refused the connection",
+        PairedFailure::TimedOut => "The gateway did not answer in time",
+        PairedFailure::Unreachable => "The network path to the gateway is unavailable",
+        PairedFailure::Tls => "The secure connection to the gateway failed",
+        PairedFailure::Revoked => "The gateway no longer accepts this device's token",
+        PairedFailure::WrongOrigin => "This address does not serve a Harness gateway",
+        PairedFailure::UpgradeRejected => "The gateway rejected the Harness connection",
+        PairedFailure::TooOld => "The gateway is too old to serve Harness",
+        PairedFailure::NoToken => "This device has no saved token for the gateway",
+    };
+    Error::new(ErrorKind::Paired(failure), message)
+}
+
+/// Connect the websocket, naming the first stage that fails. The name lookup
+/// is its own stage so an unresolvable host fails at once instead of waiting
+/// out the connection deadline.
+async fn dial(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    origin: &str,
+    deadline: Duration,
+) -> Result<Socket> {
+    let uri = request.uri();
+    let host = uri.host().unwrap_or_default().trim_matches(['[', ']']).to_owned();
+    let secure = uri.scheme_str() == Some("wss");
+    let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
+    let started = tokio::time::Instant::now();
+    match tokio::time::timeout(deadline, tokio::net::lookup_host((host.as_str(), port))).await {
+        Err(_) => return Err(paired_error(PairedFailure::TimedOut)),
+        Ok(Err(_)) => return Err(paired_error(PairedFailure::Unresolved)),
+        Ok(Ok(mut addresses)) => {
+            if addresses.next().is_none() {
+                return Err(paired_error(PairedFailure::Unresolved));
+            }
+        }
+    }
+    let remaining = deadline.saturating_sub(started.elapsed());
+    match tokio::time::timeout(remaining, tokio_tungstenite::connect_async(request)).await {
+        Err(_) => Err(paired_error(PairedFailure::TimedOut)),
+        Ok(Ok((ws, _))) => Ok(ws),
+        Ok(Err(error)) => Err(paired_error(classify_handshake(error, origin, secure).await)),
+    }
+}
+
+async fn classify_handshake(
+    error: tokio_tungstenite::tungstenite::Error,
+    origin: &str,
+    secure: bool,
+) -> PairedFailure {
+    use std::io::ErrorKind as Io;
+    use tokio_tungstenite::tungstenite::Error as Ws;
+    match error {
+        Ws::Http(response) => match response.status().as_u16() {
+            401 | 403 => PairedFailure::Revoked,
+            404 => classify_missing_route(origin).await,
+            _ => PairedFailure::UpgradeRejected,
+        },
+        Ws::Tls(_) => PairedFailure::Tls,
+        Ws::Io(error) => match error.kind() {
+            Io::ConnectionRefused => PairedFailure::Refused,
+            Io::TimedOut => PairedFailure::TimedOut,
+            Io::InvalidData | Io::UnexpectedEof if secure => PairedFailure::Tls,
+            _ if secure && looks_like_tls_failure(&error) => PairedFailure::Tls,
+            _ => PairedFailure::Unreachable,
+        },
+        _ => PairedFailure::UpgradeRejected,
+    }
+}
+
+fn looks_like_tls_failure(error: &std::io::Error) -> bool {
+    let text = format!("{error:?}").to_ascii_lowercase();
+    ["certificate", "handshake", "tls", "rustls", "peer"]
+        .iter()
+        .any(|word| text.contains(word))
+}
+
+/// The upgrade route answered 404. A gateway that serves `/health` without
+/// `harness_v1` is merely old. Anything else is the wrong address.
+async fn classify_missing_route(origin: &str) -> PairedFailure {
+    #[derive(serde::Deserialize)]
+    struct Health {
+        #[serde(default)]
+        harness_v1: bool,
+    }
+    let Ok(url) = endpoint(origin, "/health") else {
+        return PairedFailure::WrongOrigin;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return PairedFailure::WrongOrigin;
+    };
+    let Ok(response) = client.get(url).send().await else {
+        return PairedFailure::WrongOrigin;
+    };
+    if !response.status().is_success() {
+        return PairedFailure::WrongOrigin;
+    }
+    match response.json::<Health>().await {
+        Ok(health) if !health.harness_v1 => PairedFailure::TooOld,
+        Ok(_) => PairedFailure::UpgradeRejected,
+        Err(_) => PairedFailure::WrongOrigin,
+    }
+}
+
+const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
+
 pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
+    connect_within(base, token, CONNECT_DEADLINE)
+}
+
+fn connect_within(base: &str, token: &str, deadline: Duration) -> Result<Box<dyn Transport>> {
     if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Error::new(
             ErrorKind::InvalidOption,
@@ -184,24 +304,42 @@ pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
         .map_err(|_| Error::new(ErrorKind::Transport, "Could not create local transport"))?;
     peer.set_nonblocking(true)
         .map_err(|_| Error::new(ErrorKind::Transport, "Could not configure local transport"))?;
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<()>>(1);
+    let origin = base.to_owned();
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
             Ok(rt) => rt,
-            Err(_) => return,
+            Err(_) => {
+                let _ = ready_tx.send(Err(Error::new(
+                    ErrorKind::Transport,
+                    "Could not start the connection runtime",
+                )));
+                return;
+            }
         };
         runtime.block_on(async move {
-            let connected = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(request)).await;
-            let ws = match connected { Ok(Ok((ws, _))) => ws, _ => { let _ = ready_tx.send(false); return; } };
+            let ws = match dial(request, &origin, deadline).await {
+                Ok(ws) => ws,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
             #[cfg(unix)]
             let stream = tokio::net::UnixStream::from_std(peer);
             #[cfg(not(unix))]
             let stream = tokio::net::TcpStream::from_std(peer);
-            let Ok(stream) = stream else { let _ = ready_tx.send(false); return; };
-            if ready_tx.send(true).is_err() { return; }
+            let Ok(stream) = stream else {
+                let _ = ready_tx.send(Err(Error::new(
+                    ErrorKind::Transport,
+                    "Could not configure local transport",
+                )));
+                return;
+            };
+            if ready_tx.send(Ok(())).is_err() { return; }
             let (read, mut write) = tokio::io::split(stream);
             let mut lines = tokio::io::BufReader::new(read).lines();
             let (mut sink, mut source) = ws.split();
@@ -221,11 +359,10 @@ pub(crate) fn connect(base: &str, token: &str) -> Result<Box<dyn Transport>> {
             }
         });
     });
-    if ready_rx.recv_timeout(Duration::from_secs(16)) != Ok(true) {
-        return Err(Error::new(
-            ErrorKind::ConnectFailed,
-            "Paired Harness connection failed",
-        ));
+    match ready_rx.recv_timeout(deadline + Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(paired_error(PairedFailure::TimedOut)),
     }
     Ok(Box::new(PairedTransport(client)))
 }
@@ -329,5 +466,122 @@ mod tests {
         assert!(client.ping().is_err());
         drop(client);
         server.join().unwrap();
+    }
+
+    /// Answer each connection with `reply(request_line_and_headers)`, then close.
+    fn serve(reply: impl Fn(&str) -> String + Send + 'static, connections: usize) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                let _ = stream.write_all(reply(&request).as_bytes());
+            }
+        });
+        address
+    }
+
+    fn http(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn failed_kind(base: &str, deadline: Duration) -> (ErrorKind, Duration) {
+        let started = std::time::Instant::now();
+        let error = match connect_within(base, &"a".repeat(64), deadline) {
+            Ok(_) => panic!("connect unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        (error.kind, started.elapsed())
+    }
+
+    #[test]
+    fn unresolvable_name_fails_at_once_as_unresolved() {
+        let (kind, elapsed) = failed_kind("https://gateway.invalid", Duration::from_secs(10));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::Unresolved));
+        assert!(elapsed < Duration::from_secs(8), "waited {elapsed:?}");
+    }
+
+    #[test]
+    fn closed_port_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let (kind, elapsed) = failed_kind(&format!("http://{address}"), Duration::from_secs(10));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::Refused));
+        assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
+    }
+
+    #[test]
+    fn silent_gateway_times_out_at_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (kind, elapsed) = failed_kind(&format!("http://{address}"), Duration::from_millis(400));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::TimedOut));
+        assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
+        drop(listener);
+    }
+
+    #[test]
+    fn revoked_or_unknown_token_is_revoked() {
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            let address = serve(move |_| http(status, "{\"error\":\"Unknown or revoked auth token; re-pair this device\"}"), 1);
+            let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+            assert_eq!(kind, ErrorKind::Paired(PairedFailure::Revoked), "{status}");
+        }
+    }
+
+    #[test]
+    fn missing_route_on_a_gateway_without_harness_is_too_old() {
+        let address = serve(
+            |request| {
+                if request.starts_with("GET /health") {
+                    http("200 OK", "{\"status\":\"ok\"}")
+                } else {
+                    http("404 Not Found", "{}")
+                }
+            },
+            2,
+        );
+        let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::TooOld));
+    }
+
+    #[test]
+    fn missing_route_on_a_foreign_origin_is_wrong_origin() {
+        let address = serve(|_| http("404 Not Found", "nope"), 2);
+        let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::WrongOrigin));
+    }
+
+    #[test]
+    fn unusable_upgrade_answer_is_upgrade_rejected() {
+        let address = serve(|_| http("200 OK", "<html>proxy</html>"), 1);
+        let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::UpgradeRejected));
+        let address = serve(|_| http("502 Bad Gateway", ""), 1);
+        let (kind, _) = failed_kind(&format!("http://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::UpgradeRejected));
+    }
+
+    #[test]
+    fn plain_text_server_on_an_https_origin_is_a_tls_failure() {
+        let address = serve(|_| "HTTP/1.1 400 Bad Request\r\n\r\n".into(), 1);
+        let (kind, _) = failed_kind(&format!("https://{address}"), Duration::from_secs(5));
+        assert_eq!(kind, ErrorKind::Paired(PairedFailure::Tls));
+    }
+
+    #[test]
+    fn failure_messages_carry_no_token() {
+        let address = serve(|_| http("401 Unauthorized", "{}"), 1);
+        let error = connect_within(&format!("http://{address}"), &"b".repeat(64), Duration::from_secs(5))
+            .err()
+            .unwrap();
+        assert!(!error.to_string().contains(&"b".repeat(64)));
     }
 }

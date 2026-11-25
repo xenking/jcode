@@ -173,7 +173,7 @@ pub use client::{
     SearchTextOptions, ToolCall, Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
-pub use errors::{Error, ErrorKind, Result};
+pub use errors::{Error, ErrorKind, PairedFailure, Result};
 pub use jcode_applet_types as applet;
 pub use jcode_harness_api::{
     AskAnswer, AskOption, AskQuestion, AskResponse, PendingAwait, SessionEditStats,

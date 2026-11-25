@@ -53,6 +53,53 @@ pub enum ErrorKind {
     CloudNotEntitled,
     /// The server's SSH host key did not match any pinned key.
     HostKeyMismatch,
+    /// A paired Harness gateway could not be reached or refused this device.
+    Paired(PairedFailure),
+}
+
+/// Why a paired Harness gateway connection failed, classified at the source so
+/// a client can say what happened and offer the right next step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairedFailure {
+    /// The gateway's host name did not resolve. Usually: no network, VPN or
+    /// tailnet is down.
+    Unresolved,
+    /// The host answered and refused the TCP connection. Nothing is listening.
+    Refused,
+    /// The connection or handshake did not finish before its deadline.
+    TimedOut,
+    /// The network path to the host is unavailable.
+    Unreachable,
+    /// The TLS handshake failed, for example an untrusted or mismatched certificate.
+    Tls,
+    /// The gateway rejected this device's token (HTTP 401 or 403): revoked or unknown.
+    Revoked,
+    /// The origin answered but does not serve a Harness gateway (HTTP 404).
+    WrongOrigin,
+    /// The gateway answered the websocket upgrade with something unusable.
+    UpgradeRejected,
+    /// The gateway is reachable but too old to serve Harness (`harness_v1` missing).
+    TooOld,
+    /// This device holds no saved token for the gateway, so there is nothing to present.
+    NoToken,
+}
+
+impl PairedFailure {
+    /// Stable lowercase identifier, usable as a wire or log code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Unresolved => "paired_unresolved",
+            Self::Refused => "paired_refused",
+            Self::TimedOut => "paired_timeout",
+            Self::Unreachable => "paired_unreachable",
+            Self::Tls => "paired_tls",
+            Self::Revoked => "paired_revoked",
+            Self::WrongOrigin => "paired_wrong_origin",
+            Self::UpgradeRejected => "paired_upgrade_rejected",
+            Self::TooOld => "paired_too_old",
+            Self::NoToken => "paired_no_token",
+        }
+    }
 }
 
 impl ErrorKind {
@@ -81,6 +128,7 @@ impl ErrorKind {
             Self::CloudNotEntitled => "cloud_not_entitled",
             Self::HostKeyMismatch => "host_key_mismatch",
             Self::AskNotPending => "ask_not_pending",
+            Self::Paired(failure) => failure.code(),
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",
