@@ -217,7 +217,7 @@ impl Agent {
         crate::cache_keepalive::invalidate(self.session.id());
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.provider_session_id = None;
         self.session.forget_provider_session();
         if self.session.pinned_skill().is_some() {
@@ -509,7 +509,7 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.provider_session_id = None;
         self.session.forget_provider_session();
 
@@ -647,7 +647,7 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.provider_session_id = None;
         self.session.forget_provider_session();
     }
@@ -676,7 +676,7 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.provider_session_id = None;
         self.session.forget_provider_session();
 

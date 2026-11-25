@@ -8,9 +8,7 @@ const MAX_ANNOUNCED_MCP_TOOLS: usize = 64;
 /// Per-tool description budget in the late MCP announcement.
 const MAX_ANNOUNCED_DESCRIPTION_CHARS: usize = 120;
 
-/// Stable header of the late-MCP transcript announcement; used to recognize
-/// earlier announcements when a session is restored.
-pub(super) const LATE_MCP_ANNOUNCEMENT_MARKER: &str = "New MCP tools are available.";
+pub(super) use super::tool_lock::LATE_MCP_ANNOUNCEMENT_MARKER;
 
 /// Stable header of the late-skill transcript announcement; used to recognize
 /// earlier announcements when a session is restored.
@@ -76,7 +74,7 @@ impl Agent {
     /// each tool's input schema, is how the model learns about servers that
     /// finished connecting mid-session. Each tool is announced once.
     pub(crate) async fn announce_late_mcp_tools(&mut self) {
-        if self.mcp_tools_mode == crate::config::McpToolsMode::Eager || self.native_deferred_mcp() {
+        if self.tool_lock.mcp_eager() || self.native_deferred_mcp() {
             return;
         }
         self.seed_announced_mcp_tools_from_transcript();
@@ -84,7 +82,7 @@ impl Agent {
         let fresh: Vec<ToolDefinition> = current
             .into_iter()
             .filter(|tool| {
-                tool.name.starts_with("mcp__") && !self.announced_mcp_tools.contains(&tool.name)
+                tool.name.starts_with("mcp__") && !self.tool_lock.is_announced(&tool.name)
             })
             .collect();
         if fresh.is_empty() {
@@ -128,7 +126,7 @@ impl Agent {
         }
         text.push_str("</system-reminder>");
         for tool in &fresh {
-            self.announced_mcp_tools.insert(tool.name.clone());
+            self.tool_lock.announce(tool.name.clone());
         }
         logging::info(&format!(
             "Announcing {} late MCP tool(s) in the transcript (tool list stays cache-stable)",
@@ -216,7 +214,7 @@ impl Agent {
         // providers without native deferred loading, `auto` therefore always
         // uses the fixed `mcp` search/call surface; the definitions
         // reach the model through the transcript instead.
-        let deferred = !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager);
+        let deferred = !self.tool_lock.mcp_eager();
 
         if deferred {
             tools.retain(|tool| !tool.name.starts_with("mcp__"));
@@ -361,8 +359,8 @@ impl Agent {
     }
 
     pub(crate) fn invalidate_sdk_tools(&mut self) {
-        self.mcp_late_register_resolved = false;
-        self.locked_tools = None;
+        self.tool_lock.rearm_late_register();
+        self.tool_lock.unlock();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
     }
@@ -373,8 +371,7 @@ impl Agent {
     /// the active provider supports it, and falls back to the fixed
     /// `mcp` search/call surface otherwise.
     pub(crate) fn native_deferred_mcp(&self) -> bool {
-        self.mcp_tools_mode != crate::config::McpToolsMode::Eager
-            && self.provider.supports_deferred_tools()
+        !self.tool_lock.mcp_eager() && self.provider.supports_deferred_tools()
     }
 
     /// Tool list for the native deferred MCP path.
@@ -385,23 +382,22 @@ impl Agent {
     /// reconnecting servers costs no prompt-cache miss.
     pub(super) async fn native_deferred_tool_definitions(&mut self) -> Vec<ToolDefinition> {
         let current = self.build_filtered_tool_definitions().await;
-        let eager = match &self.locked_tools {
+        let eager = match self.tool_lock.locked() {
             // A snapshot locked before switching to the native path may still
             // carry eager MCP definitions; keep them eager for cache stability
             // (they are still callable) but never duplicate them as deferred.
-            Some(locked) => locked.clone(),
+            Some(locked) => locked.to_vec(),
             None => {
                 let eager = ToolDefinition::eager(&current);
                 logging::info(&format!(
                     "Locking eager tool list at {} tools for cache stability (MCP tools deferred)",
                     eager.len()
                 ));
-                self.locked_tools = Some(eager.clone());
-                self.locked_tools_native_deferred = true;
+                self.tool_lock.lock_native(&eager);
                 eager
             }
         };
-        self.mcp_late_register_resolved = true;
+        self.tool_lock.resolve_late_register();
         let mut tools = eager;
         let eager_names: HashSet<String> = tools.iter().map(|t| t.name.clone()).collect();
         tools.extend(
@@ -433,33 +429,7 @@ impl Agent {
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
     pub(super) fn seed_announced_mcp_tools_from_transcript(&mut self) {
-        let start = self
-            .announced_mcp_scan_index
-            .min(self.session.message_count());
-        for message in self.session.iter_messages_from(start) {
-            for block in &message.content {
-                match block {
-                    ContentBlock::ToolReference { tool_name, .. } => {
-                        self.announced_mcp_tools.insert(tool_name.clone());
-                    }
-                    ContentBlock::Text { text, .. }
-                        if text.contains(LATE_MCP_ANNOUNCEMENT_MARKER) =>
-                    {
-                        for line in text.lines() {
-                            if let Some(name) = line
-                                .strip_prefix("- ")
-                                .and_then(|rest| rest.split(':').next())
-                                .filter(|name| name.starts_with("mcp__"))
-                            {
-                                self.announced_mcp_tools.insert(name.to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.announced_mcp_scan_index = self.session.message_count();
+        self.tool_lock.seed_announced_from_transcript(self.session.message_count(), |start| self.session.iter_messages_from(start));
     }
 
     /// Mark skills named in earlier announcements as announced, so a
@@ -498,7 +468,7 @@ impl Agent {
         // connect, reconnect, or register late. Refresh the deferred subset
         // every turn instead of unlocking.
         let native = self.native_deferred_mcp();
-        if self.locked_tools.is_some() && self.locked_tools_native_deferred != native {
+        if self.tool_lock.stale_for(native) {
             // The active provider's deferred-loading capability changed (model
             // or provider switch). The prefix changes with the provider anyway,
             // so rebuilding costs nothing extra and keeps MCP usable.
@@ -506,8 +476,8 @@ impl Agent {
                 "Rebuilding tool snapshot: native deferred MCP loading {} after provider change",
                 if native { "enabled" } else { "disabled" }
             ));
-            self.locked_tools = None;
-            self.mcp_late_register_resolved = false;
+            self.tool_lock.unlock();
+            self.tool_lock.rearm_late_register();
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
         }
@@ -535,19 +505,20 @@ impl Agent {
         // not rescan the registry on every subsequent turn.
         // Every mode except explicit `eager` keeps a cache-stable MCP surface:
         // per-server tools registering later never change the locked list.
-        let locked_uses_fixed_mcp_surface =
-            self.mcp_tools_mode != crate::config::McpToolsMode::Eager;
-        if locked_uses_fixed_mcp_surface && let Some(locked) = self.locked_tools.clone() {
+        let locked_uses_fixed_mcp_surface = !self.tool_lock.mcp_eager();
+        if locked_uses_fixed_mcp_surface
+            && let Some(locked) = self.tool_lock.locked().map(<[ToolDefinition]>::to_vec)
+        {
             // Per-server tools may continue registering in the background, but
             // the fixed surface cannot change as a result. Avoid a provider
             // cache reset and registry scan; new tools are announced in the
             // transcript instead (see `announce_late_mcp_tools`).
-            self.mcp_late_register_resolved = true;
+            self.tool_lock.resolve_late_register();
             return locked;
         }
-        if let Some(ref locked) = self.locked_tools {
-            if self.mcp_late_register_resolved {
-                return locked.clone();
+        if let Some(locked) = self.tool_lock.locked() {
+            if self.tool_lock.late_register_resolved() {
+                return locked.to_vec();
             }
             if self.registry_has_new_mcp_tools(locked).await {
                 logging::info(
@@ -560,15 +531,15 @@ impl Agent {
                 // We intentionally do NOT call `unlock_tools()` here, because that
                 // re-arms the guard (it is the explicit-reload path) and would let
                 // the recheck fire again on every later turn.
-                self.mcp_late_register_resolved = true;
-                self.locked_tools = None;
+                self.tool_lock.resolve_late_register();
+                self.tool_lock.unlock();
                 self.cache_tracker.reset();
                 self.kv_cache_monitor.reset();
             } else {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
                 // appear (or never do, after the registry settles) we stop.
-                return locked.clone();
+                return locked.to_vec();
             }
         }
 
@@ -580,16 +551,7 @@ impl Agent {
             "Locking tool list at {} tools for cache stability",
             tools.len()
         ));
-        self.locked_tools = Some(tools.clone());
-        self.locked_tools_native_deferred = false;
-        // Per-server definitions in the snapshot itself (eager mode) are
-        // already described to the model; never announce them again.
-        self.announced_mcp_tools.extend(
-            tools
-                .iter()
-                .filter(|tool| tool.name.starts_with("mcp__"))
-                .map(|tool| tool.name.clone()),
-        );
+        self.tool_lock.lock_snapshot(&tools);
         tools
     }
 
@@ -612,15 +574,15 @@ impl Agent {
     /// Unlock the tool list so the next API request picks up any new tools.
     /// Called after MCP reload or when the user explicitly wants new tools.
     pub fn unlock_tools(&mut self) {
-        if self.locked_tools.is_some() {
+        if self.tool_lock.is_locked() {
             logging::info("Tool list unlocked — next request will pick up current tools");
-            self.locked_tools = None;
+            self.tool_lock.unlock();
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
         }
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
-        self.mcp_late_register_resolved = false;
+        self.tool_lock.rearm_late_register();
     }
 
     /// Unlock tools if a tool execution may have changed the registry
@@ -631,7 +593,7 @@ impl Agent {
         // loading or the `mcp` search/call surface), so an `mcp`
         // connect/disconnect must not unlock it: that would be a needless
         // full prompt-cache miss.
-        if tool_name == "mcp" && self.mcp_tools_mode == crate::config::McpToolsMode::Eager {
+        if tool_name == "mcp" && self.tool_lock.mcp_eager() {
             self.unlock_tools();
         }
     }
@@ -705,9 +667,7 @@ impl Agent {
     pub async fn visible_mcp_tool_names(&self) -> Vec<String> {
         // Mirrors `apply_mcp_tool_exposure`: on the unified `mcp` surface
         // per-server definitions are not exposed.
-        if !self.native_deferred_mcp()
-            && !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager)
-        {
+        if !self.native_deferred_mcp() && !self.tool_lock.mcp_eager() {
             return Vec::new();
         }
         let sdk = crate::tool::sdk::config(self.session.id());

@@ -172,7 +172,7 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
             defer_loading: false,
         }];
-        agent.locked_tools = Some(frozen_tools);
+        agent.tool_lock.lock_snapshot(&frozen_tools);
         agent.agents_md_snapshot.0 = Some("Frozen instructions, not recaptured on wake".into());
         agent.provider_session_id = Some("upstream-live-session".into());
         agent.rewind_undo_snapshot = Some(RewindUndoSnapshot {
@@ -200,7 +200,7 @@ mod tests {
             agent.provider_session_id.as_deref(),
             Some("upstream-live-session")
         );
-        assert_eq!(agent.locked_tools.as_ref().unwrap()[0].name, "frozen");
+        assert_eq!(agent.tool_lock.locked().unwrap()[0].name, "frozen");
         assert_eq!(
             agent.agents_md_snapshot.0.as_deref(),
             Some("Frozen instructions, not recaptured on wake")

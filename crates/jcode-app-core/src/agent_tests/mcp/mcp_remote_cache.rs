@@ -272,7 +272,7 @@ async fn remote_startup_case(shared: bool) {
     let cold_registration = cold_started.elapsed();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let mut agent = Agent::new(provider, registry.clone());
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
     let before = agent.tool_definitions().await;
     assert!(before.iter().any(|tool| tool.name == "mcp"));
     assert!(
@@ -365,7 +365,7 @@ async fn remote_startup_case(shared: bool) {
         ))),
         warm_registry,
     );
-    warm_agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
+    warm_agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Eager);
     let warm_before = serde_json::to_value(warm_agent.tool_definitions().await).unwrap();
     slow.wait_for_initialize().await;
     fast.wait_for_initialize().await;
@@ -505,7 +505,7 @@ async fn remote_connect_disconnect_reconnect_preserves_prompt_and_cache_baseline
                 std::sync::atomic::AtomicBool::new(native),
             )));
             let mut agent = Agent::new(provider, registry);
-            agent.mcp_tools_mode = mode;
+            agent.tool_lock.set_mcp_mode(mode);
             agent.add_message(
                 Role::User,
                 vec![ContentBlock::Text {

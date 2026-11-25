@@ -47,11 +47,11 @@ async fn locked_snapshots_ignore_runtime_description_changes() {
             .await;
         let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
         let mut agent = Agent::new(provider, registry);
-        agent.mcp_tools_mode = mode;
+        agent.tool_lock.set_mcp_mode(mode);
         agent.allowed_tools = Some(HashSet::from(["compile_remote".into()]));
         let before = agent.tool_definitions().await;
         assert_eq!(before.len(), 1);
-        agent.mcp_late_register_resolved = true;
+        agent.tool_lock.resolve_late_register();
         paid.store(true, Ordering::SeqCst);
         let after = agent.tool_definitions().await;
         assert_eq!(after[0].description, before[0].description);

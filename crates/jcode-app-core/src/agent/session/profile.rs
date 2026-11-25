@@ -77,7 +77,7 @@ impl Agent {
         );
         if changed {
             // The cached tool surface was computed for the old policy.
-            self.locked_tools = None;
+            self.tool_lock.unlock();
         }
     }
 

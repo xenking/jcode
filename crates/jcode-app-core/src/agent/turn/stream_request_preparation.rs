@@ -35,7 +35,7 @@ impl Agent {
             // Reset cache tracker and tool lock on compaction since the message history changes
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
-            self.locked_tools = None;
+            self.tool_lock.unlock();
             logging::info(&format!(
                 "Context compacted ({}{})",
                 event.trigger,

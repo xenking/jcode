@@ -13,7 +13,7 @@ impl Agent {
         self.reset_provider_session();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         let (compaction_message, compaction_started) = self.request_manual_compaction();
         self.persist_session_now()?;
         Ok(serde_json::json!({

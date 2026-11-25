@@ -103,7 +103,7 @@ pub(super) async fn agent_with_fake_mcp_surface(
         )
         .await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = mode;
+    agent.tool_lock.set_mcp_mode(mode);
     agent
 }
 
@@ -176,7 +176,7 @@ async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
         .map(|tool| tool.name)
         .collect();
     assert_eq!(auto_deferred_names, stable_auto_names);
-    assert!(auto_deferred.mcp_late_register_resolved);
+    assert!(auto_deferred.tool_lock.late_register_resolved());
 }
 
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Deferred);
 
     let before: Vec<String> = agent
         .tool_definitions()
@@ -214,7 +214,7 @@ async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
         before, after,
         "fixed deferred surface must stay cache-stable"
     );
-    assert!(agent.mcp_late_register_resolved);
+    assert!(agent.tool_lock.late_register_resolved());
     assert!(!after.iter().any(|name| name.starts_with("mcp__")));
 }
 
@@ -225,7 +225,7 @@ async fn auto_mode_never_changes_the_tool_list_for_late_mcp_tools() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
 
     let before = agent.tool_definitions().await;
     assert!(before.iter().any(|tool| tool.name == "mcp"));
@@ -247,7 +247,7 @@ async fn auto_mode_never_changes_the_tool_list_for_late_mcp_tools() {
         serde_json::to_string(&after).unwrap(),
         "late MCP registration and the mcp tool must not change the cached tool list"
     );
-    assert!(agent.mcp_late_register_resolved);
+    assert!(agent.tool_lock.late_register_resolved());
 }
 
 /// Reproduction for #206: MCP tools that register on the registry *after* the
@@ -264,7 +264,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
     let mut agent = Agent::new(provider, registry);
     // The late-registration rebuild (#206) only exists in explicit eager
     // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Eager);
 
     // First turn locks the snapshot (this is what happens before the async MCP
     // registration spawn completes).
@@ -329,7 +329,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
     let mut agent = Agent::new(provider, registry);
     // The late-registration rebuild (#206) only exists in explicit eager
     // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Eager);
 
     // First turn locks the snapshot with no MCP tools yet.
     let _ = agent.tool_definitions().await;
@@ -350,7 +350,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
         "first late MCP tool must be picked up by the one accepted rebuild"
     );
     assert!(
-        agent.mcp_late_register_resolved,
+        agent.tool_lock.late_register_resolved(),
         "one-shot guard must latch after the accepted rebuild"
     );
 
@@ -382,7 +382,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
     // and lets the next snapshot pick up everything currently registered.
     agent.unlock_tools();
     assert!(
-        !agent.mcp_late_register_resolved,
+        !agent.tool_lock.late_register_resolved(),
         "explicit unlock must re-arm the one-shot guard"
     );
     let after_unlock = agent.tool_definitions().await;
@@ -404,7 +404,7 @@ async fn tool_snapshot_is_stable_without_new_mcp_tools() {
     let mut agent = Agent::new(provider, registry);
     // The late-registration rebuild (#206) only exists in explicit eager
     // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Eager);
 
     let first = agent.tool_definitions().await;
     // Register a NON-mcp tool after locking — this should NOT trigger a rebuild,

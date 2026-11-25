@@ -33,7 +33,7 @@ async fn native_deferred_agent(mode: crate::config::McpToolsMode) -> Agent {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = mode;
+    agent.tool_lock.set_mcp_mode(mode);
     agent
 }
 
@@ -92,7 +92,7 @@ async fn native_deferred_mcp_late_registration_keeps_eager_prefix() {
             .find(|t| t.name == "mcp__late__tool")
             .expect("late MCP tool is offered to the provider");
         assert!(late.defer_loading, "late MCP tools are deferred");
-        assert!(agent.locked_tools.is_some(), "eager snapshot stays locked");
+        assert!(agent.tool_lock.is_locked(), "eager snapshot stays locked");
     }
 }
 
@@ -143,7 +143,7 @@ async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Deferred);
 
     let on_native = agent.tool_definitions().await;
     assert!(
@@ -175,7 +175,7 @@ async fn late_mcp_tools_are_announced_once_in_the_transcript() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
 
     let before = agent.tool_definitions().await;
     agent
@@ -239,7 +239,7 @@ async fn late_mcp_announcement_skips_referenced_native_and_eager() {
         )
         .await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
     agent.add_message(
         Role::User,
         vec![
@@ -269,7 +269,7 @@ async fn late_mcp_announcement_skips_referenced_native_and_eager() {
             let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
             let registry = Registry::new(provider.clone()).await;
             let mut agent = Agent::new(provider, registry);
-            agent.mcp_tools_mode = mode;
+            agent.tool_lock.set_mcp_mode(mode);
             agent
         } else {
             native_deferred_agent(mode).await
@@ -331,7 +331,7 @@ async fn late_mcp_announcement_uses_original_names_for_sanitized_aliases() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
     let _ = agent.tool_definitions().await;
 
     let alias = crate::mcp::dispatch_name("yc", "hiring.create_job");
@@ -450,7 +450,7 @@ async fn a_150_tool_server_adds_nothing_to_the_default_tool_list() {
     let registry = Registry::new(provider.clone()).await;
     register_fake_deferred_mcp_surface(&registry).await;
     let mut agent = Agent::new(provider, registry.clone());
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.tool_lock.set_mcp_mode(crate::config::McpToolsMode::Auto);
     let before = agent.tool_definitions().await;
     register_big_server(registry).await;
     agent.announce_late_mcp_tools().await;

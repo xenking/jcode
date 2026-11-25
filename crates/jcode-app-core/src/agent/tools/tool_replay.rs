@@ -31,7 +31,7 @@ impl Agent {
         }
         Some(Scope {
             working_dir: self.session.working_dir().map(str::to_owned),
-            mcp_mode: self.mcp_tools_mode,
+            mcp_mode: self.tool_lock.mcp_mode(),
             native_deferred: self.native_deferred_mcp(),
             allowed: self
                 .allowed_tools
@@ -55,16 +55,8 @@ impl Agent {
         else {
             return;
         };
-        self.locked_tools = Some(ToolDefinition::eager(&saved.tools));
-        self.locked_tools_native_deferred = scope.native_deferred;
-        self.mcp_late_register_resolved = saved.mcp_late_register_resolved;
-        self.announced_mcp_tools.extend(
-            saved
-                .tools
-                .iter()
-                .filter(|def| !def.defer_loading && def.name.starts_with("mcp__"))
-                .map(|def| def.name.clone()),
-        );
+        self.tool_lock
+            .restore(&saved.tools, scope.native_deferred, saved.mcp_late_register_resolved);
         self.sent_tool_surface = Some(saved);
     }
 
@@ -85,7 +77,7 @@ impl Agent {
                 retain_revealed_deferred(&mut tools, &saved.tools, messages);
             }
             if saved.tools == tools
-                && saved.mcp_late_register_resolved == self.mcp_late_register_resolved
+                && saved.mcp_late_register_resolved == self.tool_lock.late_register_resolved()
             {
                 return Ok(tools);
             }
@@ -93,7 +85,7 @@ impl Agent {
         let surface = ToolSurface {
             scope,
             tools: tools.clone(),
-            mcp_late_register_resolved: self.mcp_late_register_resolved,
+            mcp_late_register_resolved: self.tool_lock.late_register_resolved(),
         };
         if !self.session.is_ephemeral() {
             let path = tool_surface_path(self.session_id())?;

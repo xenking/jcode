@@ -143,7 +143,7 @@ impl Agent {
         self.session.forget_provider_session();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.reset_tool_output_tracking();
         self.reset_compaction_manager_from_session(&mut manager);
         drop(manager);
@@ -176,7 +176,7 @@ impl Agent {
         self.session.touch();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.reset_tool_output_tracking();
         self.reset_compaction_manager_from_session(&mut manager);
         drop(manager);

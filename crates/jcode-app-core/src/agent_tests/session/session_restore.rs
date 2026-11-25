@@ -23,7 +23,7 @@ fn seed_transient_session_state(agent: &mut Agent) {
         cache_read_input_tokens: Some(3),
         cache_creation_input_tokens: Some(5),
     };
-    agent.locked_tools = Some(vec![ToolDefinition {
+    agent.tool_lock.lock_snapshot(&[ToolDefinition {
         name: "test_tool".to_string(),
         description: "test tool".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
@@ -56,7 +56,7 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_lock.is_locked());
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_lock.is_locked());
 }
 
 #[tokio::test]

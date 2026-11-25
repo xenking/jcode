@@ -393,7 +393,7 @@ impl Agent {
             },
             "agent": {
                 "frozen_snapshots": frozen_snapshot_memory_profile(
-                    self.locked_tools.as_deref(),
+                    self.tool_lock.locked(),
                     self.agents_md_snapshot.0.as_ref(),
                     &self.prompt_skills_snapshot,
                 ),

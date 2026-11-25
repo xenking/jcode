@@ -702,8 +702,8 @@ impl Agent {
         if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
-        let tools = match &self.locked_tools {
-            Some(tools) => tools.clone(),
+        let tools = match self.tool_lock.locked() {
+            Some(tools) => tools.to_vec(),
             None => self.build_filtered_tool_definitions().await,
         };
         let prompt = self.build_system_prompt_split(None);

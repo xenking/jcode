@@ -123,8 +123,8 @@ impl Agent {
     pub async fn debug_context(&self) -> serde_json::Value {
         let prompt = self.build_system_prompt_split(None);
         let current_tools = self.tool_definitions_for_debug().await;
-        let effective_tools = self.locked_tools.as_ref().unwrap_or(&current_tools);
-        let locked_tool_names = self.locked_tools.as_ref().map(|tools| {
+        let effective_tools = self.tool_lock.locked().unwrap_or(&current_tools);
+        let locked_tool_names = self.tool_lock.locked().map(|tools| {
             tools
                 .iter()
                 .map(|tool| tool.name.as_str())
@@ -141,7 +141,7 @@ impl Agent {
                 "dynamic": prompt.dynamic_part,
                 "pending_memory_included": false,
             },
-            "tools_locked": self.locked_tools.is_some(),
+            "tools_locked": self.tool_lock.is_locked(),
             "locked_tool_names": locked_tool_names,
             "effective_tools": effective_tools,
             "current_tools": current_tools,

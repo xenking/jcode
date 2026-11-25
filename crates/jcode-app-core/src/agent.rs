@@ -63,6 +63,8 @@ mod streaming;
 mod swarm_reminder_tests;
 #[path = "agent/tools/tool_handoff.rs"]
 mod tool_handoff;
+#[path = "agent/tools/tool_lock.rs"]
+mod tool_lock;
 #[path = "agent/tools/tool_surface.rs"]
 mod tool_surface;
 #[path = "agent/tools/tools.rs"]
@@ -359,8 +361,8 @@ pub struct Agent {
     base_tool_selection: (Option<HashSet<String>>, HashSet<String>),
     /// Generation-scoped ownership of this Agent's global tool-policy entry.
     _tool_policy_registration: crate::tool::SessionToolPolicyRegistration,
-    /// MCP top-level definition exposure policy captured when the session starts.
-    mcp_tools_mode: crate::config::McpToolsMode,
+    /// The tool list the provider has seen, frozen for prompt-cache stability.
+    tool_lock: tool_lock::ToolLock,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
     /// The routing service has another account for this session, so a spent
@@ -398,37 +400,11 @@ pub struct Agent {
     kv_cache_monitor: crate::kv_cache_monitor::KvCacheMonitor,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
-    /// Locked tool list: once the first API request is sent, freeze the tool list
-    /// to avoid cache invalidation when MCP tools arrive asynchronously.
-    /// Cleared on compaction/reset.
-    locked_tools: Option<Vec<ToolDefinition>>,
     sent_tool_surface: Option<tool_replay::ToolSurface>,
     compaction_persist_pending: bool,
-    /// One-shot guard for the async MCP-registration race (#206).
-    ///
-    /// MCP servers connect on a background task and register `mcp__*` tools
-    /// seconds after the session starts (we deliberately do NOT block the first
-    /// turn on MCP connection, so the user can talk to the agent immediately).
-    /// The first turn therefore locks a snapshot without MCP tools. We allow
-    /// exactly one rebuild to pick them up — an intentional, one-time provider
-    /// prompt-cache miss. Once that rebuild happens (or we confirm there are no
-    /// MCP tools to wait for), this is set so the per-turn registry scan stops.
-    /// Reset whenever the tool list is intentionally unlocked.
-    mcp_late_register_resolved: bool,
     /// Before/after token counts from the last context-limit auto-recovery,
     /// consumed when the turn loop announces the compaction to clients.
     last_recovery_compaction: Option<(u64, u64, usize)>,
-    /// Whether `locked_tools` was built for provider-native deferred MCP
-    /// loading. A mid-session model/provider switch can change that
-    /// capability; the snapshot must then be rebuilt, or the new provider
-    /// would get a surface built for the other path (for example
-    /// `mcp_search` without `mcp_call` or any MCP tools).
-    locked_tools_native_deferred: bool,
-    /// MCP tools already described to the model, either in the locked tool
-    /// snapshot or by a late-tool transcript announcement.
-    announced_mcp_tools: HashSet<String>,
-    /// Transcript index already scanned for MCP tools described there.
-    announced_mcp_scan_index: usize,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -573,7 +549,7 @@ impl Agent {
             disabled_tools,
             base_tool_selection,
             _tool_policy_registration: tool_policy_registration,
-            mcp_tools_mode: tool_config.mcp_tools,
+            tool_lock: tool_lock::ToolLock::new(tool_config.mcp_tools),
             provider_session_id: None,
             routing_fail_fast_limits: false,
             last_upstream_provider: None,
@@ -590,14 +566,9 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),
-            locked_tools: None,
             sent_tool_surface: None,
             compaction_persist_pending: false,
-            mcp_late_register_resolved: false,
             last_recovery_compaction: None,
-            locked_tools_native_deferred: false,
-            announced_mcp_tools: HashSet::new(),
-            announced_mcp_scan_index: 0,
             agents_md_snapshot,
             prompt_skills_snapshot: Vec::new(),
             static_prompt,
@@ -817,10 +788,10 @@ impl Agent {
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.last_usage = TokenUsage::default();
-        self.locked_tools = None;
+        self.tool_lock.unlock();
         self.sent_tool_surface = None;
         self.compaction_persist_pending = false;
-        self.mcp_late_register_resolved = false;
+        self.tool_lock.rearm_late_register();
         self.rewind_undo_snapshot = None;
     }
 
@@ -931,8 +902,8 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
+        self.tool_lock.unlock();
+        self.tool_lock.rearm_late_register();
         self.provider_session_id = None;
         self.session.forget_provider_session();
         if self.session.pinned_skill().is_some() {
@@ -1681,8 +1652,8 @@ impl Agent {
             self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
-            self.locked_tools = None;
-            self.mcp_late_register_resolved = false;
+            self.tool_lock.unlock();
+            self.tool_lock.rearm_late_register();
         }
 
         repaired

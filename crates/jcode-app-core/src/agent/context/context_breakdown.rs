@@ -717,17 +717,14 @@ impl Agent {
         messages: &[Message],
     ) -> Vec<ToolDefinition> {
         let native = self.native_deferred_mcp();
-        let locked = self
-            .locked_tools
-            .as_ref()
-            .filter(|_| self.locked_tools_native_deferred == native);
+        let locked = self.tool_lock.locked_for(native);
         if !native
             && let Some(locked) = locked
-            && (self.mcp_tools_mode != crate::config::McpToolsMode::Eager
-                || self.mcp_late_register_resolved
+            && (!self.tool_lock.mcp_eager()
+                || self.tool_lock.late_register_resolved()
                 || !self.registry_has_new_mcp_tools(locked).await)
         {
-            return locked.clone();
+            return locked.to_vec();
         }
         let mut tools = self.build_filtered_tool_definitions().await;
         if native && let Some(locked) = locked {
