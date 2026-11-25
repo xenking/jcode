@@ -831,7 +831,7 @@ fn save_default_provider_setting(app: &mut App, provider: Option<&str>) {
             return;
         }
     };
-    match crate::config::Config::set_default_provider(provider.as_deref()) {
+    match crate::auth::account_pool::set_default_provider(provider.as_deref()) {
         Ok(()) => {
             let label = provider.as_deref().unwrap_or("auto");
             app.set_status_notice(format!("Default provider: {}", label));

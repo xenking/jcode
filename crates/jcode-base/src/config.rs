@@ -419,13 +419,12 @@ pub fn config() -> &'static Config {
         cache.config
     };
 
-    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
-    if let Some(route) = changed_default_route
-        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
-    {
-        crate::logging::error(&format!(
-            "Could not sync account order after config edit: {error}"
-        ));
+    // The account pool reconciles this the next time it is loaded, so config
+    // never calls into auth: see `take_default_route_change`.
+    if let Some(route) = changed_default_route {
+        *PENDING_DEFAULT_ROUTE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(route);
     }
 
     if let Some(reason) = reload_reason {
@@ -531,6 +530,19 @@ fn config_env_fingerprint() -> Vec<(String, String)> {
         .collect::<Vec<_>>();
     values.sort_by(|left, right| left.0.cmp(&right.0));
     values
+}
+
+/// A default provider route that changed in config.toml behind our back (a
+/// hand edit seen on reload) and has not been applied to the account pool yet.
+static PENDING_DEFAULT_ROUTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Take the default route a config reload saw change, if any. The account pool
+/// applies it when it is next loaded, so config reloads never reach into auth.
+pub fn take_default_route_change() -> Option<String> {
+    PENDING_DEFAULT_ROUTE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }
 
 /// Set by [`invalidate_config_cache`], consumed by the next reload. It lives

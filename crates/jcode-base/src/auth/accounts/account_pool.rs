@@ -258,6 +258,33 @@ fn key_for_route(route: &str, active: impl Fn(&str) -> Option<String>) -> Option
     ))
 }
 
+/// Save the default model and provider, then keep the auto-switch order in
+/// step: the first auto-switch account is the default. A failure to reorder
+/// is logged and must not undo the save.
+pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> Result<()> {
+    crate::config::Config::set_default_model(model, provider)?;
+    if let Some(route) = provider {
+        sync_order_logging_errors(route);
+    }
+    Ok(())
+}
+
+/// Save the default provider and reorder the pool to match, see
+/// [`set_default_model`].
+pub fn set_default_provider(provider: Option<&str>) -> Result<()> {
+    crate::config::Config::set_default_provider(provider)?;
+    if let Some(route) = provider {
+        sync_order_logging_errors(route);
+    }
+    Ok(())
+}
+
+fn sync_order_logging_errors(route: &str) {
+    if let Err(error) = sync_order_with_default_route(route) {
+        crate::logging::error(&format!("Could not sync account order: {error}"));
+    }
+}
+
 /// Keep the auto-switch order in step after the default provider changed
 /// through any path (model picker, `/account`, login, Desktop).
 pub fn sync_order_with_default_route(route: &str) -> Result<()> {
@@ -303,7 +330,7 @@ pub fn apply_default_account(key: &str) -> Result<bool> {
         } else {
             None
         };
-        crate::config::Config::set_default_model(model.as_deref(), Some(route))?;
+        set_default_model(model.as_deref(), Some(route))?;
         changed = true;
     }
     Ok(changed)
@@ -343,6 +370,15 @@ impl AccountPool {
 
     /// Missing or unreadable files mean "use defaults", never an error.
     pub fn load() -> Self {
+        // A default route edited in config.toml and seen by a config reload is
+        // applied here, where the pool order is read.
+        if let Some(route) = crate::config::take_default_route_change()
+            && let Err(error) = sync_order_with_default_route(&route)
+        {
+            crate::logging::error(&format!(
+                "Could not sync account order after config edit: {error}"
+            ));
+        }
         path()
             .ok()
             .filter(|path| path.exists())
@@ -695,14 +731,14 @@ mod tests {
         }
     }
 
-    /// Pins the config -> account pool wiring: saving a new default route
-    /// through the setter reorders the pool before the setter returns.
+    /// Pins that saving a new default route through the pool-aware setter
+    /// reorders the pool before the setter returns.
     #[test]
     fn saving_a_default_route_reorders_the_pool() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         pool_with_api_key_second().save().unwrap();
 
-        crate::config::Config::set_default_model(None, Some("anthropic-api")).unwrap();
+        set_default_model(None, Some("anthropic-api")).unwrap();
 
         assert_eq!(AccountPool::load().members[0], "anthropic-api");
     }

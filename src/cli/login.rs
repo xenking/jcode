@@ -611,7 +611,7 @@ fn maybe_persist_default_provider_after_login(
         .as_deref()
         .or(suggested_model.as_deref());
 
-    if let Err(err) = crate::config::Config::set_default_model(model_to_save, Some(provider_id)) {
+    if let Err(err) = crate::auth::account_pool::set_default_model(model_to_save, Some(provider_id)) {
         crate::logging::warn(&format!(
             "Failed to save {} as the default provider after login: {}",
             provider_id, err

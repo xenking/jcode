@@ -208,7 +208,7 @@ impl App {
                         provider_key.as_deref().unwrap_or("auto")
                     );
 
-                    match crate::config::Config::set_default_model(
+                    match crate::auth::account_pool::set_default_model(
                         Some(&model_spec),
                         provider_key.as_deref(),
                     ) {

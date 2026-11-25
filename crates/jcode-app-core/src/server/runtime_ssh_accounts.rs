@@ -442,7 +442,7 @@ pub(super) async fn execute(
             }) {
                 bail!("Unsupported default provider")
             }
-            crate::config::Config::set_default_provider(value)?;
+            crate::auth::account_pool::set_default_provider(value)?;
             "Saved default provider on runtime host for future sessions.".into()
         }
         ("default-model", [value]) => {
