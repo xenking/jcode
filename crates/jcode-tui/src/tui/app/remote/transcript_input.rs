@@ -4,7 +4,6 @@ use super::input_dispatch::{
 };
 use super::key_handling::submit_remote_slash_input;
 use super::*;
-use crate::tui::app as app_mod;
 
 fn set_transcript_input(app: &mut App, text: String) {
     app.input_typing_undo = None;

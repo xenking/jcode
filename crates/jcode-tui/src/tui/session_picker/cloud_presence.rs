@@ -256,7 +256,7 @@ mod tests {
         assert!(picker.selected_session().is_none());
         tx.send(HashMap::from([(session.id.clone(), None)]))
             .unwrap();
-        assert!(picker.maybe_refresh_cloud_presence());
+        assert!(picker.maybe_refresh_live_presence());
         assert!(picker.session_is_streaming(&session));
         assert_eq!(picker.selected_session().unwrap().id, session.id);
         picker.refresh_live_presence();
@@ -266,7 +266,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         picker.cloud_presence.pending = Some(rx);
         tx.send(HashMap::new()).unwrap();
-        assert!(picker.maybe_refresh_cloud_presence());
+        assert!(picker.maybe_refresh_live_presence());
         assert!(!picker.session_is_streaming(&session));
         assert!(picker.selected_session().is_none());
     }
