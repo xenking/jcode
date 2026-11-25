@@ -151,7 +151,7 @@ pub(super) fn handle_split_response_event(app: &mut App, event: ServerEvent) -> 
 pub(super) fn handle_notification_event(
     app: &mut App,
     event: ServerEvent,
-    remote: &mut impl RemoteEventState,
+    _remote: &mut impl RemoteEventState,
 ) -> bool {
     let ServerEvent::Notification {
         from_session,
