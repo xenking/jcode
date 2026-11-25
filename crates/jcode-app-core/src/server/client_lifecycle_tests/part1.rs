@@ -822,7 +822,7 @@ async fn new_client_agent_stamps_client_cwd_into_initial_context() {
     let agent = Agent::new_with_initial_working_dir(provider, registry, Some(&client_cwd));
 
     assert_eq!(agent.working_dir(), Some(client_cwd.as_ref()));
-    let context = agent.messages()[0].content_preview();
+    let context = agent.iter_messages().next().unwrap().content_preview();
     assert!(
         context.contains(&format!("Working directory: {client_cwd}")),
         "initial context must be created from the client cwd: {context}"
@@ -873,7 +873,10 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id("session_guard".to_string(), None, None);
-        session.model = Some("panic-on-fork".to_string());
+        session.apply_route(crate::session::Route {
+            model: Some("panic-on-fork".to_string()),
+            ..session.route()
+        });
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -961,7 +964,10 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
     let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider(Arc::clone(&resume)));
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.model = Some("fanout-stream".to_string());
+    session.apply_route(crate::session::Route {
+        model: Some("fanout-stream".to_string()),
+        ..session.route()
+    });
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1284,7 +1290,10 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
-    session.model = Some("complete-immediately".into());
+    session.apply_route(crate::session::Route {
+        model: Some("complete-immediately".into()),
+        ..session.route()
+    });
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
@@ -1464,7 +1473,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let persisted = crate::session::Session::load(session_id).unwrap();
     for expected in ["first turn", "acceptance back on laptop"] {
         assert!(
-            persisted.messages.iter().any(|message| {
+            persisted.iter_messages().any(|message| {
                 message.content.iter().any(
                     |block| matches!(block, ContentBlock::Text { text, .. } if text == expected),
                 )

@@ -858,11 +858,11 @@ fn history_response_stats_old_and_malformed_fields_are_optional() {
 #[test]
 fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     let mut session = jcode_base::session::Session::create(None, None);
-    session.messages = serde_json::from_value(json!([
+    session.replace_messages(serde_json::from_value(json!([
         {"id":"u","role":"user","timestamp":"2026-11-15T05:21:00Z","content":[{"type":"text","text":"question"}]},
         {"id":"a","role":"assistant","timestamp":"2026-11-15T05:21:14Z","content":[{"type":"text","text":"answer"}],
             "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
-    ])).unwrap();
+    ])).unwrap());
     let legacy: Vec<_> = jcode_base::session::render_messages(&session)
         .into_iter()
         .map(|row| jcode_base::protocol::HistoryMessage {

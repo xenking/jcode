@@ -25,7 +25,10 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.model = Some("complete-immediately".to_string());
+        session.apply_route(crate::session::Route {
+            model: Some("complete-immediately".to_string()),
+            ..session.route()
+        });
         let agent = Arc::new(Mutex::new(Agent::new_with_session(
             provider, registry, session, None,
         )));
@@ -255,7 +258,10 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
         ] {
             let mut session =
                 crate::session::Session::create_with_id(session_id.to_string(), None, None);
-            session.model = Some("panic-on-fork".to_string());
+            session.apply_route(crate::session::Route {
+                model: Some("panic-on-fork".to_string()),
+                ..session.route()
+            });
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 Arc::clone(&provider),
                 registry.clone(),

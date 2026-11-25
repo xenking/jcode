@@ -731,7 +731,14 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
         })
         .expect("missing skill system entry");
     assert!(
-        format!("{:?}", journal.message_at(skill_index + 1).expect("transcript message").content).contains("survive restart"),
+        format!(
+            "{:?}",
+            journal
+                .message_at(skill_index + 1)
+                .expect("transcript message")
+                .content
+        )
+        .contains("survive restart"),
         "skill should precede queued user text"
     );
     assert!(
@@ -917,15 +924,18 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
             .clone();
         let journal = crate::session::Session::load(&session_id).unwrap();
         let skill = journal
-            .messages
-            .iter()
+            .iter_messages()
             .position(|m| {
                 m.display_role == Some(crate::session::StoredDisplayRole::System)
                     && format!("{:?}", m.content).contains("Modes skill instructions")
             })
             .expect("skill entry");
         assert!(
-            format!("{:?}", journal.messages[skill + 1].content).contains("follow-up"),
+            format!(
+                "{:?}",
+                journal.iter_messages().nth(skill + 1).unwrap().content
+            )
+            .contains("follow-up"),
             "{mode}"
         );
         drop(writer);
@@ -1043,7 +1053,7 @@ async fn attachments_reach_the_provider_over_daemon_socket() {
         matches!(&user.attachments[2], jcode_session_types::StoredAttachment::PastedText { text } if text == "one\ntwo")
     );
     let persisted = crate::session::Session::load(&history.0).unwrap();
-    assert!(persisted.messages.iter().any(|message| {
+    assert!(persisted.iter_messages().any(|message| {
         message
             .attachment_data
             .as_ref()
@@ -1112,7 +1122,10 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
     ] {
         let before = provider.calls.load(Ordering::SeqCst);
         let mut session = Session::create(None, None);
-        session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(home._home.path().to_string_lossy().into_owned()),
+            ..session.workspace()
+        });
         session.set_pinned_skill_names(vec!["restore-probe".into()]);
         if role == Role::Assistant {
             session.add_message(
@@ -1124,9 +1137,9 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
             );
         }
         session.add_message(role, vec![content]);
-        assert_eq!(session.status, SessionStatus::Active);
+        assert_eq!(session.status(), SessionStatus::Active);
         session.save().unwrap();
-        let id = session.id;
+        let id = session.id().to_owned();
 
         let (reader, mut writer) = crate::transport::Stream::connect(&socket)
             .await
@@ -1173,7 +1186,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
             .clone();
         {
             let agent = agent.lock().await;
-            let last = agent.messages().last().unwrap();
+            let last = agent.iter_messages().last().unwrap();
             assert_eq!(last.display_role, Some(StoredDisplayRole::System));
             assert!(last.content.iter().any(|block| matches!(block,
                 ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Stay concise."))));
@@ -1195,7 +1208,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
         if should_resume {
             assert!(after > before, "unfinished turn never reached the provider");
             let session = Session::load(&id).unwrap();
-            assert!(session.messages.last().is_some_and(|last| {
+            assert!(session.iter_messages().last().is_some_and(|last| {
                 last.role == Role::Assistant && last.content.iter().any(|block| {
                     matches!(block, ContentBlock::Text { text, .. } if text == "completed")
                 })

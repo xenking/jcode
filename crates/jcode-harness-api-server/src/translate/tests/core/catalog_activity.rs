@@ -85,16 +85,25 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
     let _home = ScopedJcodeHome::new("catalog-context");
     let mut session =
         jcode_base::session::Session::create_with_id("catalog_context".to_owned(), None, None);
-    session.model = Some("example-model".into());
-    session.reasoning_effort = Some("high".into());
+    session.apply_route(jcode_base::session::Route {
+        model: Some("example-model".into()),
+        ..session.route()
+    });
+    session.apply_limits(jcode_base::session::Limits {
+        reasoning_effort: Some("high".into()),
+        ..session.limits()
+    });
     session.pinned_skills = vec!["swarm".into(), "selfdev".into()];
-    session.route_api_method = Some("openrouter".into());
-    session.last_provider_request_at = Some(session.updated_at);
+    session.apply_route(jcode_base::session::Route {
+        route_api_method: Some("openrouter".into()),
+        ..session.route()
+    });
+    session.set_last_provider_request_at_for_tests(Some(session.updated_at()));
     session.replace_messages(serde_json::from_value(json!([
         {"id":"reply", "role":"assistant", "content":[{"type":"text", "text":"response"}], "timestamp":"2024-01-01T00:00:01Z"},
         {"id":"prompt", "role":"user", "content":[{"type":"text", "text":"next prompt"}], "timestamp":"2024-01-01T00:00:03Z"}
     ]))
-    .unwrap();
+    .unwrap());
     jcode_base::recent_session_index::upsert_session(&session).unwrap();
 
     let event = only_reply_event(
@@ -102,12 +111,12 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
             .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 1})),
     );
     let wire = serde_json::to_value(event).unwrap();
-    assert_eq!(wire["sessions"][0]["session_id"], session.id);
+    assert_eq!(wire["sessions"][0]["session_id"], session.id());
     assert_eq!(
         wire["sessions"][0]["context"],
         json!({
             "model": "example-model", "reasoning_effort": "high", "modes": ["swarm", "selfdev"],
-            "cache_expires_at_ms": session.updated_at.timestamp_millis() + 300_000,
+            "cache_expires_at_ms": session.updated_at().timestamp_millis() + 300_000,
             "activity": {"origin": "user", "last_agent_activity_at_ms": 1_704_067_201_000_i64,
                          "last_message_at_ms": 1_704_067_203_000_i64},
         })
@@ -139,7 +148,11 @@ fn catalog_republishes_prompt_and_reply_after_each_save() {
     assert_eq!(listed_activity(&mut bridge), (None, None));
 
     session.add_message(Role::User, Message::user("new prompt").content);
-    session.messages.last_mut().unwrap().timestamp = Some("2024-01-01T00:00:01Z".parse().unwrap());
+    session
+        .messages_mut_for_tests()
+        .last_mut()
+        .unwrap()
+        .timestamp = Some("2024-01-01T00:00:01Z".parse().unwrap());
     let prompt = 1_704_067_201_000;
     session.save().unwrap();
     assert_eq!(listed_activity(&mut bridge), (Some(prompt), None));
@@ -150,7 +163,11 @@ fn catalog_republishes_prompt_and_reply_after_each_save() {
     );
 
     session.add_message(Role::Assistant, Message::assistant_text("reply").content);
-    session.messages.last_mut().unwrap().timestamp = Some("2024-01-01T00:00:02Z".parse().unwrap());
+    session
+        .messages_mut_for_tests()
+        .last_mut()
+        .unwrap()
+        .timestamp = Some("2024-01-01T00:00:02Z".parse().unwrap());
     let reply = 1_704_067_202_000;
     session.save().unwrap();
     assert_eq!(listed_activity(&mut bridge), (Some(reply), Some(reply)));
@@ -177,7 +194,10 @@ fn backfill_adds_missing_message_time_without_replacing_old_activity() {
         None,
         Some("Old catalog test".into()),
     );
-    session.model = Some("example-model".into());
+    session.apply_route(jcode_base::session::Route {
+        model: Some("example-model".into()),
+        ..session.route()
+    });
     session.save().unwrap();
     let journal = home.path.join(format!("sessions/{id}.journal.jsonl"));
     std::fs::write(&journal, concat!(

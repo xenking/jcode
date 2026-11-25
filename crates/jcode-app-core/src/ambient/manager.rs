@@ -180,7 +180,7 @@ impl AmbientManager {
         self.queue.len()
     }
 
-    pub(super) fn next_queue_check(&self) -> Option<DateTime<Utc>> {
+    pub(crate) fn next_queue_check(&self) -> Option<DateTime<Utc>> {
         self.queue.next_maintenance()
     }
 }

@@ -610,7 +610,7 @@ fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
         None,
         |id, _, selfdev, _| {
             assert!(selfdev);
-            super::super::inherit_visible_spawn_preferences(&parent.id, id)?;
+            super::super::inherit_visible_spawn_preferences(parent.id(), id)?;
             let child = crate::session::Session::load_startup_stub(id)?;
             assert!(child.is_canary());
             assert_eq!(
@@ -1027,9 +1027,12 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Persist after the agent is built so it reflects the authoritative on-disk
     // snapshot the spawn path will read when the agent lock is unavailable.
     let mut session = crate::session::Session::create_with_id("coord_busy".to_string(), None, None);
-    session.model = Some("claude-opus-4-6".to_string());
-    session.provider_key = Some("claude-api".to_string());
-    session.route_api_method = Some("claude-api".to_string());
+    session.apply_route(crate::session::Route {
+        model: Some("claude-opus-4-6".to_string()),
+        provider_key: Some("claude-api".to_string()),
+        route_api_method: Some("claude-api".to_string()),
+        ..session.route()
+    });
     session
         .save_prepared()
         .expect("persist coordinator session");
@@ -1200,9 +1203,12 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     crate::env::set_var("JCODE_HOME", temp.path());
     let agent = test_agent_with_working_dir("routing_busy", "/tmp/coord").await;
     let mut session = crate::session::Session::create_with_id("routing_busy".into(), None, None);
-    session.model = Some("claude-opus-4-6".into());
-    session.provider_key = Some("claude-api".into());
-    session.route_api_method = Some("claude-api".into());
+    session.apply_route(crate::session::Route {
+        model: Some("claude-opus-4-6".into()),
+        provider_key: Some("claude-api".into()),
+        route_api_method: Some("claude-api".into()),
+        ..session.route()
+    });
     session.set_canary("self-dev");
     session
         .set_agent_model_override("review", Some("review-override".into()))
@@ -1295,7 +1301,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
         serde_json::to_value(&stored_child).unwrap()["pinned_skill"],
         "pinned-probe"
     );
-    assert_eq!(stored_child.messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b,
+    assert_eq!(stored_child.iter_messages().flat_map(|m| &m.content).filter(|b| matches!(b,
         crate::message::ContentBlock::Text { text, .. } if text.contains("INHERITED_MODE_BODY")
     )).count(), 1, "worker receives the announcement before any turn");
     assert_eq!(child.provider_model(), "gpt-5.5");
