@@ -201,15 +201,37 @@ pub async fn fetch_openai_model_catalog(
     access_token: &str,
     account_label: Option<&str>,
 ) -> Result<OpenAIModelCatalog> {
+    fetch_openai_model_catalog_at(OPENAI_CODEX_MODELS_URL, access_token, account_label).await
+}
+
+const OPENAI_CODEX_MODELS_URL: &str =
+    "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
+
+/// Workspace (Business/Team/Enterprise) logins share one OAuth identity across
+/// several ChatGPT workspaces, and the backend decides which workspace's models
+/// to list from the `chatgpt-account-id` header, exactly as it does for the
+/// usage and responses calls. The token carries the same account id in its
+/// claims, so it is read from there and the catalog lists the models of the
+/// workspace the session will actually run on.
+fn catalog_account_id(access_token: &str) -> Option<String> {
+    crate::auth::codex::extract_account_id(access_token)
+}
+
+async fn fetch_openai_model_catalog_at(
+    url: &str,
+    access_token: &str,
+    account_label: Option<&str>,
+) -> Result<OpenAIModelCatalog> {
     note_openai_model_catalog_refresh_attempt();
 
     let client = crate::egress::client("openai", account_label).await?;
-    let resp = client
-        .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .timeout(CATALOG_REQUEST_TIMEOUT)
-        .send()
-        .await?;
+    let mut request = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", access_token));
+    if let Some(account_id) = catalog_account_id(access_token) {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+    let resp = request.timeout(CATALOG_REQUEST_TIMEOUT).send().await?;
 
     if !resp.status().is_success() {
         return Err(catalog_status_error(
@@ -383,6 +405,77 @@ pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn token_with_account(account_id: &str) -> String {
+        use base64::Engine as _;
+        let encode = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        format!(
+            "{}.{}.sig",
+            encode(serde_json::json!({"alg": "none"})),
+            encode(serde_json::json!({
+                "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
+            }))
+        )
+    }
+
+    /// Serve one canned response and hand back the raw request it received.
+    async fn serve_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/codex/models", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buf).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&received).to_ascii_lowercase()
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn workspace_login_catalog_fetch_names_its_workspace() {
+        let (url, request) =
+            serve_once(r#"{"models":[{"slug":"gpt-6.2-sol"},{"slug":"gpt-9-future"}]}"#).await;
+        let catalog = fetch_openai_model_catalog_at(
+            &url,
+            &token_with_account("acct-business-workspace"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            request
+                .await
+                .unwrap()
+                .contains("chatgpt-account-id: acct-business-workspace"),
+            "the catalog request must name the workspace like every other Codex call"
+        );
+        // A model absent from every fallback array is still discovered.
+        assert_eq!(catalog.available_models, ["gpt-6.2-sol", "gpt-9-future"]);
+    }
+
+    #[tokio::test]
+    async fn personal_login_catalog_fetch_sends_no_workspace() {
+        let (url, request) = serve_once(r#"{"models":[{"slug":"gpt-6.2-sol"}]}"#).await;
+        fetch_openai_model_catalog_at(&url, "opaque-token", None)
+            .await
+            .unwrap();
+        assert!(!request.await.unwrap().contains("chatgpt-account-id"));
+    }
 
     #[test]
     fn openai_catalog_service_tiers_preserve_known_and_unknown() {
