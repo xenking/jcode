@@ -785,7 +785,7 @@ async fn send_history_from_persisted_session(
         .reasoning_effort()
         .map(str::to_owned)
         .or_else(|| provider.reasoning_effort());
-    let agent_model_overrides = session.agent_model_overrides().clone();
+    let agent_model_overrides = session.agent_model_overrides();
     let inferred_interrupted = was_interrupted
         .is_none()
         .then(|| session_interrupted_by_reload(&session));

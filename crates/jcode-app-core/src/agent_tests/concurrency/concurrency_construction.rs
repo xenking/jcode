@@ -112,7 +112,7 @@ async fn provisional_agent_defers_presence_markers_until_committed() {
     let marker = crate::storage::active_pids_dir()
         .expect("active_pids dir")
         .join(agent.session.id());
-    assert!(*agent.session.status() == crate::session::SessionStatus::Active);
+    assert!(agent.session.status() == crate::session::SessionStatus::Active);
     assert!(
         !marker.exists(),
         "placeholder must not write a presence marker"

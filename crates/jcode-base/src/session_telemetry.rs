@@ -126,7 +126,7 @@ pub fn save_context(
         measured_at: chrono::Utc::now(),
         context_tokens,
         context_limit,
-        compaction: session.compaction().cloned(),
+        compaction: session.compaction(),
         route_api_method: session.route_api_method().map(str::to_owned),
         serving_provider: Some(serving_provider.to_ascii_lowercase()),
         credential,
@@ -178,7 +178,7 @@ impl SessionTelemetry {
             && self.model.as_deref() == session.model()
             && self.provider.as_deref() == session.provider_key()
             && self.route_api_method.as_deref() == session.route_api_method()
-            && self.compaction.as_ref() == session.compaction()
+            && self.compaction == session.compaction()
     }
 }
 

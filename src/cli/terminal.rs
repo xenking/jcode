@@ -195,7 +195,7 @@ pub fn install_panic_hook() {
 
             if std::env::var_os("JCODE_SSH_REMOTE").is_none()
                 && let Ok(mut session) = session::Session::load(&session_id)
-                && should_record_panic_as_crash(session.status())
+                && should_record_panic_as_crash(&session.status())
             {
                 session.mark_crashed(Some(format!("Panic: {}", info)));
                 let _ = session.save();

@@ -1448,7 +1448,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
 
         assert_eq!(child.parent_id(), Some(app.session.id()));
         assert!(child.messages().is_empty());
-        assert_eq!(child.compaction_state(), Some(&transfer_compaction));
+        assert_eq!(child.compaction().as_deref(), Some(&transfer_compaction));
         assert_eq!(child.model(), Some("test-model"));
         assert_eq!(child.provider_key(), Some("test-provider"));
         assert_eq!(child.system_prompt(), app.session.system_prompt());

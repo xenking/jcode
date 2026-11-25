@@ -132,7 +132,7 @@ pub(super) async fn create_headless_session(
         if let Ok(parent) = crate::session::Session::load_startup_stub(parent_id) {
             new_agent.inherit_pinned_skill(&parent)?;
             for (target, model) in parent.agent_model_overrides() {
-                new_agent.set_agent_model_override(target, Some(model.clone()))?;
+                new_agent.set_agent_model_override(&target, Some(model))?;
             }
         }
     }

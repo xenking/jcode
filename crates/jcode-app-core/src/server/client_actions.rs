@@ -248,7 +248,7 @@ pub(super) async fn set_session_agent_model(
     } else {
         let mut session = Session::load_startup_stub(session_id)?;
         session.set_agent_model_override(target, model)?;
-        Ok(session.agent_model_overrides().clone())
+        Ok(session.agent_model_overrides())
     }
 }
 
@@ -267,9 +267,7 @@ pub(super) async fn set_global_agent_model(
             session.agent_model_overrides.clone()
         }))
     } else {
-        Ok(Session::load_startup_stub(session_id)?
-            .agent_model_overrides()
-            .clone())
+        Ok(Session::load_startup_stub(session_id)?.agent_model_overrides())
     }
 }
 
@@ -883,7 +881,7 @@ pub(super) async fn handle_transfer(
     let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction_state().cloned(),
+        parent.compaction().map(|state| (*state).clone()),
     )
     .await
     {

@@ -93,8 +93,9 @@ pub fn build_brief(session: &Session) -> CatchupBrief {
     let tool_counts = collect_tool_counts(session);
     let validation_notes = collect_validation_notes(&rendered);
     let activity_steps = collect_activity_steps(session);
-    let (reason, tags) = reason_and_tags(session.status());
-    let needs_from_user = infer_needs_from_user(session.status(), latest_agent_response.as_deref());
+    let (reason, tags) = reason_and_tags(&session.status());
+    let needs_from_user =
+        infer_needs_from_user(&session.status(), latest_agent_response.as_deref());
 
     CatchupBrief {
         reason,
@@ -118,8 +119,8 @@ pub fn render_markdown(
 ) -> String {
     let display_name = session.display_name().to_string();
     let icon = crate::id::session_icon(&display_name);
-    let status_icon = status_icon(session.status());
-    let status_label = status_label(session.status());
+    let status_icon = status_icon(&session.status());
+    let status_label = status_label(&session.status());
     let updated_ago = format_time_ago(brief.updated_at);
     let source_label = source_session_id
         .and_then(crate::id::extract_session_name)

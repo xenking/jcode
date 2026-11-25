@@ -768,7 +768,7 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
         assert!(!crate::catchup::needs_catchup(
             &target_id,
             persisted.updated_at(),
-            persisted.status()
+            &persisted.status()
         ));
     });
 }

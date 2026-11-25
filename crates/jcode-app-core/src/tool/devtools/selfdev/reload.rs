@@ -207,7 +207,7 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     // gone) have nothing left to wait for, so they are not re-announced.
     let member_finished = |session_id: &str| -> bool {
         crate::session::Session::load(session_id)
-            .map(|session| session_status_is_finished(session.status()))
+            .map(|session| session_status_is_finished(&session.status()))
             .unwrap_or(true)
     };
     let pending_awaits: Vec<_> = crate::await_members_state::pending_await_members_for_session(session_id)

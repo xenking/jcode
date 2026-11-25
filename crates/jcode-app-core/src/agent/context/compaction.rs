@@ -639,7 +639,7 @@ impl Agent {
                 &self.provider.model(),
             );
             if let Some(state) = self.session.compaction() {
-                manager.restore_persisted_state_with(state, &provider_messages);
+                manager.restore_persisted_state_with(&state, &provider_messages);
             } else {
                 manager.seed_restored_messages_with(&provider_messages);
             }

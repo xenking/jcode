@@ -49,8 +49,8 @@ impl Session {
         self.migration_epoch
     }
 
-    pub fn status(&self) -> &SessionStatus {
-        &self.status
+    pub fn status(&self) -> SessionStatus {
+        self.status.clone()
     }
 
     pub fn is_debug(&self) -> bool {
@@ -128,8 +128,8 @@ impl Session {
         self.subagent_model.as_deref()
     }
 
-    pub fn agent_model_overrides(&self) -> &AgentModelOverrides {
-        &self.agent_model_overrides
+    pub fn agent_model_overrides(&self) -> AgentModelOverrides {
+        self.agent_model_overrides.clone()
     }
 
     pub fn agent_profile(&self) -> Option<&str> {
@@ -170,13 +170,8 @@ impl Session {
         &self.user_asks
     }
 
-    pub fn compaction(&self) -> Option<&Arc<StoredCompactionState>> {
-        self.compaction.as_ref()
-    }
-
-    /// The compacted view by reference, for callers that do not share it.
-    pub fn compaction_state(&self) -> Option<&StoredCompactionState> {
-        self.compaction.as_deref()
+    pub fn compaction(&self) -> Option<Arc<StoredCompactionState>> {
+        self.compaction.clone()
     }
 
     pub fn replay_events(&self) -> &[StoredReplayEvent] {

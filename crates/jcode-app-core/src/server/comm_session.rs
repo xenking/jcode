@@ -231,7 +231,7 @@ fn inherit_visible_spawn_preferences(parent_id: &str, child_id: &str) -> anyhow:
     let mut child = Session::load(child_id)?;
     child.inherit_pinned_skill(&parent);
     child.apply_worker_routing(crate::session::WorkerRouting {
-        agent_model_overrides: parent.agent_model_overrides().clone(),
+        agent_model_overrides: parent.agent_model_overrides(),
         ..child.worker_routing()
     });
     child.save_prepared()

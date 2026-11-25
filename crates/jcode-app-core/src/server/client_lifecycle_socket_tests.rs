@@ -1175,7 +1175,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
             );
         }
         session.add_message(role, vec![content]);
-        assert_eq!(*session.status(), SessionStatus::Active);
+        assert_eq!(session.status(), SessionStatus::Active);
         session.save().unwrap();
         let id = session.id().to_owned();
 

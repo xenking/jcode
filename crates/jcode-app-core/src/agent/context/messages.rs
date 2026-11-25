@@ -420,7 +420,7 @@ mod durable_error_tests {
                 .compaction()
                 .try_read()
                 .unwrap()
-                .persisted_state_matches(saved.compaction_state())
+                .persisted_state_matches(saved.compaction().as_deref())
         );
     }
 

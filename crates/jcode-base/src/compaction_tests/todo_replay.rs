@@ -217,7 +217,7 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     let mut session = crate::session::Session::load(session.id()).unwrap();
     let mut manager = CompactionManager::new();
     manager.restore_persisted_state(
-        session.compaction_state().unwrap(),
+        session.compaction().as_deref().unwrap(),
         session.messages().len(),
     );
     let with_nudge = request(&mut manager, &mut session, true);

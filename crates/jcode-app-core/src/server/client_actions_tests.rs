@@ -223,7 +223,7 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.compaction(), parent.compaction());
     assert_eq!(child.working_dir(), parent.working_dir());
     assert_eq!(child.model(), parent.model());
-    assert_eq!(*child.status(), crate::session::SessionStatus::Closed);
+    assert_eq!(child.status(), crate::session::SessionStatus::Closed);
     assert_ne!(child.id(), parent.id());
 
     if let Some(prev_home) = prev_home {
@@ -309,7 +309,7 @@ async fn split_empty_live_session_without_persisted_parent() {
     assert_eq!(child.parent_id(), Some(parent.id()));
     assert_eq!(child.working_dir(), parent.working_dir());
     assert_eq!(child.model(), parent.model());
-    assert_eq!(*child.status(), crate::session::SessionStatus::Closed);
+    assert_eq!(child.status(), crate::session::SessionStatus::Closed);
     assert_eq!(child.messages().len(), parent.messages().len() + 1);
     let notice = child.messages().last().unwrap();
     assert_eq!(

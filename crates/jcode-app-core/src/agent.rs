@@ -714,7 +714,7 @@ impl Agent {
             }
         }
         if let Some(state) = self.session.compaction() {
-            manager.restore_persisted_stored_state_with(state, self.session.messages());
+            manager.restore_persisted_stored_state_with(&state, self.session.messages());
         } else {
             manager.seed_restored_stored_messages_with(self.session.messages());
         }
@@ -842,7 +842,7 @@ impl Agent {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) -> Result<()> {
-        if !manager.persisted_state_matches(self.session.compaction_state()) {
+        if !manager.persisted_state_matches(self.session.compaction().as_deref()) {
             self.session
                 .set_compaction(manager.persisted_state().map(Arc::new));
             self.compaction_persist_pending = true;
@@ -1815,7 +1815,7 @@ impl Agent {
         }
         // Provisional agents defer their presence markers, telemetry session,
         // and context message until committed.
-        if *self.session.status() == crate::session::SessionStatus::Active {
+        if self.session.status() == crate::session::SessionStatus::Active {
             self.session.register_presence_markers();
         }
         if self.telemetry_session_deferred {

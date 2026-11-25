@@ -513,7 +513,7 @@ impl App {
         let (mut session, request) = if let Some(child) = child {
             let session = Session::load(&child)?;
             let mut messages = session.messages_for_provider_uncached();
-            if let Some(state) = session.compaction_state() {
+            if let Some(state) = session.compaction().as_deref() {
                 let mut compaction = crate::compaction::CompactionManager::new();
                 compaction.restore_persisted_stored_state_with(state, session.messages());
                 messages = compaction.messages_for_api_with_vision(
