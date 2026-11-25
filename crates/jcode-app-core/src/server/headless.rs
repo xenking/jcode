@@ -157,7 +157,7 @@ pub(super) async fn create_headless_session(
     // reload revival) rather than per turn so a parked ask survives agent
     // recreation.
     if report_back_to_session_id.is_some() {
-        super::ask_escalation::install_bridge(&client_session_id, Arc::clone(swarm_members));
+        super::reload_recovery::install_ask_bridge(&client_session_id, Arc::clone(swarm_members));
     }
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;

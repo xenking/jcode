@@ -74,7 +74,16 @@ fn lock_pending() -> std::sync::MutexGuard<'static, HashMap<String, PendingAsk>>
 /// Install an escalation route for a session that runs turns without an
 /// interactive client (a headless swarm worker). Idempotent: a live route is
 /// reused, so reload revival and repeated spawn paths cannot stack routes.
+#[cfg(test)]
 pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
+    install_bridge_and_then(session_id, members, || {});
+}
+
+pub(super) fn install_bridge_and_then(
+    session_id: &str,
+    members: SwarmMembers,
+    on_published: impl FnOnce(),
+) {
     let root_of: crate::ask_route::RootLookup = {
         let members = Arc::clone(&members);
         Arc::new(move |session: &str| {
@@ -93,7 +102,7 @@ pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
         return;
     };
     let worker_session_id = session_id.to_string();
-    super::reload_recovery::ask_owner_available(session_id);
+    on_published();
     tokio::spawn(async move {
         loop {
             tokio::select! {

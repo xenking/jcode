@@ -7,12 +7,12 @@ use crate::tool::selfdev::ReloadRecoveryDirective;
 use anyhow::Result;
 use futures::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock};
 
 static STORE_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 static CHANGED_PATHS: LazyLock<StdMutex<HashSet<PathBuf>>> =
@@ -334,6 +334,15 @@ pub(super) fn ask_owner_available(session_id: &str) {
     {
         notify_record_ready(path);
     }
+}
+
+pub(super) fn install_ask_bridge(
+    session_id: &str,
+    members: Arc<RwLock<HashMap<String, super::SwarmMember>>>,
+) {
+    super::ask_escalation::install_bridge_and_then(session_id, members, || {
+        ask_owner_available(session_id);
+    });
 }
 
 fn take_changed_paths() -> HashSet<PathBuf> {
@@ -1159,7 +1168,7 @@ impl RecoveryOwner {
             .get(session_id)
             .is_some_and(|member| member.is_headless && member.report_back_to_session_id.is_some())
         {
-            super::ask_escalation::install_bridge(session_id, Arc::clone(&self.swarm.members));
+            install_ask_bridge(session_id, Arc::clone(&self.swarm.members));
         }
         if crate::tool::interactive::sender(session_id).is_none()
             && !super::ask_escalation::has_bridge(session_id)
