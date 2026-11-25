@@ -40,7 +40,7 @@ async fn failed_worker_wakes_its_coordinator_even_when_an_await_covers_it_and_th
     )])));
     let mut bus = crate::bus::Bus::global().subscribe();
 
-    crate::server::swarm::update_member_status_with_report(
+    crate::server::swarm_status::update_member_status_with_report(
         worker,
         "failed",
         Some("No space left on device".into()),
