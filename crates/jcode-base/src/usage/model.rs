@@ -195,9 +195,23 @@ pub(super) struct UsageResponse {
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,
-    #[serde(default)]
+    pub(super) seven_day_sonnet: Option<UsageWindow>,
+    /// Structured limits. A `null` list is an empty list, not a parse failure.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub(super) limits: Vec<StructuredUsageLimit>,
     pub(super) extra_usage: Option<ExtraUsageResponse>,
+    /// Organization spend cap and amount spent. Kept as raw JSON: its shape
+    /// differs between plans, and an unreadable one must not fail the whole
+    /// usage response.
+    pub(super) spend: Option<serde_json::Value>,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Deserialize, Debug)]

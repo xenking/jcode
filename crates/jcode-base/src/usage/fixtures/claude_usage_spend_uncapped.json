@@ -1,0 +1,10 @@
+{
+  "five_hour": null,
+  "seven_day": null,
+  "limits": null,
+  "spend": {
+    "enabled": true,
+    "limit": null,
+    "used": {"amount_minor": 10587, "exponent": 2, "currency": "USD"}
+  }
+}

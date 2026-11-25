@@ -14,7 +14,7 @@
 use jcode_routing_meters::{model_class, parse_rfc3339_unix, percent_reading, window_from_label};
 use jcode_routing_policy::config::Unit;
 use jcode_routing_policy::{Reading, Window};
-use jcode_usage_types::CreditsState;
+use jcode_usage_types::{CreditUnit, CreditsState};
 
 use super::cache::anthropic_window_ratio_at;
 use super::{
@@ -96,7 +96,7 @@ pub(crate) fn anthropic_readings(usage: &UsageData, now: i64) -> Vec<Reading> {
             Some("opus".into()),
         ));
     }
-    windows
+    let mut readings: Vec<Reading> = windows
         .into_iter()
         .filter_map(|(window, value, reset, class)| {
             let percent = f64::from(anthropic_window_ratio_at(usage, value, reset, now)?) * 100.0;
@@ -105,7 +105,32 @@ pub(crate) fn anthropic_readings(usage: &UsageData, now: i64) -> Vec<Reading> {
             }
             pct(window, percent, reset, class, now)
         })
-        .collect()
+        .collect();
+    readings.extend(monthly_spend_reading(usage, aged));
+    readings
+}
+
+/// The dollars an organization account has spent this month against its cap.
+/// Spend only grows within a month, so a sample older than the polling
+/// interval still speaks for a spent cap and for nothing else. An unreadable
+/// or absent amount is no reading.
+fn monthly_spend_reading(usage: &UsageData, aged: bool) -> Option<Reading> {
+    let credits = usage
+        .credits
+        .as_ref()
+        .filter(|credits| credits.state == CreditsState::Known && credits.unit == CreditUnit::Usd)?;
+    let used = credits.used?;
+    if aged && !credits.limit.is_some_and(|limit| used >= limit) {
+        return None;
+    }
+    Some(Reading {
+        window: Window::CALENDAR_MONTH,
+        unit: Unit::Usd,
+        used,
+        limit: credits.limit,
+        resets_at: None,
+        model_class: None,
+    })
 }
 
 /// OpenAI/Codex windows. Each window's length comes from its own name, so a

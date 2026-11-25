@@ -43,6 +43,8 @@ pub enum ResetMode {
     Expiring { within_secs: i64 },
 }
 #[cfg(test)]
+mod anthropic_org_tests;
+#[cfg(test)]
 mod anthropic_probe_tests;
 #[cfg(test)]
 mod loopback_tests;
@@ -313,51 +315,78 @@ async fn fetch_anthropic_usage_data_uncached(
     Ok(usage)
 }
 
+/// The structured limit of one `kind` (`session` is the five-hour window,
+/// `weekly_all` the seven-day one). Newer responses can carry a window only
+/// here, with the flat field null.
+fn structured_limit<'a>(
+    data: &'a UsageResponse,
+    kind: &str,
+) -> Option<&'a model::StructuredUsageLimit> {
+    data.limits
+        .iter()
+        .find(|limit| limit.kind.as_deref() == Some(kind) && limit.percent.is_some())
+}
+
 /// The cached usage sample a successful Anthropic usage response describes.
 fn usage_data_from_response(data: &UsageResponse) -> UsageData {
+    let flat = |window: &Option<model::UsageWindow>| {
+        window.as_ref().and_then(|window| window.utilization)
+    };
+    let session = structured_limit(data, "session");
+    let weekly = structured_limit(data, "weekly_all");
+    let mut model_scoped: Vec<ModelScopedUsageWindow> = data
+        .limits
+        .iter()
+        .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
+        .filter_map(|limit| {
+            let model_name = limit.scope.as_ref()?.model.as_ref()?.display_name.clone()?;
+            Some(ModelScopedUsageWindow {
+                model_name,
+                utilization: usage_percent_to_ratio(limit.percent?),
+                resets_at: limit.resets_at.clone(),
+            })
+        })
+        .collect();
+    if let Some(sonnet) = data.seven_day_sonnet.as_ref()
+        && let Some(percent) = sonnet.utilization
+        && !model_scoped
+            .iter()
+            .any(|window| window.model_name.eq_ignore_ascii_case("sonnet"))
+    {
+        model_scoped.push(ModelScopedUsageWindow {
+            model_name: "Sonnet".to_string(),
+            utilization: usage_percent_to_ratio(percent),
+            resets_at: sonnet.resets_at.clone(),
+        });
+    }
     UsageData {
-        five_hour: data
+        // A window the response does not report is unknown, never 0% used.
+        five_hour: flat(&data.five_hour)
+            .or(session.and_then(|limit| limit.percent))
+            .map(usage_percent_to_ratio)
+            .unwrap_or(-1.0),
+        five_hour_resets_at: data
             .five_hour
             .as_ref()
-            .and_then(|w| w.utilization)
+            .and_then(|w| w.resets_at.clone())
+            .or_else(|| session.and_then(|limit| limit.resets_at.clone())),
+        seven_day: flat(&data.seven_day)
+            .or(weekly.and_then(|limit| limit.percent))
             .map(usage_percent_to_ratio)
             .unwrap_or(-1.0),
-        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day: data
+        seven_day_resets_at: data
             .seven_day
             .as_ref()
-            .and_then(|w| w.utilization)
-            .map(usage_percent_to_ratio)
-            // A window the response does not report is unknown, never 0% used.
-            .unwrap_or(-1.0),
-        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day_opus: data
-            .seven_day_opus
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(usage_percent_to_ratio),
-        model_scoped: data
-            .limits
-            .iter()
-            .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
-            .filter_map(|limit| {
-                let model_name = limit.scope.as_ref()?.model.as_ref()?.display_name.clone()?;
-                Some(ModelScopedUsageWindow {
-                    model_name,
-                    utilization: usage_percent_to_ratio(limit.percent?),
-                    resets_at: limit.resets_at.clone(),
-                })
-            })
-            .collect(),
+            .and_then(|w| w.resets_at.clone())
+            .or_else(|| weekly.and_then(|limit| limit.resets_at.clone())),
+        seven_day_opus: flat(&data.seven_day_opus).map(usage_percent_to_ratio),
+        model_scoped,
         extra_usage_enabled: data
             .extra_usage
             .as_ref()
             .and_then(|e| e.is_enabled)
             .unwrap_or(false),
-        credits: data
-            .extra_usage
-            .as_ref()
-            .and_then(credits::claude_extra_usage_credits),
+        credits: credits::claude_credits(data),
         fetched_at: Some(Instant::now()),
         last_success_at: Some(Instant::now()),
         refresh_after: None,

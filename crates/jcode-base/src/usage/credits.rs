@@ -96,37 +96,96 @@ pub(super) fn openai_credits(json: &Value) -> Option<CreditsReport> {
     })
 }
 
+/// A USD amount stated as `{amount_minor, exponent, currency}`. Anything else,
+/// another currency included, is unreadable.
+fn minor_money_usd(value: Option<&Value>) -> Option<f64> {
+    let money = value?.as_object()?;
+    let minor = money.get("amount_minor").and_then(Value::as_f64)?;
+    let exponent = money.get("exponent").and_then(Value::as_u64)?;
+    let usd = money
+        .get("currency")
+        .and_then(Value::as_str)
+        .is_some_and(|currency| currency.eq_ignore_ascii_case("usd"));
+    let amount = minor / 10f64.powi(i32::try_from(exponent).ok()?);
+    (usd && minor >= 0.0 && amount.is_finite()).then_some(amount)
+}
+
+/// Claude `spend`: an organization's spend cap and what has been spent. The
+/// cap is `null` when the organization states none. `None` when spend is off
+/// or the field is not an object. `Unknown` when it is on but states no
+/// readable amount spent.
+fn claude_spend_credits(spend: &Value) -> Option<CreditsReport> {
+    let spend = spend.as_object()?;
+    if spend.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let used = minor_money_usd(spend.get("used"));
+    let limit = minor_money_usd(spend.get("limit")).filter(|limit| *limit > 0.0);
+    Some(CreditsReport {
+        state: if used.is_some() {
+            CreditsState::Known
+        } else {
+            CreditsState::Unknown
+        },
+        unit: CreditUnit::Usd,
+        balance: used
+            .zip(limit)
+            .map(|(used, limit)| (limit - used).max(0.0)),
+        used,
+        limit,
+        ..Default::default()
+    })
+}
+
 /// Claude `extra_usage`: a monthly spend allowance in minor currency units.
-/// `None` when extra usage is off. `Unknown` when it is on but states nothing.
-pub(super) fn claude_extra_usage_credits(
-    extra: &super::model::ExtraUsageResponse,
-) -> Option<CreditsReport> {
+/// `None` when extra usage is off. `Unknown` when it is on but states nothing
+/// readable, which includes any currency other than dollars.
+fn claude_extra_usage_credits(extra: &super::model::ExtraUsageResponse) -> Option<CreditsReport> {
     if extra.is_enabled != Some(true) {
         return None;
     }
-    let scale = 10f64.powi(i32::try_from(extra.decimal_places.unwrap_or(2)).unwrap_or(2));
-    let used = extra.used_credits.map(|amount| amount / scale);
-    let limit = extra.monthly_limit.map(|amount| amount / scale);
     let usd = extra
         .currency
         .as_deref()
         .is_none_or(|currency| currency.eq_ignore_ascii_case("usd"));
+    if !usd {
+        return Some(CreditsReport {
+            state: CreditsState::Unknown,
+            unit: CreditUnit::Usd,
+            ..Default::default()
+        });
+    }
+    let scale = 10f64.powi(i32::try_from(extra.decimal_places.unwrap_or(2)).unwrap_or(2));
+    let used = extra.used_credits.map(|amount| amount / scale);
+    let limit = extra.monthly_limit.map(|amount| amount / scale);
     Some(CreditsReport {
         state: if used.is_some() || limit.is_some() {
             CreditsState::Known
         } else {
             CreditsState::Unknown
         },
-        unit: if usd {
-            CreditUnit::Usd
-        } else {
-            CreditUnit::Credits
-        },
+        unit: CreditUnit::Usd,
         balance: used.zip(limit).map(|(used, limit)| (limit - used).max(0.0)),
         used,
         limit,
         ..Default::default()
     })
+}
+
+/// What a Claude usage response says about credits and spend. The `spend`
+/// object is the organization's own statement, so it wins over the older
+/// `extra_usage` block.
+pub(super) fn claude_credits(response: &super::model::UsageResponse) -> Option<CreditsReport> {
+    response
+        .spend
+        .as_ref()
+        .and_then(claude_spend_credits)
+        .or_else(|| {
+            response
+                .extra_usage
+                .as_ref()
+                .and_then(claude_extra_usage_credits)
+        })
 }
 
 /// Cursor `GetCurrentPeriodUsage`: plan spend, bonus spend and the on-demand
@@ -450,8 +509,10 @@ mod tests {
             assert_eq!(report.credits.as_ref().map(|c| c.state), Some(state));
             let readings = crate::usage::routing_readings::anthropic_readings(&data, 1_800_000_000);
             assert!(
-                readings.is_empty(),
-                "routing must not read an unknown window as 0%"
+                readings
+                    .iter()
+                    .all(|reading| reading.unit == jcode_routing_policy::config::Unit::Usd),
+                "routing must not read an unknown window as 0%: {readings:?}"
             );
         }
     }
