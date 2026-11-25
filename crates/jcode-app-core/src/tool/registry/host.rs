@@ -70,7 +70,7 @@ pub(super) trait ToolHost: Send + Sync {
 /// A tool cannot strongly own the registry containing it without creating an
 /// Arc cycle. Upgrade this handle only for the duration of a tool call.
 #[derive(Clone)]
-pub(crate) struct WeakHost {
+pub struct WeakHost {
     upgrade: Arc<dyn Fn() -> Option<Arc<dyn ToolHost>> + Send + Sync>,
 }
 

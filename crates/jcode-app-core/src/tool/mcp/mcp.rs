@@ -166,7 +166,7 @@ impl McpSearchTool {
         }
     }
 
-    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+    pub fn with_registry(mut self, registry: WeakHost) -> Self {
         self.registry = Some(registry);
         self
     }
@@ -328,7 +328,7 @@ impl McpCallTool {
         }
     }
 
-    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+    pub fn with_registry(mut self, registry: WeakHost) -> Self {
         self.registry = Some(registry);
         self
     }
@@ -616,7 +616,7 @@ impl McpManagementTool {
         }
     }
 
-    pub(crate) fn with_registry(mut self, registry: WeakHost) -> Self {
+    pub fn with_registry(mut self, registry: WeakHost) -> Self {
         self.registry = Some(registry);
         self
     }

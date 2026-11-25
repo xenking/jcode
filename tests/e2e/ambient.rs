@@ -212,7 +212,7 @@ async fn test_ambient_end_cycle_tool() -> Result<()> {
     assert_eq!(response, "Cycle complete.");
 
     // The tool should have stored a cycle result
-    let result = jcode::tool::ambient::take_cycle_result();
+    let result = jcode::ambient_tools::take_cycle_result();
     assert!(result.is_some());
     let result = result.unwrap();
     assert_eq!(
@@ -596,7 +596,7 @@ async fn test_full_ambient_cycle_simulation() -> Result<()> {
     assert!(response.contains("Ambient cycle completed"));
 
     // Verify end_ambient_cycle stored the result
-    let result = jcode::tool::ambient::take_cycle_result();
+    let result = jcode::ambient_tools::take_cycle_result();
     assert!(result.is_some());
     let result = result.unwrap();
     assert_eq!(result.memories_modified, 6);

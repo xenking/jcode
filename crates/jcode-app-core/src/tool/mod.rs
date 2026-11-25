@@ -411,7 +411,7 @@ impl Registry {
     }
 
     /// A non-owning handle for the tools stored inside this registry.
-    pub(crate) fn downgrade(&self) -> WeakHost {
+    pub fn downgrade(&self) -> WeakHost {
         let tools = Arc::downgrade(&self.tools);
         let mcp_policy = Arc::clone(&self.mcp_policy);
         let skills = Arc::clone(&self.skills);
