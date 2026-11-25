@@ -189,7 +189,7 @@ class H(BaseHTTPRequestHandler):
                     "update": [{"name": "verify-reload-child", "status": "completed",
                                 "completion_confidence": "verified"}],
                 })}}]
-        elif CONTROL and (match := re.search(r"\[e2e:worker-dm:([a-z0-9_]+):([a-z0-9_]+)\]", prompt)) and not has_tool_result:
+        elif CONTROL and (match := re.search(r"\[e2e:worker-dm:([a-z0-9_-]+):([a-z0-9_]+)\]", prompt)) and not has_tool_result:
             session_id, text_to_worker = match.groups()
             call_id = "call_worker_reload_dm_" + text_to_worker
             if text_to_worker.endswith("_running"):
