@@ -823,11 +823,11 @@ fn import_session_from_file_with_target(
         ..session.route()
     });
     session.apply_workspace(crate::session::Workspace {
-        working_dir: working_dir,
+        working_dir,
         ..session.workspace()
     });
     session.apply_route(crate::session::Route {
-        model: model,
+        model,
         ..session.route()
     });
 
@@ -1171,11 +1171,11 @@ pub fn import_codex_session_from_path(
         ..session.titles()
     });
     session.apply_workspace(crate::session::Workspace {
-        working_dir: working_dir,
+        working_dir,
         ..session.workspace()
     });
     session.apply_route(crate::session::Route {
-        model: model,
+        model,
         ..session.route()
     });
     finalize_imported_session(session, created_at, updated_at)
@@ -1283,11 +1283,11 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
         ..session.titles()
     });
     session.apply_route(crate::session::Route {
-        provider_key: provider_key,
+        provider_key,
         ..session.route()
     });
     session.apply_route(crate::session::Route {
-        model: model,
+        model,
         ..session.route()
     });
     finalize_imported_session(session, created_at, updated_at)
@@ -1436,11 +1436,11 @@ pub fn import_opencode_session_from_path(
         });
     }
     session.apply_route(crate::session::Route {
-        provider_key: provider_key,
+        provider_key,
         ..session.route()
     });
     session.apply_route(crate::session::Route {
-        model: model,
+        model,
         ..session.route()
     });
     finalize_imported_session(session, created_at, updated_at)

@@ -460,7 +460,7 @@ impl Agent {
     pub fn set_memory_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory(&self.session.id());
+            crate::memory::clear_pending_memory(self.session.id());
         }
     }
 }

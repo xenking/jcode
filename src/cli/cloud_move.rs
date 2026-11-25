@@ -693,7 +693,6 @@ pub(crate) fn run_move(
                 + 1;
             let working_dir = sess
                 .working_dir()
-                .clone()
                 .map(PathBuf::from)
                 .or_else(|| std::env::current_dir().ok())
                 .context("session has no working directory")?;
@@ -1586,7 +1585,6 @@ fn export_return_archive(
         let stage = staging.path();
         let working_dir = sess
             .working_dir()
-            .clone()
             .map(PathBuf::from)
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {

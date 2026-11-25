@@ -9,9 +9,7 @@ use super::{
     AgentModelOverrides, Session, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredMessage, StoredReplayEvent, UserAskLedger,
 };
-use crate::kv_cache_monitor::RequestCacheDomain;
 use chrono::{DateTime, Utc};
-use jcode_message_types::WorkerSpeedStatus;
 use std::sync::Arc;
 
 /// Identity, lineage and timestamps.

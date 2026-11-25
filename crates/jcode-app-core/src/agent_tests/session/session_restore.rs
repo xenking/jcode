@@ -81,7 +81,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.graceful_shutdown_signal().is_set());
 
     let status = agent
-        .restore_session(&restored_session.id())
+        .restore_session(restored_session.id())
         .expect("restore session should succeed");
 
     assert_eq!(status, crate::session::SessionStatus::Active);
@@ -163,18 +163,18 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         .save_prepared()
         .expect("save restored session");
 
-    crate::memory::mark_memories_injected(&restored_session.id(), &["memory-stale".to_string()]);
+    crate::memory::mark_memories_injected(restored_session.id(), &["memory-stale".to_string()]);
 
     agent
-        .restore_session(&restored_session.id())
+        .restore_session(restored_session.id())
         .expect("restore session should succeed");
 
     assert!(crate::memory::is_memory_injected(
-        &restored_session.id(),
+        restored_session.id(),
         "memory-persisted"
     ));
     assert!(
-        !crate::memory::is_memory_injected(&restored_session.id(), "memory-stale"),
+        !crate::memory::is_memory_injected(restored_session.id(), "memory-stale"),
         "restore should replace stale in-memory dedup state with persisted session data"
     );
 

@@ -278,7 +278,7 @@ impl Agent {
         &self,
         apply_mcp_exposure: bool,
     ) -> Vec<ToolDefinition> {
-        let sdk = crate::tool::sdk::config(&self.session.id());
+        let sdk = crate::tool::sdk::config(self.session.id());
         let enabled = sdk
             .as_ref()
             .and_then(|c| c.enabled.as_ref())
@@ -312,7 +312,7 @@ impl Agent {
         if apply_mcp_exposure {
             self.apply_mcp_tool_exposure(&mut tools);
         }
-        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id(), tools);
+        let mut tools = crate::tool::sdk::apply_definitions(self.session.id(), tools);
         if let Some(config) = sdk.as_ref() {
             let disabled = config.disabled.iter().cloned().collect();
             tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
@@ -332,7 +332,7 @@ impl Agent {
             &mut tools,
             self.native_deferred_mcp(),
             loader_allowed,
-            |name| crate::tool::sdk::custom(&self.session.id(), name),
+            |name| crate::tool::sdk::custom(self.session.id(), name),
         );
         tools
     }
@@ -638,13 +638,13 @@ impl Agent {
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
         let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
-        let name = if crate::tool::sdk::custom(&self.session.id(), unqualified_name) {
+        let name = if crate::tool::sdk::custom(self.session.id(), unqualified_name) {
             unqualified_name
         } else {
             Registry::resolve_tool_name(unqualified_name)
         };
         let mut sdk_enabled = false;
-        if let Some(config) = crate::tool::sdk::config(&self.session.id()) {
+        if let Some(config) = crate::tool::sdk::config(self.session.id()) {
             let disabled = config.disabled.into_iter().collect();
             anyhow::ensure!(
                 !self.registry.tool_is_disabled(&disabled, name),
@@ -710,7 +710,7 @@ impl Agent {
         {
             return Vec::new();
         }
-        let sdk = crate::tool::sdk::config(&self.session.id());
+        let sdk = crate::tool::sdk::config(self.session.id());
         let enabled: Option<HashSet<String>> = sdk
             .as_ref()
             .and_then(|c| c.enabled.as_ref())

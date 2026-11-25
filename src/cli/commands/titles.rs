@@ -132,12 +132,10 @@ async fn backfill(
 
         let manual_title = session
             .custom_title()
-            .as_deref()
             .is_some_and(|title| !title.trim().is_empty())
             || (session.is_saved()
                 && session
                     .save_label()
-                    .as_deref()
                     .is_some_and(|label| !label.trim().is_empty()));
         if manual_title {
             skipped += 1;

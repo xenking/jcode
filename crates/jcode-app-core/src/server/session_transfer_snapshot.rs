@@ -111,7 +111,7 @@ pub(super) fn create_transfer_child_session(
     }
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.inherit_from(
-        &parent,
+        parent,
         Inherit::SYSTEM_PROMPT
             | Inherit::WORKING_DIR
             | Inherit::ROUTE

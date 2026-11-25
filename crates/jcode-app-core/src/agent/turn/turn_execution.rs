@@ -972,11 +972,11 @@ impl Agent {
         if self.session.migration_lease_block().is_none()
             && crate::turn_activity::global()
                 .snapshot()
-                .session(&self.session.id())
+                .session(self.session.id())
                 .is_some_and(|activity| activity.checkpoint_pending)
         {
             self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(&self.session.id());
+            crate::turn_activity::global().checkpointed(self.session.id());
         }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {

@@ -265,12 +265,12 @@ impl Agent {
     ) -> Result<()> {
         if provider_key.is_some() {
             self.session.apply_route(crate::session::Route {
-                provider_key: provider_key,
+                provider_key,
                 ..self.session.route()
             });
         }
         self.session.apply_route(crate::session::Route {
-            route_api_method: route_api_method,
+            route_api_method,
             ..self.session.route()
         });
         self.session.apply_limits(crate::session::Limits {
@@ -499,8 +499,8 @@ impl Agent {
     }
 
     pub(super) fn model_usage_turn_id(&mut self) -> String {
-        if let Some(id) = &self.session.model_usage_turn_id() {
-            return id.clone().to_owned();
+        if let Some(id) = self.session.model_usage_turn_id() {
+            return id.to_owned();
         }
         // Old sessions and direct loop callers have no durable anchor yet.
         // Internal reminders and tool-result rows do not start a logical turn.
@@ -784,7 +784,7 @@ impl Agent {
                         provider_key.as_deref(),
                         choice.mode
                     ) == choice.mode
-                    && self.session.is_worker_speed_approved(&choice),
+                    && self.session.is_worker_speed_approved(choice),
                 "This retune would invalidate the worker's approved speed. Select Standard before retuning."
             );
         }
@@ -1296,7 +1296,7 @@ impl Agent {
 
     pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
         self.session.apply_route(crate::session::Route {
-            provider_key: provider_key,
+            provider_key,
             ..self.session.route()
         });
     }

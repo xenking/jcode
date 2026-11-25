@@ -181,7 +181,7 @@ impl Agent {
             }
 
             logging::debug_lazy(|| format!("Tool starting: {}", tc.name));
-            crate::session_metrics::record_activity(&self.session.id());
+            crate::session_metrics::record_activity(self.session.id());
             if inline_output_tap {
                 // Surface the tool execution on the coordinator's inline
                 // viewport immediately: workers spend most wall-clock time
@@ -206,7 +206,7 @@ impl Agent {
                     (handle, Some(started))
                 } else {
                     (
-                        crate::runtime_activity::spawn_session(&self.session.id(), async move {
+                        crate::runtime_activity::spawn_session(self.session.id(), async move {
                             let execution = tool_handoff::run_tool(
                                 registry_clone,
                                 tool_name_for_spawn,
@@ -241,7 +241,7 @@ impl Agent {
                 &self.registry,
                 &tc.name,
                 &tc.input,
-                &self.session.id(),
+                self.session.id(),
                 foreground_budget,
             )
             .await
@@ -294,7 +294,7 @@ impl Agent {
 
             self.unlock_tools_if_needed(&tc.name);
             let tool_elapsed = tool_start.elapsed();
-            crate::session_metrics::record_activity(&self.session.id());
+            crate::session_metrics::record_activity(self.session.id());
 
             if let Some(result) = tool_result {
                 // Normal tool completion
@@ -506,7 +506,7 @@ impl Agent {
                     .adopt_with_options(
                         &tc.name,
                         tool_handoff::handoff_display_name(&tc.input),
-                        &self.session.id(),
+                        self.session.id(),
                         true,
                         false,
                         tool_handle,

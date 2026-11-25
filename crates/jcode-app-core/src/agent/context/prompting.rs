@@ -543,7 +543,6 @@ impl Agent {
                     self.session.pinned_skill_arguments(name),
                     self.session
                         .working_dir()
-                        .as_deref()
                         .map(std::path::Path::new),
                 )
             })
