@@ -16,6 +16,63 @@ static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static COMPLETIONS: std::sync::LazyLock<watch::Sender<()>> =
     std::sync::LazyLock::new(|| watch::channel(()).0);
 
+/// Terminal results whose durable commit failed (disk full, read-only state
+/// dir). The in-memory result is authoritative for this process: the wake is
+/// delivered anyway, readers see the wait as resolved, and every read retries
+/// the write so the marker lands once the filesystem recovers.
+///
+/// Keyed by the state file path, so a result is only ever visible to, and
+/// flushed into, the state directory it was meant for.
+static UNPERSISTED_FINALS: std::sync::Mutex<
+    Option<HashMap<std::path::PathBuf, PersistedAwaitMembersState>>,
+> = std::sync::Mutex::new(None);
+
+fn with_unpersisted<R>(
+    f: impl FnOnce(&mut HashMap<std::path::PathBuf, PersistedAwaitMembersState>) -> R,
+) -> R {
+    let mut guard = UNPERSISTED_FINALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(guard.get_or_insert_with(HashMap::new))
+}
+
+/// Retry committing every held result. A superseded or already-final disk
+/// record means the result no longer needs holding.
+fn flush_unpersisted() {
+    with_unpersisted(|held| {
+        if held.is_empty() {
+            return;
+        }
+        let mut committed = false;
+        held.retain(|path, entry| {
+            if is_stale(entry) {
+                return false;
+            }
+            let disk = crate::storage::read_json::<PersistedAwaitMembersState>(&path).ok();
+            if disk.is_some_and(|disk| {
+                disk.created_at_unix_ms > entry.created_at_unix_ms
+                    || (disk.created_at_unix_ms == entry.created_at_unix_ms
+                        && disk.final_response.is_some())
+            }) {
+                return false;
+            }
+            if crate::storage::write_json(path, &*entry).is_ok() {
+                committed = true;
+                return false;
+            }
+            true
+        });
+        if committed {
+            invalidate_pending_scan();
+        }
+    });
+}
+
+fn unpersisted_final(key: &str) -> Option<PersistedAwaitMembersState> {
+    let path = crate::durable_state::state_path(AWAIT_MEMBERS_DIR, key);
+    with_unpersisted(|held| held.get(&path).cloned())
+}
+
 pub(crate) fn subscribe_await_completion() -> watch::Receiver<()> {
     COMPLETIONS.subscribe()
 }
@@ -268,7 +325,24 @@ pub(super) fn request_key(
 }
 
 pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
-    load_json_state(AWAIT_MEMBERS_DIR, key, is_stale)
+    flush_unpersisted();
+    let disk: Option<PersistedAwaitMembersState> =
+        load_json_state(AWAIT_MEMBERS_DIR, key, is_stale);
+    match (unpersisted_final(key), disk) {
+        (Some(held), disk)
+            if disk
+                .as_ref()
+                .is_none_or(|disk| held_supersedes(&held, disk)) =>
+        {
+            Some(held)
+        }
+        (_, disk) => disk,
+    }
+}
+
+/// Whether a result held in memory is the latest word on a persisted record.
+fn held_supersedes(held: &PersistedAwaitMembersState, disk: &PersistedAwaitMembersState) -> bool {
+    held.created_at_unix_ms >= disk.created_at_unix_ms && disk.final_response.is_none()
 }
 
 pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
@@ -419,13 +493,20 @@ pub(super) fn persist_final_response(
     if superseded {
         return (next, false);
     }
-    // The terminal result is the durable delivery marker. Never publish the
-    // completion if that marker could not be committed, otherwise a restart
-    // can publish the same result again from the still-pending primary.
+    // The terminal result is the durable delivery marker, but a lost wake is
+    // worse than a duplicate one. If the marker cannot be committed (disk
+    // full), deliver anyway and keep the result in memory: this process then
+    // treats the wait as resolved, and every later read retries the write. A
+    // restart before the retry succeeds may replay the wake from the
+    // still-pending record, which is the accepted cost.
     let path = crate::durable_state::state_path(AWAIT_MEMBERS_DIR, &next.key);
     if let Err(error) = crate::storage::write_json(&path, &next) {
-        crate::logging::warn(&format!("Failed to persist await completion: {error}"));
-        return (next, false);
+        crate::logging::warn(&format!(
+            "Failed to persist await completion, delivering from memory: {error}"
+        ));
+        with_unpersisted(|held| held.insert(path.clone(), next.clone()));
+    } else {
+        with_unpersisted(|held| held.remove(&path));
     }
     invalidate_pending_scan();
     COMPLETIONS.send_replace(());
@@ -488,6 +569,7 @@ pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwai
 }
 
 fn scan_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
+    flush_unpersisted();
     let dir = state_dir(AWAIT_MEMBERS_DIR);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -513,7 +595,9 @@ fn scan_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersSt
             let _ = std::fs::remove_file(path);
             continue;
         }
-        if state.is_pending() {
+        if state.is_pending()
+            && !unpersisted_final(&state.key).is_some_and(|held| held_supersedes(&held, &state))
+        {
             pending.push(state);
         }
     }

@@ -276,7 +276,7 @@ async fn finalize_await(
 
 /// Finalize durably before delivery. Recovery can combine newly finalized
 /// results without replaying one notification/wake per historical wait.
-async fn finish_await(
+pub(super) async fn finish_await(
     runtime: &AwaitMembersRuntime,
     state: &PersistedAwaitMembersState,
     completed: bool,

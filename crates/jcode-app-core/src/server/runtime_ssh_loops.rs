@@ -343,7 +343,7 @@ fn merge_live_background_tasks(snapshot: &mut todo::followup::TodoSnapshot, live
 
 /// A turn that ended with a background await in flight is waiting, not idle.
 /// The await's wake re-enters this loop with fresh state.
-fn session_has_pending_await(session_id: &str) -> bool {
+pub(super) fn session_has_pending_await(session_id: &str) -> bool {
     super::pending_await_members_for_session(session_id)
         .iter()
         .any(|state| state.background && state.wake && state.is_pending())
