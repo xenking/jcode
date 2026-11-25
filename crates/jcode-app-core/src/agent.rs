@@ -149,7 +149,6 @@ enum CompactionBoundary {
 }
 
 #[path = "agent/context/cache_request.rs"]
-#[path = "agent/context/cache_request.rs"]
 mod cache_request;
 #[path = "agent/tools/tool_replay.rs"]
 mod tool_replay;
