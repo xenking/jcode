@@ -139,7 +139,6 @@ pub fn set_org(provider: &str, label: &str, org: Option<&str>) -> Result<()> {
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

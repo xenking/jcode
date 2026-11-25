@@ -8,6 +8,7 @@ impl Config {
         let mut effective_disabled_tools: Vec<String> =
             self.tools.selection().disabled_tools.into_iter().collect();
         effective_disabled_tools.sort();
+        let agents = self.agents.summary();
 
         format!(
             r#"**Configuration** (`{}`)
@@ -41,31 +42,7 @@ impl Config {
 - Hotkey: `{}`
 - Timeout: {}s
 
-**Display:**
-- Diff mode: {}
-- Centered: {}
-- Markdown spacing: {}
-- LaTeX rendering: {}
-- Pin images: {}
-- Queue mode: {}
-- Auto server reload: {}
-- Mouse capture: {}
-- Debug socket: {}
-- Emoji: {}
-- Idle animation: {}
-- Prompt entry animation: {}
-- Compact notifications: {}
-- Chat native scrollbar: {}
-- Side panel native scrollbar: {}
-- Disabled animations: {}
-- Performance tier: {}
-- Animation FPS: {}
-- Redraw FPS: {}
-- Copy badge Alt label: {}
-- Show agentgrep output: {}
-- Tool call details: {}
-- Theme: {}
-- Custom colors: {}
+{}
 
 **Features:**
 - Check updates: {}
@@ -173,59 +150,7 @@ impl Config {
             },
             self.dictation.key,
             self.dictation.timeout_secs,
-            self.display.diff_mode.label(),
-            self.display.centered,
-            self.display.markdown_spacing.label(),
-            self.display.latex_rendering.as_str(),
-            self.display.pin_images,
-            self.display.queue_mode,
-            self.display.auto_server_reload,
-            self.display.mouse_capture,
-            self.display.debug_socket,
-            self.display.emoji,
-            self.display.idle_animation,
-            self.display.prompt_entry_animation,
-            self.display.compact_notifications,
-            self.display.native_scrollbars.chat,
-            self.display.native_scrollbars.side_panel,
-            if self.display.disabled_animations.is_empty() {
-                "(none)".to_string()
-            } else {
-                self.display.disabled_animations.join(", ")
-            },
-            if self.display.performance.is_empty() {
-                "auto"
-            } else {
-                &self.display.performance
-            },
-            self.display.animation_fps,
-            self.display.redraw_fps,
-            if self.display.copy_badge_alt_label.trim().is_empty() {
-                "auto"
-            } else {
-                self.display.copy_badge_alt_label.trim()
-            },
-            self.display.show_agentgrep_output,
-            self.display.tool_call_details,
-            if self.display.theme.trim().is_empty() {
-                "auto"
-            } else {
-                self.display.theme.trim()
-            },
-            if self.display.colors.is_empty() {
-                "default (run /colors to customize)".to_string()
-            } else {
-                format!(
-                    "{} custom ({})",
-                    self.display.colors.len(),
-                    self.display
-                        .colors
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            },
+            self.display.summary(),
             self.features.check_updates,
             self.features.memory,
             self.features.swarm,
@@ -280,12 +205,9 @@ impl Config {
             self.provider.openai_native_compaction_mode.as_str(),
             self.provider.openai_native_compaction_threshold_tokens,
             self.provider.cross_provider_failover.as_str(),
-            self.agents
-                .swarm_model
-                .as_deref()
-                .unwrap_or("(inherit current session)"),
-            self.agents.swarm_spawn_mode.as_str(),
-            self.agents.root_effort_for_swarm(),
+            agents.swarm_model,
+            agents.swarm_spawn_mode,
+            agents.swarm_root_effort,
             self.terminal
                 .spawn_hook
                 .as_deref()
@@ -298,12 +220,8 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents.memory_jev_provider,
-            if self.agents.memory_sidecar_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
+            agents.memory_jev_provider,
+            agents.memory_sidecar,
             self.ambient
                 .model
                 .as_deref()

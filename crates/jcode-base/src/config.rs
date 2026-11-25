@@ -15,7 +15,7 @@ pub use jcode_config_types::{
     NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
     ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
     SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, TodoHeaderMode, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    WebSearchConfig, WebSearchEngine, WorkerModelSlot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -93,32 +93,6 @@ snippet_pointer = "/summary"
     assert!(no_count.count_param.is_none());
     assert_eq!(no_count.method, CustomWebSearchMethod::Get);
     assert!(WebSearchConfig::default().custom.is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn agents_jev_models_parse_and_default_unset() {
-    let config: AgentsConfig = toml::from_str(
-        r#"
-memory_jev_model = "typesafe/jev-1.14"
-browser_jev_model = "typesafe/jev-1.14"
-voice_jev_model = "typesafe/jev-1.14"
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        config.memory_jev_model.as_deref(),
-        Some("typesafe/jev-1.14")
-    );
-    assert_eq!(
-        config.browser_jev_model.as_deref(),
-        Some("typesafe/jev-1.14")
-    );
-    assert_eq!(config.voice_jev_model.as_deref(), Some("typesafe/jev-1.14"));
-    let defaults = AgentsConfig::default();
-    assert!(defaults.memory_jev_model.is_none());
-    assert!(defaults.browser_jev_model.is_none());
-    assert!(defaults.voice_jev_model.is_none());
 }
 
 const CONFIG_ENV_KEYS: &[&str] = &[

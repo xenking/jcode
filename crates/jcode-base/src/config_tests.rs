@@ -1,7 +1,7 @@
 use super::{
-    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
-    McpToolsMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig,
-    config_env_fingerprint, populate_context_limits_from_config_ref,
+    AgentsConfig, AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands,
+    LatexRenderingMode, McpToolsMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode,
+    ToolConfig, config_env_fingerprint, populate_context_limits_from_config_ref,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -1728,7 +1728,10 @@ fn dictation_backend_defaults_to_auto_and_parses() {
     let config = Config::default();
     assert_eq!(config.dictation.backend, DictationBackend::Auto);
     assert!(config.dictation.base_url.is_empty());
-    assert!(config.dictation.model.is_empty(), "empty means the backend default");
+    assert!(
+        config.dictation.model.is_empty(),
+        "empty means the backend default"
+    );
     // A command may run as long as a dictation can, not just 90 seconds.
     assert_eq!(config.dictation.timeout_secs, 300);
     let parsed: Config = toml::from_str(
@@ -1903,4 +1906,29 @@ fn retired_routing_and_cache_keys_still_load() {
     // Retired keys are never written back.
     let text = toml::to_string(&config).unwrap();
     assert!(!text.contains("drain_before_reset_h") && !text.contains("max_pings_per_wait"));
+}
+
+#[test]
+fn agents_jev_models_parse_and_default_unset() {
+    let config: AgentsConfig = toml::from_str(
+        r#"
+memory_jev_model = "typesafe/jev-1.14"
+browser_jev_model = "typesafe/jev-1.14"
+voice_jev_model = "typesafe/jev-1.14"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.memory_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(
+        config.browser_jev_model.as_deref(),
+        Some("typesafe/jev-1.14")
+    );
+    assert_eq!(config.voice_jev_model.as_deref(), Some("typesafe/jev-1.14"));
+    let defaults = AgentsConfig::default();
+    assert!(defaults.memory_jev_model.is_none());
+    assert!(defaults.browser_jev_model.is_none());
+    assert!(defaults.voice_jev_model.is_none());
 }

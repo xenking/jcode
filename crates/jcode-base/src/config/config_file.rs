@@ -176,10 +176,10 @@ impl Config {
             .map(str::to_string);
         let mut cfg = Self::load_for_update()?;
         match target {
-            "swarm" => cfg.agents.swarm_model = value,
+            "swarm" => cfg.agents.set_worker_model(WorkerModelSlot::Swarm, value),
             "review" => cfg.autoreview.model = value,
             "judge" => cfg.autojudge.model = value,
-            "memory" => cfg.agents.memory_model = value,
+            "memory" => cfg.agents.set_worker_model(WorkerModelSlot::Memory, value),
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
@@ -291,7 +291,7 @@ impl Config {
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.centered = centered;
+        cfg.display.set_centered(centered);
         cfg.save()?;
         crate::logging::info(&format!("Saved display.centered to config: {}", centered));
         Ok(())
@@ -312,7 +312,7 @@ impl Config {
     /// Update the persisted compact-notifications preference.
     pub fn set_compact_notifications(compact: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.compact_notifications = compact;
+        cfg.display.set_compact_notifications(compact);
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved display.compact_notifications to config: {}",
@@ -324,8 +324,7 @@ impl Config {
     /// Save the todo header mode and keep the legacy pin flag in sync.
     pub fn set_todo_header_mode(mode: TodoHeaderMode) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.todo_header = mode;
-        cfg.display.pin_todos = mode.is_visible();
+        cfg.display.set_todo_header_mode(mode);
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved display.todo_header to config: {}",
@@ -337,7 +336,7 @@ impl Config {
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.show_agentgrep_output = show;
+        cfg.display.set_show_agentgrep_output(show);
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved display.show_agentgrep_output to config: {}",
@@ -349,7 +348,7 @@ impl Config {
     /// Update the persisted LaTeX rendering mode.
     pub fn set_latex_rendering(mode: LatexRenderingMode) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.latex_rendering = mode;
+        cfg.display.set_latex_rendering(mode);
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved display.latex_rendering to config: {}",
@@ -361,7 +360,7 @@ impl Config {
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.tool_call_details = show;
+        cfg.display.set_tool_call_details(show);
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved display.tool_call_details to config: {}",
@@ -375,7 +374,7 @@ impl Config {
     /// Auto-import calls this once with the per-repo chord -> directory layout it
     /// inferred. `imported` is set so the bake never runs twice and later manual
     /// edits are not clobbered.
-    pub fn set_launch_hotkeys(
+    pub(crate) fn set_launch_hotkeys(
         entries: Vec<jcode_config_types::LaunchHotkeyEntry>,
         enabled: bool,
     ) -> anyhow::Result<()> {
@@ -411,7 +410,7 @@ impl Config {
     /// hotkey reinstall), `false` otherwise. Best-effort: errors are logged and
     /// swallowed.
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    pub fn bake_launch_hotkeys_once() -> bool {
+    pub(crate) fn bake_launch_hotkeys_once() -> bool {
         use jcode_import_core::repo_ranking;
 
         let cfg = Self::load();
@@ -496,7 +495,7 @@ impl Config {
 
     /// No-op bake on platforms without global launch hotkeys.
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    pub fn bake_launch_hotkeys_once() -> bool {
+    pub(crate) fn bake_launch_hotkeys_once() -> bool {
         false
     }
 
@@ -695,7 +694,7 @@ impl Config {
         ))
     }
 
-    pub fn external_auth_source_allowed(source_id: &str) -> bool {
+    pub(crate) fn external_auth_source_allowed(source_id: &str) -> bool {
         let source_id = Self::normalize_external_auth_source_id(source_id);
         if source_id.is_empty() {
             return false;
@@ -707,7 +706,10 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
     }
 
-    pub fn external_auth_source_allowed_for_path(source_id: &str, path: &std::path::Path) -> bool {
+    pub(crate) fn external_auth_source_allowed_for_path(
+        source_id: &str,
+        path: &std::path::Path,
+    ) -> bool {
         let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
             return false;
         };
@@ -756,7 +758,7 @@ impl Config {
     /// Startup-sensitive variant that uses the process-cached config snapshot.
     ///
     /// This avoids reloading config.toml repeatedly during cold-start probes.
-    pub fn external_auth_source_allowed_for_path_cached(
+    pub(crate) fn external_auth_source_allowed_for_path_cached(
         source_id: &str,
         path: &std::path::Path,
     ) -> bool {
@@ -784,7 +786,7 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }
 
-    pub fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
+    pub(crate) fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
         let source_id = Self::normalize_external_auth_source_id(source_id);
         if source_id.is_empty() {
             anyhow::bail!("External auth source id cannot be empty");
@@ -810,7 +812,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn allow_external_auth_source_for_path(
+    pub(crate) fn allow_external_auth_source_for_path(
         source_id: &str,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
@@ -834,7 +836,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn revoke_external_auth_source_for_path(
+    pub(crate) fn revoke_external_auth_source_for_path(
         source_id: &str,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
@@ -856,7 +858,7 @@ impl Config {
 
     /// Remove a source-level (non-path) trust decision, e.g. for credentials
     /// that have no stable on-disk path (macOS Keychain items).
-    pub fn revoke_external_auth_source(source_id: &str) -> anyhow::Result<()> {
+    pub(crate) fn revoke_external_auth_source(source_id: &str) -> anyhow::Result<()> {
         let source_id = Self::normalize_external_auth_source_id(source_id);
         if source_id.is_empty() {
             return Ok(());
