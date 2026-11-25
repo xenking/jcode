@@ -76,10 +76,16 @@ pub(super) fn agent_model_target_config_path(target: AgentModelTarget) -> &'stat
 pub(super) fn load_agent_model_override(target: AgentModelTarget) -> Option<String> {
     let cfg = crate::config::Config::load();
     match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model,
+        AgentModelTarget::Swarm => cfg
+            .agents
+            .worker_model(crate::config::WorkerModelSlot::Swarm)
+            .map(str::to_string),
         AgentModelTarget::Review => cfg.autoreview.model,
         AgentModelTarget::Judge => cfg.autojudge.model,
-        AgentModelTarget::Memory => cfg.agents.memory_model,
+        AgentModelTarget::Memory => cfg
+            .agents
+            .worker_model(crate::config::WorkerModelSlot::Memory)
+            .map(str::to_string),
         AgentModelTarget::Ambient => cfg.ambient.model,
     }
 }
@@ -94,10 +100,14 @@ pub(super) fn save_agent_model_override(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
+        AgentModelTarget::Swarm => cfg
+            .agents
+            .set_worker_model(crate::config::WorkerModelSlot::Swarm, value),
         AgentModelTarget::Review => cfg.autoreview.model = value,
         AgentModelTarget::Judge => cfg.autojudge.model = value,
-        AgentModelTarget::Memory => cfg.agents.memory_model = value,
+        AgentModelTarget::Memory => cfg
+            .agents
+            .set_worker_model(crate::config::WorkerModelSlot::Memory, value),
         AgentModelTarget::Ambient => cfg.ambient.model = value,
     }
     cfg.save()
