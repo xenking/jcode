@@ -263,7 +263,7 @@ pub(in super::super) fn render_message_into(
                 }
             }
         }
-        "system" => {
+        "system" | "setting_change" => {
             let content_width = width.saturating_sub(4);
             let cached =
                 get_cached_message_lines(msg, content_width, diff_mode, render_system_message);

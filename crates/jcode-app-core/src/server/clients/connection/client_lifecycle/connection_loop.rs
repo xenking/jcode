@@ -144,6 +144,20 @@ impl ClientConnection {
                                 dispatch_queued_prompt!(self, !super::super::state::turn_stop_log::last_turn_yielded(&self.client_session_id));
                             }
                         }
+                        Ok(BusEvent::SettingChange { session_id, message }) => {
+                            if session_id == self.client_session_id {
+                                send_client_event_best_effort(&self.client_event_tx, ServerEvent::Notification {
+                                    from_session: "jcode".into(),
+                                    from_name: Some("Jcode".into()),
+                                    notification_type: crate::protocol::NotificationType::Message {
+                                        scope: Some("setting_change".into()),
+                                        channel: None,
+                                        tldr: None,
+                                    },
+                                    message,
+                                }, "client_lifecycle: SettingChange");
+                            }
+                        }
                         Ok(BusEvent::BatchProgress(progress)) => {
                             if progress.session_id == self.client_session_id {
                                 send_client_event_best_effort(&self.client_event_tx, ServerEvent::BatchProgress { progress }, "client_lifecycle: BatchProgress");

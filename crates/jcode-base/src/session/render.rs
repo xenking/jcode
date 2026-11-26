@@ -35,8 +35,10 @@ fn display_replay_rows(
             else {
                 return None;
             };
-            if !matches!(role.as_str(), "error" | "swarm_worker_notice")
-                || boundary.is_some_and(|start| event.timestamp < start)
+            if !matches!(
+                role.as_str(),
+                "error" | "swarm_worker_notice" | "setting_change"
+            ) || boundary.is_some_and(|start| event.timestamp < start)
             {
                 return None;
             }

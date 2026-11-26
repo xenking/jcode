@@ -199,6 +199,7 @@ impl Agent {
                 ));
             }
             self.apply_pending_reasoning_effort();
+            self.log_unrecorded_setting_changes();
             self.ensure_session_speed()?;
             let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await?;
 
@@ -1552,6 +1553,7 @@ impl Agent {
                         model: model_after_stream.clone(),
                     },
                 );
+                self.log_setting_changes("the provider switched models mid-request; reason not reported");
                 self.persist_session_best_effort("model fallback");
             }
             // Refresh authoritative credential identity after every upstream

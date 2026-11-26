@@ -366,11 +366,13 @@ impl Agent {
             anyhow::bail!(crate::skill::unknown_skill_message(name));
         }
         let previous = self.active_skill_announcement();
+        self.begin_setting_change();
         self.session.set_pinned_skill_invocation(name, arguments);
         self.active_skill = Some(name.to_owned());
         if self.active_skill_announcement() != previous {
             self.announce_active_skill_inner();
         }
+        self.log_setting_changes("a skill invocation pinned it");
         self.session.save()?;
         Ok(())
     }
@@ -383,6 +385,7 @@ impl Agent {
         if self.session.pinned_skill_names() == next && self.active_skill.as_ref() == next.first() {
             return Ok(());
         }
+        self.begin_setting_change();
         self.session.set_pinned_skill_names(next);
         self.active_skill = self.session.pinned_skill().map(str::to_owned);
         if self.active_skill.is_some() {
@@ -400,6 +403,7 @@ impl Agent {
                 Some(StoredDisplayRole::System),
             );
         }
+        self.log_setting_changes("you changed the mode");
         self.session.save()?;
         Ok(())
     }

@@ -26,6 +26,8 @@ mod compaction;
 
 #[path = "agent_tests/session/pinned_mode.rs"]
 mod pinned_mode;
+#[path = "agent_tests/session/setting_log.rs"]
+mod setting_log;
 
 #[path = "agent_tests/cache/cache_session_affinity.rs"]
 mod cache_session_affinity;

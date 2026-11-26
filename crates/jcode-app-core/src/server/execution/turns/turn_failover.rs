@@ -635,6 +635,7 @@ async fn retry_turn_with_model_fallbacks(
             "failed_over",
             Some(fallback),
         );
+        agent.set_failover_cause(&crate::util::format_error_chain(error));
         if let Err(switch_error) = agent.set_model(fallback) {
             crate::logging::warn(&format!(
                 "Swarm fallback model {fallback} unavailable: {switch_error}"
@@ -969,6 +970,7 @@ pub(super) async fn retry_turn_with_server_failover(
             break;
         }
         let limit_event = usage_limit_event(agent, &message, "failed_over", Some(&target.label));
+        agent.set_failover_cause(&message);
         if let Err(switch_error) = apply_failover_target(agent, &target, &event_tx) {
             crate::logging::warn(&format!(
                 "Server account failover to {} failed: {switch_error}",

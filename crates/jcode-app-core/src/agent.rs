@@ -29,6 +29,8 @@ mod inline_tail;
 mod interrupts;
 #[path = "agent/context/messages.rs"]
 mod messages;
+#[path = "agent/context/setting_log.rs"]
+mod setting_log;
 #[cfg(test)]
 #[path = "agent/session/model_usage_tests.rs"]
 mod model_usage_tests;
@@ -432,6 +434,10 @@ pub struct Agent {
     telemetry_session_deferred: bool,
     /// Whether reasoning effort was explicitly chosen by the user or restored from a saved session.
     reasoning_effort_user_override: bool,
+    /// What the chat log last said about provider, model, effort and mode.
+    setting_log: setting_log::SettingLog,
+    /// Why the next setting change happens, when the caller knows.
+    setting_cause: Option<String>,
     /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
     jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy
@@ -563,6 +569,8 @@ impl Agent {
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
             reasoning_effort_user_override: false,
+            setting_log: setting_log::SettingLog::default(),
+            setting_cause: None,
             jarvis_default_effort_applied: false,
             concurrency_session: None,
         };

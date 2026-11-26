@@ -1453,7 +1453,10 @@ impl BridgeState {
                 let message = event["message"].as_str().unwrap_or("");
                 let notification = &event["notification_type"];
                 if notification["kind"] == "message"
-                    && notification["scope"] == "swarm_worker_control"
+                    && matches!(
+                        notification["scope"].as_str(),
+                        Some("swarm_worker_control" | "setting_change")
+                    )
                     && event["from_session"] == "jcode"
                 {
                     return vec![ServerFrame::event(ApiEvent::SwarmWorkerNotice {

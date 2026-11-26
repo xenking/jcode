@@ -440,6 +440,12 @@ pub enum SessionUpdateStatus {
 
 #[derive(Clone, Debug)]
 pub enum BusEvent {
+    /// A provider, model, effort or mode change that was just written into the
+    /// session's chat log.
+    SettingChange {
+        session_id: String,
+        message: String,
+    },
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
     /// A session's stored todo list, plan or goals were rewritten. Carries the

@@ -89,6 +89,20 @@ fn swarm_worker_control_notice_is_session_scoped_and_not_a_chat_message() {
 }
 
 #[test]
+fn setting_change_notice_reaches_the_chat_as_a_notice_row() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "notification",
+        "from_session": "jcode",
+        "notification_type": {"kind": "message", "scope": "setting_change"},
+        "message": "Model: a → b (you chose it)"
+    }));
+    assert!(matches!(&frames[..], [frame] if matches!(&frame.event,
+        ApiEvent::SwarmWorkerNotice { session_id, message }
+            if session_id == "s1" && message == "Model: a → b (you chose it)")));
+}
+
+#[test]
 fn malformed_image_metadata_is_not_a_successful_empty_history() {
     for field in ["images", "messages"] {
         let mut state = state_with_session();

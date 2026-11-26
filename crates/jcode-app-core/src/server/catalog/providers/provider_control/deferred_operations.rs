@@ -42,6 +42,8 @@ pub(super) fn log_provider_control_completed(operation: &'static str, id: u64, q
     );
 }
 
+const DEFERRED_CAUSE: &str = "you chose it while the agent was busy; applied when it finished";
+
 pub(super) fn spawn_deferred_agent_mutation<F>(
     operation: &'static str,
     id: u64,
@@ -55,6 +57,7 @@ pub(super) fn spawn_deferred_agent_mutation<F>(
     crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired(operation, id, queued_at);
+        agent_guard.set_setting_cause(DEFERRED_CAUSE);
         apply(&mut agent_guard, &client_event_tx);
         log_provider_control_completed(operation, id, queued_at);
     });
@@ -72,11 +75,13 @@ pub(super) fn spawn_deferred_provider_operation<F>(
     let queued_at = log_provider_control_deferred(operation, id);
     crate::runtime_activity::spawn(async move {
         let provider = {
-            let agent_guard = agent.lock().await;
+            let mut agent_guard = agent.lock().await;
             log_provider_control_lock_acquired(operation, id, queued_at);
+            agent_guard.begin_setting_change();
             agent_guard.provider_handle()
         };
         apply(provider, &client_event_tx);
+        agent.lock().await.log_setting_changes(DEFERRED_CAUSE);
         log_provider_control_completed(operation, id, queued_at);
     });
 }
