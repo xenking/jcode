@@ -540,6 +540,14 @@ async fn sdk_socket_cancel_workflow(
             assert!(matches!(snapshot, ServerEvent::QueuedPrompts { prompts, .. }
                 if prompts.len() == 1 && prompts[0].content == "plain during update"));
             until(&mut client_reader, |event| matches!(event, ServerEvent::Done { id: 2 })).await;
+            if queued_test == Some("hold_reattach") {
+                // The replacement daemon delivers the parked prompt only for a
+                // session it can load by id, even one that never ran a turn.
+                assert!(
+                    crate::session::session_path(&session_id).unwrap().exists(),
+                    "a prompt parked behind an update must leave a loadable session"
+                );
+            }
             send(&mut client_writer, json!({"type":"queue_prompt","id":3,"client_id":"queued-during-update","content":"queued during update","mode":"after_yield"})).await;
             until(&mut client_reader, |event| matches!(event, ServerEvent::Ack { id: 3 })).await;
             until(&mut client_reader, is_held_notice).await;

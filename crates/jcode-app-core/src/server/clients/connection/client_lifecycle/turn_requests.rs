@@ -48,6 +48,17 @@ impl ClientConnection {
             );
             return true;
         }
+        // A session that never ran a turn has no file yet. The replacement daemon
+        // can deliver this prompt only to a session it can load by id. A locked
+        // agent is running a turn, which persists the session itself.
+        if let Ok(mut agent) = self.agent.try_lock()
+            && let Err(error) = agent.persist_session_now()
+        {
+            crate::logging::warn(&format!(
+                "Could not persist session {} for a prompt parked behind an update: {error:#}",
+                self.client_session_id
+            ));
+        }
         send_client_event_best_effort(
             &self.client_event_tx,
             held_for_update_notice(),
