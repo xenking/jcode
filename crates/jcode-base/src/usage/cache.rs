@@ -1195,7 +1195,11 @@ mod stale_account_snapshot_tests {
         assert_eq!(snapshot.additional_windows[1].usage_ratio, 0.61);
         assert_eq!(snapshot.additional_windows[2].label, "Opus 7d");
         assert!(snapshot.summary_with(true).contains("Fable 7d 73% used"));
-        assert!(snapshot.summary_with(false).contains("Future Zenith 界 7d 39% left"));
+        assert!(
+            snapshot
+                .summary_with(false)
+                .contains("Future Zenith 界 7d 39% left")
+        );
 
         let limits = [
             "5-hour",

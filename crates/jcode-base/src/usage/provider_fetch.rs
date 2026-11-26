@@ -541,10 +541,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
                 usage_percent: pct,
                 resets_at: None,
             });
-            extra_info.push((
-                "Key limit".to_string(),
-                key_limit_line(remaining, limit),
-            ));
+            extra_info.push(("Key limit".to_string(), key_limit_line(remaining, limit)));
         }
     }
 
