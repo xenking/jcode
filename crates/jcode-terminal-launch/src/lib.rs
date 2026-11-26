@@ -790,6 +790,13 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // The developer's own terminal (TERM_PROGRAM, REX_BLOCK, ...) must not leak into detection.
+    fn clear_client_terminal_env() {
+        for key in CLIENT_TERMINAL_ENV_VARS {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
     #[test]
     fn client_terminal_env_replaces_inherited_identity_and_exports_aliases() {
         let mut command = Command::new("hook");
@@ -870,9 +877,9 @@ mod tests {
     #[cfg(unix)]
     fn snapshot_client_terminal_env_captures_set_vars_only() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_client_terminal_env();
         unsafe {
             std::env::set_var("ZELLIJ_SESSION_NAME", "snapshot-test");
-            std::env::remove_var("TMUX");
         }
         let snapshot = snapshot_client_terminal_env();
         assert!(
@@ -890,13 +897,8 @@ mod tests {
     #[cfg(unix)]
     fn detected_resume_terminal_recognizes_ghostty_env() {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_client_terminal_env();
         unsafe {
-            std::env::remove_var("HANDTERM_SESSION");
-            std::env::remove_var("HANDTERM_PID");
-            std::env::remove_var("KITTY_PID");
-            std::env::remove_var("WEZTERM_EXECUTABLE");
-            std::env::remove_var("WEZTERM_PANE");
-            std::env::remove_var("ALACRITTY_WINDOW_ID");
             std::env::set_var("GHOSTTY_RESOURCES_DIR", "/tmp/ghostty");
         }
         #[cfg(target_os = "macos")]
@@ -1160,6 +1162,7 @@ mod tests {
     fn missing_tmux_binary_falls_back_to_detected_emulator() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous_terminal = std::env::var_os("JCODE_TERMINAL");
+        clear_client_terminal_env();
         unsafe {
             std::env::remove_var("JCODE_TERMINAL");
         }
