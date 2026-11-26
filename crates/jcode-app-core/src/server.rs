@@ -1346,6 +1346,8 @@ impl Server {
             .finish_startup_after_bind(main_listener, debug_listener, server_start_time)
             .await;
 
+        let _stop_runtime_on_drop = runtime.cancel_on_drop();
+
         // If either listener exits unexpectedly, stop accepting work and wait
         // for every owned connection task before returning. The normal daemon
         // path runs until process shutdown or exec-based reload.

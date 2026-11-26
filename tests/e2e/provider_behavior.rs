@@ -470,8 +470,14 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     let mut saw_continuation = false;
     let mut resume_all_result: Option<(usize, usize)> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen_events = Vec::new();
     while Instant::now() < deadline && (!saw_continuation || resume_all_result.is_none()) {
-        let mut event = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await??;
+        let Ok(event) = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await
+        else {
+            break;
+        };
+        let mut event = event?;
+        seen_events.push(format!("{event:?}"));
         while let ServerEvent::TurnEvent { event: inner, .. } = event {
             event = *inner;
         }
@@ -495,13 +501,56 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
 
     assert!(
         saw_continuation,
-        "interrupted live session should stream a continuation after resume_all_sessions"
+        "interrupted live session should stream a continuation after resume_all_sessions; seen events: {}",
+        seen_events.join(" | ")
     );
     let (resumed, skipped) =
         resume_all_result.ok_or_else(|| anyhow::anyhow!("did not receive ResumeAllResult"))?;
     assert_eq!(resumed, 1, "exactly one interrupted session should resume");
     assert_eq!(skipped, 0, "no live session should be skipped");
 
+    Ok(())
+}
+
+/// Aborting a server future never reaches `shutdown`. Its accept loops and
+/// recovery owner must still stop: a finished test's lingering owner consumed
+/// the process-wide recovery wake-up of the next test's server, which then
+/// continued its interrupted session only after the 5 s retry.
+#[tokio::test]
+async fn test_aborted_server_stops_accepting_connections() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-abort-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let provider: Arc<dyn jcode::provider::Provider> =
+        Arc::new(MockProvider::with_models(vec!["model-a"]));
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+    drop(wait_for_server_client(&socket_path).await?);
+
+    server_handle.abort();
+    let _ = server_handle.await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stopped = loop {
+        if tokio::net::UnixStream::connect(&socket_path).await.is_err() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    assert!(stopped, "an aborted server kept accepting connections");
     Ok(())
 }
 

@@ -89,6 +89,14 @@ impl ServerRuntime {
         self.tasks.child_token()
     }
 
+    /// Cancels every owned task when dropped. A server future that is aborted
+    /// never reaches `shutdown`, and a dropped `JoinHandle` only detaches its
+    /// task, so without this the accept loops and the recovery owner keep
+    /// running (and keep consuming process-wide recovery wake-ups).
+    pub(super) fn cancel_on_drop(&self) -> tokio_util::sync::DropGuard {
+        self.tasks.cancellation.clone().drop_guard()
+    }
+
     pub(super) fn from_handles(handles: ServerHandles) -> Self {
         Self {
             handles,
