@@ -91,6 +91,7 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Model,
             selected_option: 0,
@@ -177,6 +178,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            icon: None,
         }],
         action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
             provider_id: "claude".to_string(),
@@ -203,6 +205,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                 provider_id: "openai".to_string(),
@@ -248,6 +251,7 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: "/agents swarm".to_string(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm),
             selected_option: 0,
@@ -386,12 +390,13 @@ fn oauth_row_displays_email_instead_of_account_label() {
     let route = &mut picker.entries[0].options[0];
     route.api_method = "openai-oauth@work".into();
     route.detail = "account work · full.person@example.com · expired".into();
+    let icon = crate::routing_view::resolved_account_icon("openai:work");
     assert_eq!(
         route_method_display(route),
-        "oauth · full.person@example.com"
+        format!("{icon} oauth · full.person@example.com")
     );
     route.detail = "account work · quota reached, contact support@example.com".into();
-    assert_eq!(route_method_display(route), "oauth · work");
+    assert_eq!(route_method_display(route), format!("{icon} oauth · work"));
     route.detail = "[global] account work · full.person@example.com".into();
     assert!(route_method_display(route).contains("full.person@example.com"));
     route.api_method = "openai-api-key".into();
@@ -405,10 +410,13 @@ fn oauth_row_shows_the_account_name_and_plan_before_the_email() {
     route.api_method = "claude-oauth@claude-otter".into();
     route.detail =
         "account claude-otter [team · Max 20x] · t***m@example.com · requires extra usage".into();
-    assert_eq!(route_method_display(route), "oauth · team · Max 20x");
+    assert_eq!(route_method_display(route), "🦦 oauth · team · Max 20x");
     // A detail naming another login never labels this one.
     route.api_method = "claude-oauth@claude-fox".into();
-    assert_eq!(route_method_display(route), "oauth · claude-fox");
+    assert_eq!(route_method_display(route), "🦊 oauth · claude-fox");
+    // The daemon's resolved icon (a configured override) wins over the default.
+    route.icon = Some("🚀".into());
+    assert_eq!(route_method_display(route), "🚀 oauth · claude-fox");
 }
 
 #[test]
@@ -426,7 +434,7 @@ fn oauth_email_is_visible_in_unselected_suggestion_rows_and_width_scan() {
             .any(|line| line.to_string().contains("full.person@example.com"))
     );
     let wide = picker_render_width(&picker, 160);
-    assert!(wide >= display_width("oauth · full.person@example.com") + 16);
+    assert!(wide >= display_width("🦊 oauth · full.person@example.com") + 16);
     for width in [24, 40, 60, 80, 160] {
         assert!(picker_render_width(&picker, width) <= width);
     }

@@ -33,7 +33,7 @@ fn header_text(app: &crate::tui::app::App, width: u16) -> String {
 }
 
 #[test]
-fn decision_event_drives_the_header_chip_and_announces_moves_once() {
+fn decision_event_drives_the_header_chip_and_never_writes_the_chat() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -66,12 +66,13 @@ fn decision_event_drives_the_header_chip_and_announces_moves_once() {
     );
 
     handle_server_event(&mut app, decision("claude:spare", &[], None), &mut remote);
-    let last = app.display_messages().last().unwrap();
-    assert!(
-        last.content.contains("now on claude:spare (priority)"),
-        "{}",
-        last.content
+    assert_eq!(
+        app.display_messages().len(),
+        before,
+        "the daemon's one setting_change row announces a move, not a client line"
     );
+    let chip = crate::tui::TuiState::routing_chip(&app).unwrap();
+    assert_eq!(chip.account, "claude:spare");
 }
 
 #[test]
@@ -89,7 +90,13 @@ fn header_chip_follows_the_decision_at_narrow_and_wide_widths() {
     );
     let wide = header_text(&app, 140);
     assert!(wide.contains("claude:team"), "{wide}");
-    assert!(wide.contains("→ claude:spare"), "{wide}");
+    assert!(
+        wide.contains(&format!(
+            "→ {} claude:spare",
+            crate::routing_view::resolved_account_icon("claude:spare")
+        )),
+        "{wide}"
+    );
     for width in [20u16, 32, 48, 64] {
         for line in persistent_header(&app, width) {
             assert!(line.width() < usize::from(width), "width={width}: {line:?}");
@@ -184,7 +191,7 @@ fn esc_cancels_the_gate_and_an_interrupt_closes_it_silently() {
 }
 
 #[test]
-fn acct_command_sends_an_intent_and_prints_the_reply() {
+fn acct_command_sends_an_intent_and_shows_the_reply_transiently() {
     let mut app = create_test_app();
     app.is_remote = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -192,6 +199,7 @@ fn acct_command_sends_an_intent_and_prints_the_reply() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     remote.mark_history_loaded();
     let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+    let before = app.display_messages().len();
 
     app.input = "/acct hold claude:team 2h".into();
     app.cursor_pos = app.input.len();
@@ -221,9 +229,44 @@ fn acct_command_sends_an_intent_and_prints_the_reply() {
         &mut remote,
     );
     assert_eq!(
-        app.display_messages().last().unwrap().content,
-        "holding claude:team for 2h"
+        app.display_messages().len(),
+        before,
+        "an intent reply never lands in the transcript"
     );
+    assert_eq!(
+        app.status_notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("holding claude:team for 2h")
+    );
+}
+
+#[test]
+fn the_routing_table_opens_a_dismissable_overlay_not_a_chat_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = app.display_messages().len();
+    let table =
+        "routing: auto\nthis session: 🦊 claude:fox\n* 🦊 claude:fox  subscription  priority 1";
+
+    handle_server_event(
+        &mut app,
+        ServerEvent::RoutingStatus {
+            id: 1,
+            text: table.into(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.display_messages().len(), before);
+    let (scroll, content) = crate::tui::TuiState::model_status_overlay(&app).unwrap();
+    assert_eq!((scroll, content), (0, table));
+    assert_eq!(
+        crate::tui::TuiState::model_status_overlay_title(&app),
+        "/acct status"
+    );
+    app.handle_model_status_key(KeyCode::Esc).unwrap();
+    assert!(crate::tui::TuiState::model_status_overlay(&app).is_none());
 }
 
 #[test]

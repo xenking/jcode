@@ -1655,6 +1655,10 @@ impl crate::tui::TuiState for App {
             .map(|scroll| (scroll, self.model_status_content.as_str()))
     }
 
+    fn model_status_overlay_title(&self) -> &str {
+        self.model_status_title
+    }
+
     fn commit_log_overlay(&self) -> Option<&crate::tui::commit_log::CommitLogOverlay> {
         self.commit_log_overlay.as_ref()
     }

@@ -661,9 +661,18 @@ fn metric_span(label: &'static str, value: usize, color: Color) -> Span<'static>
 fn provider_item(report: &jcode_usage_types::ProviderUsage) -> UsageOverlayItem {
     let status = provider_status(report);
     let subtitle = provider_subtitle(report);
+    // The account's icon leads wherever the account is named.
+    let title = match report
+        .account
+        .as_ref()
+        .and_then(|account| account.icon.as_deref())
+    {
+        Some(icon) => format!("{icon} {}", report.provider_name),
+        None => report.provider_name.clone(),
+    };
     UsageOverlayItem::new(
         report.provider_name.clone(),
-        report.provider_name.clone(),
+        title,
         subtitle,
         status,
         provider_detail_lines(report),
@@ -935,6 +944,21 @@ mod tests {
         assert!(details.contains("## Limits"));
         assert!(details.contains("5h"));
         assert!(details.contains("now"));
+    }
+
+    #[test]
+    fn an_account_report_leads_with_its_icon() {
+        let report = jcode_usage_types::ProviderUsage {
+            provider_name: "Claude".to_string(),
+            account: Some(jcode_usage_types::AccountIdentity {
+                icon: Some("🦊".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let item = provider_item(&report);
+        assert_eq!(item.title, "🦊 Claude");
+        assert_eq!(item.id, "Claude", "filtering and selection ids stay stable");
     }
 
     #[test]

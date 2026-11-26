@@ -603,8 +603,12 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
             println!();
         }
 
-        println!("{}", provider.provider_name);
-        println!("{}", "-".repeat(provider.provider_name.chars().count()));
+        let title = usage_title(provider);
+        println!("{title}");
+        println!(
+            "{}",
+            "-".repeat(unicode_width::UnicodeWidthStr::width(title.as_str()))
+        );
 
         if let Some(error) = &provider.error {
             println!("error: {}", error);
@@ -688,6 +692,18 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The section title: the account's icon leads wherever the account is named.
+fn usage_title(provider: &UsageProviderReport) -> String {
+    match provider
+        .account
+        .as_ref()
+        .and_then(|account| account.icon.as_deref())
+    {
+        Some(icon) => format!("{icon} {}", provider.provider_name),
+        None => provider.provider_name.clone(),
+    }
 }
 
 fn banked_reset_text(reset: &UsageBankedResetReport) -> String {
@@ -951,6 +967,26 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_sections_lead_with_the_account_icon() {
+        let mut usage = crate::usage::ProviderUsage {
+            provider_name: "Anthropic (claude-fox)".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_title(&usage_provider_report(&usage)),
+            "Anthropic (claude-fox)"
+        );
+        usage.account = Some(crate::usage::AccountIdentity {
+            icon: Some("🦊".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            usage_title(&usage_provider_report(&usage)),
+            "🦊 Anthropic (claude-fox)"
+        );
+    }
 
     #[test]
     fn usage_json_preserves_confirmed_zero_and_distinguishes_unknown_resets() {

@@ -14,8 +14,22 @@ pub(crate) fn configured_account_ids() -> Vec<String> {
 }
 
 impl super::App {
-    /// Record the daemon's routing decision for the header chip. A move to a
-    /// different account is also announced once, with its reason.
+    /// The daemon's answer to `/acct`. The routing table is shown on demand in
+    /// a dismissable overlay and a one-line confirmation as a status notice;
+    /// neither is written into the conversation.
+    pub(super) fn show_routing_reply(&mut self, text: String) {
+        if text.contains('\n') {
+            self.model_status_content = text;
+            self.model_status_title = "/acct status";
+            self.model_status_scroll = Some(0);
+        } else {
+            self.set_status_notice(text);
+        }
+    }
+
+    /// Record the daemon's routing decision for the header chip. The chat gets
+    /// no line for it: the daemon writes one `old → new (cause)` row per real
+    /// account change.
     pub(super) fn apply_routing_decision(
         &mut self,
         account: String,
@@ -23,15 +37,6 @@ impl super::App {
         warnings: usize,
         pending: Option<String>,
     ) {
-        let moved = self
-            .routing_chip
-            .as_ref()
-            .is_some_and(|chip| chip.account != account);
-        if moved {
-            self.push_display_message(super::DisplayMessage::system(format!(
-                "Routing: now on {account} ({reason})"
-            )));
-        }
         let chip = crate::tui::RoutingChip {
             account,
             reason,

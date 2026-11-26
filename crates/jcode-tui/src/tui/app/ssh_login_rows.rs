@@ -45,6 +45,7 @@ fn provider_entry(
                 remote_setup_detail(provider, host, supported)
             ),
             estimated_reference_cost_micros: None,
+            icon: None,
         },
         PickerAction::RemoteLogin {
             provider: provider.id,
@@ -65,6 +66,7 @@ fn import_entry(provider: &'static str, label: &str, host: &str) -> PickerEntry 
                 "Destination: {host}. One-time copy of your selected Jcode-managed {provider} account. Confirmation required. No local credentials read yet. Existing remote logins are never overwritten."
             ),
             estimated_reference_cost_micros: None,
+            icon: None,
         },
         PickerAction::RemoteLogin {
             provider,

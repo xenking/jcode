@@ -117,6 +117,10 @@ pub struct AccountIdentity {
     pub kind: CredentialKind,
     #[serde(default)]
     pub active: bool,
+    /// Resolved account icon: the `[[routing.accounts]]` override, else the
+    /// stable default for the label. Shown first wherever the account is named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// What an account's balance is denominated in.

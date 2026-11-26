@@ -777,6 +777,7 @@ impl App {
                     available: true,
                     detail: "updating model list…".to_string(),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: PickerAction::Model,
                 selected_option: 0,

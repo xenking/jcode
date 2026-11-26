@@ -73,3 +73,59 @@ async fn mode_changes_are_logged() {
         ]
     );
 }
+
+struct LoginProvider(Arc<std::sync::Mutex<String>>);
+
+#[async_trait]
+impl Provider for LoginProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("LoginProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "claude-opus-4-5".into()
+    }
+
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        Some(self.0.lock().unwrap().clone())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(LoginProvider(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn an_unchanged_account_writes_no_rows_and_a_real_move_writes_exactly_one() {
+    let _guard = crate::storage::lock_test_env();
+    let label = Arc::new(std::sync::Mutex::new("claude-fox".to_string()));
+    let provider: Arc<dyn Provider> = Arc::new(LoginProvider(label.clone()));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    for _ in 0..50 {
+        agent.log_unrecorded_setting_changes();
+    }
+    assert!(setting_rows(&agent.session).is_empty(), "no change, no row");
+
+    *label.lock().unwrap() = "claude-otter".into();
+    for _ in 0..50 {
+        agent.log_unrecorded_setting_changes();
+    }
+    let rows = setting_rows(&agent.session);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].starts_with("Provider: 🦊 claude (claude-fox) → 🦦 claude (claude-otter)"),
+        "{rows:?}"
+    );
+}

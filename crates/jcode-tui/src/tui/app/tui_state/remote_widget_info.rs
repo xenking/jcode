@@ -408,6 +408,28 @@ impl App {
             .map(|email| crate::tui::app::helpers::mask_email(&email))
     }
 
+    /// The widget's account line: the session's account icon first, then the
+    /// masked email (or the label when the email is unknown).
+    fn widget_account_named(
+        &self,
+        provider: &crate::tui::info_widget::UsageProvider,
+        hint: Option<String>,
+    ) -> Option<String> {
+        let (key, local_label): (_, fn() -> Option<String>) = match provider {
+            crate::tui::info_widget::UsageProvider::OpenAI => {
+                ("openai", crate::auth::codex::active_account_label)
+            }
+            _ => ("claude", crate::auth::claude::active_account_label),
+        };
+        let label = self
+            .remote_provider_oauth_account_label
+            .clone()
+            .or_else(|| (!self.is_remote).then(local_label).flatten());
+        let Some(label) = label else { return hint };
+        let icon = crate::routing_view::resolved_account_icon(&format!("{key}:{label}"));
+        Some(format!("{icon} {}", hint.unwrap_or(label)))
+    }
+
     pub(super) fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
@@ -418,9 +440,9 @@ impl App {
             info.provider,
             crate::tui::info_widget::UsageProvider::OpenAI
                 | crate::tui::info_widget::UsageProvider::Anthropic
-        ) && let Some(hint) = self.widget_account_hint(route.provider)
-        {
-            info.account_hint = Some(hint);
+        ) {
+            let hint = self.widget_account_hint(route.provider);
+            info.account_hint = self.widget_account_named(&info.provider, hint);
         }
         Some(info)
     }

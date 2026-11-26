@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// `icon provider  masked-email`: the account's icon first. `provider_key` is
+/// the routing id prefix (`claude`, `openai`).
+fn account_label(provider_key: &str, label: &str, name: &str, email: Option<&str>) -> String {
+    let icon = crate::routing_view::resolved_account_icon(&format!("{provider_key}:{label}"));
+    format!("{icon} {name:<9} {}", masked_identity(email))
+}
+
+/// The provider word of an account row's identity text, past its icon.
+fn identity_provider(identity: &str) -> &str {
+    let mut words = identity.split_whitespace();
+    let first = words.next().unwrap_or("");
+    if first.chars().next().is_some_and(char::is_alphanumeric) {
+        first
+    } else {
+        words.next().unwrap_or("")
+    }
+}
+
 pub(super) fn inventory_lines(
     auth: &AuthStatus,
     active: ActiveCredentialOverrides,
@@ -58,7 +76,12 @@ pub(super) fn inventory_lines(
         };
         let mut row = detail(
             oauth_credential_status(expired, usage.as_ref()),
-            format!("{name:<9} {}", masked_identity(account.email.as_deref())),
+            account_label(
+                &account.provider,
+                &account.label,
+                name,
+                account.email.as_deref(),
+            ),
             is_current,
         );
         if quotas.is_empty() || usage.as_ref().is_some_and(|usage| usage.error.is_some()) {
@@ -256,12 +279,14 @@ pub(in super::super) fn fit_account_row(mut row: Line<'static>, budget: usize) -
     let suffix = row.spans.split_off(end);
     let original_identity = row.spans[2].clone();
     // Prefer a short identity over losing any limit, retaining the provider.
-    let provider = original_identity
+    let provider = identity_provider(&original_identity.content);
+    let icon = original_identity
         .content
         .split_whitespace()
         .next()
-        .unwrap_or("");
-    row.spans[2].content = format!(" {provider}").into();
+        .filter(|first| *first != provider)
+        .map_or(String::new(), |icon| format!(" {icon}"));
+    row.spans[2].content = format!("{icon} {provider}").into();
     if row.width() > budget {
         for quota in row.spans[3..].as_chunks_mut::<5>().0 {
             // These are the shared renderer's filled and empty spans. Preserve
@@ -525,7 +550,16 @@ pub(super) fn remote_inventory_lines(
                 && selected_label.is_some_and(|label| label == account.label);
             let mut row = detail(
                 oauth_credential_status(false, Some(usage)),
-                format!("{name:<9} {}", masked_identity(account.email.as_deref())),
+                account_label(
+                    if provider == ActiveProvider::OpenAI {
+                        "openai"
+                    } else {
+                        "claude"
+                    },
+                    &account.label,
+                    name,
+                    account.email.as_deref(),
+                ),
                 is_current,
             );
             let quotas = remaining_bars(usage, display_used);

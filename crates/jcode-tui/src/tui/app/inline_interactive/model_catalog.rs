@@ -28,6 +28,7 @@ impl App {
                     available: true,
                     detail: "use the current active model".to_string(),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: PickerAction::SubagentModelChoice { inherit: true },
                 selected_option: 0,

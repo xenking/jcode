@@ -264,7 +264,11 @@ fn move_to(
     mut outcome: routing_service::Outcome,
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Err(error) = bind(agent, &outcome.account, event_tx) {
+    // The chat's one-line `old → new` row carries the routing reason.
+    agent.set_setting_cause(format!("routing: {}", outcome.reason));
+    let bound = bind(agent, &outcome.account, event_tx);
+    agent.clear_setting_cause();
+    if let Err(error) = bound {
         crate::logging::warn(&format!(
             "routing: could not move {} to {}: {error}",
             agent.session_id(),

@@ -39,7 +39,7 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
                     .as_deref()
                     .map_or(Ok(DEFAULT_HOLD_SECS as i64), secs)?;
             crate::routing_state::update(now, |state| state.set_hold(Some((&account, until))))?;
-            println!("holding {account} for {}", until_text(until, now));
+            println!("holding {} for {}", named(&account), until_text(until, now));
             Ok(())
         }
         RoutingCommand::Ack { account, duration } => {
@@ -50,7 +50,8 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
                     .map_or(Ok(DEFAULT_ACK_SECS as i64), secs)?;
             crate::routing_state::update(now, |state| state.ack(&account, until))?;
             println!(
-                "spending past ask limits on {account} for {}",
+                "spending past ask limits on {} for {}",
+                named(&account),
                 until_text(until, now)
             );
             Ok(())
@@ -62,6 +63,12 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
         }
         RoutingCommand::ImportPool { dry_run } => import_pool(dry_run),
     }
+}
+
+/// An account as people read it: its icon first, then the id.
+fn named(account: impl std::fmt::Display) -> String {
+    let id = account.to_string();
+    format!("{} {id}", crate::routing_view::resolved_account_icon(&id))
 }
 
 fn secs(raw: &str) -> Result<i64> {
@@ -125,10 +132,18 @@ fn status(json: bool, now: i64) -> Result<()> {
         None => println!("paid: {default_paid}"),
     }
     if let Some(hold) = &state.hold {
-        println!("hold: {} for {}", hold.account, until_text(hold.until, now));
+        println!(
+            "hold: {} for {}",
+            named(&hold.account),
+            until_text(hold.until, now)
+        );
     }
     for ack in &state.acks {
-        println!("ack: {} for {}", ack.account, until_text(ack.until, now));
+        println!(
+            "ack: {} for {}",
+            named(&ack.account),
+            until_text(ack.until, now)
+        );
     }
     let saved = crate::routing_view::current_saved_accounts();
     let title_of = |id: &str| {
@@ -146,14 +161,14 @@ fn status(json: bool, now: i64) -> Result<()> {
             .unwrap_or_default();
         let mut line = format!(
             "  {}{}  {:?}  priority {}  on limit {:?}",
-            account.id,
+            named(&account.id),
             title,
             account.kind,
             priority_text(&account.priority),
             account.on_limit
         );
         // Lowercase the words, never the account name the user typed.
-        let line_head = format!("  {}{}", account.id, title);
+        let line_head = format!("  {}{}", named(&account.id), title);
         line = format!("{line_head}{}", line[line_head.len()..].to_lowercase());
         if !account.models.is_empty() {
             line.push_str(&format!("  models {}", account.models.len()));
@@ -169,7 +184,7 @@ fn status(json: bool, now: i64) -> Result<()> {
         for account in unlisted {
             println!(
                 "  {} ({})  {}",
-                account.id,
+                named(&account.id),
                 account.display_name,
                 kind_text(account.kind)
             );
@@ -221,6 +236,7 @@ fn status_json(
                 .map(|account| {
                     serde_json::json!({
                         "id": account.id.as_str(),
+                        "icon": crate::routing_view::resolved_account_icon(account.id.as_str()),
                         "display_name": saved
                             .iter()
                             .find(|saved| saved.id == account.id.as_str())
@@ -242,6 +258,7 @@ fn status_json(
             .iter()
             .map(|account| serde_json::json!({
                 "id": account.id,
+                "icon": crate::routing_view::resolved_account_icon(&account.id),
                 "display_name": account.display_name,
                 "kind": kind_text(account.kind),
                 "routed": account.routed,
@@ -354,4 +371,12 @@ fn import_pool(dry_run: bool) -> Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn accounts_are_named_icon_first() {
+        assert_eq!(super::named("claude:claude-fox"), "🦊 claude:claude-fox");
+    }
 }

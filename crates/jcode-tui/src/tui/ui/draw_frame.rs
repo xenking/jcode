@@ -74,7 +74,13 @@ pub(super) fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     if let Some((scroll, content)) = app.model_status_overlay() {
-        overlays::draw_model_status_overlay(frame, area, scroll, content);
+        overlays::draw_model_status_overlay(
+            frame,
+            area,
+            scroll,
+            app.model_status_overlay_title(),
+            content,
+        );
         finalize_frame_metrics(
             app,
             total_start,

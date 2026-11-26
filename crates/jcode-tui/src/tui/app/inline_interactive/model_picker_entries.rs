@@ -123,6 +123,7 @@ impl App {
                     available: r.available,
                     detail: r.detail.clone(),
                     estimated_reference_cost_micros: r.estimated_reference_cost_micros(),
+                    icon: r.icon.clone(),
                 });
         }
         let grouping_ms = grouping_started.elapsed().as_millis();

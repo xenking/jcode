@@ -128,6 +128,7 @@ impl App {
                     (false, false) => "Cancel without reading or copying local credentials.",
                 }.into(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: PickerAction::RemoteImportDecision { accept },
             selected_option: 0,

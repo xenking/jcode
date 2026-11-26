@@ -767,6 +767,7 @@ pub(super) fn draw_model_status_overlay(
     frame: &mut Frame,
     area: Rect,
     scroll: usize,
+    title: &str,
     content: &str,
 ) {
     clear_area(frame, area);
@@ -778,12 +779,14 @@ pub(super) fn draw_model_status_overlay(
     let dim_style = Style::default().fg(dim_color());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled("  Model Status", title_style)));
-    lines.push(Line::from(Span::styled(
-        "  Live verification evidence for provider/model behavior in jcode",
-        dim_style,
-    )));
-    lines.push(Line::from(""));
+    if title.is_empty() {
+        lines.push(Line::from(Span::styled("  Model Status", title_style)));
+        lines.push(Line::from(Span::styled(
+            "  Live verification evidence for provider/model behavior in jcode",
+            dim_style,
+        )));
+        lines.push(Line::from(""));
+    }
 
     for raw in content.lines() {
         if let Some(title) = raw.strip_prefix("# ") {
@@ -810,7 +813,11 @@ pub(super) fn draw_model_status_overlay(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" /provider-test-coverage "),
+                .title(if title.is_empty() {
+                    " /provider-test-coverage ".to_string()
+                } else {
+                    format!(" {title} ")
+                }),
         )
         .scroll((scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, area);

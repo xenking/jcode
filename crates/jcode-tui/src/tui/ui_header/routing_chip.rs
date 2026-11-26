@@ -26,6 +26,14 @@ pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.width()).sum()
 }
 
+/// `icon id`: the account's icon first, as everywhere an account is named.
+fn named(account: &str) -> String {
+    format!(
+        "{} {account}",
+        crate::routing_view::resolved_account_icon(account)
+    )
+}
+
 fn variant(
     chip: &RoutingChip,
     with_reason: bool,
@@ -34,7 +42,7 @@ fn variant(
 ) -> Vec<Span<'static>> {
     let dim = Style::default().fg(super::dim_color());
     let mut spans = vec![Span::styled(
-        clean(&chip.account),
+        named(&clean(&chip.account)),
         Style::default().fg(rgb(120, 200, 170)),
     )];
     let reason = clean(&chip.reason);
@@ -53,7 +61,7 @@ fn variant(
         && let Some(pending) = chip.pending.as_deref().map(clean).filter(|p| !p.is_empty())
     {
         spans.push(Span::styled(
-            format!(" → {pending}"),
+            format!(" → {}", named(&pending)),
             Style::default().fg(rgb(255, 200, 100)),
         ));
     }

@@ -15,25 +15,45 @@ fn text(spans: &[Span<'_>]) -> String {
     spans.iter().map(|span| span.content.as_ref()).collect()
 }
 
+fn named(account: &str) -> String {
+    format!(
+        "{} {account}",
+        crate::routing_view::resolved_account_icon(account)
+    )
+}
+
 #[test]
 fn chip_shows_account_reason_warnings_and_pending_when_wide() {
     let spans = fit(&chip(Some("claude:spare"), 2), 80).unwrap();
-    assert_eq!(text(&spans), "claude:team · priority ⚠2 → claude:spare");
+    assert_eq!(
+        text(&spans),
+        format!(
+            "{} · priority ⚠2 → {}",
+            named("claude:team"),
+            named("claude:spare")
+        )
+    );
 }
 
 #[test]
 fn chip_sheds_reason_then_warnings_then_pending_as_cells_shrink() {
+    use unicode_width::UnicodeWidthStr;
     let chip = chip(Some("claude:spare"), 1);
-    let widths: Vec<(usize, String)> = [40, 30, 26, 11]
-        .into_iter()
-        .map(|avail| (avail, text(&fit(&chip, avail).unwrap())))
-        .collect();
-    assert_eq!(widths[0].1, "claude:team · priority ⚠ → claude:spare");
-    assert_eq!(widths[1].1, "claude:team ⚠ → claude:spare");
-    assert_eq!(widths[2].1, "claude:team → claude:spare");
-    assert_eq!(widths[3].1, "claude:team");
+    let (team, spare) = (named("claude:team"), named("claude:spare"));
+    let variants = [
+        format!("{team} · priority ⚠ → {spare}"),
+        format!("{team} ⚠ → {spare}"),
+        format!("{team} → {spare}"),
+        team.clone(),
+    ];
+    for (index, variant) in variants.iter().enumerate() {
+        assert_eq!(text(&fit(&chip, variant.width()).unwrap()), *variant);
+        if let Some(next) = variants.get(index + 1) {
+            assert_eq!(text(&fit(&chip, variant.width() - 1).unwrap()), *next);
+        }
+    }
     assert!(
-        fit(&chip, 10).is_none(),
+        fit(&chip, team.width() - 1).is_none(),
         "the account never gets cut mid-word"
     );
 }
@@ -88,7 +108,10 @@ fn model_line_keeps_the_model_and_shows_the_chip_when_there_is_room() {
     );
     let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(rendered.contains("Claude Opus 5.5"));
-    assert!(rendered.ends_with("claude:team · priority"), "{rendered}");
+    assert!(
+        rendered.ends_with(&format!("{} · priority", named("claude:team"))),
+        "{rendered}"
+    );
 
     let narrow = model_header_line(
         "Claude Opus 5.5",

@@ -557,6 +557,7 @@ impl App {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.model_status_scroll = None;
+                self.model_status_title = "";
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.model_status_scroll = Some(scroll.saturating_add(1));

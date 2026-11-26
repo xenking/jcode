@@ -1836,6 +1836,8 @@ pub struct App {
     help_scroll: Option<usize>,
     model_status_scroll: Option<usize>,
     model_status_content: String,
+    /// Border title of the model status overlay; empty for the coverage report.
+    model_status_title: &'static str,
     /// Commit log overlay (None = not visible)
     commit_log_overlay: Option<CommitLogOverlay>,
     /// Session picker overlay (None = not visible)

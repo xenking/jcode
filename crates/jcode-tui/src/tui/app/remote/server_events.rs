@@ -1778,7 +1778,7 @@ fn handle_server_event_inner(
         }
         ServerEvent::RoutingStatus { id, text } => {
             remote.finish_runtime_command(id);
-            app.push_display_message(DisplayMessage::system(text));
+            app.show_routing_reply(text);
             true
         }
         ServerEvent::StdinRequest { .. } => {

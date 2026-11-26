@@ -245,6 +245,7 @@ pub(in super::super) fn handle_model_status_command(app: &mut App, trimmed: &str
 
     if rest.trim().is_empty() {
         app.model_status_content = build_provider_test_coverage_summary();
+        app.model_status_title = "";
         app.model_status_scroll = Some(0);
         return true;
     }
@@ -262,6 +263,7 @@ pub(in super::super) fn handle_model_status_command(app: &mut App, trimmed: &str
     };
 
     app.model_status_content = build_model_status_report(&provider, &model);
+    app.model_status_title = "";
     app.model_status_scroll = Some(0);
     true
 }

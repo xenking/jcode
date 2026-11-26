@@ -35,6 +35,7 @@ fn model_picker_entry() -> crate::tui::PickerEntry {
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            icon: None,
         }],
         action: crate::tui::PickerAction::Model,
         selected_option: 0,

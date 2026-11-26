@@ -33,7 +33,15 @@ impl Agent {
     fn current_settings(&self) -> Settings {
         let provider = self.provider_name();
         let provider = match self.provider.serving_oauth_account_label() {
-            Some(account) => format!("{provider} ({account})"),
+            Some(account) => {
+                let key = match jcode_provider_core::parse_provider_hint(&provider) {
+                    Some(jcode_provider_core::ActiveProvider::OpenAI) => "openai",
+                    _ => "claude",
+                };
+                let icon =
+                    jcode_base::routing_view::resolved_account_icon(&format!("{key}:{account}"));
+                format!("{icon} {provider} ({account})")
+            }
             None => provider,
         };
         let mode = self.session.pinned_skill_names().join(", ");
@@ -59,6 +67,11 @@ impl Agent {
     /// the turn boundary). Consumed by the next [`Self::log_setting_changes`].
     pub(crate) fn set_setting_cause(&mut self, cause: impl Into<String>) {
         self.setting_cause = Some(cause.into());
+    }
+
+    /// Forgets a cause set for a change that did not happen.
+    pub(crate) fn clear_setting_cause(&mut self) {
+        self.setting_cause = None;
     }
 
     /// The next change is an automatic failover; record the provider error that

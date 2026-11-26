@@ -58,6 +58,7 @@ impl App {
                         format!("/agents {}", agent_model_target_slug(target))
                     },
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: PickerAction::AgentTarget(target),
                 selected_option: 0,
@@ -149,6 +150,7 @@ impl App {
                         available: true,
                         detail: format!("{} · {}", assessment.method_detail, provider.menu_detail),
                         estimated_reference_cost_micros: None,
+                        icon: None,
                     }],
                     action: if logout {
                         PickerAction::Logout(provider)
@@ -183,6 +185,7 @@ impl App {
                     available: true,
                     detail: "Auto-detects Anthropic, OpenAI, OpenRouter, Gemini, xAI, Groq, Hugging Face & more".to_string(),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: PickerAction::AutoApiKey,
                 selected_option: 0,
@@ -270,6 +273,7 @@ impl App {
                         available: true,
                         detail: "OpenRouter, Ollama, DeepSeek, Groq, Bedrock, Custom · or type to filter".to_string(),
                         estimated_reference_cost_micros: None,
+                        icon: None,
                     }],
                     action: PickerAction::ExpandLoginProviders,
                     selected_option: 0,
@@ -301,6 +305,7 @@ impl App {
                         available: true,
                         detail: "Log out of every provider with a saved session".to_string(),
                         estimated_reference_cost_micros: None,
+                        icon: None,
                     }],
                     action: PickerAction::LogoutAll,
                     selected_option: 0,
@@ -397,6 +402,7 @@ impl App {
                                 available: true,
                                 detail: "not in current picker catalog".to_string(),
                                 estimated_reference_cost_micros: None,
+                                icon: None,
                             }],
                             action: PickerAction::AgentModelChoice {
                                 target,
@@ -435,6 +441,7 @@ impl App {
                             format!("clear only this session override · {}", inherit_summary)
                         },
                         estimated_reference_cost_micros: None,
+                        icon: None,
                     }],
                     action: PickerAction::AgentModelChoice {
                         target,

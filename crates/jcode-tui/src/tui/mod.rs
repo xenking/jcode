@@ -689,6 +689,11 @@ pub trait TuiState {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         None
     }
+    /// Border title of that overlay when it shows something other than the
+    /// provider test coverage report (empty: the coverage report).
+    fn model_status_overlay_title(&self) -> &str {
+        ""
+    }
     /// Project commit log overlay (None = not showing)
     fn commit_log_overlay(&self) -> Option<&commit_log::CommitLogOverlay> {
         None
@@ -1620,6 +1625,8 @@ pub struct PickerOption {
     pub available: bool,
     pub detail: String,
     pub estimated_reference_cost_micros: Option<u64>,
+    /// The account's resolved icon when the route names one.
+    pub icon: Option<String>,
 }
 
 /// An SSH-backed socket is not a shared-filesystem local daemon. Keep this
