@@ -1614,6 +1614,18 @@ impl RemoteConnection {
         self._dummy_peer.take()
     }
 
+    /// Make every later write on a dummy connection fail with a broken pipe,
+    /// whatever happened to the peer. Dropping the peer is not enough: a child
+    /// process another test spawns concurrently can inherit a copy of the peer
+    /// descriptor (the socketpair is not close-on-exec until a follow-up call),
+    /// which keeps the peer open and lets the write succeed. Shutting down our
+    /// own write side cannot leak that way.
+    #[cfg(test)]
+    pub(crate) fn fail_dummy_writes(&mut self) {
+        let mut writer = self.writer.try_lock().expect("dummy writer is idle");
+        let _ = futures::FutureExt::now_or_never(writer.shutdown());
+    }
+
     #[cfg(test)]
     pub(crate) fn next_request_id_for_test(&self) -> u64 {
         self.next_request_id

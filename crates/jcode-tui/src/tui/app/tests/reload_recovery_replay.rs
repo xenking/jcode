@@ -334,13 +334,35 @@ fn reload_recovery_cloud_only_retry_marks_final_reminder_once() {
 
 #[test]
 fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
+    assert_prepared_send_failure_restores_draft(false);
+}
+
+// A child process spawned by a concurrent test can inherit the peer socket, so
+// closing the peer alone does not make the write fail (seen as a rare flake).
+#[cfg(unix)]
+#[test]
+fn reload_recovery_prepared_send_failure_with_peer_inherited_by_a_child() {
+    assert_prepared_send_failure_restores_draft(true);
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn assert_prepared_send_failure_restores_draft(peer_inherited: bool) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut app = create_test_app();
     app.is_remote = true;
     let mut connection = crate::tui::backend::RemoteConnection::dummy();
     connection.mark_history_loaded();
-    drop(connection.take_dummy_peer());
+    let peer = connection.take_dummy_peer();
+    #[cfg(unix)]
+    let _inherited = peer_inherited.then(|| {
+        use std::os::fd::AsFd;
+        peer.as_ref()
+            .and_then(|peer| peer.as_fd().try_clone_to_owned().ok())
+            .expect("duplicate the peer descriptor")
+    });
+    drop(peer);
+    connection.fail_dummy_writes();
     let images = vec![("image/png".to_string(), "preserved-image".to_string())];
     let result = rt.block_on(remote::submit_prepared_remote_input(
         &mut app,
