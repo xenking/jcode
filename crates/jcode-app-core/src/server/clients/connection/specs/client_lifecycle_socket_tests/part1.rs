@@ -446,6 +446,68 @@ async fn after_yield_queue_runs_when_a_server_owned_turn_yields() {
     handle.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_fifo_crosses_bridge_and_daemon_as_distinct_turns() {
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let daemon_socket = home._runtime.path().join("fifo-sdk-daemon.sock");
+    let api_socket = home._runtime.path().join("fifo-sdk-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()), daemon_socket.clone(), home._runtime.path().join("fifo-sdk-debug.sock"),
+    );
+    let runtime = server.runtime();
+    let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(api_socket.clone(), daemon_socket));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !api_socket.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await.unwrap();
+    let provider2 = provider.clone();
+    let home_path = home._home.path().to_string_lossy().into_owned();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+            socket_path: Some(api_socket), client_name: "jcode-desktop-fifo-test".into(),
+            request_timeout: Some(Duration::from_secs(5)), ensure_runtime: false, ..Default::default()
+        }).unwrap();
+        assert!(client.supports("queued_prompt_fifo_v1"));
+        let session = client.create_session(Some(home_path)).unwrap();
+        let events = client.events(Some(&session.session_id));
+        client.send_message(&session.session_id, "initial", vec![], None).unwrap();
+        handle.block_on(async { tokio::time::timeout(Duration::from_secs(5), provider2.first_started.notified()).await }).unwrap();
+        for (id, image) in [("fifo-a", "aW1hZ2Ux"), ("fifo-b", "aW1hZ2Uy")] {
+            client.queue_prompt(&session.session_id, jcode_sdk::api::QueuedPrompt {
+                client_id: id.into(), content: id.into(), images: vec![("image/png".into(), image.into())],
+                attachments: vec![], mode: jcode_sdk::api::QueuedPromptMode::Queue,
+                active_skill: None, editing: false,
+            }).unwrap();
+        }
+        let queued = client.get_queued_prompts(&session.session_id).unwrap();
+        assert_eq!(queued.iter().map(|p| p.client_id.as_str()).collect::<Vec<_>>(), ["fifo-a", "fifo-b"]);
+        assert!(queued.iter().all(|p| p.mode == jcode_sdk::api::QueuedPromptMode::Queue));
+        provider2.finish_first.notify_one();
+        let mut completed = 0;
+        while completed < 3 {
+            match events.next_timeout(Duration::from_secs(10)).expect("turn event timeout") {
+                jcode_sdk::ApiEvent::TurnDone { .. } => completed += 1,
+                jcode_sdk::ApiEvent::Error { message, .. } => panic!("turn failed: {message}"),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    let messages = provider.messages.lock().unwrap().clone();
+    assert!(messages[1].iter().any(|text| text.contains("fifo-a")));
+    assert!(!messages[1].iter().any(|text| text.contains("fifo-b")));
+    assert!(messages[2].iter().any(|text| text.contains("fifo-b")));
+    let images = provider.images.lock().unwrap().clone();
+    assert!(images[1].iter().any(|(_, image)| image == "aW1hZ2Ux"));
+    assert!(!images[1].iter().any(|(_, image)| image == "aW1hZ2Uy"));
+    assert!(images[2].iter().any(|(_, image)| image == "aW1hZ2Uy"));
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
 #[tokio::test]
 async fn fifo_queue_starts_distinct_turns_over_socket() {
     use serde_json::json;
