@@ -1,6 +1,7 @@
 //! What the routing service needs to know about a session.
 
 use super::Agent;
+use crate::compaction::{MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP};
 use crate::kv_cache_monitor::MissReason;
 use jcode_base::routing_service::{CacheContext, CacheFactors, Seam};
 
@@ -20,11 +21,19 @@ impl Agent {
                         + usage.cache_creation_input_tokens.unwrap_or(0),
                 )
             }) as f64;
+        // The manual compaction floor: enough context and more than the turns it keeps.
+        let compactable = self
+            .registry
+            .compaction()
+            .try_read()
+            .is_ok_and(|manager| manager.context_usage() >= MANUAL_COMPACT_MIN_THRESHOLD)
+            && self.session.iter_messages().count() > MIN_TURNS_TO_KEEP;
         CacheContext {
             seam: Seam::Start,
             context_tokens,
             factors: self.routing_cache_factors(provider),
             summary_tokens: None,
+            compactable,
         }
     }
 

@@ -5,7 +5,7 @@
 //! `[routing] mode = "off"` (the default) returns before any work, so a daemon
 //! without routing runs exactly the code it ran before.
 
-use crate::agent::Agent;
+use crate::agent::{Agent, PreMoveCompaction};
 use crate::protocol::ServerEvent;
 use async_trait::async_trait;
 use jcode_base::routing_service::{self, GateSink, Plan, Seam, TurnInput};
@@ -229,13 +229,20 @@ async fn apply(agent: &mut Agent, plan: Plan, event_tx: &mpsc::UnboundedSender<S
             let from = current_account(agent)
                 .map_or_else(|| "the current account".to_string(), |id| id.to_string());
             match agent.compact_on_current_account().await {
-                Ok((before, after)) => {
+                Ok(PreMoveCompaction::Compacted { before, after }) => {
                     outcome.reason = format!(
                         "compacted ~{}K to ~{}K on warm {from} first, then {}",
                         before / 1000,
                         after / 1000,
                         outcome.reason
                     );
+                }
+                // The move is forced either way; a missing precondition is no news.
+                Ok(PreMoveCompaction::Skipped(why)) => {
+                    crate::logging::info(&format!(
+                        "routing: no compaction before moving {}: {why}",
+                        agent.session_id()
+                    ));
                 }
                 Err(error) => {
                     crate::logging::warn(&format!(

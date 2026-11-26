@@ -1,5 +1,5 @@
 use super::*;
-use crate::message::{Message, ToolDefinition};
+use crate::message::{ContentBlock, Message, Role as MessageRole, ToolDefinition};
 use crate::provider::{EventStream, Provider, RouteSelection};
 use crate::tool::Registry;
 use std::sync::{Arc, Mutex};
@@ -9,14 +9,21 @@ struct Probe {
     name: &'static str,
     selection: Mutex<Option<RouteSelection>>,
     key: Mutex<Option<Option<String>>>,
+    /// Fails every model request, such as the summary of a compaction.
+    broken: bool,
 }
 
 impl Probe {
     fn new(name: &'static str) -> Arc<Self> {
+        Self::with(name, false)
+    }
+
+    fn with(name: &'static str, broken: bool) -> Arc<Self> {
         Arc::new(Self {
             name,
             selection: Mutex::new(None),
             key: Mutex::new(None),
+            broken,
         })
     }
 }
@@ -30,6 +37,9 @@ impl Provider for Probe {
         _: &str,
         _: Option<&str>,
     ) -> anyhow::Result<EventStream> {
+        if self.broken {
+            anyhow::bail!("summary backend down");
+        }
         panic!("binding an account must not send a model request")
     }
 
@@ -59,7 +69,7 @@ impl Provider for Probe {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Probe::new(self.name)
+        Probe::with(self.name, self.broken)
     }
 }
 
@@ -159,5 +169,72 @@ fn a_labelled_key_binds_to_the_session_and_leaves_the_global_key_alone() {
             .to_string(),
         "opencode-go:first",
         "binding a session must not rewrite the global active key"
+    );
+}
+
+/// A session on `opencode-go:first` that routing moves to `second` after a
+/// compaction that cannot succeed. Returns the decision event routing sent.
+async fn forced_move_with_failing_compaction(context_chars: usize) -> (Arc<Probe>, ServerEvent) {
+    crate::provider_catalog::save_labelled_api_key("opencode-go", "first", "sk-first").unwrap();
+    crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "sk-second").unwrap();
+    let probe = Probe::with("OpenCode Go", true);
+    let mut agent = Agent::new(probe.clone(), Registry::empty());
+    for _ in 0..4 {
+        agent.add_message(
+            MessageRole::User,
+            vec![ContentBlock::Text {
+                text: "x".repeat(context_chars),
+                cache_control: None,
+            }],
+        );
+    }
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let outcome = routing_service::Outcome {
+        account: account("opencode-go:second"),
+        reason: "opencode-go:first cannot serve, moving to opencode-go:second".into(),
+        warnings: Vec::new(),
+        pending: None,
+        alternative: false,
+    };
+
+    apply(&mut agent, Plan::CompactThenMove(outcome), &tx).await;
+
+    let decision = std::iter::from_fn(|| events.try_recv().ok())
+        .find(|event| matches!(event, ServerEvent::RoutingDecision { .. }))
+        .expect("the move is reported");
+    (probe, decision)
+}
+
+// A forced move never stalls on its compaction: it moves either way, and only
+// a compaction that started and failed is worth a warning.
+#[tokio::test]
+async fn a_forced_move_proceeds_when_its_compaction_cannot_run() {
+    let _home = Home::new();
+    let (probe, decision) = forced_move_with_failing_compaction(10).await;
+
+    assert_eq!(*probe.key.lock().unwrap(), Some(Some("second".into())));
+    let ServerEvent::RoutingDecision { warnings, .. } = decision else {
+        unreachable!()
+    };
+    assert!(
+        warnings.is_empty(),
+        "nothing to compact is no news: {warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_forced_move_warns_when_its_compaction_fails_unexpectedly() {
+    let _home = Home::new();
+    let (probe, decision) = forced_move_with_failing_compaction(30_000).await;
+
+    assert_eq!(*probe.key.lock().unwrap(), Some(Some("second".into())));
+    let ServerEvent::RoutingDecision { warnings, .. } = decision else {
+        unreachable!()
+    };
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("moved without compacting")),
+        "{warnings:?}"
     );
 }

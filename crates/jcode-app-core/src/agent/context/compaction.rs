@@ -2,6 +2,17 @@ use super::*;
 
 use crate::kv_cache_monitor::{MissReason, RequestCacheDomain};
 
+/// The outcome of the compaction routing runs before a forced account move.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PreMoveCompaction {
+    Compacted {
+        before: u64,
+        after: u64,
+    },
+    /// Compaction could not start: nothing to compact, or one already runs.
+    Skipped(String),
+}
+
 const SWITCHED_ROUTE_COLD_LIMIT: usize = 150_000;
 
 fn cold_route_limit(manager: &crate::compaction::CompactionManager) -> usize {
@@ -75,25 +86,30 @@ impl Agent {
     /// Compacts on the account the session runs on now, while its prompt
     /// cache is warm, and waits for the summary. Routing calls this right
     /// before it moves the session, so the move rewrites only the summary.
-    /// Returns the context size before and after, in tokens.
-    pub(crate) async fn compact_on_current_account(&mut self) -> Result<(u64, u64)> {
+    /// Returns what happened: a compaction with the context size before and
+    /// after in tokens, or the expected reason it could not start. `Err` is
+    /// a compaction that started and failed.
+    pub(crate) async fn compact_on_current_account(&mut self) -> Result<PreMoveCompaction> {
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
         let before = manager.effective_token_count_with(self.session.provider_messages());
         let provider = self.provider.fork();
-        manager
-            .force_compact_with_policy(
-                self.session.provider_messages(),
-                provider,
-                crate::compaction::ManualCompactionPolicy::Standard,
-            )
-            .map_err(|reason| anyhow::anyhow!("cannot compact before the move: {reason}"))?;
+        if let Err(reason) = manager.force_compact_with_policy(
+            self.session.provider_messages(),
+            provider,
+            crate::compaction::ManualCompactionPolicy::Standard,
+        ) {
+            return Ok(PreMoveCompaction::Skipped(reason));
+        }
         self.wait_for_request_compaction(&mut manager).await?;
         if let Some(error) = manager.take_compaction_error() {
             anyhow::bail!("compaction before the move failed: {error}");
         }
         let after = manager.effective_token_count_with(self.session.provider_messages());
-        Ok((before as u64, after as u64))
+        Ok(PreMoveCompaction::Compacted {
+            before: before as u64,
+            after: after as u64,
+        })
     }
 
     pub(super) async fn wait_for_request_compaction(

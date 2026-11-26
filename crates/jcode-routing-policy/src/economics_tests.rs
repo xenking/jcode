@@ -91,6 +91,7 @@ fn cache(seam: Seam, context: f64) -> CacheContext {
         context_tokens: context,
         factors: CacheFactors::ANTHROPIC_1H,
         summary_tokens: Some(20_000.0),
+        compactable: true,
     }
 }
 
@@ -202,6 +203,38 @@ fn compact_then_move_wins_with_a_large_context() {
         matches!(&decision, Decision::CompactThenMove { account, .. } if account.as_str() == "claude:a"),
         "{decision:?}"
     );
+}
+
+// A forced move plans a compaction only when it can run: at 38k tokens the
+// cheaper-looking compaction is skipped, and 400k tokens still compacts.
+#[test]
+fn a_compaction_is_planned_only_when_it_can_run() {
+    let policy = policy(OnLimit::Switch);
+    let b = id("claude:b");
+    let walled = AccountState {
+        readings: vec![weekly_resetting(99.0, NOW + 600)],
+        ..state(99.0, vec![])
+    };
+    let snap = snapshot(state(20.0, vec![]), walled);
+    let run = |context: f64, compactable: bool| {
+        let cache = CacheContext {
+            compactable,
+            ..cache(Seam::Warm, context)
+        };
+        decide(&policy, &snap, &Intents::default(), on_b(&b, cache), NOW)
+    };
+
+    assert!(matches!(
+        run(38_000.0, true),
+        Decision::CompactThenMove { .. }
+    ));
+    let plain = run(38_000.0, false);
+    assert_eq!(account_of(&plain), "claude:a", "{plain:?}");
+    assert_eq!(pending_of(&plain), None);
+    assert!(matches!(
+        run(400_000.0, true),
+        Decision::CompactThenMove { .. }
+    ));
 }
 
 // Rule 3: a short rate limit keeps the session on its account; exhausted

@@ -77,6 +77,9 @@ pub struct CacheContext {
     pub factors: CacheFactors,
     /// `S`: the context after compaction. Unknown estimates a quarter of `C`.
     pub summary_tokens: Option<f64>,
+    /// Compaction can run on the warm session now. Without it a forced move
+    /// is a plain move: planning a compaction that cannot run only hides it.
+    pub compactable: bool,
 }
 
 impl CacheContext {
@@ -105,7 +108,8 @@ pub(crate) struct Options {
     /// `C x write x λnew`.
     pub moved: f64,
     /// Compaction on the warm current account, then a move with `S`.
-    /// `None` when the current account cannot run the compaction.
+    /// `None` when compaction cannot run: the session is not compactable or
+    /// the current account is out of service.
     pub compacted: Option<f64>,
 }
 
@@ -115,7 +119,7 @@ impl Options {
         let s = cache.summary();
         let factors = cache.factors;
         let moved = c * factors.write * target;
-        let compacted = current.map(|lambda| {
+        let compacted = current.filter(|_| cache.compactable).map(|lambda| {
             c * factors.read * lambda + s * OUTPUT_FACTOR * lambda + s * factors.write * target
         });
         Self { moved, compacted }

@@ -217,7 +217,12 @@ quarter of `C` unless measured), `write`/`read` the provider's cache factors and
 | Compact, then move | `C*read*λcur + S*5*λcur + S*write*λnew` |
 | Redeem a reset on the current account | free when the grant would otherwise expire unused; the cache survives |
 
-A plain move wins a tie. Cache factors: Anthropic 5-minute writes 1.25x, 1-hour
+A plain move wins a tie. Compaction is an option only when it can run: the
+context is at least the manual-compaction floor (10% of the budget) and holds
+more messages than the turns compaction keeps. Otherwise the forced move is a
+plain move. When a planned compaction does not start the move still happens
+(it was forced anyway); that is logged at info, and the move carries a warning
+only if a compaction that started failed. Cache factors: Anthropic 5-minute writes 1.25x, 1-hour
 writes 2x, reads 0.1x (the tier follows the session's cache TTL, 5m when at most
 300 s); other providers write 1x and read at the catalog's cached-input ratio,
 1x when unknown.
