@@ -136,7 +136,7 @@ async fn serve_replacement_stops_only_the_registered_socket_owner() {
     };
     registry.register(record.clone());
     registry.save().await.unwrap();
-    let error = super::socket::prepare_serve_replacement(&socket)
+    let error = super::rollout::prepare_serve_replacement(&socket)
         .await
         .unwrap_err()
         .to_string();
@@ -147,14 +147,14 @@ async fn serve_replacement_stops_only_the_registered_socket_owner() {
     registry.register(record);
     registry.save().await.unwrap();
     let _hold_rollout = super::rollout::try_handoff_gate().unwrap().unwrap();
-    let error = super::socket::prepare_serve_replacement(&socket)
+    let error = super::rollout::prepare_serve_replacement(&socket)
         .await
         .unwrap_err()
         .to_string();
     assert!(error.contains("rollout admission"));
     assert!(child.0.try_wait().unwrap().is_none());
     drop(_hold_rollout);
-    let _gate = super::socket::prepare_serve_replacement(&socket)
+    let _gate = super::rollout::prepare_serve_replacement(&socket)
         .await
         .unwrap()
         .unwrap();

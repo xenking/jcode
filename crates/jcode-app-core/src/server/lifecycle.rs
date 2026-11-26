@@ -7,7 +7,7 @@ const TEMP_SERVER_ENV: &str = "JCODE_TEMP_SERVER";
 const SERVER_SCOPE_ENV: &str = "JCODE_SERVER_SCOPE";
 const OWNER_PID_ENV: &str = "JCODE_SERVER_OWNER_PID";
 #[cfg(unix)]
-pub(super) const OWNER_FD_ENV: &str = "JCODE_SERVER_OWNER_FD";
+use super::socket::OWNER_FD_ENV;
 const TEMP_IDLE_SECS_ENV: &str = "JCODE_TEMP_SERVER_IDLE_SECS";
 const DEFAULT_TEMP_IDLE_SECS: u64 = 30 * 60;
 const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;

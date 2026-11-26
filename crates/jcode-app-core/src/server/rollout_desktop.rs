@@ -226,9 +226,9 @@ pub(super) fn stage_windows(
     }
     std::fs::create_dir_all(handoff.parent().context("invalid Desktop handoff path")?)?;
     for (index, window) in windows.iter().enumerate() {
-        super::rollout::save_at(&restore_file(handoff, index), &window.snapshot)?;
+        super::rollout_fs::save_at(&restore_file(handoff, index), &window.snapshot)?;
     }
-    super::rollout::save_at(handoff, &windows)?;
+    super::rollout_fs::save_at(handoff, &windows)?;
     Ok(owners)
 }
 
@@ -265,7 +265,7 @@ pub(super) async fn quit(app: &Path, owners: &[(u32, std::time::SystemTime)]) ->
 }
 
 pub(super) async fn launch(app: &Path, handoff: &Path) -> Result<()> {
-    if let Some(windows) = super::rollout::load_json::<Vec<RestartWindow>>(handoff)? {
+    if let Some(windows) = crate::rollout_journal::load_json::<Vec<RestartWindow>>(handoff)? {
         return launch_windows(app, handoff, windows).await;
     }
     if is_running(app)? {
@@ -298,7 +298,7 @@ async fn launch_windows(app: &Path, handoff: &Path, windows: Vec<RestartWindow>)
                 // A previous launch already consumed this window's staged copy.
                 continue;
             }
-            super::rollout::save_at(&state, &window.snapshot)?;
+            super::rollout_fs::save_at(&state, &window.snapshot)?;
         }
         let mut command = direct_launch_command(app);
         command.args(window.args.iter().filter_map(|arg| match arg.as_str() {

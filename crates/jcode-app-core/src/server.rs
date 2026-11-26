@@ -1133,7 +1133,7 @@ impl Server {
         }
 
         let replacement_gate = if replace {
-            socket::prepare_serve_replacement(&self.socket_path).await?
+            rollout::prepare_serve_replacement(&self.socket_path).await?
         } else {
             None
         };

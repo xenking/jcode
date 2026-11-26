@@ -1,13 +1,13 @@
+pub use crate::server_client::{is_server_ready, wait_for_server_ready};
 use crate::server_endpoint::resolved_socket_identity;
-use crate::transport::Stream;
-use anyhow::Result;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
 pub use crate::server_endpoint::{
     connect_socket, debug_socket_path, default_socket_path, has_live_listener, is_shared_socket,
     socket_has_live_listener, socket_path, socket_path_is_custom,
 };
-pub use crate::server_client::{is_server_ready, wait_for_server_ready};
+use crate::transport::Stream;
+use anyhow::Result;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 pub(super) fn sibling_socket_path(path: &std::path::Path) -> Option<PathBuf> {
     let filename = path.file_name()?.to_str()?;
@@ -32,16 +32,19 @@ pub fn cleanup_socket_pair(path: &std::path::Path) {
 }
 
 #[cfg(unix)]
+pub(super) const OWNER_FD_ENV: &str = "JCODE_SERVER_OWNER_FD";
+
+#[cfg(unix)]
 pub(super) fn same_socket_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     resolved_socket_identity(left) == resolved_socket_identity(right)
 }
 
-enum ServeListener {
+pub(super) enum ServeListener {
     Missing,
     Live(Option<u32>),
 }
 
-async fn serve_listener(path: &std::path::Path) -> Result<ServeListener> {
+pub(super) async fn serve_listener(path: &std::path::Path) -> Result<ServeListener> {
     #[cfg(unix)]
     {
         match Stream::connect(path).await {
@@ -124,61 +127,6 @@ pub(super) async fn acquire_serve_lock(path: &std::path::Path) -> Result<Vec<Dae
             Err(error.context(
                 "Use server reload, server stop --force, or serve --replace after startup",
             ))
-        }
-    }
-}
-
-pub(super) async fn prepare_serve_replacement(
-    path: &std::path::Path,
-) -> Result<Option<(super::rollout::Lock, super::rollout::Lock)>> {
-    let ServeListener::Live(_peer_pid) = serve_listener(path).await? else {
-        return Ok(None);
-    };
-    #[cfg(not(unix))]
-    {
-        anyhow::bail!("serve --replace cannot verify the owner of this listener on this platform");
-    }
-    #[cfg(unix)]
-    {
-        use anyhow::Context;
-        let pid = _peer_pid
-            .filter(|pid| *pid != std::process::id())
-            .context("serve --replace could not verify a different live daemon PID")?;
-        let gate = super::rollout::guard_serve_replacement(path)?;
-        let registered = crate::registry::find_server_by_socket_sync(path)
-            .is_some_and(|server| server.pid == pid);
-        anyhow::ensure!(
-            registered,
-            "Refusing to replace unverified listener pid {pid} on {}",
-            path.display()
-        );
-        anyhow::ensure!(
-            matches!(serve_listener(path).await?, ServeListener::Live(Some(current)) if current == pid),
-            "The listener on {} changed before replacement",
-            path.display()
-        );
-        // Do not signal a process group or escalate on a cached PID.
-        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error).context(format!("Could not stop daemon pid {pid}"));
-            }
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match serve_listener(path).await? {
-                ServeListener::Missing => return Ok(Some(gate)),
-                ServeListener::Live(Some(current)) if current == pid => {}
-                ServeListener::Live(_) => anyhow::bail!(
-                    "A different listener claimed {} during replacement",
-                    path.display()
-                ),
-            }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "Daemon pid {pid} did not exit after SIGTERM. Try jcode server stop --force."
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -436,7 +384,7 @@ async fn spawn_server_notify_impl(
     let (owner, owned_server) = if owned {
         let (owner, server) = UnixStream::pair()?;
         let owner_fd = server.as_raw_fd();
-        cmd.env(super::lifecycle::OWNER_FD_ENV, owner_fd.to_string());
+        cmd.env(OWNER_FD_ENV, owner_fd.to_string());
         // The owner's endpoint stays CLOEXEC in every child. Inherit only
         // the server endpoint, and only in the server's initial exec.
         unsafe {

@@ -65,7 +65,7 @@ pub(in crate::server) fn validate_bundle_replacement(
 
 pub(in crate::server) async fn verify(app: &Path, cli: &str, desktop: &str) -> Result<()> {
     retire_stale_bridges(app, app).await?;
-    crate::server::rollout::preflight(&app.join("Contents/MacOS/jcode"), cli).await?;
+    crate::server::rollout_fs::preflight(&app.join("Contents/MacOS/jcode"), cli).await?;
     let mut version_command =
         tokio::process::Command::new(app.join("Contents/MacOS/jcode-desktop"));
     version_command.arg("--version").kill_on_drop(true);

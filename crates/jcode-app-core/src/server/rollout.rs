@@ -8,11 +8,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::rollout_fs::{preflight, same_commit, save_at};
 use super::{rollout_desktop, rollout_fs};
+use crate::rollout_journal::load_json;
 pub use crate::rollout_journal::{
     Intent, Journal, Mutation, Phase, inspect, journal_path, read_journal,
 };
-pub(super) use crate::rollout_journal::load_json;
 use crate::rollout_journal::{load_at, receipt_path};
 use crate::turn_activity::{ActivitySnapshot, SessionActivity};
 
@@ -90,7 +91,7 @@ fn sweep_before_rollout_at(path: PathBuf, app: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(Lock, Lock)> {
+fn guard_serve_replacement(socket: &Path) -> Result<(Lock, Lock)> {
     let handoff =
         try_handoff_gate()?.context("cannot replace the daemon during rollout admission")?;
     let executor = try_process_lock(&journal_path()?.with_file_name("executor.lock"))?
@@ -105,6 +106,62 @@ pub(super) fn guard_serve_replacement(socket: &Path) -> Result<(Lock, Lock)> {
         );
     }
     Ok((handoff, executor))
+}
+
+pub(super) async fn prepare_serve_replacement(
+    path: &std::path::Path,
+) -> Result<Option<(Lock, Lock)>> {
+    use super::socket::{ServeListener, serve_listener};
+    let ServeListener::Live(_peer_pid) = serve_listener(path).await? else {
+        return Ok(None);
+    };
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("serve --replace cannot verify the owner of this listener on this platform");
+    }
+    #[cfg(unix)]
+    {
+        use anyhow::Context;
+        let pid = _peer_pid
+            .filter(|pid| *pid != std::process::id())
+            .context("serve --replace could not verify a different live daemon PID")?;
+        let gate = guard_serve_replacement(path)?;
+        let registered = crate::registry::find_server_by_socket_sync(path)
+            .is_some_and(|server| server.pid == pid);
+        anyhow::ensure!(
+            registered,
+            "Refusing to replace unverified listener pid {pid} on {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            matches!(serve_listener(path).await?, ServeListener::Live(Some(current)) if current == pid),
+            "The listener on {} changed before replacement",
+            path.display()
+        );
+        // Do not signal a process group or escalate on a cached PID.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context(format!("Could not stop daemon pid {pid}"));
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match serve_listener(path).await? {
+                ServeListener::Missing => return Ok(Some(gate)),
+                ServeListener::Live(Some(current)) if current == pid => {}
+                ServeListener::Live(_) => anyhow::bail!(
+                    "A different listener claimed {} during replacement",
+                    path.display()
+                ),
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Daemon pid {pid} did not exit after SIGTERM. Try jcode server stop --force."
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 pub fn try_preparation_lock() -> Result<Option<File>> {
@@ -219,23 +276,6 @@ fn try_process_lock(path: &Path) -> Result<Option<Lock>> {
         let _ = file;
         bail!("daemon rollout locking requires Unix")
     }
-}
-
-pub(super) fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, path)?;
-    rollout_fs::sync_parent(path)?;
-    Ok(())
 }
 
 struct Store {
@@ -860,10 +900,6 @@ fn drain_timeout(journal: &mut Journal, blockers: Vec<&SessionActivity>) -> anyh
     anyhow::anyhow!("drain timed out: {detail}")
 }
 
-fn same_commit(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
-}
-
 async fn install_snapshot(source: &Path, installed: &Path, label: &str) -> Result<()> {
     if installed.exists() {
         return preflight(installed, label).await;
@@ -884,26 +920,6 @@ async fn install_snapshot(source: &Path, installed: &Path, label: &str) -> Resul
     }
     std::fs::remove_file(&temporary)?;
     rollout_fs::sync_parent(installed)
-}
-
-pub(super) async fn preflight(binary: &Path, label: &str) -> Result<()> {
-    let mut command = tokio::process::Command::new(binary);
-    command.args(["version", "--json"]).kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
-        .await
-        .context("new binary version probe timed out")??;
-    if !output.status.success() {
-        bail!("new binary version probe exited {}", output.status);
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("new binary version probe is not JSON")?;
-    if !value["git_hash"]
-        .as_str()
-        .is_some_and(|hash| same_commit(hash, label))
-    {
-        bail!("new binary reports {}, expected {label}", value["git_hash"]);
-    }
-    Ok(())
 }
 
 #[cfg(unix)]

@@ -5,6 +5,49 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 
+pub(super) fn save_at(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    sync_parent(path)?;
+    Ok(())
+}
+
+pub(super) fn same_commit(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+pub(super) async fn preflight(binary: &Path, label: &str) -> Result<()> {
+    let mut command = tokio::process::Command::new(binary);
+    command.args(["version", "--json"]).kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+        .await
+        .context("new binary version probe timed out")??;
+    if !output.status.success() {
+        bail!("new binary version probe exited {}", output.status);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("new binary version probe is not JSON")?;
+    if !value["git_hash"]
+        .as_str()
+        .is_some_and(|hash| same_commit(hash, label))
+    {
+        bail!("new binary reports {}, expected {label}", value["git_hash"]);
+    }
+    Ok(())
+}
+
 pub(super) fn copy_bundle(source: &Path, destination: &Path) -> Result<()> {
     if !source.is_dir() {
         bail!("bundle source is not a directory: {}", source.display());
