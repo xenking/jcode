@@ -230,12 +230,18 @@ async fn stdio_stream_handshake_ping_and_eof_release_daemon_connection() {
     )
     .await
     .unwrap();
+    let (mut daemon, _) = listener.accept().await.unwrap();
+    let (probe, _) = listener.accept().await.unwrap();
+    let mut probe = BufReader::new(probe);
+    let mut probe_line = String::new();
+    read_frame(&mut probe, &mut probe_line).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&probe_line).unwrap()["type"], "ping");
+    write_json_line(probe.get_mut(), &serde_json::json!({"type":"pong","id":0})).await.unwrap();
     let mut line = String::new();
     read_frame(&mut read, &mut line).await.unwrap();
     let hello: ServerFrame = serde_json::from_str(&line).unwrap();
     assert_eq!(hello.reply_to, Some(1));
     assert!(matches!(hello.event, ApiEvent::HelloOk { .. }));
-    let (mut daemon, _) = listener.accept().await.unwrap();
     write_json_line(&mut write, &ClientFrame::new(2, ApiRequest::Ping))
         .await
         .unwrap();

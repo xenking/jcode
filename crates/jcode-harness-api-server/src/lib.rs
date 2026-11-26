@@ -497,10 +497,29 @@ where
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let daemon_connected_at = std::time::Instant::now();
     let mut control = DaemonControl::default();
-    let daemon_caps = control
-        .capabilities(&legacy_socket)
-        .await
-        .unwrap_or_default();
+    let daemon_caps = match control.capabilities(&legacy_socket).await {
+        Some(capabilities) => capabilities,
+        None => match control
+            .capabilities_with_timeout(&legacy_socket, std::time::Duration::from_secs(2))
+            .await
+        {
+            Some(capabilities) => capabilities,
+            None => {
+                write_json_line(
+                    &mut write_half,
+                    &ServerFrame::reply(
+                        reply_to,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Could not verify daemon capabilities. Reconnect when the daemon is responsive; no session request was sent.".into(),
+                        },
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        },
+    };
     let control = Arc::new(tokio::sync::Mutex::new(control));
     let mut openrig_host_cap = None;
     if daemon_caps
@@ -896,6 +915,11 @@ mod public_acceptance_tests {
         let mut reader = BufReader::new(client_read);
         write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1,"client":"stdio-test"})).await.unwrap();
         let (_daemon, _) = listener.accept().await.unwrap();
+        let (probe, _) = listener.accept().await.unwrap();
+        let mut probe = BufReader::new(probe);
+        let mut probe_line = String::new();
+        probe.read_line(&mut probe_line).await.unwrap();
+        write_json_line(probe.get_mut(), &json!({"type":"pong","id":0})).await.unwrap();
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         assert_eq!(
@@ -979,6 +1003,11 @@ mod public_acceptance_tests {
 
         let fake_daemon = tokio::spawn(async move {
             let (stream, _) = legacy_listener.accept().await.unwrap();
+            let (probe, _) = legacy_listener.accept().await.unwrap();
+            let mut probe = BufReader::new(probe);
+            let mut probe_line = String::new();
+            probe.read_line(&mut probe_line).await.unwrap();
+            write_json_line(probe.get_mut(), &json!({"type":"pong","id":0,"capabilities":["runtime_commands"]})).await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let mut attached_state_id = None;
@@ -1156,6 +1185,11 @@ mod fragmented_reply_tests {
             let mut replies = BufReader::new(client_read).lines();
             write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1})).await.unwrap();
             let (daemon, _) = listener.accept().await.unwrap();
+            let (probe, _) = listener.accept().await.unwrap();
+            let mut probe = BufReader::new(probe);
+            let mut probe_line = String::new();
+            read_frame(&mut probe, &mut probe_line).await.unwrap();
+            write_json_line(probe.get_mut(), &json!({"type":"pong","id":0})).await.unwrap();
             let (daemon_read, mut daemon_write) = daemon.into_split();
             let mut requests = BufReader::new(daemon_read).lines();
             assert_eq!(serde_json::from_str::<Value>(&replies.next_line().await.unwrap().unwrap()).unwrap()["ev"], "hello_ok");

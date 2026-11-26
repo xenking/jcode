@@ -43,11 +43,15 @@ impl DaemonControl {
     }
 
     async fn ping(&mut self, socket: &Path) -> Result<Value> {
+        self.ping_with_timeout(socket, PING_TIMEOUT).await
+    }
+
+    async fn ping_with_timeout(&mut self, socket: &Path, timeout: Duration) -> Result<Value> {
         let reply = self
             .request(
                 socket,
                 serde_json::json!({"type":"ping", "id":0}),
-                PING_TIMEOUT,
+                timeout,
             )
             .await?;
         if reply["type"] != "pong" {
@@ -60,8 +64,16 @@ impl DaemonControl {
     /// Only negotiate using old, universally supported Ping on a separate
     /// stream. Older daemons may close after Ping or after unknown requests.
     pub(super) async fn capabilities(&mut self, socket: &Path) -> Option<Vec<String>> {
+        self.capabilities_with_timeout(socket, PING_TIMEOUT).await
+    }
+
+    pub(super) async fn capabilities_with_timeout(
+        &mut self,
+        socket: &Path,
+        timeout: Duration,
+    ) -> Option<Vec<String>> {
         self.persistent = true;
-        let reply = self.ping(socket).await;
+        let reply = self.ping_with_timeout(socket, timeout).await;
         let capabilities = reply.as_ref().ok().map(|reply| {
             reply["capabilities"]
                 .as_array()
