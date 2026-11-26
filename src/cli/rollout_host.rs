@@ -987,7 +987,8 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     fn checkout_fixture() -> (tempfile::TempDir, MacHost, String) {
-        let dir = tempfile::tempdir().unwrap();
+        // proc_pidpath reports the canonical path; macOS TMPDIR is under /var.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let root = dir.path();
         let repo = root.join("repo");
         std::fs::create_dir(&repo).unwrap();

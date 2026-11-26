@@ -190,8 +190,10 @@ fn portable_workspace_restores_bundle_and_refuses_foreign_checkout() {
 }
 
 pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
-    let root = tempfile::tempdir().unwrap();
-    let stage = tempfile::tempdir().unwrap();
+    // Session cwds and git report canonical paths; macOS TMPDIR is under the /var symlink.
+    let canonical = std::env::temp_dir().canonicalize().unwrap();
+    let root = tempfile::tempdir_in(&canonical).unwrap();
+    let stage = tempfile::tempdir_in(&canonical).unwrap();
     git(root.path(), &["init", "--quiet"]).unwrap();
     git(root.path(), &["config", "user.name", "Cloud Test"]).unwrap();
     git(

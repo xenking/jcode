@@ -99,7 +99,8 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         "history",
         "history-unknown",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        // The credential store rejects symlinked paths; macOS TMPDIR is under /var.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         // Fake SSH accepts the same final shell-command argument as real SSH.
