@@ -626,6 +626,26 @@ against the code before relying on them.
   Selecting an account-specific route pins or switches the session to that
   account through the routing intents (`Pin`/`Switch`, the same as `/acct pin|switch`).
 
+## 12b. Identity on provider usage endpoints
+
+Rule (owner decision): usage, limit, profile and reset reads send what omp sends
+to the same endpoint, and nothing more. Reference: omp's `pi-ai/src/usage/`
+(`claude-api.ts` `buildClaudeOAuthHeaders`, `openai-codex.ts`, `cursor.ts`) and
+`providers/claude-code-fingerprint.ts`.
+
+- **Claude** (`/api/oauth/usage`, `/profile`, saved and session resets): headers
+  `Accept: application/json, text/plain, */*`, `Content-Type: application/json`,
+  `anthropic-beta: oauth-2025-04-20`, `User-Agent: claude-cli/<release> (external, cli)`
+  and the bearer token. No `x-client-request-id`, no `x-app`. `<release>` is omp's
+  `DEFAULT_CLAUDE_CODE_VERSION`; `JCODE_CLAUDE_CODE_VERSION` overrides it. The
+  endpoint decides per caller whether to evaluate saved resets (`ineligible_reason`
+  `surface` / `cli_version`), which is why this identity is needed here. Inference
+  keeps the honest `jcode/<version>` identity. Helper: `apply_claude_account_headers`.
+- **ChatGPT/Codex** (`/wham/usage`): bearer token, `chatgpt-account-id`, and the
+  client's own user agent (omp sends `omp/<version>`, jcode sends `jcode/<version>`).
+- **Cursor** (Connect RPC on `api2.cursor.sh`): bearer token, `Connect-Protocol-Version: 1`,
+  JSON content type; no user-agent override.
+
 ## 13. Verify this doc
 
 ```sh

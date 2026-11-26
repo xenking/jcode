@@ -737,6 +737,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     let response = client
         .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
         .header("Authorization", format!("Bearer {}", tokens.access_token))
+        .header("Connect-Protocol-Version", "1")
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(10))

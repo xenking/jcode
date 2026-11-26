@@ -66,18 +66,7 @@ pub(super) fn authorize(
     request: reqwest::RequestBuilder,
     access_token: &str,
 ) -> reqwest::RequestBuilder {
-    crate::provider::anthropic::apply_oauth_attribution_headers(
-        request
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                crate::provider::anthropic::usage_endpoint_user_agent(),
-            )
-            .header("anthropic-beta", "oauth-2025-04-20"),
-        &crate::provider::anthropic::new_oauth_request_id(),
-    )
+    crate::provider::anthropic::apply_claude_account_headers(request, access_token)
 }
 
 #[cfg(test)]

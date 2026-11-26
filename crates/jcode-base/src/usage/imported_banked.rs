@@ -164,17 +164,13 @@ pub(super) async fn import_for_account(token: &str, key: &str, account_label: Op
     if !super::disk_cache::begin_import_probe(key, token) {
         return;
     }
-    let response = client
-        .get(crate::auth::oauth::claude::PROFILE_URL)
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header(
-            "User-Agent",
-            crate::provider::anthropic::usage_endpoint_user_agent(),
-        )
-        .bearer_auth(token)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
+    let response = crate::provider::anthropic::apply_claude_account_headers(
+        client.get(crate::auth::oauth::claude::PROFILE_URL),
+        token,
+    )
+    .timeout(std::time::Duration::from_secs(5))
+    .send()
+    .await;
     let response = match response {
         Ok(response) => response,
         Err(error) => {

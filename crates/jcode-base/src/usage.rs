@@ -174,18 +174,9 @@ fn usage_request(
     query: &str,
     access_token: &str,
 ) -> reqwest::RequestBuilder {
-    crate::provider::anthropic::apply_oauth_attribution_headers(
-        client
-            .get(format!("{base}/usage?{query}"))
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                crate::provider::anthropic::usage_endpoint_user_agent(),
-            )
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("anthropic-beta", "oauth-2025-04-20"),
-        &crate::provider::anthropic::new_oauth_request_id(),
+    crate::provider::anthropic::apply_claude_account_headers(
+        client.get(format!("{base}/usage?{query}")),
+        access_token,
     )
 }
 
