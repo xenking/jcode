@@ -1,6 +1,6 @@
-use super::{
-    WidgetProviderKind, WidgetRouteInfo, remote_oauth_widget_usage,
-    remote_oauth_widget_usage_for_route,
+use super::{WidgetProviderKind, WidgetRouteInfo};
+use crate::tui::app::quota_projection::{
+    remote_oauth_widget_usage, remote_oauth_widget_usage_for_route, startup_usage_slot_pending,
 };
 use crate::tui::info_widget::{AuthMethod, UsageProvider};
 use crate::usage::AccountUsageSnapshot;
@@ -9,13 +9,13 @@ use crate::usage::AccountUsageSnapshot;
 fn startup_usage_slot_waits_for_account_binding_even_with_cached_quotas() {
     for runtime_pending in [false, true] {
         for usage_received in [false, true] {
-            assert!(!super::startup_usage_slot_pending(
+            assert!(!startup_usage_slot_pending(
                 false,
                 runtime_pending,
                 usage_received
             ));
             assert_eq!(
-                super::startup_usage_slot_pending(true, runtime_pending, usage_received),
+                startup_usage_slot_pending(true, runtime_pending, usage_received),
                 runtime_pending || !usage_received,
             );
         }

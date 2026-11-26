@@ -1,6 +1,7 @@
 //! Widget usage snapshots.
 
 use super::*;
+use crate::tui::app::quota_projection::remote_oauth_widget_usage_for_route;
 
 impl App {
     pub(super) fn widget_usage_info_inner(

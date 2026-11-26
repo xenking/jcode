@@ -138,6 +138,7 @@ mod voice_input;
 pub(crate) use crate::tui::command_registry::registered_command_names;
 mod binary_watch;
 mod justrust_status;
+mod quota_projection;
 mod state_ui_history_marker;
 mod state_ui_maintenance;
 mod state_ui_messages;
