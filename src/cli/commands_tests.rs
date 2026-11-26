@@ -1155,17 +1155,7 @@ async fn auth_test_choice_plan_leaves_non_compat_provider_unchanged() {
 #[tokio::test]
 async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint() {
     let _env_guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-    ]);
+    let _saved = SavedEnv::capture(OPENAI_COMPAT_PROFILE_ENV);
     let api_base = spawn_single_response_http_server(200, r#"{"data":[{"id":"llama3.2"}]}"#);
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
@@ -1188,20 +1178,13 @@ async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint(
 #[tokio::test]
 async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key() {
     let _env_guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "OPENAI_COMPAT_API_KEY",
-        "NO_PROXY",
-        "no_proxy",
-    ]);
+    let _saved = SavedEnv::capture(
+        &[
+            OPENAI_COMPAT_PROFILE_ENV,
+            &["OPENAI_COMPAT_API_KEY", "NO_PROXY", "no_proxy"],
+        ]
+        .concat(),
+    );
     // Since #2018 a bare IP host is treated like loopback, so the profile
     // needs no API key by default. A configured key must still be sent, so
     // this checks model discovery with a key against a bare-IP endpoint.
@@ -1241,17 +1224,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
 #[tokio::test]
 async fn auth_test_choice_plan_skips_local_custom_compat_endpoint_without_models() {
     let _env_guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-    ]);
+    let _saved = SavedEnv::capture(OPENAI_COMPAT_PROFILE_ENV);
     let api_base = spawn_single_response_http_server(200, r#"{"data":[]}"#);
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
@@ -1647,6 +1620,34 @@ mod ci_run;
 mod cloud_sessions;
 #[path = "commands/tests/ndjson_metadata_tests.rs"]
 mod ndjson_metadata;
+
+/// Everything the OpenAI-compatible choice plan (apply_openai_compatible_profile_env)
+/// may set or clear; restoring only a subset leaks a profile into later tests.
+const OPENAI_COMPAT_PROFILE_ENV: &[&str] = &[
+    "JCODE_OPENAI_COMPAT_API_BASE",
+    "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+    "JCODE_OPENAI_COMPAT_ENV_FILE",
+    "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+    "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+    "JCODE_OPENROUTER_API_BASE",
+    "JCODE_OPENROUTER_API_KEY_NAME",
+    "JCODE_OPENROUTER_ENV_FILE",
+    "JCODE_OPENROUTER_CACHE_NAMESPACE",
+    "JCODE_OPENROUTER_PROVIDER_FEATURES",
+    "JCODE_OPENROUTER_TRANSPORT_STATE",
+    "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+    "JCODE_OPENROUTER_MODEL_CATALOG",
+    "JCODE_OPENROUTER_MODEL",
+    "JCODE_OPENROUTER_STATIC_MODELS",
+    "JCODE_OPENROUTER_AUTH_HEADER",
+    "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+    "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+    "JCODE_OPENROUTER_PROVIDER",
+    "JCODE_OPENROUTER_NO_FALLBACK",
+    "JCODE_NAMED_PROVIDER_PROFILE",
+    "JCODE_PROVIDER_PROFILE_ACTIVE",
+    "JCODE_PROVIDER_PROFILE_NAME",
+];
 
 struct SavedEnv {
     vars: Vec<(String, Option<String>)>,
