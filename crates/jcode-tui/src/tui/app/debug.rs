@@ -282,41 +282,6 @@ pub(super) struct MermaidUiBenchSummary {
     time_to_deferred_idle_ms: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct DebugEvent {
-    at_ms: u64,
-    kind: String,
-    detail: String,
-}
-
-pub(super) struct DebugTrace {
-    pub(super) enabled: bool,
-    pub(super) started_at: Instant,
-    pub(super) events: Vec<DebugEvent>,
-}
-
-impl DebugTrace {
-    pub(super) fn new() -> Self {
-        Self {
-            enabled: false,
-            started_at: Instant::now(),
-            events: Vec::new(),
-        }
-    }
-
-    pub(super) fn record(&mut self, kind: &str, detail: String) {
-        if !self.enabled {
-            return;
-        }
-        let at_ms = self.started_at.elapsed().as_millis() as u64;
-        self.events.push(DebugEvent {
-            at_ms,
-            kind: kind.to_string(),
-            detail,
-        });
-    }
-}
-
 const LARGE_DISPLAY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]

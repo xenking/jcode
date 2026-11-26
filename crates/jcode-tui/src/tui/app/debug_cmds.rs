@@ -1035,15 +1035,14 @@ impl App {
             self.should_quit = true;
             "OK: quitting".to_string()
         } else if cmd == "trace-start" {
-            self.debug_trace.enabled = true;
-            self.debug_trace.started_at = Instant::now();
-            self.debug_trace.events.clear();
+            self.debug_trace.start();
             "OK: trace started".to_string()
         } else if cmd == "trace-stop" {
-            self.debug_trace.enabled = false;
+            self.debug_trace.stop();
             "OK: trace stopped".to_string()
         } else if cmd == "trace" {
-            serde_json::to_string_pretty(&self.debug_trace.events)
+            self.debug_trace
+                .export()
                 .unwrap_or_else(|_| "[]".to_string())
         } else if cmd.starts_with("scroll:") {
             let dir = cmd.strip_prefix("scroll:").unwrap_or("");

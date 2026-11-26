@@ -32,7 +32,7 @@ use auth::PendingLogin;
 use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use debug::DebugTrace;
+use debug_trace::DebugTrace;
 use futures::StreamExt;
 use helpers::*;
 pub(crate) use helpers::{effort_display_label, effort_glyph_label, effort_menu_label};
@@ -85,6 +85,7 @@ mod commands_review;
 mod conversation_state;
 mod copy_selection;
 mod debug;
+mod debug_trace;
 mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;

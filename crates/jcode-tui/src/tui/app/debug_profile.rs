@@ -272,12 +272,8 @@ impl App {
             .as_ref()
             .map(|overlay| overlay.borrow().debug_memory_profile())
             .unwrap_or_else(|| serde_json::json!({"present": false, "total_estimate_bytes": 0}));
-        let debug_trace_events_bytes: usize = self
-            .debug_trace
-            .events
-            .iter()
-            .map(|event| event.kind.capacity() + event.detail.capacity())
-            .sum();
+        let (trace_enabled, trace_event_count, debug_trace_events_bytes) =
+            self.debug_trace.profile();
         let string_state_bytes = self.observe_page_markdown.capacity()
             + self.split_view_markdown.capacity()
             + self
@@ -489,8 +485,8 @@ impl App {
                 "estimate_bytes": tool_tracking_bytes,
             },
             "debug": {
-                "trace_enabled": self.debug_trace.enabled,
-                "trace_event_count": self.debug_trace.events.len(),
+                "trace_enabled": trace_enabled,
+                "trace_event_count": trace_event_count,
                 "trace_event_bytes": debug_trace_events_bytes,
                 "reload_info_bytes": reload_info_bytes,
             },
