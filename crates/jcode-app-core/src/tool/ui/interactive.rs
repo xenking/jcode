@@ -32,10 +32,29 @@ use tokio_util::sync::CancellationToken;
 
 type ClientTx = UnboundedSender<StdinInputRequest>;
 
-/// Finds the spawn chain above a session: its spawner first, the root last,
-/// empty for a session nobody spawned.
+/// What the swarm knows about a session that runs without a client.
+#[derive(Default)]
+pub(crate) struct SpawnInfo {
+    /// The spawn chain above the session: its spawner first, the root last,
+    /// empty for a session nobody spawned.
+    pub(crate) ancestors: Vec<String>,
+    /// The label its spawner gave it, if any.
+    pub(crate) label: Option<String>,
+}
+
+/// Finds the [`SpawnInfo`] of a session.
 pub(crate) type AncestorLookup =
-    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> + Send + Sync>;
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = SpawnInfo> + Send>> + Send + Sync>;
+
+/// How a card names a worker: its spawn label, else its generated name.
+pub(crate) fn worker_name(session_id: &str, label: Option<&str>) -> String {
+    label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .or_else(|| crate::id::extract_session_name(session_id))
+        .unwrap_or(session_id)
+        .to_owned()
+}
 
 #[derive(Default)]
 struct State {
@@ -80,6 +99,8 @@ struct Pending {
     requester: String,
     /// Spawner first, root last.
     chain: Vec<String>,
+    /// What the card calls the requester when it is shown away from it.
+    worker: String,
     questions: Vec<AskQuestion>,
     kind: AskKind,
     /// The requester's own channel when it has no registered client.
@@ -119,11 +140,8 @@ fn reachable(state: &State, pending: &Pending) -> Option<(String, Vec<ClientTx>)
 fn dispatch(pending: &Pending, session: &str, target: &ClientTx) -> bool {
     let mut questions = pending.questions.clone();
     if session != pending.requester && pending.kind == AskKind::Question {
-        let who = crate::id::extract_session_name(&pending.requester)
-            .unwrap_or(&pending.requester)
-            .to_owned();
         for question in &mut questions {
-            question.question = format!("Worker \"{who}\": {}", question.question);
+            question.question = format!("Worker \"{}\": {}", pending.worker, question.question);
         }
     }
     let questions = match serde_json::to_value(&questions) {
@@ -291,10 +309,9 @@ pub(crate) async fn ask(request: AskRequest) -> Result<AskResponse, AskFailure> 
         attach_wait,
         parks_turn,
     } = request;
-    let chain = match chain {
-        Some(chain) => chain,
-        None => spawn_chain(&requester).await,
-    };
+    let info = spawn_info(&requester).await;
+    let worker = worker_name(&requester, info.label.as_deref());
+    let chain = chain.unwrap_or(info.ancestors);
     let request_id = format!("ask-{call}");
     let generation = NEXT.fetch_add(1, Ordering::Relaxed);
     let (answer_tx, answer_rx) = oneshot::channel();
@@ -308,6 +325,7 @@ pub(crate) async fn ask(request: AskRequest) -> Result<AskResponse, AskFailure> 
                 call: call.clone(),
                 requester: requester.clone(),
                 chain,
+                worker,
                 questions,
                 kind,
                 direct,
@@ -375,10 +393,15 @@ pub(crate) fn set_spawn_chain(session_id: &str, lookup: AncestorLookup) {
 
 /// The sessions above `session_id`, spawner first and root last.
 pub(crate) async fn spawn_chain(session_id: &str) -> Vec<String> {
+    spawn_info(session_id).await.ancestors
+}
+
+/// The spawn chain and spawn label of `session_id`.
+pub(crate) async fn spawn_info(session_id: &str) -> SpawnInfo {
     let lookup = state().spawn_chains.get(session_id).cloned();
     match lookup {
         Some(lookup) => lookup(session_id).await,
-        None => Vec::new(),
+        None => SpawnInfo::default(),
     }
 }
 

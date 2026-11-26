@@ -167,15 +167,16 @@ async fn require_within(
     } = request;
     // A swarm worker has no client; its approvals go to the nearest client up
     // its spawn chain (see `interactive::ask`).
-    let chain = interactive::spawn_chain(&ctx.session_id).await;
-    let who = if chain.is_empty() {
+    let info = interactive::spawn_info(&ctx.session_id).await;
+    let who = if info.ancestors.is_empty() {
         String::new()
     } else {
         format!(
             "Worker \"{}\": ",
-            crate::id::extract_session_name(&ctx.session_id).unwrap_or(&ctx.session_id)
+            interactive::worker_name(&ctx.session_id, info.label.as_deref())
         )
     };
+    let chain = info.ancestors;
     let questions = vec![AskQuestion {
         question: format!(
             "{who}Allow MCP tool \"{tool}\" on server \"{server}\" with arguments {}?",

@@ -25,7 +25,12 @@ fn chain_worker(id: &str, chain: &[&str]) -> Worker {
         id,
         Arc::new(move |_| {
             let chain = chain.clone();
-            Box::pin(async move { chain })
+            Box::pin(async move {
+                crate::tool::interactive::SpawnInfo {
+                    ancestors: chain,
+                    label: None,
+                }
+            })
         }),
     );
     Worker { id: id.into() }

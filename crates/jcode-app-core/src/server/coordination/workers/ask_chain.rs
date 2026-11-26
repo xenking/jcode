@@ -7,6 +7,7 @@
 //! only tells the registry how to find those sessions; nothing here answers.
 
 use super::SwarmMember;
+use crate::tool::interactive::SpawnInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,7 +23,11 @@ pub(crate) fn register(session_id: &str, members: SwarmMembers) {
             let members = Arc::clone(&members);
             let session = session.to_string();
             Box::pin(async move {
-                super::swarm_ancestry::swarm_ancestors(&*members.read().await, &session)
+                let members = members.read().await;
+                SpawnInfo {
+                    ancestors: super::swarm_ancestry::swarm_ancestors(&members, &session),
+                    label: members.get(&session).and_then(|m| m.task_label.clone()),
+                }
             })
         }),
     );
@@ -72,5 +77,64 @@ pub(in crate::server) mod tests {
             },
             event_rx,
         )
+    }
+
+    use crate::protocol::{AskKind, AskQuestion};
+    use crate::tool::interactive::{AskRequest, ask, attach};
+
+    /// The text of the card the root client is shown for a worker's ask.
+    async fn card_text(worker: &str, label: Option<&str>) -> String {
+        let root = format!("{worker}-root");
+        let (worker_member, _events) = member(worker, "agent", true, Some(&root));
+        let members: SwarmMembers = Default::default();
+        members.write().await.insert(
+            worker.to_string(),
+            SwarmMember {
+                task_label: label.map(str::to_string),
+                ..worker_member
+            },
+        );
+        register(worker, members);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _client = attach(&root, tx);
+        let waiter = tokio::spawn(ask(AskRequest {
+            requester: worker.to_string(),
+            call: format!("{worker}-call"),
+            questions: vec![AskQuestion {
+                question: "Which?".into(),
+                header: None,
+                options: Vec::new(),
+                multi_select: false,
+                allow_other: false,
+            }],
+            kind: AskKind::Question,
+            chain: None,
+            direct: None,
+            attach_wait: None,
+            parks_turn: false,
+        }));
+        let shown = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the worker's card reaches the root client")
+            .unwrap();
+        let text = shown.ask_questions.unwrap().to_string();
+        waiter.abort();
+        withdraw_worker(worker);
+        text
+    }
+
+    #[tokio::test]
+    async fn a_workers_card_names_the_label_its_spawner_gave_it() {
+        let text = card_text("session_vole_1_a", Some("parser rewrite")).await;
+        assert!(
+            text.contains(r#"Worker \"parser rewrite\": Which?"#),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unlabelled_workers_card_names_its_generated_name() {
+        let text = card_text("session_otter_1_b", None).await;
+        assert!(text.contains(r#"Worker \"otter\": Which?"#), "{text}");
     }
 }

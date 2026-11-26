@@ -47,7 +47,12 @@ async fn a_headless_ask_with_no_client_is_never_answered_for_the_user() {
 async fn a_workers_ask_is_shown_to_its_spawner_chain_and_the_answer_resumes_it() {
     super::super::interactive::set_spawn_chain(
         "ask-tool-worker",
-        std::sync::Arc::new(|_| Box::pin(async { vec!["ask-tool-root".to_string()] })),
+        std::sync::Arc::new(|_| Box::pin(async {
+            super::super::interactive::SpawnInfo {
+                ancestors: vec!["ask-tool-root".to_string()],
+                label: None,
+            }
+        })),
     );
     let (root_tx, mut root_rx) = mpsc::unbounded_channel();
     let _root = super::super::interactive::attach("ask-tool-root", root_tx);
