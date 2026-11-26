@@ -1,54 +1,12 @@
 use super::*;
 
-#[path = "final_text_tests.rs"]
-mod final_text_tests;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-#[cfg(target_os = "linux")]
-use std::hint::black_box;
-
-// Counting is per-thread and disabled during CPU measurements and other tests.
-struct ProbeAllocator;
-thread_local! {
-    static COUNT: Cell<bool> = const { Cell::new(false) };
-    static CALLS: Cell<usize> = const { Cell::new(0) };
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-}
-fn record(bytes: usize) {
-    if COUNT.try_with(Cell::get).unwrap_or(false) {
-        CALLS.with(|n| n.set(n.get() + 1));
-        BYTES.with(|n| n.set(n.get() + bytes));
-    }
-}
-unsafe impl GlobalAlloc for ProbeAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        record(size);
-        unsafe { System.realloc(ptr, layout, size) }
-    }
-}
-#[global_allocator]
-static ALLOCATOR: ProbeAllocator = ProbeAllocator;
-
-type Output = (
+fn render(
+    session: &Session,
+) -> (
     Vec<RenderedMessage>,
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
-);
-fn original(session: &Session) -> Output {
-    image_context_original::render_messages_and_images_with_compacted_history(session, 64)
-}
-fn optimized(session: &Session) -> Output {
+) {
     render_messages_and_images_with_compacted_history(session, 64)
 }
 fn text(s: &str) -> ContentBlock {
@@ -84,69 +42,74 @@ fn native() -> ContentBlock {
         item: serde_json::json!({"type":"web_search_call", "id":"native", "status":"completed", "action":{"type":"search", "query":"test"}}),
     }
 }
-fn fixture(size: usize, images: bool) -> Session {
-    let mut s = Session::create_with_id("render-image-context-probe".into(), None, None);
-    s.add_message(Role::Assistant, vec![call("a", size)]);
-    let mut blocks = vec![result("a")];
-    if images {
-        blocks.push(image());
-    }
-    s.add_message(Role::User, blocks);
-    s
+/// (label, source, anchor, history_message_index) per rendered image.
+type ImageRow = (
+    Option<String>,
+    RenderedImageSource,
+    Option<RenderedImageAnchor>,
+    Option<usize>,
+);
+fn image_rows(session: &Session) -> Vec<ImageRow> {
+    render(session)
+        .1
+        .into_iter()
+        .map(|i| (i.label, i.source, i.anchor, i.history_message_index))
+        .collect()
 }
-fn parity(session: &Session) {
-    // RenderedMessage intentionally has no PartialEq. Serialization compares all fields.
+fn tool_image(label: Option<&str>, tool_name: &str, id: &str, index: usize) -> ImageRow {
+    (
+        label.map(Into::into),
+        RenderedImageSource::ToolResult {
+            tool_name: tool_name.into(),
+        },
+        Some(RenderedImageAnchor::ToolCall { id: id.into() }),
+        Some(index),
+    )
+}
+
+#[test]
+fn tool_result_images_are_attributed_to_their_call_and_label() {
+    let mut s = Session::create_with_id("image-edges".into(), None, None);
+    s.add_message(Role::Assistant, vec![call("a", 0), call("b", 0)]);
+    s.add_message(
+        Role::User,
+        vec![
+            image(),
+            text("prompt"),
+            result("a"),
+            image(),
+            image(),
+            text("[Attached image associated with the preceding tool result: explicit.png]"),
+            text("interleaved"),
+            native(),
+            image(),
+            call("a", 8192),
+            image(),
+            result("a"),
+            image(),
+            result("missing"),
+            image(),
+            result("b"),
+            image(),
+        ],
+    );
     assert_eq!(
-        serde_json::to_value(original(session)).unwrap(),
-        serde_json::to_value(optimized(session)).unwrap()
+        image_rows(&s),
+        vec![
+            (None, RenderedImageSource::UserInput, None, None),
+            tool_image(Some("/tmp/test.png"), "read", "a", 2),
+            tool_image(Some("explicit.png"), "read", "a", 2),
+            tool_image(Some("/tmp/test.png"), "read", "a", 4),
+            tool_image(Some("/tmp/test.png"), "read", "a", 4),
+            tool_image(Some("/tmp/test.png"), "read", "a", 5),
+            tool_image(None, "tool", "missing", 6),
+            tool_image(Some("/tmp/test.png"), "read", "b", 7),
+        ]
     );
 }
+
 #[test]
-fn image_context_frozen_renderer_parity() {
-    for size in [0, 32, 256 * 1024] {
-        for images in [false, true] {
-            parity(&fixture(size, images));
-        }
-    }
-    for role in [Role::User, Role::Assistant] {
-        let mut s = Session::create_with_id("image-edges".into(), None, None);
-        s.add_message(Role::Assistant, vec![call("a", 0), call("b", 0)]);
-        s.add_message(
-            role,
-            vec![
-                image(),
-                text("prompt"),
-                result("a"),
-                image(),
-                image(),
-                text("[Attached image associated with the preceding tool result: explicit.png]"),
-                text("interleaved"),
-                native(),
-                image(),
-                call("a", 8192),
-                image(),
-                result("a"),
-                image(),
-                result("missing"),
-                image(),
-                result("b"),
-                image(),
-            ],
-        );
-        parity(&s);
-        let (_, images, _) = optimized(&s);
-        assert_eq!(images[2].label.as_deref(), Some("explicit.png"));
-        assert_eq!(
-            images[4].anchor,
-            Some(RenderedImageAnchor::ToolCall { id: "a".into() })
-        );
-        assert_eq!(
-            images[6].source,
-            RenderedImageSource::ToolResult {
-                tool_name: "tool".into()
-            }
-        );
-    }
+fn tool_image_label_is_absent_without_a_usable_file_path() {
     for input in [
         serde_json::json!({}),
         serde_json::json!({"file_path":"   "}),
@@ -163,93 +126,35 @@ fn image_context_frozen_renderer_parity() {
             }],
         );
         s.add_message(Role::User, vec![result("fallback"), image()]);
-        parity(&s);
-        assert!(optimized(&s).1[0].label.is_none());
-    }
-    for blocks in [
-        vec![image()],
-        vec![image(), text("prompt")],
-        vec![native(), image()],
-    ] {
-        let mut s = Session::create_with_id("unowned-image".into(), None, None);
-        s.add_message(Role::User, blocks);
-        parity(&s);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn thread_cpu_ns() -> u64 {
-    let mut t = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    assert_eq!(
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) },
-        0
-    );
-    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
-}
-#[cfg(target_os = "linux")]
-fn allocations(f: fn(&Session) -> Output, s: &Session) -> (usize, usize) {
-    CALLS.with(|n| n.set(0));
-    BYTES.with(|n| n.set(0));
-    COUNT.with(|n| n.set(true));
-    drop(black_box(f(black_box(s))));
-    COUNT.with(|n| n.set(false));
-    (CALLS.with(Cell::get), BYTES.with(Cell::get))
-}
-
-// Run alone: justrust test -p jcode-base --lib image_context_cpu_allocation_probe -- --ignored --nocapture --test-threads=1
-// CPU uses the calling thread's actual clock, not elapsed time. Counting is separate.
-#[test]
-#[ignore = "isolated alternating CPU/allocation measurement"]
-#[cfg(target_os = "linux")]
-fn image_context_cpu_allocation_probe() {
-    let empty = Session::create_with_id("empty-render-probe".into(), None, None);
-    for (name, s) in [
-        ("noimages", empty),
-        ("tiny", fixture(8, false)),
-        ("largeinput", fixture(256 * 1024, false)),
-        ("images", fixture(256 * 1024, true)),
-    ] {
-        parity(&s);
-        for _ in 0..64 {
-            drop(original(&s));
-            drop(optimized(&s));
-        }
-        let old_alloc = allocations(original, &s);
-        let new_alloc = allocations(optimized, &s);
-        assert!(new_alloc.0 <= old_alloc.0 && new_alloc.1 <= old_alloc.1);
-        let mut old = Vec::new();
-        let mut new = Vec::new();
-        let iterations = if name == "largeinput" || name == "images" {
-            500
-        } else {
-            10_000
-        };
-        let measure = |f: fn(&Session) -> Output| {
-            let start = thread_cpu_ns();
-            for _ in 0..iterations {
-                drop(black_box(f(black_box(&s))));
-            }
-            thread_cpu_ns() - start
-        };
-        for round in 0..12 {
-            if round % 2 == 0 {
-                old.push(measure(original));
-                new.push(measure(optimized));
-            } else {
-                new.push(measure(optimized));
-                old.push(measure(original));
-            }
-        }
-        old.sort_unstable();
-        new.sort_unstable();
-        let ratio = new[6] as f64 / old[6] as f64;
-        println!(
-            "{name}: CPU new/old={ratio:.4}, old={}ns new={}ns allocations {old_alloc:?} -> {new_alloc:?}",
-            old[6], new[6]
+        assert_eq!(
+            image_rows(&s),
+            vec![tool_image(None, "read", "fallback", 1)]
         );
-        assert!(ratio <= 1.05, "{name}: CPU regression {ratio}");
     }
+}
+
+#[test]
+fn user_prompt_images_anchor_to_their_prompt_ordinal() {
+    let mut s = Session::create_with_id("prompt-ordinals".into(), None, None);
+    s.add_message(Role::User, vec![text("before"), native(), image()]);
+    s.add_message(Role::User, vec![image(), text("next prompt")]);
+    let user_image = |ordinal| {
+        (
+            None,
+            RenderedImageSource::UserInput,
+            Some(RenderedImageAnchor::UserPrompt { ordinal }),
+            None,
+        )
+    };
+    assert_eq!(image_rows(&s), vec![user_image(0), user_image(1)]);
+}
+
+#[test]
+fn large_text_renders_intact() {
+    let big = "x".repeat(256 * 1024);
+    let mut s = Session::create_with_id("final-text".into(), None, None);
+    s.add_message(Role::Assistant, vec![text(&big)]);
+    let (messages, _, _) = render(&s);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, big);
 }

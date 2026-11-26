@@ -1,3 +1,5 @@
+> Historical record. The frozen original renderers and their parity/CPU probes were removed later; `session/render/image_context_tests.rs` now asserts the production renderer's output directly. Commands naming `final_text_frozen_parity` or `image_context_cpu_allocation_probe` no longer exist.
+
 # Final rendered text ownership, 2026-11-18
 
 ## Scope

@@ -1,10 +1,6 @@
 mod response_stats;
 
 #[cfg(test)]
-mod final_text_original;
-#[cfg(test)]
-mod image_context_original;
-#[cfg(test)]
 mod image_context_tests;
 #[cfg(test)]
 mod prompt_count_tests;
