@@ -6,7 +6,7 @@ use super::super::{
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
-use super::process_reserved_message_streaming_mpsc;
+use crate::server::turn_execution::process_reserved_message_streaming_mpsc;
 use super::*;
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};

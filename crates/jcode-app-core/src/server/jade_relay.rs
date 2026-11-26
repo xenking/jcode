@@ -1,4 +1,4 @@
-use super::client_lifecycle::process_reserved_message_streaming_mpsc;
+use super::turn_execution::process_reserved_message_streaming_mpsc;
 use super::session_control::{SessionControlHandle, queue_soft_interrupt_for_session};
 use super::state::{SessionInterruptQueues, TurnEventChannel};
 use super::{SessionAgents, SwarmMember};

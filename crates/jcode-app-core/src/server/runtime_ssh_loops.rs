@@ -509,7 +509,7 @@ pub(super) async fn run_reserved_followups(
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
         let messages_before = agent.message_count();
-        let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+        let result = super::turn_execution::process_reserved_message_streaming_mpsc(
             agent,
             lease,
             &followup.message,

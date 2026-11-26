@@ -282,7 +282,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
     let attempt_start = guard.message_count();
-    let result = super::client_lifecycle::process_reserved_message_with_role(
+    let result = super::turn_execution::process_reserved_message_with_role(
         &mut guard,
         lease,
         content,
@@ -452,7 +452,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
     let attempt_start = agent.message_count();
-    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+    let result = super::turn_execution::process_reserved_message_streaming_mpsc(
         agent,
         lease,
         content,

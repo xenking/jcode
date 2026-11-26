@@ -99,6 +99,7 @@ mod swarm_todo_projection;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod swarm_watchdog_delivery;
+mod turn_execution;
 mod turn_failover;
 mod util;
 mod worker_revive;
