@@ -2321,41 +2321,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-telemetry-core/src/categories.rs": {
-      "dot_ok": 1,
-      "let_underscore": 1,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-telemetry-core/src/concurrency.rs": {
-      "dot_ok": 7,
-      "let_underscore": 6,
-      "unwrap_or_default": 2
-    },
-    "crates/jcode-telemetry-core/src/desktop.rs": {
-      "dot_ok": 1,
-      "let_underscore": 2,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-telemetry-core/src/lib.rs": {
-      "dot_ok": 5,
-      "let_underscore": 10,
-      "unwrap_or_default": 2
-    },
-    "crates/jcode-telemetry-core/src/lib_project_profile.rs": {
-      "dot_ok": 3,
-      "let_underscore": 0,
-      "unwrap_or_default": 2
-    },
-    "crates/jcode-telemetry-core/src/lifecycle.rs": {
-      "dot_ok": 0,
-      "let_underscore": 3,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-telemetry-core/src/state_support.rs": {
-      "dot_ok": 22,
-      "let_underscore": 5,
-      "unwrap_or_default": 0
-    },
     "crates/jcode-terminal-image/src/display.rs": {
       "dot_ok": 0,
       "let_underscore": 0,

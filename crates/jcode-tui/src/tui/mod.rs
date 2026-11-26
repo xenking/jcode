@@ -1114,7 +1114,7 @@ pub enum ImportSummaryPill {
 }
 
 /// The telemetry settings sub-page: a Continue button (row 0) followed by one
-/// checkbox per [`crate::telemetry::TelemetryCategory`].
+/// checkbox per telemetry category (informational only; telemetry is removed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TelemetryPage {
     /// 0 = Continue, 1.. = category rows.

@@ -65,7 +65,6 @@
     "crates/jcode-session-types/src/codemode.rs": 6,
     "crates/jcode-session-types/src/lib.rs": 2,
     "crates/jcode-session-types/src/prelowercased_tokenization_probe.rs": 1,
-    "crates/jcode-telemetry-core/src/concurrency.rs": 2,
     "crates/jcode-terminal-launch/src/lib.rs": 1,
     "crates/jcode-tui-core/src/stream_buffer.rs": 3,
     "crates/jcode-tui-mermaid/src/mermaid_kitty_classic.rs": 1,

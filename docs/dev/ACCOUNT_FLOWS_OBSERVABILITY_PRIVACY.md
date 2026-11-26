@@ -12,6 +12,10 @@ surfaces live in this repo; backend surfaces live in `solosystems-backend`.
 
 ## Existing surfaces (grounding)
 
+> This fork removed the client telemetry pipeline: `jcode-telemetry-core` is a
+> no-op facade (see `TELEMETRY.md`), so the `jcode-telemetry-core` references
+> below describe upstream and no longer exist here.
+
 - Client telemetry pipeline: `crates/jcode-telemetry-core/src/lib.rs`
   (`record_auth_success` @1409, `sanitize_telemetry_label` applied to all
   auth labels @398-400; `AuthEvent` schema in

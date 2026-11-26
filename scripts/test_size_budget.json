@@ -29,7 +29,6 @@
     "crates/jcode-provider-antigravity-runtime/src/antigravity_tests.rs": 1241,
     "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 3529,
     "crates/jcode-sdk/tests/client_behavior.rs": 1325,
-    "crates/jcode-telemetry-core/src/tests.rs": 1747,
     "crates/jcode-tui/src/tui/app/commands_cloud_tests.rs": 1288,
     "crates/jcode-tui/src/tui/app/remote_tests.rs": 1489,
     "crates/jcode-tui/src/tui/app/tests.rs": 1981,

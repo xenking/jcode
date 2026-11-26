@@ -4,9 +4,10 @@
 to any telemetry endpoint. There is no opt-in, no opt-out, and nothing to
 configure.
 
-- `is_enabled()` in `crates/jcode-telemetry-core` always returns `false`. The
-  delivery code (event, usage, transcript and install events) and the endpoint
-  URLs have been removed, so the `record_*` call sites are inert.
+- `crates/jcode-telemetry-core` is a no-op facade kept only so upstream call
+  sites compile. `is_enabled()` always returns `false`; every `record_*`
+  function does nothing. The crate has no state, files, identifiers, counters,
+  threads, network code or endpoint URLs.
 - Provider OAuth account emails are never read for upload; the upload code has
   been deleted.
 - `scripts/install.sh` no longer reports installer funnel events or stores an

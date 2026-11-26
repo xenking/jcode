@@ -4778,18 +4778,9 @@ name = "jcode-telemetry-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
- "jcode-build-meta",
- "jcode-core",
- "jcode-logging",
  "jcode-provider-core",
- "jcode-selfdev-types",
- "jcode-storage",
- "jcode-usage-types",
  "serde_json",
  "tempfile",
- "uuid",
- "walkdir",
 ]
 
 [[package]]

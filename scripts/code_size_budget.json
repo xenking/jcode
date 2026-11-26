@@ -89,7 +89,6 @@
     "crates/jcode-sdk/src/launch.rs": 1360,
     "crates/jcode-session-types/src/lib.rs": 1347,
     "crates/jcode-setup-hints/src/lib.rs": 2329,
-    "crates/jcode-telemetry-core/src/lib.rs": 2341,
     "crates/jcode-terminal-launch/src/lib.rs": 1802,
     "crates/jcode-tui-core/src/keybind.rs": 1235,
     "crates/jcode-tui-markdown/src/lib.rs": 1229,
