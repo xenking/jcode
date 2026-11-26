@@ -14,6 +14,15 @@ const CONSECUTIVE_REQUESTS: u8 = 3;
 const PLATEAU_MIN_TAIL: u64 = 10_000;
 const PLATEAU_TOTAL: u64 = 80_000;
 const PLATEAU_REQUESTS: u8 = 5;
+// Cumulative-waste rule for calls the 50k rules never see. A "miss" is a warm
+// request that read back under half of the previous prompt (that prefix was just
+// sent, so it should have been cached) and left at least 10k tokens uncached.
+// Two or more misses among the last 8 requests whose waste sums to 100k pause the
+// session: three 35k misses trip it, a single miss of any size never does.
+const MISS_WINDOW: usize = 8;
+const MISS_MIN_WASTE: u64 = PLATEAU_MIN_TAIL;
+const MISS_MIN_COUNT: usize = 2;
+const MISS_TOTAL: u64 = 100_000;
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -28,7 +37,7 @@ pub(crate) struct CachePause {
 impl CachePause {
     fn message(&self) -> String {
         format!(
-            "Paused by cache protection: {} / {} sent {} uncached input tokens across {} consecutive requests. No further model requests were sent. Use /cache resume to allow a new attempt.",
+            "Paused by cache protection: {} / {} sent {} uncached input tokens across {} requests. No further model requests were sent. Use /cache resume to allow a new attempt.",
             self.provider, self.model, self.uncached_input, self.requests
         )
     }
@@ -54,6 +63,8 @@ struct Sample {
     read: u64,
     plateau_requests: u8,
     plateau_uncached: u64,
+    /// Avoidable uncached tokens of each recent request (0 for a non-miss), oldest first.
+    recent_waste: Vec<u64>,
 }
 
 impl CacheBreaker {
@@ -116,7 +127,7 @@ impl CacheBreaker {
             } else {
                 (0, 0)
             };
-        let (requests, expensive_uncached) = match (expensive, same_run) {
+        let (requests, expensive_uncached) = match (expensive, &same_run) {
             (true, Some(old)) => (
                 old.requests.saturating_add(1),
                 old.uncached.saturating_add(uncached),
@@ -125,19 +136,38 @@ impl CacheBreaker {
             (false, _) => (0, 0),
         };
         let stalled = plateau_requests >= PLATEAU_REQUESTS && plateau_uncached >= PLATEAU_TOTAL;
-        let pause = (requests >= CONSECUTIVE_REQUESTS || stalled).then(|| CachePause {
+        let waste = match &same_run {
+            Some(old) if !expensive && read < old.prompt / 2 => {
+                Some(prompt - read).filter(|w| *w >= MISS_MIN_WASTE)
+            }
+            _ => None,
+        };
+        let mut recent_waste = same_run
+            .as_ref()
+            .map_or_else(Vec::new, |old| old.recent_waste.clone());
+        recent_waste.push(waste.unwrap_or(0));
+        let excess = recent_waste.len().saturating_sub(MISS_WINDOW);
+        recent_waste.drain(..excess);
+        let misses = recent_waste.iter().filter(|w| **w > 0).count();
+        let wasted: u64 = recent_waste.iter().sum();
+        let wasteful = misses >= MISS_MIN_COUNT && wasted >= MISS_TOTAL;
+        let pause = (requests >= CONSECUTIVE_REQUESTS || stalled || wasteful).then(|| CachePause {
             provider: route.domain.provider.clone(),
             model: route.domain.model.clone(),
             timestamp: chrono::Utc::now(),
             requests: if requests >= CONSECUTIVE_REQUESTS {
                 requests
-            } else {
+            } else if stalled {
                 plateau_requests
+            } else {
+                misses as u8
             },
             uncached_input: if requests >= CONSECUTIVE_REQUESTS {
                 expensive_uncached
-            } else {
+            } else if stalled {
                 plateau_uncached
+            } else {
+                wasted
             },
         });
         self.previous = Some(Sample {
@@ -149,6 +179,7 @@ impl CacheBreaker {
             read,
             plateau_requests,
             plateau_uncached,
+            recent_waste,
         });
         pause
     }
@@ -299,6 +330,57 @@ mod tests {
             .observe(route("openai", "a"), Some((153_083, 133_888, None)), now)
             .unwrap();
         assert_eq!((pause.requests, pause.uncached_input), (5, 80_005));
+    }
+
+    fn miss(breaker: &mut CacheBreaker, prompt: u64, read: u64) -> Option<CachePause> {
+        breaker.observe(
+            route("anthropic", "a"),
+            Some((prompt - read, read, Some(0))),
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn repeated_sub_50k_misses_pause_at_cumulative_waste_threshold() {
+        let mut breaker = CacheBreaker::default();
+        assert!(miss(&mut breaker, 40_000, 40_000).is_none(), "warm start");
+        assert!(
+            miss(&mut breaker, 41_000, 1_000).is_none(),
+            "one miss: 40k wasted"
+        );
+        assert!(
+            miss(&mut breaker, 42_000, 1_000).is_none(),
+            "two misses: 81k < 100k"
+        );
+        let pause = miss(&mut breaker, 43_000, 1_000).expect("123k wasted across 3 misses");
+        assert_eq!((pause.requests, pause.uncached_input), (3, 123_000));
+    }
+
+    #[test]
+    fn sub_threshold_waste_single_miss_and_warm_tails_do_not_pause() {
+        // Just below the total: 2 misses of 49_999 each = 99_998.
+        let mut breaker = CacheBreaker::default();
+        miss(&mut breaker, 50_000, 50_000);
+        assert!(miss(&mut breaker, 50_000, 1).is_none());
+        assert!(miss(&mut breaker, 50_000, 1).is_none());
+        // Exactly at the total (33_333 + 33_333 + 33_334 = 100_000) pauses.
+        let mut breaker = CacheBreaker::default();
+        miss(&mut breaker, 33_333, 33_333);
+        assert!(miss(&mut breaker, 33_333, 0).is_none());
+        assert!(miss(&mut breaker, 33_333, 0).is_none());
+        let pause = miss(&mut breaker, 33_334, 0).expect("100k wasted at the boundary");
+        assert_eq!(pause.uncached_input, 100_000);
+        // A single huge-tail miss never trips the cumulative rule.
+        let mut breaker = CacheBreaker::default();
+        miss(&mut breaker, 40_000, 40_000);
+        assert!(miss(&mut breaker, 49_000, 1_000).is_none());
+        // Healthy growth: every request reads the previous prompt back.
+        let mut breaker = CacheBreaker::default();
+        let mut prompt = 20_000;
+        for _ in 0..40 {
+            assert!(miss(&mut breaker, prompt + 12_000, prompt).is_none());
+            prompt += 12_000;
+        }
     }
 
     #[test]
