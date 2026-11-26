@@ -55,6 +55,19 @@ pub(super) fn account_usage_probe(
     crate::usage::account_usage_probe_sync(kind)
 }
 
+/// Whether the routing service, not the account pool, chooses `provider`'s
+/// account for `model`. With routing in `auto` it is the only decider: the pool
+/// rotation, same-provider failover prompts and banked-reset spending in this
+/// module stand down, so one account is chosen and one redeemer claims a grant.
+pub(super) fn routing_decides(provider: ActiveProvider, model: &str) -> bool {
+    let provider = match provider {
+        ActiveProvider::Claude => "claude",
+        ActiveProvider::OpenAI => "openai",
+        _ => return false,
+    };
+    crate::routing_service::global().applies(provider, model)
+}
+
 pub(super) fn same_provider_account_failover_enabled() -> bool {
     crate::config::Config::load()
         .provider
@@ -132,13 +145,14 @@ pub fn has_eligible_alternate_account(provider: &str) -> bool {
 /// Whether the multi-account router owns an OAuth account failure. Includes
 /// cooling-down pool members so the final login in a rotation also returns its
 /// failure immediately rather than sleeping before reporting pool exhaustion.
-pub fn has_alternate_account_in_pool(provider: &str) -> bool {
+pub fn has_alternate_account_in_pool(provider: &str, model: &str) -> bool {
     let provider = match provider {
         "claude" | "anthropic" => ActiveProvider::Claude,
         "openai" => ActiveProvider::OpenAI,
         _ => return false,
     };
-    same_provider_account_failover_enabled()
+    !routing_decides(provider, model)
+        && same_provider_account_failover_enabled()
         && active_account_label_for_provider(provider).is_some()
         && !same_provider_account_rotation(provider).is_empty()
 }

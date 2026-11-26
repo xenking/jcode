@@ -424,7 +424,7 @@ pub(super) async fn run_stream_with_retries(
                     && !saw_output
                     && !response_accepted
                     && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
-                    && jcode_base::provider::has_alternate_account_in_pool("claude")
+                    && jcode_base::provider::has_alternate_account_in_pool("claude", &model_name)
                     && !retry_recoverable_limit
                 {
                     let _ = tx.send(Err(e)).await;

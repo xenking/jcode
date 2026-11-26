@@ -157,10 +157,14 @@ impl MultiProvider {
             models::is_agent_model_for_failover(model, provider)
                 && limit.is_some_and(|limit| limit >= required_context)
         };
+        // With routing in auto it moves sessions between accounts of a provider;
+        // this prompt only offers other providers.
+        let same_provider_rotation = same_provider_account_failover_enabled()
+            && !account_failover::routing_decides(from, &self.model());
         if !failover_config.failover_model_excluded(&self.model())
             && let Some(current) = from_label
                 .as_deref()
-                .filter(|_| !context_only && same_provider_account_failover_enabled())
+                .filter(|_| !context_only && same_provider_rotation)
         {
             let method = if from == ActiveProvider::OpenAI {
                 "openai-oauth"
@@ -214,9 +218,7 @@ impl MultiProvider {
             {
                 continue;
             }
-            if target_provider == from
-                && (context_only || !same_provider_account_failover_enabled())
-            {
+            if target_provider == from && (context_only || !same_provider_rotation) {
                 continue;
             }
             let label = jcode_provider_core::oauth_account_label(&route.api_method);

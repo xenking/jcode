@@ -356,6 +356,7 @@ impl MultiProvider {
     ) -> Result<bool> {
         if jcode_provider_core::worker_request_is_pinned()
             || !self.provider_uses_oauth_accounts(provider)
+            || account_failover::routing_decides(provider, &self.model())
         {
             return Ok(false);
         }
@@ -368,13 +369,13 @@ impl MultiProvider {
         if !enabled {
             return Ok(false);
         }
+        let account = self
+            .selected_account_for_provider(provider)
+            .or_else(|| active_account_label_for_provider(provider));
         if let Some(prompt) = self.auto_reset_route_prompt(provider, reason, messages, tools, mode)
         {
             // Preserve the router's exact-route approval/countdown boundary.
             // A reset must not spend a grant while a permitted route is ready.
-            let account = self
-                .selected_account_for_provider(provider)
-                .or_else(|| active_account_label_for_provider(provider));
             models::record_provider_unavailable_for_account_label(
                 Self::provider_key(provider),
                 account.as_deref(),
@@ -382,9 +383,6 @@ impl MultiProvider {
             );
             return Err(anyhow::anyhow!(prompt.to_error_message()));
         }
-        let account = self
-            .selected_account_for_provider(provider)
-            .or_else(|| active_account_label_for_provider(provider));
         let decision = account_failover::multi_account_provider_kind(provider).map(|kind| {
             auto_reset_trigger::decide(
                 config.auto_reset_trigger,

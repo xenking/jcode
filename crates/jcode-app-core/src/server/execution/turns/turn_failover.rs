@@ -78,6 +78,10 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     if !error_wants_failover(error) {
         return None;
     }
+    // With routing in auto the service is the one decider of account moves.
+    if super::routing_turn::owns_failover(agent) {
+        return None;
+    }
     if !super::provider_control::automatic_failover_source_is_pool_member(agent) {
         return None;
     }
@@ -993,3 +997,7 @@ pub(super) async fn retry_turn_with_server_failover(
 #[cfg(test)]
 #[path = "turn_failover_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "turn_routing_failover_tests.rs"]
+mod routing_tests;

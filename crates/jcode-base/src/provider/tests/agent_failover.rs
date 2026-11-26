@@ -40,8 +40,11 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
     // Changing the configured default bumps the config generation, which is
-    // part of the memo key. Re-key the fixture catalog so the test keeps
-    // measuring its own routes instead of the real built-in catalog.
+    // part of the memo key. Reload the cached config first (the routing check
+    // inside the prompt would otherwise bump it after the re-key), then re-key
+    // the fixture catalog so the test keeps measuring its own routes instead
+    // of the real built-in catalog.
+    let _ = crate::config::config();
     let routes = provider
         .routes_memo
         .lock()

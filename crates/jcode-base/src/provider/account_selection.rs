@@ -50,7 +50,11 @@ impl MultiProvider {
                 .filter(|kind| crate::usage::account_known_exhausted(*kind, &label))
                 .map(|_| "OAuth usage exhausted".to_string())
         }) {
-            Some(reason) if same_provider_account_failover_enabled() => {
+            // With routing in auto the session keeps the account routing chose.
+            Some(reason)
+                if same_provider_account_failover_enabled()
+                    && !account_failover::routing_decides(target, &self.model()) =>
+            {
                 match account_failover::same_provider_account_candidates(target)
                     .into_iter()
                     .next()
