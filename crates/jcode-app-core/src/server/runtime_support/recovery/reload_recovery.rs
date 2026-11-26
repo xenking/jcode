@@ -611,6 +611,31 @@ pub(crate) fn cancel(session_id: &str) -> Result<()> {
     finish_pending(session_id, ReloadRecoveryStatus::Cancelled, "user Stop")
 }
 
+/// Retire every continuation that still waits for admission. A daemon that was
+/// stopped or killed, rather than exec'd by a reload, must not restart turns
+/// its owner had already ended. Returns how many intents were cancelled.
+pub(super) fn cancel_all_pending(reason: &str) -> Result<usize> {
+    let dir = recovery_dir()?;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let _guard = lock_store()?;
+    let mut cancelled = 0;
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(mut record) = read_record_at(&path)?
+            && record.status.needs_admission()
+        {
+            write_outcome(&mut record, ReloadRecoveryStatus::Cancelled, reason)?;
+            cancelled += 1;
+        }
+    }
+    Ok(cancelled)
+}
+
 pub(super) fn supersede(session_id: &str) -> Result<()> {
     finish_pending(
         session_id,

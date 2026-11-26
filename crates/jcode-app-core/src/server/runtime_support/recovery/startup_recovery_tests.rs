@@ -294,6 +294,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
 
     let provider = Arc::new(StreamingMockProvider::default());
     for _ in 0..2 {
@@ -666,6 +667,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
 
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
@@ -771,6 +773,7 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
     let _delay_guard = ScopedEnvVar::set("JCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS", "500");
 
     let mut headless =
@@ -857,6 +860,7 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("picked the lane back up".to_string()),
@@ -957,6 +961,7 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("resumed after daemon crash".to_string()),
@@ -1036,6 +1041,7 @@ async fn startup_recovery_blocks_intent_for_unsaved_session() -> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
+    simulate_reload_exec();
     let session_id = "session_never_saved";
     super::super::reload_recovery::persist_intent(
         "reload",
@@ -1056,5 +1062,72 @@ async fn startup_recovery_blocks_intent_for_unsaved_session() -> Result<()> {
         super::super::reload_recovery::ReloadRecoveryStatus::Blocked
     );
     assert!(!record.status.needs_admission());
+    Ok(())
+}
+
+/// A killed or stopped daemon leaves running members and unadmitted intents
+/// behind. Only a reload exec may turn them back on.
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
+async fn cold_start_does_not_resume_turns_left_by_a_killed_daemon() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("resumed by itself".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let mut worker = crate::session::Session::create(None, Some("killed worker".to_string()));
+    worker.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool_bash".to_string(),
+            content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
+            is_error: Some(true),
+        }],
+    );
+    worker.save()?;
+    let swarm_id = "swarm-cold-start";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            worker.id(),
+            swarm_id,
+            "running",
+            "bash tool",
+        )],
+    );
+    super::super::reload_recovery::persist_intent(
+        "shutdown-before-kill",
+        worker.id(),
+        super::super::reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "continue".into(),
+        },
+        "headless session running during shutdown",
+    )?;
+
+    let server = Server::new(provider);
+    server.recover_headless_sessions_on_startup().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        !server.handles.sessions.contains(worker.id()).await,
+        "a plain daemon start must not start a turn by itself"
+    );
+    let record = super::super::reload_recovery::peek_for_session(worker.id())?.expect("record");
+    assert_eq!(
+        record.status,
+        super::super::reload_recovery::ReloadRecoveryStatus::Cancelled
+    );
+    let members = server.handles.swarm_state.members.read().await;
+    assert_eq!(members[worker.id()].status, "stopped");
     Ok(())
 }

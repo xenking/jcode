@@ -252,6 +252,16 @@ fn configure_test_env(root: &tempfile::TempDir) -> EnvGuard {
     }
 }
 
+/// Mark this process as the continuation of a reload exec, which keeps the pid.
+fn simulate_reload_exec() {
+    crate::reload_state::write_reload_state(
+        "reload-test",
+        "new-build",
+        crate::reload_state::ReloadPhase::SocketReady,
+        None,
+    );
+}
+
 #[derive(Default, Clone)]
 pub(super) struct StreamingMockProvider {
     responses: Arc<StdMutex<Vec<Vec<StreamEvent>>>>,

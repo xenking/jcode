@@ -413,6 +413,9 @@ pub(super) async fn start_processing_message(
         );
         return;
     }
+    if !content.trim().is_empty() || !images.is_empty() {
+        crate::server::runtime_ssh_loops::set_user_stopped(client_session_id, false);
+    }
     if super::super::reload_recovery::wait_for_retired_attempt(client_session_id).await
         && state.task.is_none()
     {

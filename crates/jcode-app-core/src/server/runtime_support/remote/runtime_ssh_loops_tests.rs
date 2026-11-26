@@ -828,3 +828,45 @@ fn turn_tool_call_detection_only_looks_at_new_messages() {
         "compaction is progress"
     );
 }
+
+#[test]
+fn user_cancel_suppresses_auto_poke_until_the_user_sends_something() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    initialize_remote_session("cancelled-session", true).unwrap();
+    todo::save_todos("cancelled-session", &open_snapshot().todos).unwrap();
+    let snapshot = || snapshot("cancelled-session").unwrap();
+    let poked = |session: &str| {
+        decide_followup(session, &snapshot(), false)
+            .unwrap()
+            .follow_up
+            .is_some()
+    };
+
+    set_user_stopped("cancelled-session", true);
+    assert!(
+        !poked("cancelled-session"),
+        "a cancelled turn must not be re-poked"
+    );
+    assert!(
+        !poked("cancelled-session"),
+        "the pause lasts until new user input"
+    );
+    set_user_stopped("cancelled-session", false);
+    assert!(
+        poked("cancelled-session"),
+        "user input resumes continuation"
+    );
+
+    // A cancel on a session that never armed poke keeps the host default.
+    set_user_stopped("fresh-session", true);
+    set_user_stopped("fresh-session", false);
+    assert_eq!(
+        read_state(&state_path("fresh-session").unwrap())
+            .unwrap()
+            .poke_enabled,
+        crate::config::config().features.auto_poke
+    );
+}

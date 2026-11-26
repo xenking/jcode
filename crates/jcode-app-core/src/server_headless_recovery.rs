@@ -12,6 +12,13 @@ impl Server {
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
             .filter(|state| state.pid == std::process::id())
             .map(|state| state.request_id);
+        if current_reload_id.is_none() {
+            // Only a reload or rollout exec keeps the daemon's pid. Anything
+            // else (SIGTERM, SIGKILL, a crash, a plain stop/start) means the
+            // owner or the OS ended those turns, so nothing resumes by itself.
+            self.discard_unattended_recovery(&recovery).await;
+            return recovery.reconcile_once().await;
+        }
         let candidates = {
             let coordinators = self.handles.swarm_state.coordinators.read().await.clone();
             let members = self.handles.swarm_state.members.read().await;
@@ -165,5 +172,26 @@ impl Server {
         // Both attached and headless sessions, including records whose session
         // is absent from the swarm snapshot, enter this one admission path.
         recovery.reconcile_once().await
+    }
+
+    async fn discard_unattended_recovery(&self, recovery: &recovery_owner::RecoveryOwner) {
+        match reload_recovery::cancel_all_pending("daemon restarted without a reload handoff") {
+            Ok(0) => {}
+            Ok(count) => crate::logging::info(&format!(
+                "Cold start: cancelled {count} recovery intent(s) left by a stopped daemon"
+            )),
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot cancel stale recovery intents: {error:#}"))
+            }
+        }
+        for session_id in &self.running_before_restart {
+            recovery
+                .finish_unstarted_headless(
+                    session_id,
+                    "stopped",
+                    Some("daemon stopped without a reload".into()),
+                )
+                .await;
+        }
     }
 }

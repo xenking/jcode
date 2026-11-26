@@ -331,6 +331,7 @@ impl SessionControlHandle {
         }
         if !content.trim().is_empty() || !images.is_empty() || !attachments.is_empty() {
             super::reload_recovery::supersede(&self.session_id)?;
+            crate::server::runtime_ssh_loops::set_user_stopped(&self.session_id, false);
         }
         let mut queue = self
             .soft_interrupt_queue
@@ -896,6 +897,7 @@ impl SessionControlHandle {
             "SESSION_CANCEL_SIGNAL_FIRE session={}",
             self.session_id
         ));
+        crate::server::runtime_ssh_loops::set_user_stopped(&self.session_id, true);
         crate::mobile_push::mark_cancelled(&self.session_id);
         crate::turn_cancel_registry::mark_interruption(
             &self.session_id,

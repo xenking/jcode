@@ -27,6 +27,9 @@ struct LoopState {
     policy: todo::followup::FollowUpPolicy,
     turns: u64,
     last_notice: Option<String>,
+    /// The user cancelled the last turn: no daemon continuation until the user
+    /// sends something new.
+    user_stopped: bool,
 }
 
 impl Default for LoopState {
@@ -38,6 +41,7 @@ impl Default for LoopState {
             policy: todo::followup::FollowUpPolicy::new(false),
             turns: 0,
             last_notice: None,
+            user_stopped: false,
         }
     }
 }
@@ -89,6 +93,23 @@ pub(super) fn initialize_remote_session(session_id: &str, enabled: bool) -> Resu
     };
     crate::storage::write_json(&path, &state)?;
     Ok(())
+}
+
+/// A user cancel pauses daemon continuation; new user input resumes it. Never
+/// creates a disabled state file for a session that has none yet.
+pub(in crate::server) fn set_user_stopped(session_id: &str, stopped: bool) {
+    let result = initialize_remote_session(session_id, crate::config::config().features.auto_poke)
+        .and_then(|()| {
+            update_state(session_id, |state| {
+                state.user_stopped = stopped;
+                Ok(())
+            })
+        });
+    if let Err(error) = result {
+        crate::logging::warn(&format!(
+            "Cannot record user stop for {session_id}: {error:#}"
+        ));
+    }
 }
 
 fn update_state<T>(
@@ -381,6 +402,9 @@ fn next_followup(
     state: &mut LoopState,
     snapshot: &todo::followup::TodoSnapshot,
 ) -> todo::followup::Decision {
+    if state.user_stopped {
+        return Default::default();
+    }
     if let Some(workflow) = &state.workflow {
         if !workflow.active || workflow.plan_only {
             return Default::default();
