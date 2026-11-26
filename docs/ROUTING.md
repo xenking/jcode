@@ -465,7 +465,7 @@ catalog price. They drive the cost shown in the TUI and the spend ledger.
 
 | Where | What | When |
 | --- | --- | --- |
-| Chat transcript | One row `Provider: old -> new (cause)` (role `setting_change`), plus Model, Reasoning effort, Mode rows, from `setting_log` | Only when the session's provider/account/model actually changes; the request-boundary net re-checks every turn and writes nothing if nothing changed. The routing table is not a transcript item (see the Intended block in section 12) |
+| Chat transcript | One row `Provider: old -> new (cause)` (role `setting_change`), plus Model, Reasoning effort, Mode rows, from `setting_log` | Only when the session's provider/account/model actually changes; the request-boundary net re-checks every turn and writes nothing if nothing changed. The routing table is not a transcript item (see "Icons, popover, account-aware picker") |
 | Wire events | `RoutingDecision {account, reason, warnings, pending}` (drives the account chip), `RoutingGate`/`RoutingGateClosed`, `RoutingStatus {text}`, `RoutingView` | every decided turn / gate / on request |
 | Decisions log | `JCODE_HOME/routing-decisions.jsonl` (rotated to `.1` at 8 MiB): `at, time, mode, session, model, role, seam, current, decision, account, reason, warnings, pending, applied` | one line per decision in `shadow` and `auto`; `decision` is `stay`, `move`, `pending`, `compact`, `redeem`, `gate` or `block`; `applied` is true only for an applied `move` |
 | Daemon log | `routing[auto\|shadow]: session=.. model=.. current=.. <decision> <account> (<reason>)`; `routing: ...` warnings for invalid config, failed binds, failed or unconfirmed reset claims | same moments |

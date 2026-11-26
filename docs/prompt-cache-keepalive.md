@@ -42,11 +42,6 @@ Each ping follows rule 6 of the routing economics
   A wake before expiry needs no ping. An `await_members` deadline is the wait's
   deadline. With no definite wake (a turn that ended with live workers) it
   rolls one TTL past the current expiry and is re-evaluated after each ping.
-- On an account with free room (quota that would expire unused), pings cost
-  nothing and always run.
-- When routing has a pending move for the session that is worth its cache miss
-  (the move costs less than staying warm with the pings it takes), pinging
-  stops. The cache goes cold and the move happens at the next turn for free.
 
 With reads at 0.1x and 1-hour writes at 2x the input price and no tail, up to
 19 pings (about 17 hours of waiting) cost less than one rebuild.
@@ -60,7 +55,7 @@ session transfer. It is never added to history or the session's context usage.
 
 Anthropic can still charge for a rewrite if the cache unexpectedly misses. The
 daily limit reserves the estimated full rewrite plus tail before dispatch, then
-settles it from reported tokens, also on free room. An ambiguous response keeps
+settles it from reported tokens. An ambiguous response keeps
 the reservation and is not retried. Only a confirmed full hit advances the
 countdown or the card's "Kept warm" count. The card's dollar amount uses public
 rates, not an invoice or an estimate of remaining subscription quota.
