@@ -17,12 +17,12 @@ const PLATEAU_REQUESTS: u8 = 5;
 // Cumulative-waste rule for calls the 50k rules never see. A "miss" is a warm
 // request that read back under half of the previous prompt (that prefix was just
 // sent, so it should have been cached) and left at least 10k tokens uncached.
-// Two or more misses among the last 8 requests whose waste sums to 100k pause the
-// session: three 35k misses trip it, a single miss of any size never does.
+// Three or more misses among the last 8 requests whose waste sums to 250k pause the
+// session: fewer than three misses never trip it, however large they are.
 const MISS_WINDOW: usize = 8;
 const MISS_MIN_WASTE: u64 = PLATEAU_MIN_TAIL;
-const MISS_MIN_COUNT: usize = 2;
-const MISS_TOTAL: u64 = 100_000;
+const MISS_MIN_COUNT: usize = 3;
+const MISS_TOTAL: u64 = 250_000;
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -332,10 +332,12 @@ mod tests {
         assert_eq!((pause.requests, pause.uncached_input), (5, 80_005));
     }
 
+    /// One Anthropic request: `read` tokens come back from the cache and the rest of the
+    /// prompt is written again, so a miss shows up as a large cache write, not as `input`.
     fn miss(breaker: &mut CacheBreaker, prompt: u64, read: u64) -> Option<CachePause> {
         breaker.observe(
             route("anthropic", "a"),
-            Some((prompt - read, read, Some(0))),
+            Some((0, read, Some(prompt - read))),
             Instant::now(),
         )
     }
@@ -343,37 +345,39 @@ mod tests {
     #[test]
     fn repeated_sub_50k_misses_pause_at_cumulative_waste_threshold() {
         let mut breaker = CacheBreaker::default();
-        assert!(miss(&mut breaker, 40_000, 40_000).is_none(), "warm start");
+        assert!(miss(&mut breaker, 100_000, 100_000).is_none(), "warm start");
         assert!(
-            miss(&mut breaker, 41_000, 1_000).is_none(),
-            "one miss: 40k wasted"
+            miss(&mut breaker, 100_000, 1_000).is_none(),
+            "one miss: 99k wasted"
         );
         assert!(
-            miss(&mut breaker, 42_000, 1_000).is_none(),
-            "two misses: 81k < 100k"
+            miss(&mut breaker, 100_000, 1_000).is_none(),
+            "two misses: 198k < 250k"
         );
-        let pause = miss(&mut breaker, 43_000, 1_000).expect("123k wasted across 3 misses");
-        assert_eq!((pause.requests, pause.uncached_input), (3, 123_000));
+        let pause = miss(&mut breaker, 100_000, 1_000).expect("297k wasted across 3 misses");
+        assert_eq!((pause.requests, pause.uncached_input), (3, 297_000));
     }
 
     #[test]
     fn sub_threshold_waste_single_miss_and_warm_tails_do_not_pause() {
-        // Just below the total: 2 misses of 49_999 each = 99_998.
+        // 3 misses wasting 249_999 in total stay below the threshold.
         let mut breaker = CacheBreaker::default();
-        miss(&mut breaker, 50_000, 50_000);
-        assert!(miss(&mut breaker, 50_000, 1).is_none());
-        assert!(miss(&mut breaker, 50_000, 1).is_none());
-        // Exactly at the total (33_333 + 33_333 + 33_334 = 100_000) pauses.
+        miss(&mut breaker, 83_333, 83_333);
+        for _ in 0..3 {
+            assert!(miss(&mut breaker, 83_333, 0).is_none());
+        }
+        // Exactly 250_000 (83_333 + 83_333 + 83_334) with 3 misses pauses.
         let mut breaker = CacheBreaker::default();
-        miss(&mut breaker, 33_333, 33_333);
-        assert!(miss(&mut breaker, 33_333, 0).is_none());
-        assert!(miss(&mut breaker, 33_333, 0).is_none());
-        let pause = miss(&mut breaker, 33_334, 0).expect("100k wasted at the boundary");
-        assert_eq!(pause.uncached_input, 100_000);
-        // A single huge-tail miss never trips the cumulative rule.
+        miss(&mut breaker, 83_333, 83_333);
+        assert!(miss(&mut breaker, 83_333, 0).is_none());
+        assert!(miss(&mut breaker, 83_333, 0).is_none());
+        let pause = miss(&mut breaker, 83_334, 0).expect("250k wasted at the boundary");
+        assert_eq!((pause.requests, pause.uncached_input), (3, 250_000));
+        // Two misses never pause, however much they waste.
         let mut breaker = CacheBreaker::default();
-        miss(&mut breaker, 40_000, 40_000);
-        assert!(miss(&mut breaker, 49_000, 1_000).is_none());
+        miss(&mut breaker, 500_000, 500_000);
+        assert!(miss(&mut breaker, 500_000, 0).is_none());
+        assert!(miss(&mut breaker, 500_000, 0).is_none());
         // Healthy growth: every request reads the previous prompt back.
         let mut breaker = CacheBreaker::default();
         let mut prompt = 20_000;
@@ -381,6 +385,45 @@ mod tests {
             assert!(miss(&mut breaker, prompt + 12_000, prompt).is_none());
             prompt += 12_000;
         }
+    }
+
+    #[test]
+    fn a_miss_that_leaves_the_eight_request_window_no_longer_counts() {
+        const PROMPT: u64 = 100_000;
+        // Warm start, two misses, `healthy` warm requests, then a third miss.
+        let third_miss = |healthy: usize| {
+            let mut breaker = CacheBreaker::default();
+            miss(&mut breaker, PROMPT, PROMPT);
+            miss(&mut breaker, PROMPT, 0);
+            miss(&mut breaker, PROMPT, 0);
+            for _ in 0..healthy {
+                assert!(miss(&mut breaker, PROMPT, PROMPT).is_none());
+            }
+            miss(&mut breaker, PROMPT, 0)
+        };
+        assert!(
+            third_miss(5).is_some(),
+            "first miss is the 8th-oldest request"
+        );
+        assert!(third_miss(6).is_none(), "first miss left the window");
+    }
+
+    #[test]
+    fn consecutive_expensive_requests_still_pause_below_the_cumulative_threshold() {
+        // 3 x 60k uncached input waste only 180k, so the cumulative rule alone would not stop them.
+        let mut breaker = CacheBreaker::default();
+        let now = Instant::now();
+        for _ in 0..2 {
+            assert!(
+                breaker
+                    .observe(route("anthropic", "a"), Some((60_000, 0, Some(0))), now)
+                    .is_none()
+            );
+        }
+        let pause = breaker
+            .observe(route("anthropic", "a"), Some((60_000, 0, Some(0))), now)
+            .unwrap();
+        assert_eq!((pause.requests, pause.uncached_input), (3, 180_000));
     }
 
     #[test]
