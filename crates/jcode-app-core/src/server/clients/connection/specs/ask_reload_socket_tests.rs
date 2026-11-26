@@ -137,7 +137,10 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
 
     let activity = crate::turn_activity::global();
     let fence = activity
-        .wait_for_checkpointable(Duration::ZERO)
+        .wait_for_checkpointable(
+            Duration::ZERO,
+            crate::turn_activity::RolloutExemption::default(),
+        )
         .await
         .expect("an unanswered question must not block the reviewed fence");
     reload::persist_reload_recovery_intents(

@@ -523,6 +523,8 @@ pub struct ReloadSignal {
     pub triggering_session: Option<String>,
     pub prefer_selfdev_binary: bool,
     pub idle_timeout: Option<std::time::Duration>,
+    /// The rollout this replacement belongs to; sessions parked on it never block it.
+    pub rollout: Option<String>,
     pub request_id: String,
 }
 
@@ -657,6 +659,7 @@ pub fn send_reload_signal(
         target,
         request_id,
         None,
+        None,
     )
 }
 
@@ -674,6 +677,7 @@ pub fn send_reload_signal_target(
         target,
         crate::id::new_id("reload"),
         None,
+        None,
     ))
 }
 
@@ -681,15 +685,18 @@ pub(super) fn send_checkpointable_reload_signal_target(
     hash: String,
     target: jcode_selfdev_types::ImmutableTarget,
     timeout: std::time::Duration,
+    triggering_session: Option<String>,
+    rollout: String,
 ) -> anyhow::Result<String> {
     jcode_build_support::runtime_generation::validate_target(&target)?;
     Ok(publish_reload_signal(
         hash,
-        None,
+        triggering_session,
         false,
         target,
         crate::id::new_id("reload"),
         Some(timeout),
+        Some(rollout),
     ))
 }
 
@@ -700,6 +707,7 @@ fn publish_reload_signal(
     target: jcode_selfdev_types::ImmutableTarget,
     request_id: String,
     idle_timeout: Option<std::time::Duration>,
+    rollout: Option<String>,
 ) -> String {
     let (tx, _) = reload_signal();
     let _ = tx.send(Some(ReloadSignal {
@@ -708,6 +716,7 @@ fn publish_reload_signal(
         triggering_session,
         prefer_selfdev_binary,
         idle_timeout,
+        rollout,
         request_id: request_id.clone(),
     }));
     request_id

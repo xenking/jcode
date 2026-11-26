@@ -518,16 +518,42 @@ fn drain_skips_unchanged_daemon_and_never_waits_on_initiator() {
     journal.intent.now = true;
     assert!(drain_blockers(&snapshot, &journal, "0000000").is_empty());
 
+    // A reviewed rollout waits for computation, but never for the session that
+    // started it or for sessions only parked on it (wait-1 also runs a tool).
     journal.intent.now = false;
     journal.intent.reviewed = true;
     journal.intent.triggering_session = None;
-    assert_eq!(
-        drain_blockers(&snapshot, &journal, "abcdef123456")
+    let reviewed = |journal: &Journal| {
+        drain_blockers(&snapshot, journal, "abcdef123456")
             .iter()
-            .map(|session| session.session_id.as_str())
-            .collect::<Vec<_>>(),
-        ["initiator", "wait-1", "wait-2", "wait-other", "worker"]
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        reviewed(&journal),
+        ["initiator", "wait-1", "wait-other", "worker"]
     );
+    journal.intent.triggering_session = Some("initiator".into());
+    assert_eq!(reviewed(&journal), ["wait-1", "wait-other", "worker"]);
+}
+
+#[test]
+fn drain_timeout_names_each_blocker_and_how_long_its_turn_has_run() {
+    let (_dir, _store, mut journal) = fixture();
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let _turn = activity.admit("session_whale_1").unwrap();
+    let mut blocker = activity
+        .snapshot()
+        .session("session_whale_1")
+        .unwrap()
+        .clone();
+    blocker.turn_age_secs = Some(17 * 60 + 5);
+    let message = drain_timeout(&mut journal, vec![&blocker]).to_string();
+    assert!(
+        message.starts_with("drain timed out: session_whale_1 ("),
+        "{message}"
+    );
+    assert!(message.contains("in turn 17m05s"), "{message}");
 }
 
 #[test]

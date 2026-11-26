@@ -251,7 +251,13 @@ pub(super) async fn await_reload_signal(
         // rejection rather than disappearing between capture and exec.
         let activity = crate::turn_activity::global();
         let admission = match signal.idle_timeout {
-            Some(timeout) => activity.wait_for_checkpointable(timeout).await,
+            Some(timeout) => {
+                let exempt = crate::turn_activity::RolloutExemption {
+                    rollout: signal.rollout.as_deref(),
+                    initiator: signal.triggering_session.as_deref(),
+                };
+                activity.wait_for_checkpointable(timeout, exempt).await
+            }
             None => activity.close_admission(),
         };
         let _admission = match admission {
@@ -298,7 +304,10 @@ pub(super) async fn await_reload_signal(
                     "durable checkpoint missing for {}",
                     unfinished
                         .into_iter()
-                        .map(|session| session.session_id)
+                        .map(|session| match session.checkpoint_error {
+                            Some(error) => format!("{} ({error})", session.session_id),
+                            None => session.session_id,
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 )),

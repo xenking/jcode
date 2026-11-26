@@ -7,7 +7,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 /// The tool whose pending call stands for a whole rollout wait.
@@ -41,6 +41,29 @@ pub struct SessionActivity {
     pub checkpoint_pending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_rollout: Option<String>,
+    /// Seconds since the session's turn took its first lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_age_secs: Option<u64>,
+    /// Why a requested checkpoint cannot be acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_error: Option<String>,
+}
+
+/// Sessions a replacement never waits for: the one that started the rollout and
+/// those parked on it. Neither can finish before the rollout does.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RolloutExemption<'a> {
+    pub rollout: Option<&'a str>,
+    pub initiator: Option<&'a str>,
+}
+
+impl RolloutExemption<'_> {
+    fn exempts(&self, session: &SessionActivity) -> bool {
+        self.initiator == Some(session.session_id.as_str())
+            || self
+                .rollout
+                .is_some_and(|id| session.waiting_rollout.as_deref() == Some(id))
+    }
 }
 
 impl SessionActivity {
@@ -74,18 +97,17 @@ impl ActivitySnapshot {
     /// Reload drain waits for computation, not a user answer that can be
     /// durably checkpointed. Idle upgrades must use `busy_sessions` instead.
     pub fn drain_sessions(&self) -> Vec<String> {
-        self.drain_blockers(None)
+        self.drain_blockers(RolloutExemption::default())
             .map(|session| session.session_id.clone())
             .collect()
     }
 
-    pub fn drain_blockers<'a>(
+    pub fn drain_blockers<'a, 'e>(
         &'a self,
-        rollout: Option<&str>,
-    ) -> impl Iterator<Item = &'a SessionActivity> {
-        self.checkpoint_blockers().filter(move |session| {
-            rollout.is_none_or(|id| session.waiting_rollout.as_deref() != Some(id))
-        })
+        exempt: RolloutExemption<'e>,
+    ) -> impl Iterator<Item = &'a SessionActivity> + use<'a, 'e> {
+        self.checkpoint_blockers()
+            .filter(move |session| !exempt.exempts(session))
     }
 
     pub(crate) fn checkpoint_blockers(&self) -> impl Iterator<Item = &SessionActivity> {
@@ -133,6 +155,9 @@ struct SessionState {
     participants: BTreeMap<u64, Participant>,
     checkpoint_requested: bool,
     checkpointed: bool,
+    checkpoint_error: Option<String>,
+    /// Set while the session has any participant.
+    started: Option<Instant>,
 }
 
 impl SessionState {
@@ -213,6 +238,11 @@ impl SessionState {
                 TurnPhase::Checkpointed,
                 "durable checkpoint acknowledged".into(),
             )
+        } else if let Some(error) = &self.checkpoint_error {
+            (
+                TurnPhase::CheckpointRequested,
+                format!("checkpoint save failed: {error}"),
+            )
         } else if self.checkpoint_requested {
             (
                 TurnPhase::CheckpointRequested,
@@ -249,6 +279,8 @@ impl SessionState {
             active,
             checkpoint_pending: self.checkpoint_requested && !self.checkpointed,
             waiting_rollout,
+            turn_age_secs: self.started.map(|started| started.elapsed().as_secs()),
+            checkpoint_error: self.checkpoint_error.clone(),
         }
     }
 }
@@ -448,6 +480,8 @@ impl ActivityRegistry {
         if session.participants.is_empty() {
             session.checkpoint_requested = false;
             session.checkpointed = false;
+            session.checkpoint_error = None;
+            session.started = Some(Instant::now());
         }
         session.participants.insert(token, participant);
         self.changed.notify_waiters();
@@ -496,6 +530,20 @@ impl ActivityRegistry {
         if let Some(session) = state.sessions.get_mut(session_id) {
             session.checkpoint_requested = true;
             session.checkpointed = false;
+            session.checkpoint_error = None;
+            state.next();
+        }
+        self.changed.notify_waiters();
+    }
+
+    /// Call when the checkpoint writer could not make the transcript durable, so
+    /// the waiting replacement learns why now instead of at its timeout.
+    pub fn checkpoint_failed(&self, session_id: &str, error: &str) {
+        let mut state = self.lock();
+        if let Some(session) = state.sessions.get_mut(session_id)
+            && session.checkpoint_requested
+        {
+            session.checkpoint_error = Some(error.to_owned());
             state.next();
         }
         self.changed.notify_waiters();
@@ -508,6 +556,7 @@ impl ActivityRegistry {
             && session.checkpoint_requested
         {
             session.checkpointed = true;
+            session.checkpoint_error = None;
             state.next();
         }
         self.changed.notify_waiters();
@@ -523,6 +572,7 @@ impl ActivityRegistry {
             new.participants.extend(old.participants);
             new.checkpoint_requested |= old.checkpoint_requested;
             new.checkpointed |= old.checkpointed;
+            new.started = [new.started, old.started].into_iter().flatten().min();
             state.next();
         }
         self.changed.notify_waiters();
@@ -530,24 +580,25 @@ impl ActivityRegistry {
 
     /// Forced reload closes admission even when interruption is required.
     pub fn close_admission(&self) -> Result<AdmissionFence> {
-        self.fence(FencePolicy::Any)
+        self.fence(FencePolicy::Any, RolloutExemption::default())
     }
 
     /// Idle replacement must prove quiescence while atomically closing admission.
     pub fn try_quiescent(&self) -> Result<AdmissionFence> {
-        self.fence(FencePolicy::Idle)
+        self.fence(FencePolicy::Idle, RolloutExemption::default())
     }
 
     pub(crate) async fn wait_for_checkpointable(
         &self,
         timeout: Duration,
+        exempt: RolloutExemption<'_>,
     ) -> Result<AdmissionFence> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            match self.fence(FencePolicy::Checkpointable) {
+            match self.fence(FencePolicy::Checkpointable, exempt) {
                 Ok(fence) => return Ok(fence),
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
@@ -556,7 +607,7 @@ impl ActivityRegistry {
         }
     }
 
-    fn fence(&self, policy: FencePolicy) -> Result<AdmissionFence> {
+    fn fence(&self, policy: FencePolicy, exempt: RolloutExemption<'_>) -> Result<AdmissionFence> {
         let mut state = self.lock();
         ensure!(state.fence.is_none(), "turn admission already fenced");
         if policy != FencePolicy::Any {
@@ -565,7 +616,7 @@ impl ActivityRegistry {
                 FencePolicy::Any => unreachable!(),
                 FencePolicy::Idle => snapshot.busy_sessions(),
                 FencePolicy::Checkpointable => snapshot
-                    .checkpoint_blockers()
+                    .drain_blockers(exempt)
                     .map(|s| s.session_id.clone())
                     .collect(),
             };
@@ -605,6 +656,8 @@ impl ActivityRegistry {
                         active: false,
                         checkpoint_pending: true,
                         waiting_rollout: None,
+                        turn_age_secs: None,
+                        checkpoint_error: None,
                     }),
                 })
                 .collect();
@@ -612,7 +665,12 @@ impl ActivityRegistry {
             if unfinished.is_empty() {
                 return unfinished;
             }
-            if tokio::time::Instant::now() >= deadline {
+            // A failed save will not recover by waiting.
+            if unfinished
+                .iter()
+                .any(|session| session.checkpoint_error.is_some())
+                || tokio::time::Instant::now() >= deadline
+            {
                 return unfinished;
             }
             // Re-snapshot even at timeout so an acknowledgement racing the
@@ -669,6 +727,9 @@ impl AdmissionGuard {
         let mut changed = false;
         for session in state.sessions.values_mut() {
             changed |= session.participants.remove(&token).is_some();
+            if session.participants.is_empty() {
+                session.started = None;
+            }
         }
         if changed {
             state.next();
@@ -731,6 +792,7 @@ impl Drop for AdmissionFence {
             for session in state.sessions.values_mut() {
                 session.checkpoint_requested = false;
                 session.checkpointed = false;
+                session.checkpoint_error = None;
             }
             state.next();
         }

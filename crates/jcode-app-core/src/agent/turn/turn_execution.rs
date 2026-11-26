@@ -342,20 +342,36 @@ impl Agent {
         self.fire_turn_start_hook("chat");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.session.migration_lease_block().is_none()
-            && crate::turn_activity::global()
-                .snapshot()
-                .session(self.session.id())
-                .is_some_and(|activity| activity.checkpoint_pending)
-        {
-            self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(self.session.id());
-        }
+        self.acknowledge_requested_checkpoint();
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
             self.refresh_session_title(Some(&title_event_tx)).await;
         }
         result
+    }
+
+    /// A reload that asked this turn to checkpoint waits for the outcome. A
+    /// failed save (a full disk) is reported to it now: returning early would
+    /// leave it waiting out its whole timeout and hide the turn's own result.
+    fn acknowledge_requested_checkpoint(&mut self) {
+        let session_id = self.session.id().to_owned();
+        let activity = crate::turn_activity::global();
+        if self.session.migration_lease_block().is_some()
+            || !activity
+                .snapshot()
+                .session(&session_id)
+                .is_some_and(|activity| activity.checkpoint_pending)
+        {
+            return;
+        }
+        match self.persist_session_now() {
+            Ok(()) => activity.checkpointed(&session_id),
+            Err(error) => {
+                let error = format!("{error:#}");
+                logging::warn(&format!("Checkpoint save failed for {session_id}: {error}"));
+                activity.checkpoint_failed(&session_id, &error);
+            }
+        }
     }
 
     /// Re-run the model loop for the turn already in history, without
@@ -380,15 +396,7 @@ impl Agent {
         self.fire_turn_start_hook("failover");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.session.migration_lease_block().is_none()
-            && crate::turn_activity::global()
-                .snapshot()
-                .session(self.session.id())
-                .is_some_and(|activity| activity.checkpoint_pending)
-        {
-            self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(self.session.id());
-        }
+        self.acknowledge_requested_checkpoint();
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
             self.refresh_session_title(Some(&title_event_tx)).await;
@@ -934,15 +942,7 @@ impl Agent {
         self.fire_turn_start_hook("reload_resume");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.session.migration_lease_block().is_none()
-            && crate::turn_activity::global()
-                .snapshot()
-                .session(self.session.id())
-                .is_some_and(|activity| activity.checkpoint_pending)
-        {
-            self.persist_session_now()?;
-            crate::turn_activity::global().checkpointed(self.session.id());
-        }
+        self.acknowledge_requested_checkpoint();
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
             self.refresh_session_title(Some(&title_event_tx)).await;

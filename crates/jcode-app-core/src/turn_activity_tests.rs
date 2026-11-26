@@ -102,13 +102,13 @@ async fn reviewed_restart_waits_for_turns_and_then_fences_new_admission() {
     let turn = activity.admit("reviewed-active-turn").unwrap();
     assert!(
         activity
-            .wait_for_checkpointable(Duration::ZERO)
+            .wait_for_checkpointable(Duration::ZERO, RolloutExemption::default())
             .await
             .is_err()
     );
     drop(turn);
     let fence = activity
-        .wait_for_checkpointable(Duration::ZERO)
+        .wait_for_checkpointable(Duration::ZERO, RolloutExemption::default())
         .await
         .unwrap();
     assert!(activity.admit("reviewed-new-turn").is_err());
@@ -125,7 +125,7 @@ async fn answer_cannot_leave_a_parked_turn_during_reviewed_replacement() {
     tokio::pin!(question);
     assert!(futures::poll!(&mut question).is_pending());
     let fence = activity
-        .wait_for_checkpointable(Duration::ZERO)
+        .wait_for_checkpointable(Duration::ZERO, RolloutExemption::default())
         .await
         .unwrap();
     answer.send("B").unwrap();
@@ -273,4 +273,103 @@ fn drain_excludes_checkpointable_asks_but_idle_upgrade_still_sees_ownership() {
         ["accepted", "asking", "saved", "tool"]
     );
     assert!(activity.try_quiescent().is_err());
+}
+
+/// A provider whose first request asks the turn for a checkpoint and then
+/// fills the disk: the sessions directory can no longer be written.
+struct FullDiskProvider(std::sync::Mutex<Option<String>>);
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for FullDiskProvider {
+    async fn complete(
+        &self,
+        _: &[crate::message::Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<crate::provider::EventStream> {
+        let session_id = self.0.lock().unwrap().clone().unwrap();
+        global().checkpoint_requested(&session_id);
+        let sessions = crate::storage::jcode_dir().unwrap().join("sessions");
+        std::fs::remove_dir_all(&sessions).unwrap();
+        std::fs::write(&sessions, b"disk full").unwrap();
+        Ok(Box::pin(futures::stream::iter([
+            Ok(crate::message::StreamEvent::TextDelta("done".into())),
+            Ok(crate::message::StreamEvent::MessageEnd { stop_reason: None }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "full-disk-test"
+    }
+    fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+        Arc::new(Self(std::sync::Mutex::new(self.0.lock().unwrap().clone())))
+    }
+}
+
+#[tokio::test]
+async fn failed_checkpoint_save_reaches_the_waiting_reload_before_its_timeout() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider = Arc::new(FullDiskProvider(std::sync::Mutex::new(None)));
+    let mut agent = crate::agent::Agent::new(provider.clone(), crate::tool::Registry::empty());
+    let id = agent.session_id().to_owned();
+    *provider.0.lock().unwrap() = Some(id.clone());
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    // The turn's own outcome is not what the reload waits for.
+    let _ = agent
+        .run_once_streaming_mpsc("save me", Vec::new(), None, events)
+        .await;
+
+    let started = std::time::Instant::now();
+    let unfinished = global()
+        .wait_for_checkpoints(std::slice::from_ref(&id), Duration::from_secs(5))
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a failed save must not be waited out"
+    );
+    assert_eq!(unfinished.len(), 1);
+    assert!(
+        unfinished[0].reason.contains("checkpoint save failed"),
+        "{}",
+        unfinished[0].reason
+    );
+}
+
+#[tokio::test]
+async fn reviewed_fence_does_not_wait_for_its_initiator_or_sessions_parked_on_it() {
+    let activity = ActivityRegistry::default();
+    let _initiator = activity.admit("initiator").unwrap();
+    let _waiter = activity.admit("waiter").unwrap();
+    let _wait_tool = activity.awaiting_tool("waiter", ROLLOUT_WAIT_TOOL, "call");
+    let _running = activity.in_tool_call("waiter", ROLLOUT_WAIT_TOOL, "call");
+    let _parked = activity.rollout_wait("waiter", "call", "rollout_1");
+    let exempt = RolloutExemption {
+        rollout: Some("rollout_1"),
+        initiator: Some("initiator"),
+    };
+    assert!(
+        activity
+            .wait_for_checkpointable(Duration::ZERO, RolloutExemption::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        activity
+            .wait_for_checkpointable(
+                Duration::ZERO,
+                RolloutExemption {
+                    rollout: Some("rollout_other"),
+                    ..exempt
+                }
+            )
+            .await
+            .is_err(),
+        "a waiter on another rollout still blocks"
+    );
+    assert!(
+        activity
+            .wait_for_checkpointable(Duration::ZERO, exempt)
+            .await
+            .is_ok()
+    );
 }

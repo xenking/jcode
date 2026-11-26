@@ -15,7 +15,7 @@ pub use crate::rollout_journal::{
     Intent, Journal, Mutation, Phase, inspect, journal_path, read_journal,
 };
 use crate::rollout_journal::{load_at, receipt_path};
-use crate::turn_activity::{ActivitySnapshot, SessionActivity};
+use crate::turn_activity::{ActivitySnapshot, RolloutExemption, SessionActivity};
 
 #[cfg(target_os = "macos")]
 #[path = "rollout_builds.rs"]
@@ -750,6 +750,8 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
                     journal.intent.cli.clone(),
                     target,
                     deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    journal.intent.triggering_session.clone(),
+                    journal.id.clone(),
                 )?
             } else {
                 super::send_reload_signal_target(
@@ -797,7 +799,10 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         Some(if journal.intent.now {
             activity.close_admission()?
         } else {
-            match activity.wait_for_checkpointable(timeout).await {
+            match activity
+                .wait_for_checkpointable(timeout, exemption(journal))
+                .await
+            {
                 Ok(fence) => fence,
                 Err(error) => {
                     let snapshot = activity.snapshot();
@@ -869,27 +874,34 @@ fn drain_blockers<'a>(
     journal: &Journal,
     serving: &str,
 ) -> Vec<&'a SessionActivity> {
-    if journal.intent.now {
+    if journal.intent.now || (!journal.intent.reviewed && same_commit(serving, &journal.intent.cli))
+    {
         return Vec::new();
     }
-    if journal.intent.reviewed {
-        return snapshot.checkpoint_blockers().collect();
+    snapshot.drain_blockers(exemption(journal)).collect()
+}
+
+/// A rollout never waits for its own initiator or for sessions waiting on it.
+fn exemption(journal: &Journal) -> RolloutExemption<'_> {
+    RolloutExemption {
+        rollout: Some(&journal.id),
+        initiator: journal.intent.triggering_session.as_deref(),
     }
-    if same_commit(serving, &journal.intent.cli) {
-        return Vec::new();
-    }
-    snapshot
-        .drain_blockers(Some(&journal.id))
-        .filter(|session| {
-            journal.intent.triggering_session.as_deref() != Some(session.session_id.as_str())
-        })
-        .collect()
 }
 
 fn blocker_detail<'a>(blockers: impl IntoIterator<Item = &'a SessionActivity>) -> String {
     blockers
         .into_iter()
-        .map(|session| format!("{} ({})", session.session_id, session.reason))
+        .map(|session| match session.turn_age_secs {
+            Some(secs) => format!(
+                "{} ({}, in turn {}m{:02}s)",
+                session.session_id,
+                session.reason,
+                secs / 60,
+                secs % 60
+            ),
+            None => format!("{} ({})", session.session_id, session.reason),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1002,7 +1014,10 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
             activity.close_admission()?
         } else {
             activity
-                .wait_for_checkpointable(Duration::from_secs(journal.intent.drain_timeout_secs))
+                .wait_for_checkpointable(
+                    Duration::from_secs(journal.intent.drain_timeout_secs),
+                    exemption(journal),
+                )
                 .await?
         })
     } else {
@@ -1036,6 +1051,8 @@ async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
                 journal.previous_shared.clone(),
                 target,
                 Duration::from_secs(journal.intent.drain_timeout_secs),
+                journal.intent.triggering_session.clone(),
+                journal.id.clone(),
             )?;
         } else {
             super::send_reload_signal_target(journal.previous_shared.clone(), None, false, target)?;

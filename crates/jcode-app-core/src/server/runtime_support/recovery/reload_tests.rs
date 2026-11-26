@@ -62,6 +62,7 @@ async fn receive_reload_signal_consumes_already_pending_value() {
         triggering_session: Some("sess-1".to_string()),
         prefer_selfdev_binary: true,
         idle_timeout: None,
+        rollout: None,
         request_id: "reload-1".to_string(),
     }))
     .expect("send pending reload signal");
@@ -93,6 +94,7 @@ async fn receive_reload_signal_waits_for_future_value_when_initially_empty() {
         triggering_session: Some("sess-2".to_string()),
         prefer_selfdev_binary: false,
         idle_timeout: None,
+        rollout: None,
         request_id: "reload-2".to_string(),
     }))
     .expect("send future reload signal");

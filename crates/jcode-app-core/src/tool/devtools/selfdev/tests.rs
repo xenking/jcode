@@ -504,6 +504,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
         triggering_session: None,
         prefer_selfdev_binary: true,
         idle_timeout: None,
+        rollout: None,
         request_id: "ignored".to_string(),
     });
 
@@ -514,6 +515,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
         triggering_session: None,
         prefer_selfdev_binary: true,
         idle_timeout: None,
+        rollout: None,
         request_id,
     });
 
