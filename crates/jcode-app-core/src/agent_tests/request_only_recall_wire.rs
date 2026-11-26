@@ -135,6 +135,8 @@ async fn exercise(
     let _env = super::worker_http_capture::EnvGuard::set(&[
         ("JCODE_TEST_SESSION", "1"),
         ("JCODE_RUNTIME_PROVIDER", "openai-api"),
+        ("JCODE_INITIAL_PROVIDER_EXPLICIT", "1"),
+        ("JCODE_ACTIVE_PROVIDER", "openai"),
         ("OPENAI_API_KEY", KEY),
         ("JCODE_OPENAI_API_BASE", &base),
         ("JCODE_OPENAI_TRANSPORT", "websocket"),
@@ -165,19 +167,18 @@ async fn exercise(
         ([first, second], reused_socket)
     });
 
-    let credentials = crate::auth::codex::CodexCredentials {
-        access_token: KEY.into(),
-        refresh_token: String::new(),
-        id_token: None,
-        account_id: None,
-        expires_at: None,
-    };
     let scope = crate::provider::openai_catalog_scope_for_credential(false, KEY);
     crate::provider::populate_account_models_for_scope(&scope, vec![MODEL.into()]);
-    let provider = Arc::new(jcode_provider_openai_runtime::OpenAIProvider::new(
-        credentials,
-    ));
-    provider.set_transport("websocket").unwrap();
+    crate::provider::external::register_external_provider(
+        crate::provider::external::OPENAI_RUNTIME,
+        || {
+            Arc::new(jcode_provider_openai_runtime::OpenAIProvider::new(
+                crate::auth::codex::load_credentials().expect("fixture API key"),
+            ))
+        },
+    );
+    let provider = Arc::new(crate::provider::MultiProvider::new_fast());
+    assert_eq!(provider.name(), "OpenAI");
 
     let project = tempfile::tempdir_in(home.root()).unwrap();
     let mut session = crate::session::Session::create(None, None);
