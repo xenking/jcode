@@ -103,10 +103,11 @@ pub(super) fn explain_run_error(error: anyhow::Error) -> anyhow::Error {
     let Some(prompt) = crate::provider::parse_failover_prompt_message(&text) else {
         return error;
     };
-    let reset = crate::provider::usage_limit_details(&text)
-        .and_then(|details| details.reset)
-        .map(|reset| format!(", resets {reset}"))
-        .unwrap_or_default();
+    let reset = match crate::provider::usage_limit_details(&text).and_then(|details| details.reset)
+    {
+        Some(reset) => format!(", resets {reset}"),
+        None => String::new(),
+    };
     anyhow::anyhow!(
         "{} is unavailable ({}{reset}). The message was not delivered: jcode run never switches provider on its own. Pass -p/--provider or -m/--model (for example `jcode --resume <id> -p {} run ...`) to continue on another route.",
         prompt.from_label,

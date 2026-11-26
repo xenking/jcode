@@ -63,11 +63,10 @@ const USAGE_ENDPOINT_CLAUDE_CODE_VERSION: &str = "2.1.326";
 
 /// `User-Agent` for the account usage, profile and saved-reset endpoints.
 pub fn usage_endpoint_user_agent() -> String {
-    let version = std::env::var("JCODE_CLAUDE_CODE_VERSION")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| USAGE_ENDPOINT_CLAUDE_CODE_VERSION.to_owned());
+    let version = match std::env::var("JCODE_CLAUDE_CODE_VERSION") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        _ => USAGE_ENDPOINT_CLAUDE_CODE_VERSION.to_owned(),
+    };
     format!("claude-cli/{version} (external, cli)")
 }
 

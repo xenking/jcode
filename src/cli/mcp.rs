@@ -162,7 +162,10 @@ fn render_tool_line(server: &McpServerConfig, tool: &crate::mcp::McpToolDef) -> 
 
 pub(crate) async fn run(action: McpCommand) -> Result<()> {
     let config = McpConfig::load();
-    let project_dir = std::env::current_dir().ok();
+    let project_dir = match std::env::current_dir() {
+        Ok(dir) => Some(dir),
+        Err(_) => None,
+    };
     if let Some(warning) = approvals::inert_config_toml_warning()
         && matches!(
             action,

@@ -171,10 +171,18 @@ fn edit(
         if text.ends_with('\n') {
             out.push('\n');
         }
-        let permissions = std::fs::metadata(&path).map(|meta| meta.permissions()).ok();
+        let permissions = match std::fs::metadata(&path) {
+            Ok(meta) => Some(meta.permissions()),
+            Err(_) => None,
+        };
         crate::storage::write_bytes(&path, out.as_bytes())?;
-        if let Some(permissions) = permissions {
-            let _ = std::fs::set_permissions(&path, permissions);
+        if let Some(permissions) = permissions
+            && let Err(error) = std::fs::set_permissions(&path, permissions)
+        {
+            crate::logging::warn(&format!(
+                "MCP approvals: could not restore permissions of {}: {error}",
+                path.display()
+            ));
         }
     }
     Ok(path)
@@ -240,8 +248,12 @@ pub fn revoke(
 /// table, so each entry is inert; returns the file and the server names.
 pub fn inert_config_toml_servers() -> Option<(PathBuf, Vec<String>)> {
     let path = crate::config::Config::path()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let doc: toml::Value = toml::from_str(&text).ok()?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return None;
+    };
+    let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
+        return None;
+    };
     let mut names: Vec<String> = doc
         .get("mcp")?
         .get("servers")?
@@ -256,7 +268,10 @@ pub fn inert_config_toml_servers() -> Option<(PathBuf, Vec<String>)> {
 /// The warning for [`inert_config_toml_servers`], or `None` when there is nothing to warn about.
 pub fn inert_config_toml_warning() -> Option<String> {
     let (path, names) = inert_config_toml_servers()?;
-    let global = crate::storage::jcode_dir().ok()?.join("mcp.json");
+    let Ok(dir) = crate::storage::jcode_dir() else {
+        return None;
+    };
+    let global = dir.join("mcp.json");
     Some(format!(
         "MCP: [mcp.servers.{}] in {} is ignored: jcode reads MCP servers (and their `approval` / `approve_free` policy) only from {} (or project .jcode/mcp.json), under the key \"servers\". Move the entries there.",
         names.join("], [mcp.servers."),

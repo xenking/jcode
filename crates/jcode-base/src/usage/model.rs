@@ -211,7 +211,10 @@ where
     D: serde::Deserializer<'de>,
     T: Default + Deserialize<'de>,
 {
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    Ok(match Option::<T>::deserialize(deserializer)? {
+        Some(value) => value,
+        None => T::default(),
+    })
 }
 
 #[derive(Deserialize, Debug)]

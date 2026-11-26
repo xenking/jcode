@@ -36,10 +36,13 @@ const ATTACH_WAIT_ENV: &str = "JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS";
 const DEFAULT_ATTACH_WAIT: Duration = Duration::from_secs(30);
 
 fn attach_wait() -> Duration {
-    std::env::var(ATTACH_WAIT_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .map_or(DEFAULT_ATTACH_WAIT, Duration::from_secs)
+    match std::env::var(ATTACH_WAIT_ENV) {
+        Ok(raw) => match raw.trim().parse() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => DEFAULT_ATTACH_WAIT,
+        },
+        Err(_) => DEFAULT_ATTACH_WAIT,
+    }
 }
 
 /// What the user chose. Only the exact option strings the card offers count;
@@ -184,8 +187,7 @@ async fn require_within(
                         super::interactive::wait_for_sender(&ctx.session_id),
                     )
                     .await
-                    .ok()
-                    .or_else(route);
+                    .map_or_else(|_| route(), Some);
                     match attached {
                         Some(tx) => tx,
                         None => return None,
@@ -196,7 +198,13 @@ async fn require_within(
             Some(ask_client(tx, &questions, &request_id).await)
         })
         .await;
-    let _ = HUMAN_WAIT.try_with(|clock| clock.add(started.elapsed()));
+    // Outside a turn there is no wait clock to charge; that is not an error.
+    if HUMAN_WAIT
+        .try_with(|clock| clock.add(started.elapsed()))
+        .is_err()
+    {
+        crate::logging::debug("MCP approval wait was not charged to a turn clock");
+    }
     let response = match response {
         None => {
             log("refused_no_client", ctx, request);
