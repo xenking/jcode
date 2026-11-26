@@ -1557,15 +1557,6 @@ impl Tool for TodoTool {
         let result = if is_write {
             // Goals/plan-only writes keep the stored todo list.
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
-            // A full rewrite replaces the plan, not the user's requests.
-            let edits_in_place = ["update", "add", "remove", "cancel"].iter().any(|key| {
-                write_mode_input
-                    .get(*key)
-                    .is_some_and(|value| !value.is_null())
-            });
-            if !edits_in_place {
-                crate::todo::carry_over_requests(&previous, &mut todos);
-            }
             if let Some(todo) = todos.iter().find(|todo| {
                 crate::todo::todo_status_is_cancelled(&todo.status)
                     && !previous.iter().any(|old| {
@@ -1608,18 +1599,8 @@ impl Tool for TodoTool {
                     ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                let plan_todos: Vec<TodoItem> = todos
-                    .iter()
-                    .filter(|todo| !todo.is_request())
-                    .cloned()
-                    .collect();
-                let plan_previous: Vec<TodoItem> = previous
-                    .iter()
-                    .filter(|todo| !todo.is_request())
-                    .cloned()
-                    .collect();
                 let (observations, mut nudges) =
-                    record_reframe_observations(&plan, &goals, &plan_todos, &plan_previous);
+                    record_reframe_observations(&plan, &goals, &todos, &previous);
                 nudges.extend(ignored_goals);
                 for observation in &observations {
                     let kind = match observation.kind {

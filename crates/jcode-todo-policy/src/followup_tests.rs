@@ -955,29 +955,3 @@ fn documented_stop_exempts_its_todos_from_validation_nudges() {
         followup.message
     );
 }
-
-fn request(number: u64, status: &str) -> TodoItem {
-    TodoItem {
-        id: format!("request_{number}"),
-        content: format!("Ask #{number}: do it"),
-        group: Some(crate::REQUESTS_GROUP.into()),
-        ..todo("", status)
-    }
-}
-
-#[test]
-fn an_open_request_never_triggers_a_follow_up_turn() {
-    let mut policy = FollowUpPolicy::new(true);
-    let only_requests = snapshot(vec![request(1, "pending"), request(2, "in_progress")]);
-    assert_eq!(policy.decide(&only_requests), Decision::default());
-    assert_eq!(
-        policy.decide_after_turn(&only_requests, true),
-        Decision::default()
-    );
-
-    // Plan work is still poked, and the request is not named in the poke.
-    let mixed = snapshot(vec![request(1, "pending"), todo("plan work", "pending")]);
-    let message = policy.decide(&mixed).follow_up.expect("poke").message;
-    assert!(message.contains("plan work"), "{message}");
-    assert!(!message.contains("Ask #1"), "{message}");
-}

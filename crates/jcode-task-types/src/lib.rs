@@ -454,18 +454,6 @@ where
 /// `TodoItem::lane_owner` value that requests an auto-spawned swarm worker.
 pub const LANE_OWNER_WORKER: &str = "worker";
 
-/// Group of the todos the daemon creates for each user message. They track the
-/// user's requests, not the agent's plan, so stage, swarm and quality-gate
-/// policy treats them separately from the rest of the list.
-pub const REQUESTS_GROUP: &str = "requests";
-
-impl TodoItem {
-    /// True for a todo that tracks one user request.
-    pub fn is_request(&self) -> bool {
-        self.group.as_deref().map(str::trim) == Some(REQUESTS_GROUP)
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,

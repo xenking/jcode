@@ -15,7 +15,6 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        self.record_user_ask(None, user_message, false);
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -62,7 +61,6 @@ impl Agent {
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        self.record_user_ask(display_role, user_message, false);
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -221,29 +219,7 @@ impl Agent {
                 lease.identity(),
                 queued_client_id.as_deref(),
                 || {
-                    let previous_ask_id = self.session.user_asks().last_id;
-                    if !continues_turn && !has_queued_skills {
-                        if queued_items.is_empty() {
-                            self.record_user_ask(
-                                display_role,
-                                attachment_data
-                                    .as_ref()
-                                    .map_or(&*user_message, |data| &data.display_content),
-                                !images.is_empty() || attachment_data.is_some(),
-                            );
-                        } else {
-                            for item in &queued_items {
-                                self.record_user_ask(
-                                    super::interrupts::soft_interrupt_session_display_role(
-                                        item.source,
-                                    ),
-                                    &item.content,
-                                    !item.images.is_empty() || !item.attachments.is_empty(),
-                                );
-                            }
-                        }
-                    }
-                    let result = if has_queued_skills {
+                    if has_queued_skills {
                         let previous_count = self.session.message_count();
                         let previous_skill = self.active_skill.clone();
                         let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
@@ -256,15 +232,6 @@ impl Agent {
                                     );
                                 } else {
                                     self.set_queued_active_skill(None);
-                                }
-                                if !continues_turn {
-                                    self.record_user_ask(
-                                        super::interrupts::soft_interrupt_session_display_role(
-                                            item.source,
-                                        ),
-                                        &item.content,
-                                        !item.images.is_empty() || !item.attachments.is_empty(),
-                                    );
                                 }
                                 let ids: Vec<String> = item.client_id.into_iter().collect();
                                 let attachment_data = if item.attachments.is_empty() {
@@ -310,11 +277,7 @@ impl Agent {
                             queued_client_id.as_deref(),
                             attachment_data,
                         )
-                    };
-                    if result.is_err() {
-                        self.discard_user_asks_after(previous_ask_id);
                     }
-                    result
                 },
             )? {
                 return Ok(());
@@ -507,13 +470,6 @@ impl Agent {
         images: Vec<(String, String)>,
         attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
-        self.record_user_ask(
-            None,
-            attachment_data
-                .as_ref()
-                .map_or(user_message, |data| &data.display_content),
-            !images.is_empty() || attachment_data.is_some(),
-        );
         self.append_user_context_message_with_display_role(
             user_message,
             images,

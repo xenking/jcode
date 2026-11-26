@@ -31,6 +31,28 @@ fn session_loads_future_status() {
     assert_eq!(restored.id, session.id);
 }
 
+/// Sessions saved while the open-requests ledger existed still carry its field.
+#[test]
+fn session_loads_retired_open_request_ledger() -> Result<()> {
+    let mut session = Session::create_with_id("session_retired_ledger".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "kept".into(),
+            cache_control: None,
+        }],
+    );
+    let ledger = serde_json::json!({"last_id": 3, "open": [{"id": 3, "preview": "Fix it"}]});
+    let mut json = serde_json::to_value(&session)?;
+    json["user_asks"] = ledger.clone();
+    let restored: Session = serde_json::from_value(json)?;
+    assert_eq!(restored.messages[0].content_preview(), "kept");
+    let mut meta = serde_json::to_value(session.journal_meta())?;
+    meta["user_asks"] = ledger;
+    serde_json::from_value::<SessionJournalMeta>(meta)?;
+    Ok(())
+}
+
 #[test]
 fn session_loads_unknown_replay_event_without_losing_messages() {
     let _env_lock = lock_env();

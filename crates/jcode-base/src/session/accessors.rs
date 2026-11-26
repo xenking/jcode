@@ -7,7 +7,7 @@
 
 use super::{
     AgentModelOverrides, Session, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredMessage, StoredReplayEvent, UserAskLedger,
+    StoredMessage, StoredReplayEvent,
 };
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -203,10 +203,6 @@ impl Session {
         self.pinned_skill.as_deref()
     }
 
-    pub fn user_asks(&self) -> &UserAskLedger {
-        &self.user_asks
-    }
-
     pub fn compaction(&self) -> Option<Arc<StoredCompactionState>> {
         self.compaction.clone()
     }
@@ -247,16 +243,6 @@ impl Session {
 
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt;
-    }
-
-    pub fn set_last_user_ask_id(&mut self, id: u64) {
-        self.user_asks.last_id = id;
-    }
-
-    /// Hand over the open requests recorded before requests became todos,
-    /// leaving the ledger empty.
-    pub fn take_legacy_open_user_asks(&mut self) -> Vec<super::LegacyOpenUserAsk> {
-        std::mem::take(&mut self.user_asks.legacy_open)
     }
 
     /// Remove compaction events at or after `cutoff` (all of them when there is

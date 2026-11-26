@@ -110,10 +110,7 @@ pub(super) fn check_lane_completion(worker: &str, task_id: &str) -> anyhow::Resu
 /// Completed and cancelled todos are skipped; a lane with nothing open is
 /// skipped and never blocks.
 pub(crate) fn plan_items_from_todos(todos: &[TodoItem]) -> Vec<PlanItem> {
-    let open: Vec<&TodoItem> = todos
-        .iter()
-        .filter(|todo| is_open(todo) && !todo.is_request())
-        .collect();
+    let open: Vec<&TodoItem> = todos.iter().filter(|todo| is_open(todo)).collect();
     let mut items = Vec::new();
     let mut previous_stage: Vec<String> = Vec::new();
     for stage in crate::todo::stages::stage_layout(&open) {

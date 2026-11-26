@@ -81,8 +81,6 @@ mod turn_loop_policy;
 mod turn_loops;
 #[path = "agent/turn/turn_ownership.rs"]
 mod turn_ownership;
-#[path = "agent/recovery/user_asks.rs"]
-mod user_asks;
 pub(crate) use reload_resume::{ResumeOutcome, ResumePlan, last_turn_message_for_recovery};
 pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,

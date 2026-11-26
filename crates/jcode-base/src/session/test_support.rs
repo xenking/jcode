@@ -27,10 +27,6 @@ impl Session {
         self.save_label = label;
     }
 
-    pub fn set_user_asks_for_tests(&mut self, asks: super::UserAskLedger) {
-        self.user_asks = asks;
-    }
-
     pub fn set_replay_events_for_tests(&mut self, events: Vec<super::StoredReplayEvent>) {
         self.replay_events = events;
     }

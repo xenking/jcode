@@ -114,7 +114,6 @@ impl Agent {
         // for its context message until it actually becomes the session.
         if track_concurrency {
             agent.session.ensure_initial_session_context_message();
-            agent.migrate_legacy_user_asks();
         }
         mark("context_msg", &mut lap);
         agent.seed_compaction_from_session();
@@ -197,7 +196,6 @@ impl Agent {
         agent.restore_speed_from_session();
         agent.restore_cache_sidecars();
         agent.session.ensure_initial_session_context_message();
-        agent.migrate_legacy_user_asks();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("attach");

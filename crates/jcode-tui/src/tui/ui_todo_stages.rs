@@ -320,13 +320,9 @@ fn current_stage(
     stages: &[crate::todo::stages::TodoStage],
     todos: &[&crate::todo::TodoItem],
 ) -> Option<usize> {
-    // The user's requests are not a phase of the plan, so open ones never make
-    // the plan's later phases look like they have not started.
-    stages.iter().position(|stage| {
-        stage
-            .item_indices()
-            .any(|i| !todos[i].is_request() && !is_done(todos[i]))
-    })
+    stages
+        .iter()
+        .position(|stage| stage.item_indices().any(|i| !is_done(todos[i])))
 }
 
 fn todo_pip_status(todo: &crate::todo::TodoItem) -> &str {

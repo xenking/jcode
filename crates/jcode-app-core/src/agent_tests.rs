@@ -35,6 +35,8 @@ mod cache_keepalive;
 
 #[path = "agent_tests/request_only_recall_wire.rs"]
 mod request_only_recall_wire;
+#[path = "agent_tests/request_prefix_stability.rs"]
+mod request_prefix_stability;
 
 #[path = "agent_tests/worker/worker_http_capture.rs"]
 mod worker_http_capture;
@@ -1683,7 +1685,5 @@ mod credential_route_tests;
 
 #[path = "agent_tests_additional_tests.rs"]
 mod additional_working_directory_moves_preserve_first_active_session_origin;
-#[path = "agent_tests/user_asks.rs"]
-mod user_asks;
 
 include!("agent_tests/retention_readiness.rs");

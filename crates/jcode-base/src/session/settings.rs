@@ -302,12 +302,6 @@ impl Session {
         self.system_prompt = Some(prompt.to_string());
     }
 
-    /// Whether requests recorded before they became todos still wait to be
-    /// moved into the todo list.
-    pub fn has_legacy_user_asks(&self) -> bool {
-        !self.user_asks.legacy_open.is_empty()
-    }
-
     /// Take a generated title unless a person has named the session (a rename
     /// or a bookmark label) or the title is already current. Returns whether
     /// the title changed. The caller persists.

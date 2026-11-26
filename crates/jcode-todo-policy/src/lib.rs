@@ -35,8 +35,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, LANE_OWNER_WORKER, REQUESTS_GROUP, TodoGoal, TodoGoalChange, TodoGoalField,
-    TodoItem, TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth,
+    IterationMaturity, LANE_OWNER_WORKER, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
+    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -951,11 +951,9 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
     let own = todos
         .iter()
         .filter(|todo| {
-            !todo.is_request()
-                && todo
-                    .assigned_to
-                    .as_deref()
-                    .is_none_or(|owner| owner == "@self" || owner.trim().is_empty())
+            todo.assigned_to
+                .as_deref()
+                .is_none_or(|owner| owner == "@self" || owner.trim().is_empty())
         })
         .collect::<Vec<_>>();
     let current = own
