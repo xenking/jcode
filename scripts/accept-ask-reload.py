@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Isolated acceptance: pending ask survives a real forced daemon exec reload.
+"""Isolated acceptance: pending ask survives a real daemon exec reload.
 
-Run with the freshly built jcode binary as the only argument. No real provider,
-shared daemon, or user sessions are used.
+Run with the freshly built jcode binary and reload mode (force or normal).
+The normal mode installs a newer isolated candidate to exercise upgrade reload.
+No real provider, shared daemon, or user sessions are used.
 """
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class Provider(BaseHTTPRequestHandler):
+    requests = []
     def log_message(self, *args):
         pass
 
@@ -33,6 +36,7 @@ class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["content-length"])))
         messages = request.get("messages", [])
+        self.requests.append(messages)
         has_result = any(m.get("role") == "tool" for m in messages)
         if not has_result:
             delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "call-ask-reload", "type": "function", "function": {"name": "ask", "arguments": json.dumps({"intent": "fixture", "questions": [{"question": "Choose?", "options": [{"label": "Alpha"}, {"label": "Beta"}]}]})}}]}
@@ -73,7 +77,7 @@ class Client:
         self.socket.close()
 
 
-def main(binary):
+def main(binary, mode):
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="jcode-ask-") as temp:
@@ -97,7 +101,16 @@ def main(binary):
             first.until(lambda e: e.get("type") == "done" and e.get("id") == 1)
             first.send(type="message", id=2, content="Choose one")
             original = first.until(lambda e: e.get("type") == "ask_user_request")
-            reload_result = json.loads(cli("server", "reload", "--force", "--json").stdout)
+            if mode == "normal":
+                candidate = jcode / "builds" / "stable" / "jcode"
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(binary, candidate)
+                candidate.chmod(0o755)
+                # The daemon's update check requires a strictly newer candidate.
+                mtime = pathlib.Path(binary).stat().st_mtime + 10
+                os.utime(candidate, (mtime, mtime))
+            args = ("server", "reload", "--force", "--json") if mode == "force" else ("server", "reload", "--json")
+            reload_result = json.loads(cli(*args).stdout)
             assert reload_result["reloaded"] and reload_result["handoff_ready"], reload_result
             first.socket.settimeout(5)
             for line in first.reader:
@@ -129,15 +142,19 @@ def main(binary):
             call_index = next(i for i, message in enumerate(messages) if any(block.get("id") == original["tool_call_id"] and block.get("type") == "tool_use" for block in message["content"]))
             result_index = next(i for i, message in enumerate(messages) if any(block.get("tool_use_id") == original["tool_call_id"] and "Beta" in block.get("content", "") for block in message["content"]))
             assert result_index == call_index + 1, messages
+            assert not any('[auto]' in block.get('text', '') for message in messages[call_index + 1:] for block in message['content']), messages
             assert stored["model_usage_turn_id"].endswith(messages[call_index - 1]["id"]), stored["model_usage_turn_id"]
+            resumed_request = next(request for request in reversed(Provider.requests) if any(m.get("role") == "tool" for m in request))
+            assert any(m.get("role") == "tool" and m.get("tool_call_id") == original["tool_call_id"] and "Beta" in str(m.get("content", "")) for m in resumed_request), resumed_request
+            assert not any("[auto]" in str(m.get("content", "")) for m in resumed_request), resumed_request
             second.close()
-            print("PASS: original ask replayed after forced reload; answer persisted once")
+            print(f"PASS: {mode} exec reload preserves original ask and turn without synthetic prompt")
         finally:
             cli("server", "stop", "--force", "--json")
             provider.shutdown()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} /path/to/jcode")
-    main(sys.argv[1])
+    if len(sys.argv) != 3 or sys.argv[2] not in ("force", "normal"):
+        raise SystemExit(f"usage: {sys.argv[0]} /path/to/jcode force|normal")
+    main(sys.argv[1], sys.argv[2])
