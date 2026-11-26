@@ -112,11 +112,15 @@ fn ask_request_carries_who_may_answer_and_rejects_an_unknown_kind() {
         }
         event
     };
-    let kind_of = |state: &mut BridgeState, kind| match &state.legacy_event_to_api(&ask(kind))[0].event {
-        jcode_harness_api::ApiEvent::AskRequest { kind, .. } => Some(*kind),
-        _ => None,
-    };
-    assert_eq!(kind_of(&mut state, None), Some(jcode_session_types::AskKind::Question));
+    let kind_of =
+        |state: &mut BridgeState, kind| match &state.legacy_event_to_api(&ask(kind))[0].event {
+            jcode_harness_api::ApiEvent::AskRequest { kind, .. } => Some(*kind),
+            _ => None,
+        };
+    assert_eq!(
+        kind_of(&mut state, None),
+        Some(jcode_session_types::AskKind::Question)
+    );
     assert_eq!(
         kind_of(&mut state, Some("cold_wake")),
         Some(jcode_session_types::AskKind::ColdWake)

@@ -52,7 +52,10 @@ fn a_session_saved_with_prose_ask_answers_still_loads_and_renders() -> Result<()
         })
         .collect();
     assert_eq!(answers.len(), 2);
-    assert!(answers.iter().all(|row| row.ask.is_none()), "nothing was typed yet");
+    assert!(
+        answers.iter().all(|row| row.ask.is_none()),
+        "nothing was typed yet"
+    );
 
     let record = jcode_session_types::AskRecord::resolve(None, &answers[0].content)
         .expect("the prose answer rebuilds");

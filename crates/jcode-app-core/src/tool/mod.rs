@@ -13,10 +13,10 @@ mod apply_patch;
 #[path = "ui/ask.rs"]
 mod ask;
 pub(crate) use ask::output_record as ask_output_record;
-#[path = "fs/line_anchor.rs"]
-mod line_anchor;
 #[path = "bash/bash.rs"]
 mod bash;
+#[path = "fs/line_anchor.rs"]
+mod line_anchor;
 pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
 #[cfg(unix)]
 pub(crate) use bash::{BASH_SUPERVISED, follow_detached_task, restore_detached_task_monitoring};

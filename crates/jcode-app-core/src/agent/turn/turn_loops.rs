@@ -1584,7 +1584,12 @@ impl Agent {
                                 &tools,
                             );
                         }
-                        self.add_tool_result(blocks, tool_elapsed.as_millis() as u64, codemode, ask);
+                        self.add_tool_result(
+                            blocks,
+                            tool_elapsed.as_millis() as u64,
+                            codemode,
+                            ask,
+                        );
                         tool_results_dirty = true;
                     }
                     Err(e) => {

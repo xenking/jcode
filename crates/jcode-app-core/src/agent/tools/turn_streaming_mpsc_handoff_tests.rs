@@ -170,9 +170,7 @@ async fn bash_handoff_budget_starts_after_slow_pre_tool_hook() {
 #[tokio::test(start_paused = true)]
 async fn ask_waits_past_budget_and_returns_its_answer() {
     let registry = Registry::empty();
-    registry
-        .register("ask".into(), Arc::new(WaitProbe))
-        .await;
+    registry.register("ask".into(), Arc::new(WaitProbe)).await;
     let ctx = ToolContext {
         session_id: "foreground-ask-probe".into(),
         message_id: "message".into(),

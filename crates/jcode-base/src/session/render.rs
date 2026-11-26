@@ -211,7 +211,8 @@ fn stored_user_turn_count(
                 } => {
                     *is_error != Some(true)
                         && ask_ids.contains(tool_use_id.as_str())
-                        && jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), content).is_some()
+                        && jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), content)
+                            .is_some()
                 }
                 _ => false,
             })
