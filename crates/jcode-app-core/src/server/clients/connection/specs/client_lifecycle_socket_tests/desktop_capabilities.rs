@@ -38,6 +38,16 @@ pub(super) async fn assert_desktop_capability_contract(
     terminal_provider: &TerminalSocketProvider,
     home: &Path,
 ) {
+    // The applet tool is only in the catalog while the `native-ui` mode is pinned.
+    let skill = home.join(".jcode/skills/native-ui");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: native-ui\ndescription: Native cards\nmode: true\n---\nbody\n",
+    )
+    .unwrap();
+    let pinned = sessions.snapshot().await.values().next().unwrap().clone();
+    pinned.lock().await.mode_command("native-ui").unwrap();
     let mut previous = None;
     let mut previous_tools_hash = None;
     terminal_provider.finish_first.notify_one();
