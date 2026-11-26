@@ -157,10 +157,17 @@ async fn harness_websocket_uses_versioned_bridge_and_selected_daemon_socket() {
         loop {
             let (mut stream, _) = daemon.accept().await.unwrap();
             tokio::spawn(async move {
-                let mut buffer = [0; 4096];
-                while let Ok(n) = stream.read(&mut buffer).await {
-                    if n == 0 {
-                        break;
+                // The bridge verifies capabilities with a ping before it greets the client.
+                let (read, mut write) = stream.split();
+                let mut lines = tokio::io::BufReader::new(read).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["type"] == "ping" {
+                        let pong = serde_json::json!({"type":"pong","id":request["id"]});
+                        write
+                            .write_all(format!("{pong}\n").as_bytes())
+                            .await
+                            .unwrap();
                     }
                 }
             });
