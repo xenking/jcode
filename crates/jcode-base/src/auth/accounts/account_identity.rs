@@ -93,7 +93,7 @@ fn identity(
     let email = email.as_deref().map(crate::usage::mask_email);
     let plan = raw_plan.as_deref().and_then(plan_display);
     AccountIdentity {
-        icon: Some(crate::routing_view::resolved_account_icon(&format!(
+        icon: Some(crate::config::resolved_account_icon(&format!(
             "{provider}:{label}"
         ))),
         provider: provider.to_owned(),

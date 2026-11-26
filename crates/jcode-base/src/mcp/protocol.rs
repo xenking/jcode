@@ -305,6 +305,9 @@ pub struct ResourceContent {
     pub blob: Option<String>,
 }
 
+/// `approve_free` entry that exempts every tool of the server.
+pub const ALL_TOOLS: &str = "*";
+
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
@@ -406,7 +409,7 @@ impl McpServerConfig {
                     && !self
                         .approve_free
                         .iter()
-                        .any(|name| name == &tool.name || name == super::approvals::ALL_TOOLS)
+                        .any(|name| name == &tool.name || name == ALL_TOOLS)
             }
         }
     }

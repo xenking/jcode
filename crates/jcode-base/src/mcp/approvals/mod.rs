@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// `approve_free` entry that exempts every tool of the server.
-pub const ALL_TOOLS: &str = "*";
+pub use super::protocol::ALL_TOOLS;
 
 /// What an "always allow" answer covers.
 #[derive(Debug, Clone, Copy)]
@@ -276,5 +276,4 @@ pub fn warn_inert_config_toml_once() {
 }
 
 #[cfg(test)]
-#[path = "approvals_tests.rs"]
 mod tests;

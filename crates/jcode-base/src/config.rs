@@ -368,6 +368,18 @@ fn populate_context_limits_from_config_ref(cfg: &Config) {
 /// throttle, not every frame. When those inputs change, the next checked call
 /// reloads config.toml and invalidates dependent auth/model caches. Older
 /// references remain valid for the duration of any in-flight operation.
+/// The icon of a routing account: its `[[routing.accounts]] icon` override,
+/// else the stable default for its label.
+pub fn resolved_account_icon(account: &str) -> String {
+    let configured = config()
+        .routing
+        .accounts
+        .iter()
+        .find(|raw| raw.id.trim() == account)
+        .and_then(|raw| raw.icon.as_deref());
+    jcode_session_types::account_icon::account_icon(account, configured)
+}
+
 pub fn config() -> &'static Config {
     let now = Instant::now();
     if let Ok(cache) = CONFIG_CACHE.read()

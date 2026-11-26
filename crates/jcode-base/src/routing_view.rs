@@ -54,17 +54,7 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
         .collect()
 }
 
-/// The icon of a routing account: its `[[routing.accounts]] icon` override,
-/// else the stable default for its label.
-pub fn resolved_account_icon(account: &str) -> String {
-    let configured = crate::config::config()
-        .routing
-        .accounts
-        .iter()
-        .find(|raw| raw.id.trim() == account)
-        .and_then(|raw| raw.icon.as_deref());
-    jcode_session_types::account_icon::account_icon(account, configured)
-}
+pub use crate::config::resolved_account_icon;
 
 fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView {
     let (priority, class_priority) = match &raw.priority {
