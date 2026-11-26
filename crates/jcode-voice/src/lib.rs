@@ -25,6 +25,8 @@ mod elevenlabs;
 #[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
+#[cfg(feature = "desktop-config")]
+mod recovery;
 mod soniox;
 pub use backend::StreamingBackend;
 #[cfg(feature = "desktop-config")]
@@ -93,6 +95,11 @@ pub enum VoiceError {
     InvalidModel,
     /// The selected `[dictation] backend` (named here) has no live capture.
     NotStreaming(&'static str),
+    /// `cause` ended a dictation whose audio was kept on disk at `path`.
+    AudioKept {
+        cause: Box<VoiceError>,
+        path: std::path::PathBuf,
+    },
 }
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -145,6 +152,9 @@ impl fmt::Display for VoiceError {
                 f,
                 "The {backend} dictation backend has no live microphone capture. Pick Nari, Soniox or ElevenLabs in Settings",
             ),
+            Self::AudioKept { cause, path } => {
+                write!(f, "{cause}. Your recording is kept at {}", path.display())
+            }
         }
     }
 }

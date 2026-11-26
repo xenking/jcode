@@ -444,7 +444,7 @@ impl Target {
 /// talks. Providers end sessions after a limit the client cannot see, so the
 /// session is renewed on a schedule well inside any plausible limit, and also
 /// reopened when it drops on its own.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct StreamTuning {
     /// Audio sent on one session before it is closed cleanly and replaced.
     pub renew_after_samples: usize,
@@ -453,6 +453,9 @@ pub(super) struct StreamTuning {
     pub max_failed_sessions: u32,
     /// Wait before reopening after a failure, multiplied by the failure count.
     pub backoff: Duration,
+    /// Where to keep the microphone audio if the dictation fails. `None`
+    /// keeps nothing.
+    pub recovery_dir: Option<std::path::PathBuf>,
 }
 impl Default for StreamTuning {
     fn default() -> Self {
@@ -460,6 +463,7 @@ impl Default for StreamTuning {
             renew_after_samples: 16000 * 60,
             max_failed_sessions: 3,
             backoff: Duration::from_millis(400),
+            recovery_dir: None,
         }
     }
 }
@@ -717,7 +721,10 @@ impl NariRecording {
                 key,
                 &url,
                 model,
-                StreamTuning::default(),
+                StreamTuning {
+                    recovery_dir: super::recovery::default_dir(),
+                    ..StreamTuning::default()
+                },
                 MicrophoneRecording::start_pcm_cancellable,
             );
         }
@@ -731,7 +738,10 @@ impl NariRecording {
             key,
             &url,
             model,
-            StreamTuning::default(),
+            StreamTuning {
+                recovery_dir: super::recovery::default_dir(),
+                ..StreamTuning::default()
+            },
             move |c| super::command_capture::start_pcm(c, recorders),
         )
     }
@@ -843,8 +853,32 @@ impl NariRecording {
                             }
                             *slot = Some(handle);
                         }
-                        // Dropping `mic` on failure cancels the unfinished capture.
-                        let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
+                        // Audio goes to disk as well, so a failure keeps it.
+                        let (pcm, spill) = match tuning.recovery_dir.as_deref() {
+                            Some(dir) => match super::recovery::tee(pcm, dir) {
+                                Ok((pcm, spill)) => (pcm, Some(spill)),
+                                Err(pcm) => (pcm, None),
+                            },
+                            None => (pcm, None),
+                        };
+                        let named = |error: VoiceError| match &spill {
+                            Some(spill) => spill.name_in(error),
+                            None => error,
+                        };
+                        let session = match connect.await.map_err(|_| VoiceError::CaptureFailed) {
+                            Ok(Ok(session)) => session,
+                            Ok(Err(error)) | Err(error) => {
+                                // Dropping `mic` on failure cancels the unfinished capture.
+                                mic.stop();
+                                let _ = mic.finish();
+                                let error = named(error);
+                                if let Some(spill) = spill {
+                                    spill.finish(!matches!(error, VoiceError::Cancelled)).await;
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let mut kept = false;
                         let mut sink = |event: NariEvent| {
                             if !matches!(event, NariEvent::Finished(_)) {
                                 Events::lock(&e).push(event);
@@ -859,11 +893,12 @@ impl NariRecording {
                             Err(error) => Err(error),
                             Ok(Streamed { text, error: None }) => Ok(text),
                             Ok(Streamed { text, error: Some(error) }) if text.trim().is_empty() => {
-                                Err(error)
+                                Err(named(error))
                             }
                             Ok(Streamed { text, error: Some(error) }) => {
-                                sink(NariEvent::Interrupted(error));
+                                sink(NariEvent::Interrupted(named(error)));
                                 reported = true;
+                                kept = true;
                                 Ok(text)
                             }
                         };
@@ -872,20 +907,27 @@ impl NariRecording {
                         // Native stream is owned by its capture thread, never the UI.
                         let capture = mic.finish();
                         super::timing::mark("capture joined");
-                        match (result, capture) {
+                        let outcome = match (result, capture) {
                             (Err(err), _) => Err(err),
                             // A microphone fault after speech must not discard the words.
                             (Ok(text), Err(err)) if !text.trim().is_empty() => {
                                 // The provider failure came first and is the cause: the
                                 // capture only failed because nothing was reading it.
                                 if !reported {
-                                    sink(NariEvent::Interrupted(err));
+                                    sink(NariEvent::Interrupted(named(err)));
+                                    kept = true;
                                 }
                                 Ok(text)
                             }
-                            (Ok(_), Err(err)) => Err(err),
+                            (Ok(_), Err(err)) => Err(named(err)),
                             (Ok(text), Ok(())) => Ok(text),
+                        };
+                        // Only a dictation that delivered everything deletes its audio.
+                        if let Some(spill) = spill {
+                            let failed = matches!(&outcome, Err(e) if *e != VoiceError::Cancelled);
+                            spill.finish(kept || failed).await;
                         }
+                        outcome
                     });
                     runtime.shutdown_background();
                     super::timing::mark("runtime shut down");

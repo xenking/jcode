@@ -166,15 +166,30 @@ async fn dictate_with_extra_audio(fake: &Fake, answered: usize, fed: usize) -> O
 }
 
 async fn run_dictation(fake: &Fake, answered: usize, fed: usize, boundary: usize) -> Outcome {
+    run_dictation_keeping(fake, answered, fed, boundary, None).await
+}
+
+async fn run_dictation_keeping(
+    fake: &Fake,
+    answered: usize,
+    fed: usize,
+    boundary: usize,
+    recovery_dir: Option<std::path::PathBuf>,
+) -> Outcome {
     let chunks = fed;
     let acked = fake.acked.clone();
     let url = fake.url.clone();
     let recording = tokio::task::spawn_blocking(move || {
-        NariRecording::start_backend(
+        NariRecording::start_backend_with(
             Arc::new(AtomicBool::new(false)),
             StreamingBackend::Soniox,
             "sk-test",
             &url,
+            None,
+            StreamTuning {
+                recovery_dir,
+                ..StreamTuning::default()
+            },
             move |cancel| Ok(feeding_capture(cancel, acked, chunks, boundary, answered)),
         )
     })
@@ -281,4 +296,54 @@ async fn chosen_model_is_what_the_session_requests() {
     recording.stop();
     drop(recording);
     assert_eq!(*fake.models.lock().unwrap(), ["stt-rt-chosen"]);
+}
+
+fn kept_wavs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_dictation_keeps_all_its_audio_and_names_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_server_for(20, Limit::Close, 1).await;
+    let outcome = run_dictation_keeping(&fake, 20, 40, 0, Some(dir.path().join("recovery"))).await;
+    assert_eq!(
+        outcome.text,
+        Ok(expected(20)),
+        "recognised text is still delivered"
+    );
+    let wavs = kept_wavs(&dir.path().join("recovery"));
+    assert_eq!(wavs.len(), 1);
+    // The error names the file, and the cause is still the provider.
+    let [VoiceError::AudioKept { cause, path }] = &outcome.interrupted[..] else {
+        panic!("expected a named recording, got {:?}", outcome.interrupted);
+    };
+    assert_eq!(**cause, VoiceError::Network);
+    assert_eq!(path, &wavs[0]);
+    assert!(
+        outcome.interrupted[0]
+            .to_string()
+            .contains(&path.display().to_string())
+    );
+    // Everything spoken is in the WAV, including the 20 chunks nobody transcribed.
+    let wav = std::fs::read(path).unwrap();
+    let audio = 40 * CHUNK * 2;
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(wav.len(), 44 + audio);
+    assert_eq!(
+        u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize,
+        audio
+    );
+    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dictation_that_succeeds_leaves_no_audio_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_server(usize::MAX, Limit::Close).await;
+    let outcome = run_dictation_keeping(&fake, 5, 5, 0, Some(dir.path().to_owned())).await;
+    assert_eq!(outcome.text, Ok(expected(5)));
+    assert!(kept_wavs(dir.path()).is_empty());
 }
