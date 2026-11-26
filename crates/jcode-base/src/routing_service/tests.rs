@@ -376,6 +376,31 @@ async fn warm_session_stays_on_a_serving_account_and_moves_only_when_blocked() {
     );
 }
 
+// R5: opening or resuming a session is not a reason to switch. A restarted
+// daemon (a fresh service with no memory) sees the session's first turn with
+// the production-shaped cache: warm, 38k tokens, no summary. A better account
+// exists, but the session keeps the one it was on and records no move.
+#[tokio::test]
+async fn the_first_turn_after_a_restart_keeps_the_session_account() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 2), ("claude:b", 1)]);
+    env.set_used("claude:a", 20.0);
+    env.set_used("claude:b", 5.0);
+    let restarted = RoutingService::new(env.clone());
+    let first_turn = TurnInput {
+        cache: production_cache(),
+        ..input("claude:a", Seam::Warm, Role::Interactive)
+    };
+
+    let plan = restarted.plan(&first_turn).await;
+
+    let Plan::Stay(outcome) = plan else {
+        panic!("a resumed session must keep its account, got {plan:?}");
+    };
+    assert_eq!(outcome.account, account("claude:a"));
+    assert_eq!(outcome.pending, Some(account("claude:b")));
+    assert_eq!(env.log_lines()[0]["decision"], "pending");
+}
+
 #[tokio::test]
 async fn an_explicit_switch_moves_a_warm_session_immediately() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
