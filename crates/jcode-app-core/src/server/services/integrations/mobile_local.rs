@@ -77,6 +77,9 @@ impl DaemonSessions {
         if !self.sessions.contains(session_id).await {
             anyhow::bail!("that session is no longer running on this computer");
         }
+        crate::turn_activity::global()
+            .wait_new_turns_open(session_id)
+            .await;
         let deadline = tokio::time::Instant::now() + IDLE_START_WAIT;
         loop {
             let started = if let Some(agent) =

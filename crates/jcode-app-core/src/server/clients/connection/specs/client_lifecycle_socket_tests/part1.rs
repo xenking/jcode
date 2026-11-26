@@ -1351,6 +1351,36 @@ async fn force_stop_pending_ask_over_socket_releases_session() {
 }
 
 #[tokio::test]
+async fn messages_sent_during_a_drain_wait_and_run_once_after_completion() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("hold_complete"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn messages_sent_during_a_drain_wait_and_run_once_after_rollback() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("hold_rollback"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn cancel_after_owner_reconnect_is_confirmed_to_the_new_connection() {
     sdk_socket_cancel_workflow(
         false,

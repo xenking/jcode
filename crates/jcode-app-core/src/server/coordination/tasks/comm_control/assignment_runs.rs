@@ -21,6 +21,9 @@ pub(in crate::server) fn spawn_assigned_task_run(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
     crate::runtime_activity::spawn(async move {
+        crate::turn_activity::global()
+            .wait_new_turns_open(&target_session)
+            .await;
         let mut agent = agent_arc.lock().await;
         let turn_lease = match agent.claim_server_turn() {
             Ok(lease) => lease,

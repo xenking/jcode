@@ -1070,3 +1070,82 @@ mod startup_recovery;
 
 #[path = "services/integrations/mobile_local_tests.rs"]
 mod mobile_local;
+
+#[tokio::test]
+async fn wake_during_a_drain_waits_and_starts_once_after_release() {
+    let _env_lock = crate::storage::lock_test_env();
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Woken.".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, tx),
+    )])));
+    let (swarms, history, counter, events) = empty_swarm_status_state();
+
+    // An update is draining: the wake must not start a turn the drain waits on.
+    let hold = crate::turn_activity::global()
+        .hold_new_turns_for(&[&session_id])
+        .unwrap();
+    let wake = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        "wake me",
+        None,
+        &sessions,
+        super::live_turn::LiveTurnSwarmContext::new(&members, &swarms, &history, &counter, &events),
+    );
+    tokio::pin!(wake);
+    assert!(
+        timeout(Duration::from_millis(300), &mut wake)
+            .await
+            .is_err(),
+        "a wake must wait for the drain"
+    );
+    assert!(
+        crate::turn_activity::global()
+            .snapshot()
+            .session(&session_id)
+            .is_none_or(|session| !session.is_busy()),
+        "a waiting wake must not look like a running turn"
+    );
+
+    drop(hold);
+    assert!(
+        timeout(Duration::from_secs(5), &mut wake)
+            .await
+            .expect("released wake must start"),
+        "the released wake starts its turn"
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                rx.recv().await.map(unwrap_test_turn_event),
+                Some(ServerEvent::Done { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("released wake must finish its turn");
+    let woken = agent
+        .lock()
+        .await
+        .iter_messages()
+        .filter(|message| {
+            message.content.iter().any(|block| {
+                matches!(block,
+                crate::message::ContentBlock::Text { text, .. } if text.contains("wake me"))
+            })
+        })
+        .count();
+    assert_eq!(woken, 1, "the wake is delivered exactly once");
+}

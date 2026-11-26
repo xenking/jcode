@@ -165,6 +165,28 @@ pub(super) async fn start_next_queued_prompt(
     if *state.client_is_processing || crate::turn_cancel_registry::has_active_turn(session_id) {
         return;
     }
+    // A runtime update is draining or replacing the daemon. Leave the prompts in
+    // the durable queue: the release re-triggers this dispatch, and a new daemon
+    // finds them after the client reconnects.
+    let activity = crate::turn_activity::global();
+    if activity.admissions_closed() {
+        return;
+    }
+    let queued = control
+        .queued_user_prompts()
+        .map_or(0, |queued| queued.len());
+    if queued > 0
+        && let Some(announce) = activity.defer_if_held(session_id, queued)
+    {
+        if announce {
+            send_client_event_best_effort(
+                event_tx,
+                held_for_update_notice(),
+                "client_processing: held for update",
+            );
+        }
+        return;
+    }
     if let Ok(guard) = agent.try_lock()
         && guard.ensure_cache_protection_allows_request().is_err()
     {
@@ -793,6 +815,21 @@ pub(super) fn confirm_detached_stop(
             () = tx.closed() => {}
         }
     });
+}
+
+/// Tells the client its message waits for a runtime update, not for nothing.
+pub(super) fn held_for_update_notice() -> ServerEvent {
+    ServerEvent::Notification {
+        from_session: "jcode".into(),
+        from_name: Some("Update".into()),
+        notification_type: crate::protocol::NotificationType::Message {
+            scope: Some("update".into()),
+            channel: None,
+            tldr: None,
+        },
+        message: "Your message is queued behind a runtime update and will run when it finishes."
+            .into(),
+    }
 }
 
 pub(super) async fn cancel_processing_message(

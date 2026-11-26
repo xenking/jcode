@@ -211,7 +211,7 @@ impl TurnOwnership {
             .latest
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Turn identity exhausted"))?;
-        let activity = crate::turn_activity::global().admit(session_id)?;
+        let activity = crate::turn_activity::global().admit_turn(session_id)?;
         state.latest = next;
         let identity = TurnIdentity {
             runtime_generation: self.observer.runtime_generation().to_owned(),

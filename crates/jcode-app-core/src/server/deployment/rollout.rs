@@ -626,6 +626,12 @@ fn validate_label(label: &str) -> Result<()> {
 
 fn spawn_executor(store: Store, mut journal: Journal) {
     tokio::spawn(async move {
+        // New turns wait while the update drains, installs, or rolls back, so
+        // the drain can see every session idle. Released when this task ends
+        // (completion or rollback) or when the replacement takes the fence.
+        let _hold = crate::turn_activity::global()
+            .hold_new_turns()
+            .inspect_err(|error| crate::logging::warn(&format!("rollout without hold: {error:#}")));
         if let Err(error) = execute(&store, &mut journal).await {
             journal.error = Some(format!("{error:#}"));
             if journal.mutations.last().is_some_and(|m| m.result.is_none())

@@ -364,6 +364,10 @@ pub(super) async fn run_live_turn_if_idle(
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    // A wake that arrives while an update drains waits for it, then starts.
+    crate::turn_activity::global()
+        .wait_new_turns_open(session_id)
+        .await;
     let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
         return false;
     };
@@ -386,6 +390,9 @@ pub(super) async fn run_live_system_turn_if_idle(
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    crate::turn_activity::global()
+        .wait_new_turns_open(session_id)
+        .await;
     let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
         return false;
     };

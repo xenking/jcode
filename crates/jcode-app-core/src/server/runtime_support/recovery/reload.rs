@@ -273,6 +273,9 @@ pub(super) async fn await_reload_signal(
                 continue;
             }
         };
+        // Nothing new can start under the fence: starts that waited for the
+        // hold now meet it and fall back to their durable queues.
+        activity.release_new_turn_hold();
         persist_reload_recovery_intents(
             &signal.request_id,
             swarm_members,

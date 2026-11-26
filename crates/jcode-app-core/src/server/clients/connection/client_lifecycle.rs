@@ -541,9 +541,9 @@ mod model_catalog_retry_tests;
 mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
-    clear_soft_interrupts, confirm_detached_stop, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_available_models, record_processing_completion,
-    start_next_queued_prompt, start_processing_message, turn_scope,
+    clear_soft_interrupts, confirm_detached_stop, held_for_update_notice, move_tool_to_background,
+    queue_soft_interrupt, reconcile_processing_completions, record_available_models,
+    record_processing_completion, start_next_queued_prompt, start_processing_message, turn_scope,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)

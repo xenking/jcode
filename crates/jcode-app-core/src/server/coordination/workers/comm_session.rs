@@ -826,6 +826,9 @@ pub(super) async fn spawn_swarm_agent(
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
             crate::runtime_activity::spawn_session(&new_session_id, async move {
+                crate::turn_activity::global()
+                    .wait_new_turns_open(&sid_clone)
+                    .await;
                 let mut agent = agent_arc.lock().await;
                 let Ok(lease) = agent.claim_server_turn() else {
                     return;

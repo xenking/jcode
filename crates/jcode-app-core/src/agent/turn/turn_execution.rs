@@ -9,6 +9,9 @@ mod session_restore;
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        crate::turn_activity::global()
+            .wait_new_turns_open(self.session.id())
+            .await;
         let _turn = self.claim_server_turn()?;
         self.ensure_cache_protection_allows_request()?;
         let _runtime_activity =
@@ -55,6 +58,9 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
+        crate::turn_activity::global()
+            .wait_new_turns_open(self.session.id())
+            .await;
         let _turn = self.claim_server_turn()?;
         self.ensure_cache_protection_allows_request()?;
         let _runtime_activity =

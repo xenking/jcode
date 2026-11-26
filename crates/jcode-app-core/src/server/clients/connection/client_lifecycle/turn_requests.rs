@@ -3,6 +3,84 @@
 use super::*;
 
 impl ClientConnection {
+    /// While a runtime update drains, a message for an idle session waits in the
+    /// durable prompt queue instead of starting a turn the drain would have to
+    /// wait for. The release, or a new daemon after the client reconnects,
+    /// delivers it exactly once. Returns whether the message was taken.
+    async fn park_behind_update(
+        &mut self,
+        id: u64,
+        content: &str,
+        images: &[(String, String)],
+        system_reminder: Option<String>,
+        client_id: Option<String>,
+    ) -> bool {
+        use jcode_agent_runtime::QueuedMessageMode::AfterYield;
+        if !crate::turn_activity::global().new_turns_held(&self.client_session_id) {
+            return false;
+        }
+        let client_id = client_id.unwrap_or_else(|| crate::id::new_id("held"));
+        // Explicitly sent, so it starts even if the last turn was stopped.
+        let queued = self
+            .session_control
+            .enqueue_user_prompt_with_skill(
+                client_id.clone(),
+                content.to_owned(),
+                images.to_vec(),
+                AfterYield,
+                system_reminder,
+                None,
+                Vec::new(),
+            )
+            .and_then(|_| {
+                self.session_control
+                    .set_user_prompt_mode(&client_id, AfterYield, true)
+            });
+        if let Err(error) = queued {
+            send_client_event_best_effort(
+                &self.client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: format!("Could not queue the message behind the update: {error:#}"),
+                    retry_after_secs: None,
+                },
+                "client_lifecycle: Error",
+            );
+            return true;
+        }
+        send_client_event_best_effort(
+            &self.client_event_tx,
+            held_for_update_notice(),
+            "client_lifecycle: held for update",
+        );
+        if let Ok(prompts) = self.session_control.queued_user_prompts() {
+            // Remember the session for the release, and that it was told.
+            crate::turn_activity::global()
+                .defer_if_held(&self.client_session_id, prompts.len());
+            send_client_event_best_effort(
+                &self.client_event_tx,
+                ServerEvent::QueuedPrompts {
+                    id,
+                    prompts: prompts.clone(),
+                },
+                "client_lifecycle: QueuedPrompts",
+            );
+            super::super::state::fanout_peer_client_event(
+                &self.env.swarm_members,
+                &self.client_session_id,
+                &self.client_connection_id,
+                ServerEvent::QueuedPrompts { id: 0, prompts },
+            )
+            .await;
+        }
+        send_client_event_best_effort(
+            &self.client_event_tx,
+            ServerEvent::Done { id },
+            "client_lifecycle: Done",
+        );
+        true
+    }
+
     pub(super) async fn turn_requests(
         &mut self,
         request: Request,
@@ -98,6 +176,13 @@ impl ClientConnection {
                         },
                         "client_lifecycle: Error",
                     );
+                    return Ok(Outcome::SkipEpilogue);
+                }
+                if !self.client_is_processing
+                    && self
+                        .park_behind_update(id, &content, &images, system_reminder.clone(), None)
+                        .await
+                {
                     return Ok(Outcome::SkipEpilogue);
                 }
                 if !self.client_is_processing {
@@ -290,7 +375,16 @@ impl ClientConnection {
                     }
                     start
                 };
-                if start_idle_turn {
+                if start_idle_turn
+                    && self
+                        .park_behind_update(id, &content, &images, None, client_id.clone())
+                        .await
+                {
+                    let mut connections = self.env.client_connections.write().await;
+                    if let Some(info) = connections.get_mut(&self.client_connection_id) {
+                        info.is_processing = false;
+                    }
+                } else if start_idle_turn {
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {

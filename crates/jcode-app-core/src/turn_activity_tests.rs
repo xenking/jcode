@@ -373,3 +373,51 @@ async fn reviewed_fence_does_not_wait_for_its_initiator_or_sessions_parked_on_it
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn hold_pauses_new_turns_until_released_and_remembers_who_waited() {
+    let activity = ActivityRegistry::default();
+    let _running = activity.admit("running").unwrap();
+    let hold = activity.hold_new_turns().unwrap();
+    assert!(activity.hold_new_turns().is_err(), "one hold at a time");
+
+    assert!(activity.admit_turn("fresh").is_err());
+    assert!(
+        activity.admit("fresh").is_ok(),
+        "worker control and queue writes are not new turns"
+    );
+    assert!(activity.admit_queue_delivery("fresh").is_ok());
+    // Running work and stops keep going: the hold only refuses new turns.
+    let _tool = activity.in_tool_call("running", "bash", "call");
+
+    assert_eq!(activity.defer_if_held("fresh", 1), Some(true));
+    assert_eq!(activity.defer_if_held("fresh", 1), Some(false));
+    assert_eq!(activity.defer_if_held("fresh", 2), Some(true));
+
+    let waiter = activity.wait_new_turns_open("fresh");
+    tokio::pin!(waiter);
+    assert!(futures::poll!(&mut waiter).is_pending());
+    drop(hold);
+    waiter.await;
+    assert!(activity.admit_turn("another").is_ok());
+    assert_eq!(activity.defer_if_held("fresh", 1), None);
+}
+
+#[tokio::test]
+async fn replacement_fence_releases_the_hold_early() {
+    let activity = ActivityRegistry::default();
+    let hold = activity.hold_new_turns().unwrap();
+    let fence = activity.close_admission().unwrap();
+    activity.release_new_turn_hold();
+    assert!(
+        activity.admit_turn("late").is_err(),
+        "the fence still refuses"
+    );
+    drop(fence);
+    assert!(activity.admit_turn("late").is_ok());
+    drop(hold);
+    assert!(
+        activity.hold_new_turns().is_ok(),
+        "a stale guard cannot clear a new hold"
+    );
+}

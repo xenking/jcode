@@ -508,6 +508,97 @@ async fn sdk_socket_cancel_workflow(
             matches!(event, ServerEvent::Done { id: 1 })
         })
         .await;
+        if matches!(queued_test, Some("hold_complete" | "hold_rollback")) {
+            // A runtime update is draining: new turns for this session wait.
+            let activity = crate::turn_activity::global();
+            let hold = activity.hold_new_turns_for(&[&session_id]).unwrap();
+            let is_held_notice = |event: &ServerEvent| {
+                matches!(event, ServerEvent::Notification { notification_type, .. }
+                    if matches!(notification_type, crate::protocol::NotificationType::Message { scope: Some(scope), .. } if scope == "update"))
+            };
+
+            // Pings and cancels are answered while the drain holds new turns.
+            send(&mut client_writer, json!({"type":"ping","id":60})).await;
+            until(&mut client_reader, |event| matches!(event, ServerEvent::Pong { id: 60, .. })).await;
+            send(&mut client_writer, json!({"type":"cancel","id":61})).await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                until(&mut client_reader, |event| {
+                    matches!(event, ServerEvent::Interrupted)
+                        || matches!(event, ServerEvent::TurnEvent { event, .. } if matches!(event.as_ref(), ServerEvent::Interrupted))
+                }),
+            )
+            .await
+            .expect("cancel must be answered during a drain");
+
+            // A plain message and a queued prompt are parked, with visible status.
+            send(&mut client_writer, json!({"type":"message","id":2,"content":"plain during update"})).await;
+            until(&mut client_reader, is_held_notice).await;
+            let snapshot = until(&mut client_reader, |event| matches!(event, ServerEvent::QueuedPrompts { .. })).await;
+            assert!(matches!(snapshot, ServerEvent::QueuedPrompts { prompts, .. }
+                if prompts.len() == 1 && prompts[0].content == "plain during update"));
+            until(&mut client_reader, |event| matches!(event, ServerEvent::Done { id: 2 })).await;
+            send(&mut client_writer, json!({"type":"queue_prompt","id":3,"client_id":"queued-during-update","content":"queued during update","mode":"after_yield"})).await;
+            until(&mut client_reader, |event| matches!(event, ServerEvent::Ack { id: 3 })).await;
+            until(&mut client_reader, is_held_notice).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                terminal_provider.calls.load(Ordering::SeqCst),
+                0,
+                "no turn may start while the update holds new turns"
+            );
+
+            // Completion lifts the hold when the replacement takes the fence;
+            // rollback drops it with the executor. Either releases the queue.
+            if queued_test == Some("hold_complete") {
+                activity.release_new_turn_hold();
+                drop(hold);
+            } else {
+                drop(hold);
+            }
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                terminal_provider.first_started.notified(),
+            )
+            .await
+            .expect("released prompts must start a turn");
+            terminal_provider.finish_first.notify_one();
+            // The prompts started as one turn; wait for it to end.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if !crate::turn_cancel_registry::has_active_turn(&session_id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("released turn must finish");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                terminal_provider.calls.load(Ordering::SeqCst),
+                1,
+                "parked prompts are delivered in exactly one turn"
+            );
+            let delivered = terminal_provider.messages.lock().unwrap().concat();
+            for text in ["plain during update", "queued during update"] {
+                assert_eq!(
+                    delivered.iter().filter(|part| part.contains(text)).count(),
+                    1,
+                    "{text} must be delivered exactly once: {delivered:?}"
+                );
+            }
+            send(&mut client_writer, json!({"type":"get_queued_prompts","id":70})).await;
+            let snapshot = until(&mut client_reader, |event| matches!(event, ServerEvent::QueuedPrompts { id: 70, .. })).await;
+            assert!(matches!(snapshot, ServerEvent::QueuedPrompts { prompts, .. } if prompts.is_empty()));
+            drop(client_writer);
+            drop(client_reader);
+            drop(legacy_writer);
+            drop(legacy_reader);
+            server_task.abort();
+            legacy_task.abort();
+            return;
+        }
         send(
             &mut client_writer,
             json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn", "jarvis_voice":idle_soft_interrupt}),

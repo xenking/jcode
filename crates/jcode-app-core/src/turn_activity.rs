@@ -5,7 +5,7 @@
 //! Checkpoint acknowledgement is explicit and follows durable transcript saving.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -285,10 +285,22 @@ impl SessionState {
     }
 }
 
+/// New turns wait while a runtime update drains, instead of keeping the drain
+/// from ever seeing every session idle at once.
+struct Hold {
+    token: u64,
+    /// `None` holds every session. Tests scope a hold to the sessions they own.
+    sessions: Option<BTreeSet<String>>,
+}
+
 #[derive(Default)]
 struct State {
     revision: u64,
     next_token: u64,
+    hold: Option<Hold>,
+    /// Sessions with a start that waited on the hold, with how many queued
+    /// prompts they had when last told. Released ones re-fire.
+    deferred: BTreeMap<String, usize>,
     fence: Option<u64>,
     parked_asks_fenced: bool,
     sessions: BTreeMap<String, SessionState>,
@@ -312,6 +324,42 @@ impl State {
         // must not stop guard cleanup, and live ownership tokens are never reused.
         self.revision = self.revision.wrapping_add(1);
         self.next_token
+    }
+
+    fn start_hold(&mut self, sessions: Option<BTreeSet<String>>) -> Result<u64> {
+        ensure!(self.hold.is_none(), "new turns are already on hold");
+        let token = self.next();
+        self.hold = Some(Hold { token, sessions });
+        Ok(token)
+    }
+
+    fn is_held_for(&self, session_id: &str) -> bool {
+        self.hold.as_ref().is_some_and(|hold| {
+            hold.sessions
+                .as_ref()
+                .is_none_or(|sessions| sessions.contains(session_id))
+        })
+    }
+
+    fn defer(&mut self, session_id: &str, queued: usize) -> Option<bool> {
+        self.is_held_for(session_id).then(|| {
+            let told = self.deferred.entry(session_id.to_owned()).or_default();
+            let grew = queued > *told;
+            *told = queued;
+            grew
+        })
+    }
+
+    /// Ends the hold with `token` (any hold when `None`) and returns the
+    /// sessions that waited on it, or `None` when no such hold is active.
+    fn end_hold(&mut self, token: Option<u64>) -> Option<BTreeMap<String, usize>> {
+        let active = self.hold.as_ref()?.token;
+        if token.is_some_and(|token| token != active) {
+            return None;
+        }
+        self.hold = None;
+        self.next();
+        Some(std::mem::take(&mut self.deferred))
     }
 
     fn snapshot(&self) -> ActivitySnapshot {
@@ -342,13 +390,95 @@ impl ActivityRegistry {
 
     /// Must succeed before a turn is accepted, including before Agent locking.
     pub fn admit(&self, session_id: &str) -> Result<AdmissionGuard> {
+        self.admit_with(session_id, false)
+    }
+
+    fn admit_with(&self, session_id: &str, respect_hold: bool) -> Result<AdmissionGuard> {
         let mut state = self.lock();
+        ensure!(
+            !(respect_hold && state.is_held_for(session_id)),
+            "new turns are paused while a runtime update drains, retry shortly"
+        );
         ensure!(
             state.fence.is_none(),
             "turn admission is fenced for runtime replacement, retry after reconnect"
         );
         ensure!(!stop_path(session_id)?.try_exists()?, "Session is stopped");
         Ok(self.insert(&mut state, session_id, Participant::Admission))
+    }
+
+    /// Pause new turns until the returned hold drops. Running turns, queued
+    /// prompts and stops are unaffected. Fails if a hold is already active.
+    pub fn hold_new_turns(&self) -> Result<NewTurnHold> {
+        self.hold(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_new_turns_for(&self, sessions: &[&str]) -> Result<NewTurnHold> {
+        self.hold(Some(sessions.iter().map(|id| (*id).to_owned()).collect()))
+    }
+
+    fn hold(&self, sessions: Option<BTreeSet<String>>) -> Result<NewTurnHold> {
+        let token = self.lock().start_hold(sessions)?;
+        Ok(NewTurnHold {
+            registry: self.clone(),
+            token,
+        })
+    }
+
+    pub(crate) fn new_turns_held(&self, session_id: &str) -> bool {
+        self.lock().is_held_for(session_id)
+    }
+
+    /// Whether a start for `session_id` must wait. A waiting session is
+    /// remembered so the release re-triggers its queued work. The flag is true
+    /// when `queued` prompts exceed what the session was last told about.
+    pub(crate) fn defer_if_held(&self, session_id: &str, queued: usize) -> Option<bool> {
+        self.lock().defer(session_id, queued)
+    }
+
+    /// Resolves once new turns may start for `session_id`.
+    pub(crate) async fn wait_new_turns_open(&self, session_id: &str) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.new_turns_held(session_id) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    /// Lift the hold early, for a replacement that has taken the fence: queued
+    /// starts then meet the fence and fall back to durable storage.
+    pub(crate) fn release_new_turn_hold(&self) {
+        self.end_hold(None);
+    }
+
+    fn release_hold(&self, token: u64) {
+        self.end_hold(Some(token));
+    }
+
+    fn end_hold(&self, token: Option<u64>) {
+        let Some(deferred) = self.lock().end_hold(token) else {
+            return;
+        };
+        self.changed.notify_waiters();
+        // Connections dispatch queued prompts when their session's turn is released.
+        for session_id in deferred.into_keys() {
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::TurnReleased(session_id));
+        }
+    }
+
+    pub(crate) fn admissions_closed(&self) -> bool {
+        self.lock().fence.is_some()
+    }
+
+    /// Admission of a new turn. Unlike `admit`, it refuses while a hold is active;
+    /// starts that can wait are expected to have waited for the hold first.
+    pub(crate) fn admit_turn(&self, session_id: &str) -> Result<AdmissionGuard> {
+        self.admit_with(session_id, true)
     }
 
     /// Keep queue writes in stop's quiescence boundary. Unlike a new turn,
@@ -744,6 +874,19 @@ impl Drop for AdmissionGuard {
             let registry = self.registry.clone();
             self.release(&mut registry.lock());
         }
+    }
+}
+
+/// Pauses new turns while alive; dropping it releases them.
+#[must_use]
+pub struct NewTurnHold {
+    registry: ActivityRegistry,
+    token: u64,
+}
+
+impl Drop for NewTurnHold {
+    fn drop(&mut self) {
+        self.registry.release_hold(self.token);
     }
 }
 
