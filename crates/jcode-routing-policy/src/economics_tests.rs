@@ -1,5 +1,5 @@
 //! Time-stepped tests for the cache, reset and keepalive economics
-//! (docs/ROUTING_POLICY_PLAN.md, "Economics", rules 1-7 and the option table).
+//! (docs/ROUTING.md, section 6, "Economics rules 1-7" and the option table).
 
 use std::collections::BTreeMap;
 

@@ -2,7 +2,7 @@
 
 The one design document for how Jcode chooses which login (account) serves a
 session, when it leaves it, and what it says about it. It is derived from the
-code and replaces the earlier account-routing, usage-limit and routing-policy
+code and replaces the earlier usage-limit, routing-policy and API-key-account
 notes. Where a statement is about work still landing, it sits in a block marked
 **Intended (in progress)**; adjust those once the code lands.
 
@@ -14,7 +14,9 @@ Code owners: `crates/jcode-routing-policy` (pure engine and config types),
 `crates/jcode-session-types/src/routing_acct.rs` (`/acct`),
 `crates/jcode-config-types/src/runtime/provider.rs` (`[provider]` failover keys).
 
-Other routing docs: [MODEL_ROUTING.md](MODEL_ROUTING.md) is about which *model*
+Other routing docs: [ACCOUNT_ROUTING.md](ACCOUNT_ROUTING.md) is the original
+account-pool and plan-priority note (kept as written; this document wins on any
+conflict). [MODEL_ROUTING.md](MODEL_ROUTING.md) is about which *model*
 each role (workers, review, titles, compaction) uses, not which account.
 [prompt-cache-keepalive.md](prompt-cache-keepalive.md) covers keepalive pings.
 
@@ -39,7 +41,7 @@ describe.
 
 Routing only chooses **between accounts of one provider** (`anthropic` and
 `claude` are the same family). Moving to another provider is a failover
-concern, see section 7.
+concern, see section 7. API-key providers can hold several labelled keys (section 9).
 
 ## 2. Accounts
 
@@ -390,12 +392,76 @@ logins; the exact id wins. A proxy is probed (750 ms timeout, cached 5 s).
 `required = true` and unreachable: the account is unavailable (`EgressDown`) and
 routing picks another, and no request leaves directly. `required = false`: requests
 go direct with a warning.
+## 9. API-key accounts
 
-## 9. What is logged where
+API-key providers hold several labelled keys the way Claude and OpenAI logins
+hold several accounts: two OpenCode Go subscriptions, Hugging Face keys billed
+to different organizations, several keys on one named OpenAI-compatible
+provider. The ids are the routing account ids of section 2: `opencode-go` is the
+unlabelled key (existing setups keep working), `opencode-go:second` a labelled
+one. Providers are the built-in OpenAI-compatible profiles (`opencode`,
+`opencode-go`, `huggingface`, `deepseek` and the rest of the login catalog) and
+`[providers.<name>]` entries of type `openai-compatible` or `openrouter`. The
+generic `openai-compatible` profile and the Muse subscription take no labels.
+
+```sh
+jcode login opencode-go --account second                  # paste or pipe the key
+jcode auth keys add gateway team --api-key-env TEAM_KEY   # named provider
+jcode auth keys list [PROVIDER] [--json]                  # * marks the key requests use
+jcode auth keys use opencode-go second                    # from the next call on
+jcode auth keys use opencode-go                           # back to the unlabelled key
+jcode auth keys remove opencode-go second
+```
+
+In the TUI: `/account <provider> switch <label>`, `/account <provider> remove
+<label>`, `/account list`. Keys are stored in `api-key-accounts.json` next to the
+other credential files (mode 0600) and are never printed. The first labelled key
+of a provider with no unlabelled key becomes active on its own; a labelled key
+never replaces the unlabelled one.
+
+**In routing and usage.** A key account takes part in routing only when listed in
+`[[routing.accounts]]` (typically `kind = "metered"`, or `subscription` for a
+plan such as OpenCode Go); a saved key not listed is shown as "not routed" by
+`jcode routing status`. `/usage` shows every key as its own entry with its own
+windows, for example `OpenCode Go (API key) [second]`. OpenCode and Cursor windows
+reach routing as pushed readings (section 3). Metered spend is recorded in the
+local ledger under the exact account id of the key in use (`opencode-go:second`
+for a labelled key, the original `openai-compatible:opencode-go` entry for the
+unlabelled one), and ledger budgets (section 4) count it.
+
+**`key_command`** for a Keychain or password manager: an argv array with no
+shell, whose trimmed stdout is the key. Cached in memory until the config
+reloads, never written to disk or the log. A command that fails, times out or
+prints nothing gives an error naming the account and program; Jcode never falls
+back to another key. Values beginning with `!` are plain text and never executed.
+
+```toml
+[providers.gateway]
+base_url = "https://gateway.example/v1"
+key_command = ["security", "find-generic-password", "-s", "gateway", "-w"]
+key_command_timeout_secs = 15        # default 15, clamped to 1..=120
+
+[api_key_profiles.opencode-go.keys.vault]
+key_command = ["op", "read", "op://Private/opencode/credential"]
+```
+
+**Headers and base URL.** `[api_key_profiles.<id>] headers` (and
+`[providers.<name>] headers`, which also applies to OpenAI-compatible requests)
+are sent with every request; `[api_key_profiles.<id>.keys.<label>] headers`
+overrides them per key (`X-HF-Bill-To` for per-organization billing). An invalid
+header name or value stops the request with an error naming the header, not its
+value. `[api_key_profiles.<id>] base_url` points a built-in profile at a proxy.
+
+**Price overrides.** `[api_key_profiles.<id>.costs."<model or * glob>"]` and
+`[providers.<name>.costs."*"]` take `input`, `output`, `cache_read`, `cache_write`
+(USD per 1M tokens); the most specific match wins and omitted categories use the
+catalog price. They drive the cost shown in the TUI and the spend ledger.
+
+## 10. What is logged where
 
 | Where | What | When |
 | --- | --- | --- |
-| Chat transcript | One row `Provider: old -> new (cause)` (role `setting_change`), plus Model, Reasoning effort, Mode rows, from `setting_log` | Only when the session's provider/account/model actually changes; the request-boundary net re-checks every turn and writes nothing if nothing changed. The routing table is not a transcript item (see the Intended block in section 11) |
+| Chat transcript | One row `Provider: old -> new (cause)` (role `setting_change`), plus Model, Reasoning effort, Mode rows, from `setting_log` | Only when the session's provider/account/model actually changes; the request-boundary net re-checks every turn and writes nothing if nothing changed. The routing table is not a transcript item (see the Intended block in section 12) |
 | Wire events | `RoutingDecision {account, reason, warnings, pending}` (drives the account chip), `RoutingGate`/`RoutingGateClosed`, `RoutingStatus {text}`, `RoutingView` | every decided turn / gate / on request |
 | Decisions log | `JCODE_HOME/routing-decisions.jsonl` (rotated to `.1` at 8 MiB): `at, time, mode, session, model, role, seam, current, decision, account, reason, warnings, pending, applied` | one line per decision in `shadow` and `auto`; `decision` is `stay`, `move`, `pending`, `compact`, `redeem`, `gate` or `block`; `applied` is true only for an applied `move` |
 | Daemon log | `routing[auto\|shadow]: session=.. model=.. current=.. <decision> <account> (<reason>)`; `routing: ...` warnings for invalid config, failed binds, failed or unconfirmed reset claims | same moments |
@@ -406,7 +472,7 @@ go direct with a warning.
 The routing table (`status` text) is for **on-demand inspection only** and is not
 written into the chat.
 
-## 10. Configuration reference
+## 11. Configuration reference
 
 Everything below is read from `config.toml`; defaults are from the `Default`
 impls (`crates/jcode-routing-policy/src/config.rs`,
@@ -502,7 +568,7 @@ limit = 100
 action = "ask"
 ```
 
-## 11. Surfaces
+## 12. Surfaces
 
 ### CLI
 
@@ -560,7 +626,7 @@ against the code before relying on them.
   Selecting an account-specific route pins or switches the session to that
   account through the routing intents (`Pin`/`Switch`, the same as `/acct pin|switch`).
 
-## 12. Verify this doc
+## 13. Verify this doc
 
 ```sh
 # defaults and ranges
@@ -574,6 +640,7 @@ JUSTRUST_TEST_PARALLEL=0 justrust test -p jcode-session-types --lib -- routing_a
 JUSTRUST_TEST_PARALLEL=0 justrust test -p jcode-base --lib -- routing_service routing_view routing_meters
 # live view of the policy you configured
 jcode routing status --json
+jcode auth keys list --json
 # isolated daemon (own socket and home, fixture provider): shadow, auto, gate, block, 429 re-decision
 python3 scripts/accept-routing-daemon.py <built-jcode>
 python3 scripts/check_tui_chrome.py
