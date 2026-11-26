@@ -52,7 +52,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Instant;
 
-pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
+pub use account_failover::{
+    has_alternate_account_in_pool, has_eligible_alternate_account, set_routing_decider,
+};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,

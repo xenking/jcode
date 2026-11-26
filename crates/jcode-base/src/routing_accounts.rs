@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use jcode_routing_policy::config::{AccountConfig, PriorityConfig, RoutingConfig};
 
 use crate::auth::account_pool::AccountPool;
-use crate::routing_view::{SavedAccount, provider_keys, saved_accounts};
+use crate::routing_view::{Measured, SavedAccount, build, provider_keys, saved_accounts};
+use jcode_routing_policy::{AccountId, Reading};
+use jcode_session_types::routing::RoutingView;
 
 /// Credentials and the pool are read from disk at most this often.
 const DISCOVERY_TTL: Duration = Duration::from_secs(10);
@@ -102,6 +104,26 @@ pub fn routing() -> RoutingConfig {
         )
     });
     effective(&crate::config::config().routing, saved, pool)
+}
+
+struct CachedMeasure(i64);
+
+impl Measured for CachedMeasure {
+    fn readings(&self, account: &AccountId) -> Option<Vec<Reading>> {
+        crate::routing_meters::account_readings(account, self.0)
+    }
+}
+
+/// The view of the loaded config and the cached meters at `now` (unix seconds).
+pub fn view(now: i64) -> RoutingView {
+    let config = crate::config::config();
+    build(
+        &routing(),
+        &config.egress,
+        |policy| crate::routing_meters::snapshot(policy, now),
+        &CachedMeasure(now),
+        &provider_keys(),
+    )
 }
 
 #[cfg(test)]

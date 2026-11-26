@@ -55,6 +55,15 @@ pub(super) fn account_usage_probe(
     crate::usage::account_usage_probe_sync(kind)
 }
 
+static ROUTING_DECIDER: std::sync::OnceLock<fn(&str, &str) -> bool> = std::sync::OnceLock::new();
+
+/// Installs the daemon's routing service as the decider `routing_decides`
+/// asks; the service sits above providers, so it registers itself here.
+/// Without one (no daemon in this process) the account pool decides.
+pub fn set_routing_decider(applies: fn(&str, &str) -> bool) {
+    let _ = ROUTING_DECIDER.set(applies);
+}
+
 /// Whether the routing service, not the account pool, chooses `provider`'s
 /// account for `model`. With routing in `auto` it is the only decider: the pool
 /// rotation, same-provider failover prompts and banked-reset spending in this
@@ -65,7 +74,9 @@ pub(super) fn routing_decides(provider: ActiveProvider, model: &str) -> bool {
         ActiveProvider::OpenAI => "openai",
         _ => return false,
     };
-    crate::routing_service::global().applies(provider, model)
+    ROUTING_DECIDER
+        .get()
+        .is_some_and(|applies| applies(provider, model))
 }
 
 pub(super) fn same_provider_account_failover_enabled() -> bool {

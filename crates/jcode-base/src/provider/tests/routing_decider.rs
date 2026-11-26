@@ -6,6 +6,10 @@
 
 fn route_by_service(accounts: &[&str]) {
     use jcode_routing_policy::config::{AccountConfig, RoutingMode};
+    // What the daemon installs at startup.
+    set_routing_decider(|provider, model| {
+        crate::routing_service::global().applies(provider, model)
+    });
     let mut config = crate::config::Config::load();
     config.routing.mode = RoutingMode::Auto;
     config.routing.accounts = accounts

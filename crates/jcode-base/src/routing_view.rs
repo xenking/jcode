@@ -275,14 +275,6 @@ pub(crate) fn provider_keys() -> Vec<ProviderKeys> {
         .collect()
 }
 
-struct CachedMeasure(i64);
-
-impl Measured for CachedMeasure {
-    fn readings(&self, account: &AccountId) -> Option<Vec<Reading>> {
-        crate::routing_meters::account_readings(account, self.0)
-    }
-}
-
 /// A saved login or API key and how it is billed by default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedAccount {
@@ -338,18 +330,6 @@ pub fn saved_accounts(keys: &[ProviderKeys]) -> Vec<SavedAccount> {
 /// [`saved_accounts`] for the credentials on this machine.
 pub fn current_saved_accounts() -> Vec<SavedAccount> {
     saved_accounts(&provider_keys())
-}
-
-/// The view of the loaded config and the cached meters at `now` (unix seconds).
-pub fn current(now: i64) -> RoutingView {
-    let config = crate::config::config();
-    build(
-        &crate::routing_accounts::routing(),
-        &config.egress,
-        |policy| crate::routing_meters::snapshot(policy, now),
-        &CachedMeasure(now),
-        &provider_keys(),
-    )
 }
 
 #[cfg(test)]

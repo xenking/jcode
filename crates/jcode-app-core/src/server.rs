@@ -868,6 +868,10 @@ impl Server {
         // silently degrades (rerank -> hybrid order, no relevance/extraction) on
         // Copilot, Antigravity, Gemini, Cursor, Bedrock, and OpenRouter.
         crate::provider::set_active_provider(Arc::clone(&provider));
+        // The routing service decides accounts for providers in this daemon.
+        crate::provider::set_routing_decider(|provider, model| {
+            jcode_base::routing_service::global().applies(provider, model)
+        });
 
         let (client_debug_response_tx, _) = broadcast::channel(64);
 
