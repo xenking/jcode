@@ -62,10 +62,7 @@ pub(in crate::cli) async fn run_single_message_command(
         _ => crate::agent::Agent::new(provider.clone(), registry),
     };
     if let RunPersistence::Resume(session_id) = persistence {
-        // `-p`/`-m` are an explicit route choice that outranks the saved one.
-        let requested_route = (*choice != crate::cli::provider_init::ProviderChoice::Auto
-            || model.is_some())
-        .then(|| agent.provider_model());
+        let requested_route = requested_resume_route(choice, model, &agent);
         if let Err(error) =
             resume_session_for_run(&mut agent, session_id, requested_route.as_deref(), message)
         {
@@ -75,6 +72,20 @@ pub(in crate::cli) async fn run_single_message_command(
     }
 
     run_single_message_with_agent(&mut agent, provider, message, output).await
+}
+
+/// `-p`/`-m` are an explicit route choice that outranks the saved one. `-m` is
+/// passed on as typed: the agent's own model string has already lost the
+/// credential account of a spec like `claude-oauth@<account>:<model>`, so
+/// re-applying it could never leave the saved (possibly exhausted) account.
+pub(super) fn requested_resume_route(
+    choice: &crate::cli::provider_init::ProviderChoice,
+    model: Option<&str>,
+    agent: &crate::agent::Agent,
+) -> Option<String> {
+    model.map(str::to_owned).or_else(|| {
+        (*choice != crate::cli::provider_init::ProviderChoice::Auto).then(|| agent.provider_model())
+    })
 }
 
 /// Restore `session_id` for a one-shot run. A requested route replaces the

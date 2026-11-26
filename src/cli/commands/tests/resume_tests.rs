@@ -152,3 +152,37 @@ async fn blocked_resume_fails_with_the_reason_and_delivers_the_message_once() {
         .count();
     assert_eq!(deliveries, 1, "retried runs must not pile up copies");
 }
+
+#[tokio::test]
+async fn resume_route_flags_keep_the_account_the_user_named() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let spec = "claude-oauth@claude-otter:claude-sonnet-4-6";
+    let id = seeded_session(Arc::new(SwitchableTestProvider(
+        "claude-oauth@claude-fox:claude-sonnet-4-6"
+            .to_string()
+            .into(),
+    )))
+    .await;
+    // The agent's model string carries no account, as with the real providers.
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableTestProvider(
+        "claude-sonnet-4-6".to_string().into(),
+    ));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    let auto = crate::cli::provider_init::ProviderChoice::Auto;
+    let requested = run_options::requested_resume_route(&auto, Some(spec), &agent);
+    assert_eq!(requested.as_deref(), Some(spec));
+    run_options::resume_session_for_run(&mut agent, &id, requested.as_deref(), "again").unwrap();
+    assert_eq!(provider.model(), spec);
+    agent.mark_closed();
+
+    // No flags keep the saved route.
+    assert_eq!(
+        run_options::requested_resume_route(&auto, None, &agent),
+        None
+    );
+}
