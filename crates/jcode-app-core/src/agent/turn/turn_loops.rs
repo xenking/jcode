@@ -287,6 +287,7 @@ impl Agent {
             if messages_with_memory.len() > before_reminders {
                 self.persist_session_best_effort("turn reminders");
             }
+            self.append_openai_request_snapshot(&mut messages_with_memory);
             self.record_client_cache_request(&messages_with_memory);
 
             // Request-only messages follow every durable block. A reload nudge
@@ -301,7 +302,9 @@ impl Agent {
             }
             let prompt_has_recent_tool_result =
                 Self::messages_end_with_tool_result(&messages_with_memory);
-            messages_with_memory.extend(self.user_ask_instructions());
+            if self.provider.name() != "openai" {
+                messages_with_memory.extend(self.user_ask_instructions());
+            }
 
             logging::debug_lazy(|| {
                 format!(

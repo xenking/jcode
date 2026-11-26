@@ -252,3 +252,60 @@ async fn worker_and_automatic_todo_inputs_do_not_become_requests() {
     assert!(requests(&agent).is_empty());
     assert!(agent.user_ask_instructions().is_none());
 }
+
+#[tokio::test]
+async fn openai_request_snapshots_track_changes_and_survive_resume() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = IsolatedHome::new();
+    let credentials = crate::auth::codex::CodexCredentials {
+        access_token: "sk-snapshot-fixture".into(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    let provider = Arc::new(jcode_provider_openai_runtime::OpenAIProvider::new(
+        credentials,
+    ));
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    agent
+        .session
+        .set_pinned_skill_names(vec!["poteto-mode".into()]);
+    agent
+        .append_user_context_message("Check the quota", vec![], None)
+        .unwrap();
+    let mut history = agent.session.provider_messages().to_vec();
+    agent.append_openai_request_snapshot(&mut history);
+    let first = message_text(history.last().unwrap());
+    assert!(first.contains("Ask #1: Check the quota [pending]"));
+    let count = history.len();
+    agent.append_openai_request_snapshot(&mut history);
+    assert_eq!(history.len(), count);
+
+    let mut todos = crate::todo::load_todos(agent.session_id()).unwrap();
+    todos[0].status = "in_progress".into();
+    crate::todo::save_todos(agent.session_id(), &todos).unwrap();
+    agent.append_openai_request_snapshot(&mut history);
+    assert_eq!(history.len(), count + 1);
+    let updated = message_text(history.last().unwrap());
+    assert!(updated.contains("Ask #1: Check the quota [in_progress]"));
+    assert!(updated.contains("supersedes earlier"));
+
+    todos[0].status = "completed".into();
+    crate::todo::save_todos(agent.session_id(), &todos).unwrap();
+    agent.append_openai_request_snapshot(&mut history);
+    assert!(message_text(history.last().unwrap()).contains("no open user requests now"));
+    let count = history.len();
+    agent.append_openai_request_snapshot(&mut history);
+    assert_eq!(history.len(), count);
+    let session_id = agent.session_id().to_owned();
+    drop(agent);
+
+    let saved = crate::session::Session::load(&session_id).unwrap();
+    let mut resumed = Agent::new_with_session(provider, Registry::empty(), saved, None);
+    let mut history = resumed.session.provider_messages().to_vec();
+    let count = history.len();
+    assert!(message_text(history.last().unwrap()).contains("no open user requests now"));
+    resumed.append_openai_request_snapshot(&mut history);
+    assert_eq!(history.len(), count);
+}

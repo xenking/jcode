@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 
 /// Open requests listed per turn. A longer backlog is summarized by count.
 const MAX_LISTED_REQUESTS: usize = 8;
+const REQUEST_REMINDER_PREFIX: &str = "<system-reminder>\nOpen user requests.";
+const NO_OPEN_REQUESTS: &str = "<system-reminder>\nOpen user requests. There are no open user requests now. Earlier lists are superseded.\n</system-reminder>";
 
 impl Agent {
     /// Turn a user message into a request todo, so the user's requests share
@@ -119,5 +121,43 @@ impl Agent {
         }
         text.push_str("</system-reminder>");
         Some(Message::user(&text).into_request_only())
+    }
+
+    pub(super) fn append_openai_request_snapshot(&mut self, messages: &mut Vec<Message>) {
+        if self.provider.name() != "openai" || self.is_swarm_worker() {
+            return;
+        }
+        let previous = messages.iter().rev().find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text, .. } if text.starts_with(REQUEST_REMINDER_PREFIX) => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+        });
+        let current = match self.user_ask_instructions() {
+            Some(message) => match &message.content[..] {
+                [ContentBlock::Text { text, .. }] => format!(
+                    "{}This list supersedes earlier open user request lists.\n</system-reminder>",
+                    text.strip_suffix("</system-reminder>").unwrap_or(text)
+                ),
+                _ => return,
+            },
+            None if previous.is_some() => {
+                let Ok(todos) = crate::todo::load_todos(self.session.id()) else {
+                    return;
+                };
+                if crate::todo::open_requests(&todos).next().is_some() {
+                    return;
+                }
+                NO_OPEN_REQUESTS.to_owned()
+            }
+            None => return,
+        };
+        if previous == Some(current.as_str()) {
+            return;
+        }
+        messages.push(self.append_model_reminder(&current));
+        self.persist_session_best_effort("open request snapshot");
     }
 }

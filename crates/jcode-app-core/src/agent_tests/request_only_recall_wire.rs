@@ -11,7 +11,7 @@ const RECALL: &str = "The fixture notebook is blue.";
 const TOOL: &str = "fixture_lookup";
 const CALL: &str = "call_fixture_lookup";
 
-struct Lookup(bool);
+struct Lookup(bool, Option<String>);
 
 #[async_trait]
 impl Tool for Lookup {
@@ -25,6 +25,11 @@ impl Tool for Lookup {
         json!({"type": "object"})
     }
     async fn execute(&self, _input: Value, _context: ToolContext) -> Result<ToolOutput> {
+        if let Some(session_id) = &self.1 {
+            let mut todos = crate::todo::load_todos(session_id)?;
+            todos[0].status = "completed".into();
+            crate::todo::save_todos(session_id, &todos)?;
+        }
         let output = ToolOutput::new("fixture result");
         Ok(if self.0 {
             output.with_labeled_image(
@@ -117,7 +122,13 @@ struct Exchange {
     stored_recall_count: usize,
 }
 
-async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
+async fn exercise(
+    index: usize,
+    image: bool,
+    persist: bool,
+    asks: bool,
+    complete_ask: bool,
+) -> Exchange {
     let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -188,22 +199,32 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
     let session_id = session.id().to_owned();
     let registry = Registry::empty();
     registry
-        .register(TOOL.into(), Arc::new(Lookup(image)))
+        .register(
+            TOOL.into(),
+            Arc::new(Lookup(image, complete_ask.then(|| session_id.clone()))),
+        )
         .await;
     let mut agent = Agent::new_with_session(provider, registry, session, None);
+    if asks {
+        agent
+            .session
+            .set_pinned_skill_names(vec!["poteto-mode".into()]);
+    }
     agent.memory_enabled = true;
     let entry = crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, RECALL);
     let manager = crate::memory::MemoryManager::new().with_project_dir(project.path());
     manager.remember_project(entry.clone()).unwrap();
     let prompt = crate::memory::format_relevant_prompt(std::slice::from_ref(&entry), 1).unwrap();
-    crate::memory::set_pending_memory_for_project(
-        &session_id,
-        prompt,
-        1,
-        vec![entry.id],
-        None,
-        project.path().to_str(),
-    );
+    if !asks {
+        crate::memory::set_pending_memory_for_project(
+            &session_id,
+            prompt,
+            1,
+            vec![entry.id],
+            None,
+            project.path().to_str(),
+        );
+    }
     let (tx, mut rx) = tokio_mpsc::unbounded_channel();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         agent
@@ -223,11 +244,13 @@ async fn exercise(index: usize, image: bool, persist: bool) -> Exchange {
     drop(agent);
 
     let mut saved = crate::session::Session::load(&session_id).unwrap();
-    assert_eq!(
-        saved.memory_injections().len(),
-        1,
-        "recall card survives either policy"
-    );
+    if !asks {
+        assert_eq!(
+            saved.memory_injections().len(),
+            1,
+            "recall card survives either policy"
+        );
+    }
     let replay = crate::provider::openai_request::build_responses_input(saved.provider_messages());
     crate::config::invalidate_config_cache();
     Exchange {
@@ -253,8 +276,8 @@ fn print_counts(index: usize, mode: &str, frames: &[Request]) {
 
 async fn recall_wire_incident(index: usize, image: bool) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let baseline = exercise(index, image, false).await;
-    let durable = exercise(index, image, true).await;
+    let baseline = exercise(index, image, false, false, false).await;
+    let durable = exercise(index, image, true, false, false).await;
     print_counts(index, "opt-out", &baseline.frames);
     print_counts(index, "durable-control", &durable.frames);
     let [first, callback] = &baseline.frames;
@@ -292,6 +315,48 @@ async fn recall_wire_incident(index: usize, image: bool) {
     assert_eq!(callback.input()[0]["type"], "function_call_output");
     assert_eq!(callback.input()[0]["call_id"], CALL);
     assert!(!callback.input().iter().any(recall_item));
+}
+
+#[tokio::test]
+async fn open_request_reminder_keeps_websocket_chain() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let exchange = exercise(30, false, false, true, false).await;
+    let [first, callback] = &exchange.frames;
+    assert!(
+        first
+            .input()
+            .iter()
+            .any(|item| item.to_string().contains("Open user requests"))
+    );
+    assert!(
+        exchange.reused_socket,
+        "request reminder displaced the previous wire prefix"
+    );
+    assert_eq!(callback.previous(), Some("resp_fixture_lookup"));
+    assert_eq!(callback.input()[0]["type"], "function_call_output");
+    assert_eq!(callback.input()[0]["call_id"], CALL);
+}
+
+#[tokio::test]
+async fn changed_open_request_reminder_keeps_websocket_chain() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let exchange = exercise(30, false, false, true, true).await;
+    let [first, callback] = &exchange.frames;
+    assert!(
+        first
+            .input()
+            .iter()
+            .any(|item| item.to_string().contains("[pending]"))
+    );
+    assert!(exchange.reused_socket);
+    assert_eq!(callback.previous(), Some("resp_fixture_lookup"));
+    assert_eq!(callback.input()[0]["type"], "function_call_output");
+    assert!(
+        callback
+            .input()
+            .iter()
+            .any(|item| item.to_string().contains("no open user requests now"))
+    );
 }
 
 #[tokio::test]
