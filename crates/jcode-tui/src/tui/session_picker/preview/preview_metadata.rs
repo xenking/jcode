@@ -85,7 +85,9 @@ mod tests {
         let git = data.git_info.unwrap();
         assert_eq!(git.branch, "selected-preview");
         assert_eq!(git.untracked, 1);
-        assert_eq!(git.repo_root.as_deref(), Some(repo.path()));
+        // Git reports the real path; macOS temp dirs sit behind the /var symlink.
+        let real = repo.path().canonicalize().unwrap();
+        assert_eq!(git.repo_root.as_deref(), Some(real.as_path()));
     }
 
     #[test]

@@ -100,7 +100,7 @@ fn test_ambient_scheduled_queue() {
 
     // Future item still in queue
     assert_eq!(queue.len(), 1);
-    assert_eq!(queue.items()[0].id, "future_1");
+    assert_eq!(queue.snapshot()[0].id, "future_1");
 }
 
 /// Test adaptive scheduler: interval calculation
