@@ -290,7 +290,6 @@ shallow-module ratatui_core::buffer
 shallow-module ratatui_core::layout::rect
 wide-directory crates/
 wide-directory crates/jcode-app-core/src/
-wide-directory crates/jcode-app-core/src/server/
 wide-directory crates/jcode-base/src/
 wide-directory crates/jcode-base/src/provider/
 wide-directory crates/jcode-base/src/session/
