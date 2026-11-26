@@ -24,7 +24,7 @@ inside the last 5 minutes of a 1-hour window or the last minute of an opted-in
 5-minute window, but never within 15 seconds of expiry.
 
 Each ping follows rule 6 of the routing economics
-([ROUTING_POLICY_PLAN.md](ROUTING_POLICY_PLAN.md), "Economics"):
+([ROUTING.md](ROUTING.md), section 6, rule 6):
 
 - A ping costs a read of the cached prefix plus ordinary input rates on any
   uncached tail. A rebuild costs a cache write plus the tail. Pinging continues

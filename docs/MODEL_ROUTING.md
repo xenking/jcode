@@ -3,6 +3,9 @@
 How Jcode picks a model for each role, and how compaction thresholds follow
 the active model.
 
+Which *account* serves a session (priorities, pacing, failover) is covered in
+[ROUTING.md](ROUTING.md).
+
 ## Roles and their knobs
 
 | Role | Config key | Session override | Default when unset |
