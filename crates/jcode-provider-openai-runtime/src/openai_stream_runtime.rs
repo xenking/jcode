@@ -796,7 +796,7 @@ async fn continue_persistent_ws_locked(
             || !input_item_hashes.starts_with(&state.last_input_item_hashes))
     {
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Debug,
+            jcode_base::logging::LogLevel::Info,
             "persistent_state_reset",
             || {
                 vec![
@@ -828,7 +828,7 @@ async fn continue_persistent_ws_locked(
             Err(diff) => {
                 use jcode_provider_core::fingerprint::stable_hash_json;
                 log_openai_stream_lifecycle(
-                    jcode_base::logging::LogLevel::Debug,
+                    jcode_base::logging::LogLevel::Info,
                     "persistent_state_reset",
                     || {
                         vec![
