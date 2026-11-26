@@ -1359,8 +1359,7 @@ impl App {
         }
         match action {
             AccountPickerAction::Switch { provider_id, label } => match provider_id.as_str() {
-                "claude" => self.switch_account(&label),
-                "openai" => self.switch_openai_account(&label),
+                "claude" | "openai" => self.switch_saved_oauth_account(&provider_id, &label),
                 _ => self.push_display_message(DisplayMessage::error(format!(
                     "Provider `{}` does not support account switching.",
                     provider_id

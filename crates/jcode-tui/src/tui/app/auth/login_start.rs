@@ -140,7 +140,7 @@ impl App {
             };
 
             let opened = App::open_auth_browser(&device.verification_uri_complete);
-            let card = auth_progress::encode_device_login_card(
+            let card = crate::tui::app::login_card::encode_device_login_card(
                 "Jcode",
                 &device.verification_uri_complete,
                 None,
@@ -509,11 +509,7 @@ impl App {
         Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri)).await
     }
 
-    pub(in super::super) fn switch_account(&mut self, label: &str) {
-        self.switch_saved_oauth_account("claude", label);
-    }
-
-    pub(super) fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
+    pub(in super::super) fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
         let selection = match saved_account_route_selection(
             provider_id,
             label,
@@ -577,8 +573,8 @@ impl App {
             .any(|account| account.label == label);
 
         match (has_anthropic, has_openai) {
-            (true, false) => self.switch_account(label),
-            (false, true) => self.switch_openai_account(label),
+            (true, false) => self.switch_saved_oauth_account("claude", label),
+            (false, true) => self.switch_saved_oauth_account("openai", label),
             (true, true) => self.push_display_message(DisplayMessage::error(format!(
                 "Account label {} exists for both Anthropic and OpenAI. Use /account switch {} or /account openai switch {} explicitly.",
                 label, label, label
@@ -605,10 +601,6 @@ impl App {
                 )));
             }
         }
-    }
-
-    pub(in super::super) fn switch_openai_account(&mut self, label: &str) {
-        self.switch_saved_oauth_account("openai", label);
     }
 
     pub(in super::super) fn remove_openai_account(&mut self, label: &str) {
@@ -796,7 +788,7 @@ impl App {
                 "Account: {label}\n\nOpen {} on any browser or phone and enter code `{}`.\nYou can still paste a manual OAuth callback URL here if preferred.{qr_section}",
                 device.verification_url, device.user_code
             );
-            let card = auth_progress::encode_device_login_card(
+            let card = crate::tui::app::login_card::encode_device_login_card(
                 "OpenAI",
                 &device.verification_url,
                 Some(&device.user_code),
@@ -1494,7 +1486,7 @@ impl App {
                 "Confirm code `{}` in your browser. You do not need to install the Grok CLI.{qr_section}",
                 authorization.user_code
             );
-            let card = auth_progress::encode_device_login_card(
+            let card = crate::tui::app::login_card::encode_device_login_card(
                 "xAI",
                 url,
                 Some(&authorization.user_code),

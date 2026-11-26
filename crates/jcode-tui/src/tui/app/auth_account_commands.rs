@@ -445,8 +445,7 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
             execute_account_add_local(app, &provider_id, label.as_deref())
         }
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => app.switch_account(&label),
-            "openai" => app.switch_openai_account(&label),
+            "claude" | "openai" => app.switch_saved_oauth_account(&provider_id, &label),
             other => switch_api_key_account_local(app, other, &label),
         },
         AccountCommand::SwitchShorthand { label } => app.switch_account_by_label(&label),

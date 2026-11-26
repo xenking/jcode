@@ -126,7 +126,7 @@ impl App {
                         if qr_section.is_empty() { "" } else { "\n\n" },
                         qr_section
                     );
-                    super::auth_progress::encode_device_login_card(
+                    crate::tui::app::login_card::encode_device_login_card(
                         "GitHub",
                         &verification_uri,
                         Some(&user_code),
@@ -288,7 +288,7 @@ impl App {
                     let details = format!(
                         "{warning}\n\nEnter code `{user_code}` and authorize. No local Muse installation is required.{qr_section}"
                     );
-                    super::auth_progress::encode_device_login_card(
+                    crate::tui::app::login_card::encode_device_login_card(
                         "Meta",
                         &url,
                         Some(&user_code),

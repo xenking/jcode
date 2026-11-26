@@ -273,7 +273,7 @@ fn oauth_login_progress_generalized_claude_and_device_code_cards() {
     );
 
     // Device-code card for Copilot shows Code: <CODE> and collapses details.
-    let device_card = crate::tui::app::auth::auth_progress::encode_device_login_card(
+    let device_card = crate::tui::app::login_card::encode_device_login_card(
         "GitHub",
         "https://github.com/login/device",
         Some("ABCD-1234"),
@@ -309,7 +309,7 @@ fn oauth_login_progress_openai_device_fallback_updates_card_and_cancels_cleanly(
         device_fallback_cancelled: Some(std::sync::Arc::clone(&cancelled)),
     });
 
-    let fallback_card = crate::tui::app::auth::auth_progress::encode_device_login_card(
+    let fallback_card = crate::tui::app::login_card::encode_device_login_card(
         "OpenAI",
         "https://auth.openai.com/codex/device",
         Some("WXYZ-9876"),
