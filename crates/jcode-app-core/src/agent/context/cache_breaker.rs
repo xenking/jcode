@@ -9,6 +9,11 @@ use std::{
 
 const EXPENSIVE_TOKENS: u64 = 50_000;
 const CONSECUTIVE_REQUESTS: u8 = 3;
+// Five substantial tails totaling 80k catch sustained waste without treating
+// a small, normally changing suffix on a warm cache as a stall.
+const PLATEAU_MIN_TAIL: u64 = 10_000;
+const PLATEAU_TOTAL: u64 = 80_000;
+const PLATEAU_REQUESTS: u8 = 5;
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -46,6 +51,9 @@ struct Sample {
     prompt: u64,
     requests: u8,
     uncached: u64,
+    read: u64,
+    plateau_requests: u8,
+    plateau_uncached: u64,
 }
 
 impl CacheBreaker {
@@ -68,7 +76,9 @@ impl CacheBreaker {
     ) -> Option<CachePause> {
         let previous = self.previous.take();
         let (input, read, write) = usage?;
-        let (prompt, uncached, expensive) = match route.domain.provider.to_ascii_lowercase().as_str() {
+        let provider = route.domain.provider.to_ascii_lowercase();
+        let is_openai = matches!(provider.as_str(), "openai" | "openai-api" | "openai-oauth");
+        let (prompt, uncached, expensive) = match provider.as_str() {
             "anthropic" | "claude" => {
                 let prompt = input
                     .saturating_add(read)
@@ -91,7 +101,22 @@ impl CacheBreaker {
                 && now.saturating_duration_since(old.at) <= MAX_SAMPLE_GAP
                 && prompt >= old.prompt - old.prompt / 5
         });
-        let (requests, uncached) = match (expensive, same_run) {
+        let (plateau_requests, plateau_uncached) =
+            if is_openai && read > 0 && uncached >= PLATEAU_MIN_TAIL {
+                match same_run
+                    .as_ref()
+                    .filter(|old| old.read == read && prompt > old.prompt)
+                {
+                    Some(old) => (
+                        old.plateau_requests.saturating_add(1),
+                        old.plateau_uncached.saturating_add(uncached),
+                    ),
+                    None => (1, uncached),
+                }
+            } else {
+                (0, 0)
+            };
+        let (requests, expensive_uncached) = match (expensive, same_run) {
             (true, Some(old)) => (
                 old.requests.saturating_add(1),
                 old.uncached.saturating_add(uncached),
@@ -99,19 +124,31 @@ impl CacheBreaker {
             (true, None) => (1, uncached),
             (false, _) => (0, 0),
         };
-        let pause = (requests >= CONSECUTIVE_REQUESTS).then(|| CachePause {
+        let stalled = plateau_requests >= PLATEAU_REQUESTS && plateau_uncached >= PLATEAU_TOTAL;
+        let pause = (requests >= CONSECUTIVE_REQUESTS || stalled).then(|| CachePause {
             provider: route.domain.provider.clone(),
             model: route.domain.model.clone(),
             timestamp: chrono::Utc::now(),
-            requests,
-            uncached_input: uncached,
+            requests: if requests >= CONSECUTIVE_REQUESTS {
+                requests
+            } else {
+                plateau_requests
+            },
+            uncached_input: if requests >= CONSECUTIVE_REQUESTS {
+                expensive_uncached
+            } else {
+                plateau_uncached
+            },
         });
         self.previous = Some(Sample {
             route,
             at: now,
             prompt,
             requests,
-            uncached,
+            uncached: expensive_uncached,
+            read,
+            plateau_requests,
+            plateau_uncached,
         });
         pause
     }
@@ -244,6 +281,63 @@ mod tests {
                 account: Some(account.into()),
             },
             effort: None,
+        }
+    }
+
+    #[test]
+    fn openai_growing_tail_on_fixed_read_pauses_after_cumulative_waste() {
+        let mut breaker = CacheBreaker::default();
+        let now = Instant::now();
+        for prompt in [146_328, 148_694, 150_332, 151_008] {
+            assert!(
+                breaker
+                    .observe(route("openai", "a"), Some((prompt, 133_888, None)), now)
+                    .is_none()
+            );
+        }
+        let pause = breaker
+            .observe(route("openai", "a"), Some((153_083, 133_888, None)), now)
+            .unwrap();
+        assert_eq!((pause.requests, pause.uncached_input), (5, 80_005));
+    }
+
+    #[test]
+    fn plateau_resets_on_warming_small_tail_unknown_route_effort_and_compaction() {
+        let now = Instant::now();
+        let mut breaker = CacheBreaker::default();
+        for prompt in 295_272..295_292 {
+            assert!(
+                breaker
+                    .observe(route("openai", "a"), Some((prompt, 294_272, None)), now)
+                    .is_none()
+            );
+        }
+        for reset in 0..6 {
+            let mut breaker = CacheBreaker::default();
+            for prompt in [146_328, 148_694, 150_332, 151_008] {
+                assert!(
+                    breaker
+                        .observe(route("openai", "a"), Some((prompt, 133_888, None)), now)
+                        .is_none()
+                );
+            }
+            let mut changed = route("openai", if reset == 2 { "b" } else { "a" });
+            if reset == 3 {
+                changed.effort = Some("high".into());
+            }
+            let usage = match reset {
+                0 => None,
+                1 => Some((153_083, 135_000, None)),
+                4 => Some((100_000, 90_000, None)),
+                5 => Some((134_888, 133_888, None)),
+                _ => Some((153_083, 133_888, None)),
+            };
+            assert!(breaker.observe(changed, usage, now).is_none());
+            assert!(
+                breaker
+                    .observe(route("openai", "a"), Some((154_000, 133_888, None)), now)
+                    .is_none()
+            );
         }
     }
 
