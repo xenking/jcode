@@ -4,7 +4,6 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
