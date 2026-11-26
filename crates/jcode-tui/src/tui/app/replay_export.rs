@@ -372,6 +372,8 @@ mod tests {
     #[test]
     fn ansi_preserves_unicode_and_blank_cell_backgrounds() {
         use ratatui::{layout::Rect, style::Color};
+        // crossterm memoizes NO_COLOR process-wide; the ANSI output is what's under test.
+        crossterm::style::Colored::set_ansi_color_disabled(false);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 2));
         buffer[(0, 0)]
             .set_symbol("界")

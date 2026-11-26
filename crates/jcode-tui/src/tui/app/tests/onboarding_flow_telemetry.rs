@@ -85,11 +85,13 @@ fn start_choice_prefetches_recent_project_so_enter_does_not_block() {
         "the warm prefetch should be reused"
     );
 
-    // The resolved path is still the repository the session runs in.
+    // The resolved path is still the repository the session runs in. Ranking
+    // folds the macOS /private prefix away, so compare canonical paths.
+    let canonical = |path: Option<std::path::PathBuf>| path.map(|p| p.canonicalize().unwrap());
     assert_eq!(
-        app.onboarding_recent_project_path(),
-        crate::import::repo_ranking::resolve_git_root(std::path::Path::new(
-            app.session.working_dir().expect("test session working dir")
+        canonical(app.onboarding_recent_project_path()),
+        canonical(crate::import::repo_ranking::resolve_git_root(
+            std::path::Path::new(app.session.working_dir().expect("test session working dir"))
         ))
     );
 }

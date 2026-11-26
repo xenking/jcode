@@ -14,6 +14,8 @@ use ratatui::style::Color;
 /// Drive the backend to draw a single cell with the given fg color and return
 /// the raw bytes it emitted to the writer.
 fn emitted_bytes_for(fg: Color) -> Vec<u8> {
+    // crossterm memoizes NO_COLOR process-wide; the wire format is what's under test.
+    crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut out: Vec<u8> = Vec::new();
     {
         let mut backend = CrosstermBackend::new(&mut out);

@@ -55,6 +55,8 @@ fn parses_saved_and_public_todos_and_labeled_metadata() {
 #[test]
 fn ansi_preserves_rgb_blank_backgrounds_and_wide_cells() {
     use ratatui::{layout::Rect, style::Color};
+    // crossterm memoizes NO_COLOR process-wide; the ANSI output is what's under test.
+    crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 2));
     buffer[(0, 0)]
         .set_symbol("界")
