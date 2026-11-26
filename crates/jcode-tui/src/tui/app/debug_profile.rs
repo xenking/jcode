@@ -1,6 +1,37 @@
 use super::*;
 use std::borrow::Cow;
 
+fn estimate_display_message_bytes(message: &DisplayMessage) -> usize {
+    message.role.len()
+        + message.content.len()
+        + message
+            .tool_calls
+            .iter()
+            .map(|call| call.len())
+            .sum::<usize>()
+        + message.title.as_ref().map(|title| title.len()).unwrap_or(0)
+        + message
+            .tool_data
+            .as_ref()
+            .map(crate::process_memory::estimate_json_bytes)
+            .unwrap_or(0)
+}
+
+fn estimate_string_vec_bytes(values: &[String]) -> usize {
+    values.iter().map(|value| value.capacity()).sum()
+}
+
+fn estimate_pair_vec_bytes(values: &[(String, usize)]) -> usize {
+    values.iter().map(|(name, _)| name.capacity()).sum()
+}
+
+fn estimate_pending_images_bytes(values: &[(String, String)]) -> usize {
+    values
+        .iter()
+        .map(|(media_type, data)| media_type.capacity() + data.capacity())
+        .sum()
+}
+
 const LARGE_DISPLAY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]
