@@ -19,9 +19,9 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "crates/jcode-routing-pol
 # (name, file, original, mutated, test that must fail)
 MUTATIONS = [
     ("rule4 warm stays while it can serve", "engine.rs",
-     "|s: &Standing<'_>| s.ready && s.hard.is_empty() && (paid_allowed",
-     "|s: &Standing<'_>| s.ready && (paid_allowed",
-     "warm_session_stays_on_an_account_past_the_soft_ceiling"),
+     "        s.ready && s.hard.is_empty() && (paid_allowed",
+     "        s.ready && (paid_allowed",
+     "warm_session_moves_when_its_account_is_hard_blocked"),
     ("rule1 cold seam moves", "engine.rs",
      "&& request.cache.seam == Seam::Warm =>",
      "&& request.cache.seam != Seam::Start =>",
