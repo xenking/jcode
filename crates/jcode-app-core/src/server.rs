@@ -65,6 +65,7 @@ mod routing_turn;
 pub use routing_turn::route_unattached_turn;
 mod recovery_owner;
 pub(crate) mod reload_recovery;
+mod reload_transcript;
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
 pub(crate) mod ask_escalation;

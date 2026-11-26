@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::client_state::{handle_get_history, send_resume_todos, spawn_model_prefetch_update};
+use super::reload_transcript::{last_message_has_pending_tool, message_has_reload_interruption};
 use super::swarm::notify_owner_of_unrestored_idle_workers;
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
@@ -13,7 +14,6 @@ use super::{
     unregister_session_event_sender, update_member_status,
 };
 use crate::agent::{Agent, last_turn_message_for_recovery};
-use crate::message::ContentBlock;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
@@ -35,35 +35,9 @@ pub(in crate::server) use detached_source::*;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
-/// An assistant tool request is persisted before execution. If it is still the
-/// last message after restart, execution never persisted a result.
-pub(super) fn last_message_has_pending_tool(session: &crate::session::StoredMessage) -> bool {
-    session.role == crate::message::Role::Assistant
-        && session
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-}
-
 pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
-    last_turn_message_for_recovery(agent.iter_messages()).is_some_and(message_has_reload_interruption)
-}
-
-pub(super) fn message_has_reload_interruption(message: &crate::session::StoredMessage) -> bool {
-    message.content.iter().any(|block| match block {
-        ContentBlock::Text { text, .. } => {
-            text.ends_with("[generation interrupted - server reloading]")
-        }
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            content == "Reload initiated. Process restarting..."
-                || (is_error.unwrap_or(false)
-                    && (content.contains("interrupted by server reload")
-                        || content.contains("Skipped - server reloading")))
-        }
-        _ => false,
-    })
+    last_turn_message_for_recovery(agent.iter_messages())
+        .is_some_and(message_has_reload_interruption)
 }
 
 pub(super) fn restored_session_was_interrupted(

@@ -87,7 +87,7 @@ impl Server {
             let interrupted = crate::agent::last_turn_message_for_recovery(session.iter_messages())
                 .is_some_and(|message| {
                     message.role == crate::message::Role::User
-                        || self::client_session::last_message_has_pending_tool(message)
+                        || self::reload_transcript::last_message_has_pending_tool(message)
                         || message.content.iter().any(|block| match block {
                             crate::message::ContentBlock::Text { text, .. } => {
                                 text.contains("server reloading")
