@@ -603,7 +603,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::ReasoningEffort(
+                    level,
+                ))
+                .await?;
             return Ok(());
         }
 
@@ -739,7 +743,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /transport <mode>"));
                 return Ok(());
             }
-            remote.set_transport(mode).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Transport(mode))
+                .await?;
             return Ok(());
         }
 
@@ -763,7 +769,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autoreview on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autoreview, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autoreview,
+                    enabled: true,
+                })
                 .await?;
             app.set_autoreview_feature_enabled(true);
             app.set_status_notice("Autoreview: ON");
@@ -775,7 +784,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autoreview off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autoreview, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autoreview,
+                    enabled: false,
+                })
                 .await?;
             app.set_autoreview_feature_enabled(false);
             app.set_status_notice("Autoreview: OFF");
@@ -820,7 +832,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autojudge on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autojudge, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autojudge,
+                    enabled: true,
+                })
                 .await?;
             app.set_autojudge_feature_enabled(true);
             app.set_status_notice("Autojudge: ON");
@@ -832,7 +847,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autojudge off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autojudge, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autojudge,
+                    enabled: false,
+                })
                 .await?;
             app.set_autojudge_feature_enabled(false);
             app.set_status_notice("Autojudge: OFF");
@@ -990,7 +1008,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         if trimmed == "/memory" {
             let new_state = !app.memory_enabled;
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, new_state)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: new_state,
+                })
                 .await?;
             app.set_memory_feature_enabled(new_state);
             let label = if new_state { "ON" } else { "OFF" };
@@ -1004,7 +1025,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/memory on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: true,
+                })
                 .await?;
             app.set_memory_feature_enabled(true);
             app.set_status_notice("Memory: ON");
@@ -1016,7 +1040,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/memory off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: false,
+                })
                 .await?;
             app.set_memory_feature_enabled(false);
             app.set_status_notice("Memory: OFF");
@@ -1151,7 +1178,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/swarm on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Swarm, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Swarm,
+                    enabled: true,
+                })
                 .await?;
             app.set_swarm_feature_enabled(true);
             app.set_status_notice("Swarm: ON");
@@ -1163,7 +1193,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/swarm off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Swarm, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Swarm,
+                    enabled: false,
+                })
                 .await?;
             app.set_swarm_feature_enabled(false);
             app.set_status_notice("Swarm: OFF");
@@ -1475,7 +1508,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
                 return Ok(());
             };
-            remote.set_compaction_mode(mode).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Compaction(mode))
+                .await?;
             return Ok(());
         }
 
@@ -1492,7 +1527,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
             if trimmed == "/z" {
                 app.provider.set_premium_mode(PremiumMode::Normal);
-                let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        PremiumMode::Normal as u8,
+                    ))
+                    .await;
                 let _ = crate::config::Config::set_copilot_premium(None);
                 app.set_status_notice("Premium: normal");
                 app.push_display_message(DisplayMessage::system(
@@ -1508,7 +1547,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             };
             if current == mode {
                 app.provider.set_premium_mode(PremiumMode::Normal);
-                let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        PremiumMode::Normal as u8,
+                    ))
+                    .await;
                 let _ = crate::config::Config::set_copilot_premium(None);
                 app.set_status_notice("Premium: normal");
                 app.push_display_message(DisplayMessage::system(
@@ -1516,7 +1559,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
             } else {
                 app.provider.set_premium_mode(mode);
-                let _ = remote.set_premium_mode(mode as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        mode as u8,
+                    ))
+                    .await;
                 let config_val = match mode {
                     PremiumMode::Zero => "zero",
                     PremiumMode::OnePerSession => "one",

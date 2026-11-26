@@ -128,7 +128,12 @@ async fn forward_pending_reasoning_effort(app: &mut App, remote: &mut RemoteConn
     let Some(effort) = app.pending_reasoning_effort.take() else {
         return;
     };
-    match remote.set_reasoning_effort(&effort).await {
+    match remote
+        .apply_session_policy(crate::tui::backend::SessionPolicyChange::ReasoningEffort(
+            &effort,
+        ))
+        .await
+    {
         Ok(()) => {
             // Optimistically track the requested effort so the widget/header
             // reflect the picker choice; ReasoningEffortChanged confirms it.

@@ -503,19 +503,27 @@ pub(crate) async fn execute_account_command_remote(
             AccountCommand::SetOpenAiTransport(value) => {
                 save_openai_transport_setting_local(app, value.as_deref());
                 remote
-                    .set_transport(value.as_deref().unwrap_or("auto"))
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Transport(
+                        value.as_deref().unwrap_or("auto"),
+                    ))
                     .await?;
             }
             AccountCommand::SetOpenAiEffort(value) => {
                 save_openai_effort_setting_local(app, value.as_deref());
                 if let Some(value) = value.as_deref() {
-                    remote.set_reasoning_effort(value).await?;
+                    remote
+                        .apply_session_policy(
+                            crate::tui::backend::SessionPolicyChange::ReasoningEffort(value),
+                        )
+                        .await?;
                 }
             }
             AccountCommand::SetOpenAiFast(enabled) => {
                 save_openai_fast_setting_local(app, enabled);
                 remote
-                    .set_service_tier(if enabled { "priority" } else { "off" })
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::ServiceTier(
+                        if enabled { "priority" } else { "off" },
+                    ))
                     .await?;
             }
             other => execute_account_command_local(app, other),

@@ -44,5 +44,7 @@ pub(super) async fn request_remote_service_tier(
         "Speed: {} requested (waiting for server)",
         app_mod::service_tier_display_label(tier)
     ));
-    remote.set_service_tier(tier).await
+    remote
+        .apply_session_policy(crate::tui::backend::SessionPolicyChange::ServiceTier(tier))
+        .await
 }

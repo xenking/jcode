@@ -243,6 +243,18 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
         .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
 }
 
+pub(crate) enum SessionPolicyChange<'a> {
+    Premium(u8),
+    ReasoningEffort(&'a str),
+    ServiceTier(&'a str),
+    Transport(&'a str),
+    Feature {
+        feature: FeatureToggle,
+        enabled: bool,
+    },
+    Compaction(crate::config::CompactionMode),
+}
+
 pub(crate) trait RemoteEventState {
     fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
         false
@@ -1127,63 +1139,32 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set Copilot premium request conservation mode on the server
-    pub async fn set_premium_mode(&mut self, mode: u8) -> Result<()> {
-        let request = Request::SetPremiumMode {
-            id: self.next_request_id,
-            mode,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set reasoning effort on the server (for OpenAI models)
-    pub async fn set_reasoning_effort(&mut self, effort: &str) -> Result<()> {
-        let request = Request::SetReasoningEffort {
-            id: self.next_request_id,
-            effort: effort.to_string(),
-            target_session_id: None,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set service tier on the server (for OpenAI models)
-    pub async fn set_service_tier(&mut self, service_tier: &str) -> Result<()> {
-        let request = Request::SetServiceTier {
-            id: self.next_request_id,
-            service_tier: service_tier.to_string(),
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set connection transport on the server (for OpenAI models)
-    pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
-        let request = Request::SetTransport {
-            id: self.next_request_id,
-            transport: transport.to_string(),
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Toggle a runtime feature on the server for this session
-    pub async fn set_feature(&mut self, feature: FeatureToggle, enabled: bool) -> Result<()> {
-        let request = Request::SetFeature {
-            id: self.next_request_id,
-            feature,
-            enabled,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set compaction mode on the server for this session.
-    pub async fn set_compaction_mode(&mut self, mode: crate::config::CompactionMode) -> Result<()> {
-        let request = Request::SetCompactionMode {
-            id: self.next_request_id,
-            mode,
+    pub(crate) async fn apply_session_policy(
+        &mut self,
+        change: SessionPolicyChange<'_>,
+    ) -> Result<()> {
+        let id = self.next_request_id;
+        let request = match change {
+            SessionPolicyChange::Premium(mode) => Request::SetPremiumMode { id, mode },
+            SessionPolicyChange::ReasoningEffort(effort) => Request::SetReasoningEffort {
+                id,
+                effort: effort.to_string(),
+                target_session_id: None,
+            },
+            SessionPolicyChange::ServiceTier(service_tier) => Request::SetServiceTier {
+                id,
+                service_tier: service_tier.to_string(),
+            },
+            SessionPolicyChange::Transport(transport) => Request::SetTransport {
+                id,
+                transport: transport.to_string(),
+            },
+            SessionPolicyChange::Feature { feature, enabled } => Request::SetFeature {
+                id,
+                feature,
+                enabled,
+            },
+            SessionPolicyChange::Compaction(mode) => Request::SetCompactionMode { id, mode },
         };
         self.next_request_id += 1;
         self.send_request(request).await

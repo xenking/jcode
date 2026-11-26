@@ -48,7 +48,11 @@ pub(super) async fn apply_remote_effort_direction(
             "Effort: {} (will apply to next request)",
             app_mod::effort_display_label(next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        remote
+            .apply_session_policy(crate::tui::backend::SessionPolicyChange::ReasoningEffort(
+                next_effort,
+            ))
+            .await?;
     }
     Ok(())
 }
