@@ -131,7 +131,8 @@ def main(binary, mode):
             second.send(type="ask_user_response", id=5, request_id=replayed["request_id"], response={"answers": [{"selected": ["Beta"]}]})
             result = second.until(lambda e: e.get("type") == "tool_done" and e.get("name") == "ask")
             assert result["id"] == original["tool_call_id"] and "Beta" in result["output"], result
-            second.until(lambda e: e.get("type") == "done" and e.get("id") == 4)
+            # The daemon auto-resumes the interrupted turn, so its done carries the resume id, not 4.
+            second.until(lambda e: e.get("type") == "done")
             second.send(type="get_history", id=6)
             finished = second.until(lambda e: e.get("type") == "history" and e.get("id") == 6)
             rows = finished["messages"]
