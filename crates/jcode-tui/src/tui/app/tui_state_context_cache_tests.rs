@@ -9,7 +9,7 @@ fn cached(app: &App) -> CachedContextSnapshot {
         context_revision: app.context_revision,
         message_count: 2,
         compaction_count: 0,
-        compaction_summary_chars: 0,
+        compaction_summary_tokens: 0,
         is_compacting: false,
         snapshot: crate::tui::ContextSnapshot {
             info: Some(crate::prompt::ContextInfo::default()),

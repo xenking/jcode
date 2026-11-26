@@ -114,8 +114,10 @@ fn render_tool_message_groups_duration_and_tokens() {
                 },
             );
             msg.duration_secs = Some(2.4);
-            let tokens =
-                crate::util::format_approx_token_count(crate::util::estimate_tokens(content));
+            let tokens = crate::util::format_approx_token_count(crate::message::estimate_text(
+                crate::message::TokenFamily::default(),
+                content,
+            ));
             for width in [32, 60, 120] {
                 let lines = render_tool_message(&msg, width, crate::config::DiffDisplayMode::Off);
                 let row = extract_line_text(&lines[0]);
@@ -191,7 +193,7 @@ fn render_tool_message_colors_duration_independently_from_tokens() {
         (59.99, rgb(214, 184, 92)),
         (60.0, rgb(224, 118, 118)),
     ] {
-        for content in ["ok".to_owned(), "x".repeat(48_000)] {
+        for content in ["ok".to_owned(), crate::test_tokens::text_of_tokens(12_000)] {
             let mut msg = DisplayMessage::tool(
                 content,
                 crate::message::ToolCall {
@@ -234,7 +236,10 @@ fn batch_subcall_colors_duration_independently_from_tokens() {
         ("10s", rgb(214, 184, 92)),
         ("1m", rgb(224, 118, 118)),
     ] {
-        let content = format!("[tool timing: duration={timing}] {}", "x".repeat(48_000));
+        let content = format!(
+            "[tool timing: duration={timing}] {}",
+            crate::test_tokens::text_of_tokens(12_000)
+        );
         let line = crate::tui::ui::tools_ui::render_batch_subcall_line(
             &tool,
             "✓",
@@ -263,7 +268,7 @@ fn batch_subcall_colors_duration_independently_from_tokens() {
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
-        content: "x".repeat(48_000),
+        content: crate::test_tokens::text_of_tokens(12_000),
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,

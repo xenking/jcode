@@ -52,8 +52,7 @@ pub(super) fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Fr
     } else {
         "compacted"
     };
-    let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
-        .max(usize::from(info.summary_chars > 0));
+    let summary_tokens = info.summary_tokens;
     let detail = format!(
         "{} old · {} active",
         info.compacted_messages, info.active_messages

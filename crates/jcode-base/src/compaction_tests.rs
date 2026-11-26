@@ -179,7 +179,11 @@ async fn manual_compaction_bounds_large_recent_tail() {
         tokio::task::yield_now().await;
         manager.check_and_apply_compaction_with(&messages);
     }
-    assert_eq!(manager.active_message_chars_with(&messages), 240_000);
+    let tail: usize = messages[11..]
+        .iter()
+        .map(|message| message_token_estimate(TokenFamily::default(), message))
+        .sum();
+    assert_eq!(manager.active_message_tokens_with(&messages), tail);
     assert_eq!(manager.compacted_count(), 11);
     let event = manager.take_compaction_event().unwrap();
     assert_eq!(event.pre_tokens, Some(estimated_before));
@@ -296,7 +300,16 @@ async fn copied_session_compaction_request_budget() {
     manager.compaction_config.snapcompact = true;
     manager.restore_persisted_state_with(&fixture.compaction, &messages);
     let count = |request: &[Message]| {
-        estimate_compaction_tokens(None, request.iter().map(message_char_count).sum(), 500_000)
+        let family = TokenFamily::default();
+        estimate_compaction_tokens(
+            family,
+            None,
+            request
+                .iter()
+                .map(|message| message_token_estimate(family, message))
+                .sum(),
+            500_000,
+        )
     };
     let before_request = manager.messages_for_api_with_vision(&messages, true);
     let before = count(&before_request);
@@ -307,24 +320,32 @@ async fn copied_session_compaction_request_budget() {
         .pages
         .len()
         .saturating_sub(jcode_compaction_core::SNAPCOMPACT_REQUEST_PAGE_LIMIT);
-    let omitted_chars: usize = archive
+    let omitted_tokens: usize = archive
         .pages
         .iter()
         .take(omitted)
         .map(|page| {
-            message_char_count(&Message {
-                content: vec![ContentBlock::Image {
-                    media_type: "image/png".into(),
-                    data: page.clone(),
-                }]
-                .into(),
-                ..Message::user("")
-            })
+            message_token_estimate(
+                TokenFamily::default(),
+                &Message {
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: page.clone(),
+                    }]
+                    .into(),
+                    ..Message::user("")
+                },
+            )
         })
         .sum();
     let legacy_before = estimate_compaction_tokens(
+        TokenFamily::default(),
         None,
-        before_request.iter().map(message_char_count).sum::<usize>() + omitted_chars,
+        before_request
+            .iter()
+            .map(|message| message_token_estimate(TokenFamily::default(), message))
+            .sum::<usize>()
+            + omitted_tokens,
         500_000,
     );
     let before_images = before_request
@@ -390,7 +411,10 @@ async fn ineffective_snapcompact_escalates_to_text_summary() {
         true,
         None,
         None,
-        0,
+        summary_generation::RemainingTokens {
+            tokens: 0,
+            family: TokenFamily::default(),
+        },
         500_000,
         false,
     )
@@ -415,7 +439,10 @@ async fn ineffective_text_compaction_is_reported_as_failure() {
         false,
         None,
         None,
-        400_000,
+        summary_generation::RemainingTokens {
+            tokens: 400_000,
+            family: TokenFamily::default(),
+        },
         500_000,
         false,
     )
@@ -1158,7 +1185,7 @@ fn test_hard_compact_clamps_pathological_compacted_count() {
         covers_up_to_turn: 100,
         original_turn_count: 100,
     });
-    manager.active_chars.invalidate();
+    manager.active_tokens.invalidate();
 
     for _ in 0..3 {
         let _ = manager.hard_compact_with(&messages);
@@ -1200,7 +1227,10 @@ fn test_hard_compact_reduces_api_payload_and_reports_saved_tokens() {
     }
 
     let pre_api_messages = manager.messages_for_api_with(&messages);
-    let pre_chars: usize = pre_api_messages.iter().map(message_char_count).sum();
+    let pre_msg_tokens: usize = pre_api_messages
+        .iter()
+        .map(|message| message_token_estimate(TokenFamily::default(), message))
+        .sum();
     let pre_tokens = manager.effective_token_count_with(&messages);
 
     manager
@@ -1208,7 +1238,10 @@ fn test_hard_compact_reduces_api_payload_and_reports_saved_tokens() {
         .expect("hard compaction should recover oversized context");
 
     let post_api_messages = manager.messages_for_api_with(&messages);
-    let post_chars: usize = post_api_messages.iter().map(message_char_count).sum();
+    let post_msg_tokens: usize = post_api_messages
+        .iter()
+        .map(|message| message_token_estimate(TokenFamily::default(), message))
+        .sum();
     let post_tokens = manager.effective_token_count_with(&messages);
     let event = manager
         .take_compaction_event()
@@ -1219,8 +1252,8 @@ fn test_hard_compact_reduces_api_payload_and_reports_saved_tokens() {
         "hard compaction should send fewer messages"
     );
     assert!(
-        post_chars < pre_chars,
-        "hard compaction should reduce outgoing payload chars: pre={pre_chars}, post={post_chars}"
+        post_msg_tokens < pre_msg_tokens,
+        "hard compaction should reduce outgoing payload tokens: pre={pre_msg_tokens}, post={post_msg_tokens}"
     );
     assert!(
         post_tokens <= pre_tokens,
@@ -1252,7 +1285,7 @@ fn test_invalid_compacted_count_does_not_resurrect_full_transcript_after_new_tur
         covers_up_to_turn: 500,
         original_turn_count: 500,
     });
-    manager.active_chars.invalidate();
+    manager.active_tokens.invalidate();
 
     let before_new_turn = manager.messages_for_api_with(&messages);
     assert_eq!(before_new_turn.len(), 1);
@@ -1815,7 +1848,7 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
         manager.check_and_apply_compaction_with(&messages);
     }
     assert_eq!(manager.compacted_count(), 0);
-    assert_eq!(manager.summary_chars(), 0);
+    assert_eq!(manager.summary_tokens(), 0);
     assert!(
         manager
             .take_compaction_error()
@@ -1844,6 +1877,15 @@ fn set_mode_survives_active_model_rebind() {
     assert_eq!(manager.mode(), crate::config::CompactionMode::Semantic);
 }
 
+/// Tool output that the default estimator counts as `tokens` tokens.
+fn shake_filler(tokens: usize) -> String {
+    let mut text = String::new();
+    while jcode_message_types::estimate_text(TokenFamily::default(), &text) < tokens {
+        text.push_str("ab ");
+    }
+    text
+}
+
 fn shake_session(pairs: usize, tokens_each: usize) -> Vec<Message> {
     let mut m = vec![Message::user("start")];
     for i in 0..pairs {
@@ -1863,7 +1905,7 @@ fn shake_session(pairs: usize, tokens_each: usize) -> Vec<Message> {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: format!("t{i}"),
-                content: "x".repeat(tokens_each * 4),
+                content: shake_filler(tokens_each),
                 is_error: None,
             }]
             .into(),
@@ -2855,4 +2897,26 @@ fn compaction_marks_the_prefix_rewritten_until_the_next_response() {
 
     manager.note_provider_response(SystemTime::now(), Some(0));
     assert!(!manager.prefix_rewritten_since_response());
+}
+
+#[test]
+fn context_is_the_reported_count_plus_only_what_was_added_since() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_active_model(Some("anthropic"), Some("claude-opus-5-5"));
+    let mut messages = vec![make_text_message(Role::User, &"word ".repeat(400))];
+    manager.seed_restored_messages_with(&messages);
+    let estimate = manager.token_estimate_with(&messages);
+    // The provider saw this request as 50k tokens, far from our estimate.
+    manager.update_observed_input_tokens_with_estimate(50_000, estimate);
+    assert_eq!(manager.effective_token_count_with(&messages), 50_000);
+
+    let added = make_text_message(Role::Assistant, &"more words ".repeat(300));
+    let added_tokens = message_token_estimate(TokenFamily::Anthropic, &added);
+    messages.push(added.clone());
+    manager.notify_message_added_with(&added);
+    assert_eq!(
+        manager.effective_token_count_with(&messages),
+        50_000 + added_tokens,
+        "reported base plus the estimated delta, not max(estimate, report)"
+    );
 }

@@ -636,7 +636,7 @@ pub(super) fn overscroll_context_usage(
         if info.total_chars == 0 {
             return None;
         }
-        info.estimated_tokens()
+        info.estimated_tokens(data.token_family())
     };
     let limit = data
         .compaction_threshold_tokens

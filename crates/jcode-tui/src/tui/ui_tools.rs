@@ -1498,7 +1498,7 @@ pub(super) fn render_batch_subcall_line(
 ) -> Line<'static> {
     let display_name = resolve_display_tool_name(&tool.name).to_string();
     let token_badge = output_content.map(|content| {
-        let tokens = crate::util::estimate_tokens(content);
+        let tokens = crate::message::estimate_text(crate::message::TokenFamily::default(), content);
         let color = match crate::util::approx_tool_output_token_severity(tokens) {
             crate::util::ApproxTokenSeverity::Normal => rgb(118, 118, 118),
             crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),

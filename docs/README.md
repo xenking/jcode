@@ -24,6 +24,7 @@ Reference documentation for the jcode codebase.
 - Fork (xenking/jcode): `FORK_LEDGER.md`, `FORK_UPDATES.md`, `PAIRED_DESKTOP.md`, `rollout-daemon-transaction.md`
 - Routing: `ROUTING.md`, `ACCOUNT_ROUTING.md`, `MODEL_ROUTING.md`
 - Code Mode and MCP: `CODEMODE.md`, `MCP_TOOLS.md`
+- Context size and token estimates: `TOKEN_ESTIMATION.md`
 
 ## Conventions
 

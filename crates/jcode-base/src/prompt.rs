@@ -426,14 +426,14 @@ impl SplitSystemPrompt {
         }
     }
 
-    pub fn estimated_tokens(&self) -> usize {
-        crate::util::estimate_tokens(&if self.static_part.is_empty() {
-            self.dynamic_part.clone()
-        } else if self.dynamic_part.is_empty() {
-            self.static_part.clone()
-        } else {
-            format!("{}\n\n{}", self.static_part, self.dynamic_part)
-        })
+    pub fn estimated_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        let mut estimator = jcode_message_types::Estimator::new(family);
+        // The two parts are one concatenated prompt on the wire.
+        for part in [&self.static_part, &self.dynamic_part] {
+            // Writing to the estimator cannot fail.
+            let _ = std::fmt::Write::write_str(&mut estimator, part);
+        }
+        estimator.tokens()
     }
 }
 
@@ -532,9 +532,9 @@ pub struct ContextInfo {
 }
 
 impl ContextInfo {
-    /// Rough estimate of tokens (chars / 4 is a common approximation)
-    pub fn estimated_tokens(&self) -> usize {
-        self.total_chars / 4
+    /// Size-only token estimate; see [`jcode_message_types::TokenFamily::tokens_for_bytes`].
+    pub fn estimated_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.total_chars)
     }
 
     pub fn prompt_prefix_chars(&self) -> usize {
@@ -550,12 +550,12 @@ impl ContextInfo {
             + self.tool_defs_chars
     }
 
-    pub fn prompt_prefix_tokens(&self) -> usize {
-        self.prompt_prefix_chars() / 4
+    pub fn prompt_prefix_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.prompt_prefix_chars())
     }
 
-    pub fn tool_definition_tokens(&self) -> usize {
-        self.tool_defs_chars / 4
+    pub fn tool_definition_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.tool_defs_chars)
     }
 
     /// Get breakdown as (label, chars, icon) tuples for display

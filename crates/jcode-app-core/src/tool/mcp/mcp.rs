@@ -4,9 +4,9 @@
 #[path = "mcp_remote_management_tests.rs"]
 mod remote_management_tests;
 
+use super::WeakHost;
 use crate::mcp::{ContentBlock, McpManager, McpServerConfig, dispatch_name};
 use crate::tool::{Tool, ToolContext, ToolOutput};
-use super::WeakHost;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,7 @@ fn match_rank(
 /// only the leading matches with the rest listed by name. The first rendering
 /// that fits wins, so small results are never trimmed.
 fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(String, usize)> {
-    use jcode_core::util::estimate_tokens;
+    use crate::mcp::budget::estimate_tokens;
     let render = |detailed: usize, description_chars: Option<usize>| -> Result<String> {
         let head: Vec<McpSearchResult> = matches[..detailed]
             .iter()

@@ -92,7 +92,7 @@ fn metadata_footers_add_distinct_compact_facts() {
         is_compacting: false,
         compacted_messages: 20,
         active_messages: 4,
-        summary_chars: 4_000,
+        summary_tokens: 1_000,
         mode: "semantic".into(),
     });
     let framed = super::super::render_compaction_widget(&data, Rect::new(0, 0, 40, 6));

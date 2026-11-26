@@ -1345,7 +1345,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     None => "none",
                 };
                 format!(
-                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
+                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary tokens: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
                     mode,
                     if app.provider.uses_jcode_compaction() {
                         "yes"
@@ -1356,7 +1356,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     summary_kind,
                     manager.compacted_count(),
                     stats.active_messages,
-                    manager.summary_chars(),
+                    manager.summary_tokens(),
                     stats.token_estimate,
                     stats.effective_tokens,
                     stats
@@ -1434,18 +1434,19 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         if let Some((input, output)) = total_tokens {
             context_report.push_str(&format!("- session tokens: ↑{} ↓{}\n", input, output));
         }
+        let family = crate::message::TokenFamily::from_model(&model_name);
         context_report.push_str("\nPrompt / Context Composition\n");
         context_report.push_str(&format!(
             "- total chars: {} (~{} tokens)\n",
             context.total_chars,
-            context.estimated_tokens()
+            context.estimated_tokens(family)
         ));
         context_report.push_str(&format!(
             "- prompt prefix before any user text: {} chars (~{} tokens)\n- tool definitions only: {} chars (~{} tokens)\n",
             context.prompt_prefix_chars(),
-            context.prompt_prefix_tokens(),
+            context.prompt_prefix_tokens(family),
             context.tool_defs_chars,
-            context.tool_definition_tokens(),
+            context.tool_definition_tokens(family),
         ));
         context_report.push_str(&format!(
             "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/AGENTS.md: {} ({})\n- prompt overlays: {} chars\n- preferred tools: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",

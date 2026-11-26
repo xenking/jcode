@@ -106,7 +106,12 @@ impl MultiProvider {
         {
             return None;
         }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        let (chars, tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
         self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
     }
 
@@ -350,7 +355,12 @@ impl MultiProvider {
                     true,
                 )
             {
-                let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+                let (chars, tokens) = Self::estimate_request_input(
+                    jcode_message_types::TokenFamily::from_model(&self.model()),
+                    messages,
+                    tools,
+                    mode,
+                );
                 for target in Self::fallback_sequence(provider)
                     .into_iter()
                     .filter(|target| *target != provider)

@@ -119,7 +119,6 @@ fn exact_bytes_after_schema_and_tool_mutation() {
         for deferred in [false, true] {
             tool.defer_loading = deferred;
             assert_eq!(tool.prompt_chars(), frozen(&tool));
-            assert_eq!(tool.prompt_token_estimate(), frozen(&tool) / 4);
         }
         tool.input_schema = json!({"mutated": tool.input_schema, "new": "\u{0000}"});
         assert_eq!(tool.prompt_chars(), frozen(&tool));

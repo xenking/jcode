@@ -183,8 +183,8 @@ affects output size only, never permissions.
   `~/.jcode/codemode/spill/<session>-<call>.txt` and the path is included in
   the report.
 - Optional `max_output_tokens` (512–15,000): use `4000` when a preview is
-  enough. This is a provider-independent estimate of one token per four UTF-8
-  bytes, not a billing count. The budget applies only to the final report,
+  enough. This is a provider-independent estimate (about three UTF-8 bytes per token,
+  see `TOKEN_ESTIMATION.md`), not a billing count. The budget applies only to the final report,
   not nested results or stored values. A truncated preview includes the error
   (or its beginning), call counts by status, and the full report path when
   available. Omit the parameter to keep the original report limit.

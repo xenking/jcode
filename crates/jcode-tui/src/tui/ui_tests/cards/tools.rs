@@ -67,7 +67,7 @@ fn test_patch_headers_preserve_line_counts_and_token_severity() {
             (11_999, rgb(214, 184, 92)),
             (12_000, rgb(224, 118, 118)),
         ] {
-            let output = "x".repeat(tokens * crate::util::APPROX_CHARS_PER_TOKEN);
+            let output = crate::test_tokens::text_of_tokens(tokens);
             let msg = DisplayMessage {
                 role: "tool".to_string(),
                 content: output.clone(),
@@ -120,7 +120,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                 (12_000, rgb(224, 118, 118)),
             ] {
                 for batch in [false, true] {
-                    let output = "x".repeat(tokens * crate::util::APPROX_CHARS_PER_TOKEN);
+                    let output = crate::test_tokens::text_of_tokens(tokens);
                     let (name, input, content) = if batch {
                         (
                             "batch",
@@ -378,11 +378,19 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
         "rendered={rendered:?}"
     );
     assert!(
-        rendered[1].contains("read src/session.rs:0-1") && rendered[1].contains("1 tok"),
+        rendered[1].contains("read src/session.rs:0-1")
+            && rendered[1].contains(&format!(
+                "{} tok",
+                crate::message::estimate_text(crate::message::TokenFamily::default(), "1234")
+            )),
         "rendered={rendered:?}"
     );
     assert!(
-        rendered[2].contains("grep 'TODO' in src") && rendered[2].contains("2 tok"),
+        rendered[2].contains("grep 'TODO' in src")
+            && rendered[2].contains(&format!(
+                "{} tok",
+                crate::message::estimate_text(crate::message::TokenFamily::default(), "12345678")
+            )),
         "rendered={rendered:?}"
     );
 }
@@ -415,11 +423,19 @@ fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix()
 
     assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
     assert!(
-        rendered[1].contains("bash $ echo first") && rendered[1].contains("2 tok"),
+        rendered[1].contains("bash $ echo first")
+            && rendered[1].contains(&format!(
+                "{} tok",
+                crate::message::estimate_text(crate::message::TokenFamily::default(), "12345678")
+            )),
         "first subcall should keep its token badge despite timing prefix: {rendered:?}"
     );
     assert!(
-        rendered[2].contains("bash $ echo second") && rendered[2].contains("2 tok"),
+        rendered[2].contains("bash $ echo second")
+            && rendered[2].contains(&format!(
+                "{} tok",
+                crate::message::estimate_text(crate::message::TokenFamily::default(), "12345678")
+            )),
         "rendered={rendered:?}"
     );
 }
@@ -453,7 +469,11 @@ fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailin
 
     assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
     assert!(
-        rendered[1].contains("read src/session.rs:0-1") && rendered[1].contains("1 tok"),
+        rendered[1].contains("read src/session.rs:0-1")
+            && rendered[1].contains(&format!(
+                "{} tok",
+                crate::message::estimate_text(crate::message::TokenFamily::default(), "1234")
+            )),
         "rendered={rendered:?}"
     );
     assert!(

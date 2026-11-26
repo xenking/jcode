@@ -49,13 +49,20 @@ fn session(n: usize, tokens: usize, tail_tokens: usize) -> Vec<Message> {
         m.extend(tool_pair(
             &format!("t{i}"),
             "read",
-            &char::from(b'a' + (i % 26) as u8)
-                .to_string()
-                .repeat(tokens * 4),
+            &format!("{}{}", char::from(b'a' + (i % 26) as u8), filler(tokens)),
         ));
     }
-    m.push(text(Role::User, &"z".repeat(tail_tokens * 4)));
+    m.push(text(Role::User, &filler(tail_tokens)));
     m
+}
+
+/// Text that the shake estimator counts as `tokens` tokens.
+fn filler(tokens: usize) -> String {
+    let mut text = String::new();
+    while estimate_text(TokenFamily::Generic, &text) < tokens {
+        text.push_str("ab ");
+    }
+    text
 }
 
 fn json(m: &[Message]) -> String {
@@ -89,7 +96,7 @@ fn elides_old_tool_results_and_keeps_tail() {
     let ContentBlock::Text { text, .. } = &m.last().unwrap().content[0] else {
         panic!()
     };
-    assert_eq!(text.len(), 4800);
+    assert_eq!(text, &filler(1200), "the protected tail is untouched");
 }
 
 #[test]
@@ -181,7 +188,7 @@ fn elides_code_blocks_but_keeps_prose_and_images() {
             timestamp: None,
             tool_duration_ms: None,
         },
-        text(Role::User, &"z".repeat(4800)),
+        text(Role::User, &filler(1200)),
     ];
     assert!(matches!(shake(&mut m, &cfg()), ShakeOutcome::Shaken { .. }));
     let ContentBlock::Text { text, .. } = &m[0].content[0] else {
@@ -227,14 +234,10 @@ fn defaults_match_standard_shake_profile() {
 fn skill_results_are_never_elided() {
     let mut messages = vec![text(Role::User, "start")];
     for i in 0..10 {
-        messages.extend(tool_pair(
-            &format!("s{i}"),
-            "skill_manage",
-            &"s".repeat(4_000),
-        ));
-        messages.extend(tool_pair(&format!("t{i}"), "read", &"r".repeat(4_000)));
+        messages.extend(tool_pair(&format!("s{i}"), "skill_manage", &filler(1_000)));
+        messages.extend(tool_pair(&format!("t{i}"), "read", &filler(1_000)));
     }
-    messages.push(text(Role::User, &"z".repeat(4_800)));
+    messages.push(text(Role::User, &filler(1200)));
     let outcome = shake(&mut messages, &cfg());
     let ShakeOutcome::Shaken { regions_elided, .. } = outcome else {
         panic!("expected shaken");
@@ -272,7 +275,7 @@ fn skill_file_reads_are_protected() {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: format!("k{i}"),
-                content: "k".repeat(4_000),
+                content: filler(1_000),
                 is_error: Some(false),
             }]
             .into(),
@@ -280,7 +283,7 @@ fn skill_file_reads_are_protected() {
             tool_duration_ms: None,
         });
     }
-    messages.push(text(Role::User, &"z".repeat(4_800)));
+    messages.push(text(Role::User, &filler(1200)));
     assert_eq!(shake(&mut messages, &cfg()), ShakeOutcome::NoChange);
 }
 
@@ -293,7 +296,7 @@ fn xml_blocks_in_old_text_are_elided() {
             Role::Assistant,
             &format!("before\n<bash_output>\n{body}</bash_output>\nafter"),
         ),
-        text(Role::User, &"z".repeat(4_800)),
+        text(Role::User, &filler(1200)),
     ];
     let cfg = ShakeConfig {
         protect_window_tokens: 100,
@@ -326,7 +329,7 @@ fn xml_inside_a_fence_is_one_region() {
             Role::Assistant,
             &format!("```xml\n<bash_output>\n{body}</bash_output>\n```"),
         ),
-        text(Role::User, &"z".repeat(4_800)),
+        text(Role::User, &filler(1200)),
     ];
     let cfg = ShakeConfig {
         protect_window_tokens: 100,
@@ -347,7 +350,7 @@ fn unterminated_fence_is_never_elided() {
     let body = "fn x() {}\n".repeat(2000);
     let mut messages = vec![
         text(Role::Assistant, &format!("```rust\n{body}")),
-        text(Role::User, &"z".repeat(4_800)),
+        text(Role::User, &filler(1200)),
     ];
     let cfg = ShakeConfig {
         protect_window_tokens: 100,

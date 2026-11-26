@@ -1,7 +1,7 @@
 pub mod shake;
 pub mod snapcompact;
 
-use jcode_message_types::{ContentBlock, Message, Role};
+use jcode_message_types::{ContentBlock, Estimator, Message, Role, TokenFamily};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
@@ -41,9 +41,6 @@ pub const EMERGENCY_IMAGE_MAX_CHARS: usize = 1024;
 /// undercounts (see `IMAGE_TOKEN_COST`). We target a conservative budget well
 /// under the hard provider cap so a single retry reliably fits.
 pub const PAYLOAD_IMAGE_CHAR_BUDGET: usize = 12 * 1024 * 1024;
-
-/// Approximate chars per token for estimation
-pub const CHARS_PER_TOKEN: usize = 4;
 
 /// Approximate token cost charged for a single inline image.
 ///
@@ -98,11 +95,6 @@ pub const SNAPCOMPACT_REQUEST_PAGE_LIMIT: usize = 4;
 /// less than 30k tokens while `len / 4` reported ~285k, so compaction appeared
 /// to *grow* the context. Charge a flat, conservative budget instead.
 pub const OPENAI_COMPACTION_TOKEN_COST: usize = 8_000;
-
-/// Fixed token overhead for system prompt + tool definitions.
-/// These are not counted in message content but do count toward the context limit.
-/// Estimated conservatively: ~8k tokens for system prompt + ~10k for 50+ tools.
-pub const SYSTEM_OVERHEAD_TOKENS: usize = 18_000;
 
 /// Rolling window size for token history (proactive/semantic modes)
 pub const TOKEN_HISTORY_WINDOW: usize = 20;
@@ -387,83 +379,124 @@ pub fn safe_compaction_cutoff(messages: &[Message], initial_cutoff: usize) -> us
     0
 }
 
-pub fn message_char_count(msg: &Message) -> usize {
-    content_char_count(&msg.content)
+/// Estimated tokens of one message for `family`.
+pub fn message_token_estimate(family: TokenFamily, msg: &Message) -> usize {
+    content_token_estimate(family, &msg.content)
 }
 
-pub fn content_char_count(content: &[ContentBlock]) -> usize {
-    content
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text, .. } => text.len(),
-            ContentBlock::Reasoning { text } => text.len(),
-            ContentBlock::ReasoningTrace { text } => text.len(),
+pub fn content_token_estimate(family: TokenFamily, content: &[ContentBlock]) -> usize {
+    content_estimator(family, content).tokens()
+}
+
+/// The estimator after feeding `content`, for callers that also want the bytes.
+pub fn content_estimator(family: TokenFamily, content: &[ContentBlock]) -> Estimator {
+    let mut estimator = Estimator::new(family);
+    for block in content {
+        match block {
+            // An empty block is dropped before it reaches the provider.
+            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                estimator.text_block().text(text);
+            }
+            ContentBlock::Text { .. } => {}
+            ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text } => {
+                estimator.reasoning(text);
+            }
             ContentBlock::AnthropicThinking {
                 thinking,
                 signature,
-            } => thinking.len() + signature.len(),
+            } => {
+                estimator.reasoning(thinking).signature(signature.len());
+            }
             ContentBlock::OpenAIReasoning {
                 id,
                 summary,
                 encrypted_content,
                 status,
             } => {
-                id.len()
-                    + summary.iter().map(String::len).sum::<usize>()
-                    + encrypted_content.as_ref().map(String::len).unwrap_or(0)
-                    + status.as_ref().map(String::len).unwrap_or(0)
+                estimator
+                    .text(id)
+                    .encrypted(encrypted_content.as_ref().map_or(0, String::len))
+                    .text(status.as_deref().unwrap_or_default());
+                for part in summary {
+                    estimator.reasoning(part);
+                }
             }
-            ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
-            ContentBlock::ToolResult { content, .. } => content.len() + 20,
+            ContentBlock::ToolUse { name, input, .. } => {
+                estimator.tool_call().text(name);
+                // Writing to the estimator cannot fail.
+                let _ = std::fmt::Write::write_fmt(&mut estimator, format_args!("{input}"));
+            }
+            // The call's framing cost is charged on the ToolUse side.
+            ContentBlock::ToolResult { content, .. } => {
+                estimator.text(content);
+            }
             // Charge a flat token cost for images instead of the raw base64
             // payload length. See IMAGE_TOKEN_COST: counting base64 length here
             // overestimates context by ~100x and triggers spurious repeated
             // compactions.
             ContentBlock::Image { media_type, data } => {
-                image_token_cost(media_type, data) * CHARS_PER_TOKEN
+                estimator.fixed_tokens(image_token_cost(media_type, data));
             }
-            ContentBlock::OpenAICompaction { .. } => OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN,
+            ContentBlock::OpenAICompaction { .. } => {
+                estimator.fixed_tokens(OPENAI_COMPACTION_TOKEN_COST);
+            }
             // The provider expands a reference into the full definition, but
             // that definition is already accounted for by the tool catalog.
-            ContentBlock::ToolReference { tool_name, .. } => tool_name.len() + 20,
+            ContentBlock::ToolReference { tool_name, .. } => {
+                estimator.text(tool_name);
+            }
             // Search results are billed as input tokens on replay; the raw JSON
             // (mostly encrypted page content) is a reasonable size proxy.
-            ContentBlock::ProviderNative { item, .. } => item.to_string().len(),
-            ContentBlock::Unknown => 0,
-        })
-        .sum()
+            ContentBlock::ProviderNative { item, .. } => {
+                estimator.native_json(item.to_string().len());
+            }
+            ContentBlock::Unknown => {}
+        }
+    }
+    estimator
 }
 
-pub fn summary_payload_char_count(summary: &Summary) -> usize {
-    let text = summary
-        .openai_encrypted_content
-        .as_ref()
-        .map(|_| OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN)
-        .unwrap_or_else(|| summary.text.len());
+pub fn summary_payload_tokens(family: TokenFamily, summary: &Summary) -> usize {
+    let text = match &summary.openai_encrypted_content {
+        Some(_) => OPENAI_COMPACTION_TOKEN_COST,
+        None => jcode_message_types::estimate_text(family, &summary.text),
+    };
     text.saturating_add(summary.snapcompact.as_ref().map_or(0, |archive| {
-        archive
-            .index
-            .len()
-            .saturating_add(archive.decisions.len())
+        jcode_message_types::estimate_text(family, &archive.index)
+            .saturating_add(jcode_message_types::estimate_text(
+                family,
+                &archive.decisions,
+            ))
             .saturating_add(
                 archive
                     .pages
                     .iter()
                     .rev()
                     .take(SNAPCOMPACT_REQUEST_PAGE_LIMIT)
-                    .map(|page| image_token_cost("image/png", page) * CHARS_PER_TOKEN)
+                    .map(|page| image_token_cost("image/png", page))
                     .sum::<usize>(),
             )
     }))
 }
 
+/// Estimated context for the summary plus the already-estimated active
+/// messages, including the system prompt and tool catalog overhead.
 pub fn estimate_compaction_tokens(
+    family: TokenFamily,
     summary: Option<&Summary>,
-    active_message_chars: usize,
+    active_message_tokens: usize,
     token_budget: usize,
 ) -> usize {
-    let summary_chars = summary.map(summary_payload_char_count).unwrap_or(0);
-    estimate_compaction_tokens_from_chars(summary_chars + active_message_chars, token_budget)
+    let summary_tokens = summary.map_or(0, |summary| summary_payload_tokens(family, summary));
+    // Add overhead for system prompt + tool definitions, which are not in the
+    // message list but do count toward the context limit. Scale the overhead to
+    // the budget so tests with tiny budgets aren't affected.
+    let overhead = if token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
+        family.system_overhead_tokens()
+    } else {
+        0
+    };
+    summary_tokens + active_message_tokens + overhead
 }
 
 /// Best-effort context size (tokens) from a provider usage report.
@@ -535,19 +568,6 @@ pub fn reusable_cache_tokens_from_usage(
     } else {
         input_tokens
     }
-}
-
-pub fn estimate_compaction_tokens_from_chars(total_chars: usize, token_budget: usize) -> usize {
-    let msg_tokens = total_chars / CHARS_PER_TOKEN;
-    // Add overhead for system prompt + tool definitions, which are not in the
-    // message list but do count toward the context limit. Scale the overhead to
-    // the budget so tests with tiny budgets aren't affected.
-    let overhead = if token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
-        SYSTEM_OVERHEAD_TOKENS
-    } else {
-        0
-    };
-    msg_tokens + overhead
 }
 
 pub fn semantic_goal_text(messages: &[Message]) -> String {

@@ -83,7 +83,13 @@ impl Agent {
         let plan = advisor::plan_lines(&session_id);
         // Include the user message that started the turn.
         let since = start_message_index.saturating_sub(1);
-        let digest = advisor::build_digest(&messages, since, &plan, settings.digest_tokens);
+        let digest = advisor::build_digest(
+            &messages,
+            since,
+            &plan,
+            settings.digest_tokens,
+            jcode_message_types::TokenFamily::from_model(&settings.model),
+        );
         // Like pi: a turn without tool calls is not worth a review. A turn that
         // already consulted the advisor got its review.
         let consulted = messages.iter().skip(since).any(|message| {

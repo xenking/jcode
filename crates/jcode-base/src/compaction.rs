@@ -63,20 +63,21 @@ use tokio::task::JoinHandle;
 
 pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome, shake_savings};
 pub use jcode_compaction_core::{
-    CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
-    CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
+    COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent, CompactionStats,
+    DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
     EMERGENCY_IMAGE_MAX_CHARS, EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD,
     MIN_TURNS_TO_KEEP, OUTBOUND_IMAGE_TRIM_STEP_CHARS, PAYLOAD_IMAGE_CHAR_BUDGET,
-    RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
-    Summary, TOKEN_HISTORY_WINDOW, TOOL_IMAGE_DECAY_KEEP_CHARS, build_compaction_prompt,
-    build_emergency_summary_text, compacted_summary_text_block, content_char_count,
+    RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, Summary,
+    TOKEN_HISTORY_WINDOW, TOOL_IMAGE_DECAY_KEEP_CHARS, build_compaction_prompt,
+    build_emergency_summary_text, compacted_summary_text_block, content_token_estimate,
     effective_context_tokens_from_usage, emergency_strip_large_images,
     emergency_truncate_large_payloads, estimate_compaction_tokens, is_image_rejection_error,
-    is_request_payload_too_large_error, mean_embedding, message_char_count,
+    is_request_payload_too_large_error, mean_embedding, message_token_estimate,
     reusable_cache_tokens_from_usage, safe_compaction_cutoff, semantic_cache_key,
     semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    strip_oldest_images_in_steps, summary_payload_char_count,
+    strip_oldest_images_in_steps, summary_payload_tokens,
 };
+pub use jcode_message_types::TokenFamily;
 
 /// Models with measured poor dense-page recall use the text index even if they
 /// support ordinary images. Unknown models follow the provider catalog.
@@ -125,7 +126,7 @@ struct ManualCompactionInput {
     prefix: Vec<Message>,
     archive_history: Vec<Message>,
     previous: Option<Summary>,
-    remaining_chars: usize,
+    remaining: summary_generation::RemainingTokens,
     token_budget: usize,
     snapcompact_shape: Option<String>,
 }
@@ -151,11 +152,11 @@ impl ManualSnapcompactPreview {
             prefix,
             archive_history,
             mut previous,
-            remaining_chars,
+            remaining,
             token_budget,
             ..
         } = self.input;
-        let cost = CompactionCost::new(&prefix, previous.as_ref(), remaining_chars, token_budget);
+        let cost = CompactionCost::new(&prefix, previous.as_ref(), remaining, token_budget);
         previous.as_mut().and_then(sanitize_prior_summary);
         let (text, snapcompact) = render_snapcompact(
             &prefix,
@@ -222,22 +223,26 @@ struct HardThresholdWait {
 /// fields private and forcing every mutation through these named operations
 /// makes that class of bug unrepresentable.
 #[derive(Debug, Clone, Default)]
-struct ActiveCharEstimate {
-    chars: usize,
+struct ActiveTokenEstimate {
+    tokens: usize,
     dirty: bool,
+    /// Family the cached value was measured in. A value measured for another
+    /// family is stale: token counts differ per tokenizer.
+    family: TokenFamily,
 }
 
-impl ActiveCharEstimate {
-    /// The currently cached character count. Only trustworthy when not dirty;
+impl ActiveTokenEstimate {
+    /// The currently cached token estimate. Only trustworthy when not dirty;
     /// readers must consult [`Self::is_dirty`] (and any external invariants)
     /// before relying on it.
     fn value(&self) -> usize {
-        self.chars
+        self.tokens
     }
 
-    /// Whether the cached value is stale and must be recomputed from history.
-    fn is_dirty(&self) -> bool {
-        self.dirty
+    /// Whether the cached value is stale for `family` and must be recomputed
+    /// from history.
+    fn is_dirty(&self, family: TokenFamily) -> bool {
+        self.dirty || self.family != family
     }
 
     /// Mark the cached value stale so the next read recomputes from history.
@@ -245,26 +250,33 @@ impl ActiveCharEstimate {
         self.dirty = true;
     }
 
-    /// Record an exact, freshly computed count as the trusted value.
-    fn set_exact(&mut self, chars: usize) {
-        self.chars = chars;
+    /// Record an exact, freshly computed estimate as the trusted value.
+    fn set_exact(&mut self, tokens: usize, family: TokenFamily) {
+        self.tokens = tokens;
         self.dirty = false;
+        self.family = family;
     }
 
-    /// Extend a trusted count by a newly appended message's characters.
+    /// Extend a trusted estimate by a newly appended message's tokens.
     ///
     /// Mirrors the append-only fast path: the prior value is assumed accurate,
-    /// so the running sum stays trusted (dirty cleared).
-    fn append_exact(&mut self, chars: usize) {
-        self.chars = self.chars.saturating_add(chars);
+    /// so the running sum stays trusted (dirty cleared). A message measured in
+    /// another family than the cached sum cannot be added to it.
+    fn append_exact(&mut self, tokens: usize, family: TokenFamily) {
+        if self.family != family {
+            self.dirty = true;
+            return;
+        }
+        self.tokens = self.tokens.saturating_add(tokens);
         self.dirty = false;
     }
 
     /// Reset to zero after a restore/clamp. Stays dirty when there may be active
-    /// messages whose characters have not been measured yet.
-    fn reset_pending(&mut self, maybe_has_active: bool) {
-        self.chars = 0;
+    /// messages whose tokens have not been measured yet.
+    fn reset_pending(&mut self, maybe_has_active: bool, family: TokenFamily) {
+        self.tokens = 0;
         self.dirty = maybe_has_active;
+        self.family = family;
     }
 }
 
@@ -284,13 +296,13 @@ pub struct CompactionManager {
     plan_context: Option<String>,
     warned_missing_native_summary: bool,
 
-    /// Rolling char estimate for the active (non-compacted) message suffix.
+    /// Rolling token estimate for the active (non-compacted) message suffix.
     ///
     /// In the common append-only case this is maintained incrementally, so token
     /// estimation does not need to rescan the entire active history every time.
     /// Bundled with its own dirty flag so the value and staleness can never
-    /// drift apart (see [`ActiveCharEstimate`]).
-    active_chars: ActiveCharEstimate,
+    /// drift apart (see [`ActiveTokenEstimate`]).
+    active_tokens: ActiveTokenEstimate,
 
     /// Background compaction task handle
     pending_task: Option<JoinHandle<Result<CompactionResult>>>,
@@ -309,6 +321,10 @@ pub struct CompactionManager {
     /// When true, session restore/reseed has just loaded old history and
     /// compaction must stay disabled until a genuinely new message is added.
     suppress_compaction_until_new_message: bool,
+
+    /// Tokenizer family of the active model; the unit of every estimate here.
+    /// Changing it invalidates [`Self::active_tokens`].
+    family: TokenFamily,
 
     /// Token budget
     token_budget: usize,
@@ -568,7 +584,7 @@ impl CompactionManager {
             active_summary: None,
             plan_context: None,
             warned_missing_native_summary: false,
-            active_chars: ActiveCharEstimate::default(),
+            active_tokens: ActiveTokenEstimate::default(),
             pending_task: None,
             pending_decisions: Vec::new(),
             decisions_updated: false,
@@ -576,6 +592,7 @@ impl CompactionManager {
             pending_cutoff: 0,
             total_turns: 0,
             suppress_compaction_until_new_message: false,
+            family: TokenFamily::default(),
             token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
             model_token_budget: DEFAULT_TOKEN_BUDGET,
             context_cap_override: None,
@@ -642,6 +659,7 @@ impl CompactionManager {
                 .filter(|v| !v.trim().is_empty()),
             model.map(str::to_string).filter(|v| !v.trim().is_empty()),
         );
+        self.family = model.map_or_else(TokenFamily::default, TokenFamily::from_model);
         self.refresh_context_cap();
     }
 
@@ -699,7 +717,7 @@ impl CompactionManager {
     pub fn notify_message_added(&mut self) {
         self.total_turns += 1;
         self.suppress_compaction_until_new_message = false;
-        self.active_chars.invalidate();
+        self.active_tokens.invalidate();
     }
 
     /// Notify the manager that a message was added and update the rolling char
@@ -711,7 +729,8 @@ impl CompactionManager {
     pub fn notify_message_added_blocks(&mut self, content: &[ContentBlock]) {
         self.total_turns += 1;
         self.suppress_compaction_until_new_message = false;
-        self.active_chars.append_exact(content_char_count(content));
+        self.active_tokens
+            .append_exact(content_token_estimate(self.family, content), self.family);
     }
 
     /// Backward-compatible alias for `notify_message_added`.
@@ -730,24 +749,24 @@ impl CompactionManager {
     pub fn seed_restored_messages(&mut self, count: usize) {
         self.total_turns = count;
         self.suppress_compaction_until_new_message = count > 0;
-        self.active_chars.reset_pending(count > 0);
+        self.active_tokens.reset_pending(count > 0, self.family);
     }
 
     /// Keep a bounded recent suffix even when individual tool results are huge.
     /// The minimum pair remains protected, including its tool dependencies.
     fn bounded_recent_cutoff(&self, active: &[Message]) -> usize {
         let mut keep = MIN_TURNS_TO_KEEP.min(active.len());
-        let mut tail_chars: usize = active[active.len() - keep..]
+        let mut tail_tokens: usize = active[active.len() - keep..]
             .iter()
-            .map(message_char_count)
+            .map(|message| message_token_estimate(self.family, message))
             .sum();
         let tail_limit = MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10);
         while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
-            let next = message_char_count(&active[active.len() - keep - 1]);
-            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > tail_limit {
+            let next = message_token_estimate(self.family, &active[active.len() - keep - 1]);
+            if tail_tokens.saturating_add(next) > tail_limit {
                 break;
             }
-            tail_chars = tail_chars.saturating_add(next);
+            tail_tokens = tail_tokens.saturating_add(next);
             keep += 1;
         }
         active.len().saturating_sub(keep)
@@ -758,19 +777,21 @@ impl CompactionManager {
     pub fn seed_restored_messages_with(&mut self, all_messages: &[Message]) {
         self.total_turns = all_messages.len();
         self.suppress_compaction_until_new_message = !all_messages.is_empty();
-        self.active_chars
-            .set_exact(all_messages.iter().map(message_char_count).sum());
+        let tokens = all_messages
+            .iter()
+            .map(|message| message_token_estimate(self.family, message))
+            .sum();
+        self.active_tokens.set_exact(tokens, self.family);
     }
 
     pub fn seed_restored_stored_messages_with(&mut self, session: &crate::session::Session) {
         self.total_turns = session.message_count();
         self.suppress_compaction_until_new_message = !session.has_no_messages();
-        self.active_chars.set_exact(
-            session
-                .iter_messages()
-                .map(|message| content_char_count(&message.content))
-                .sum(),
-        );
+        let tokens = session
+            .iter_messages()
+            .map(|message| content_token_estimate(self.family, &message.content))
+            .sum();
+        self.active_tokens.set_exact(tokens, self.family);
     }
 
     /// Restore a previously persisted compacted view.
@@ -794,8 +815,8 @@ impl CompactionManager {
         self.semantic_embed_cache_counter = 0;
         self.total_turns = total_messages;
         self.compacted_count = state.compacted_count.min(total_messages);
-        self.active_chars
-            .reset_pending(total_messages > self.compacted_count);
+        self.active_tokens
+            .reset_pending(total_messages > self.compacted_count, self.family);
         self.active_summary = Some(Summary {
             text: state.summary_text.clone(),
             openai_encrypted_content: state.openai_encrypted_content.clone(),
@@ -816,12 +837,12 @@ impl CompactionManager {
         all_messages: &[Message],
     ) {
         self.restore_persisted_state(state, all_messages.len());
-        self.active_chars.set_exact(
-            self.active_messages(all_messages)
-                .iter()
-                .map(message_char_count)
-                .sum(),
-        );
+        let tokens = self
+            .active_messages(all_messages)
+            .iter()
+            .map(|message| message_token_estimate(self.family, message))
+            .sum();
+        self.active_tokens.set_exact(tokens, self.family);
     }
 
     pub fn restore_persisted_stored_state_with(
@@ -830,12 +851,11 @@ impl CompactionManager {
         session: &crate::session::Session,
     ) {
         self.restore_persisted_state(state, session.message_count());
-        self.active_chars.set_exact(
-            session
-                .iter_messages_from(self.compacted_count)
-                .map(|message| content_char_count(&message.content))
-                .sum(),
-        );
+        let tokens = session
+            .iter_messages_from(self.compacted_count)
+            .map(|message| content_token_estimate(self.family, &message.content))
+            .sum();
+        self.active_tokens.set_exact(tokens, self.family);
     }
 
     /// Compare the persisted view exactly without cloning its potentially large
@@ -1190,24 +1210,24 @@ impl CompactionManager {
         }
 
         crate::logging::warn(&format!(
-            "[compaction/invariant] compacted_count_exceeded_messages reason={} compacted_count={} messages_len={} total_turns={} has_summary={} summary_chars={} observed_input_tokens={:?}",
+            "[compaction/invariant] compacted_count_exceeded_messages reason={} compacted_count={} messages_len={} total_turns={} has_summary={} summary_tokens={} observed_input_tokens={:?}",
             reason,
             self.compacted_count,
             all_messages.len(),
             self.total_turns,
             self.active_summary.is_some(),
-            self.summary_chars(),
+            self.summary_tokens(),
             self.observed_input_tokens,
         ));
         self.compacted_count = all_messages.len();
-        self.active_chars.set_exact(0);
+        self.active_tokens.set_exact(0, self.family);
         true
     }
 
     fn log_compaction_state(&self, phase: &str, trigger: &str, all_messages: &[Message]) {
         let active_len = self.active_messages(all_messages).len();
         crate::logging::info(&format!(
-            "[compaction/state] phase={} trigger={} messages_len={} active_messages={} compacted_count={} total_turns={} token_budget={} token_estimate={} effective_tokens={} observed_input_tokens={:?} has_summary={} summary_chars={} pending_cutoff={} is_compacting={}",
+            "[compaction/state] phase={} trigger={} messages_len={} active_messages={} compacted_count={} total_turns={} token_budget={} token_estimate={} effective_tokens={} observed_input_tokens={:?} has_summary={} summary_tokens={} pending_cutoff={} is_compacting={}",
             phase,
             trigger,
             all_messages.len(),
@@ -1219,7 +1239,7 @@ impl CompactionManager {
             self.effective_token_count_with(all_messages),
             self.observed_input_tokens,
             self.active_summary.is_some(),
-            self.summary_chars(),
+            self.summary_tokens(),
             self.pending_cutoff,
             self.pending_task.is_some(),
         ));
@@ -1230,7 +1250,7 @@ impl CompactionManager {
         let grew = outcome.post_tokens > outcome.pre_tokens;
         let level = if grew { "warn" } else { "info" };
         let line = format!(
-            "[compaction/outcome] level={} trigger={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_chars={} observed_input_tokens={:?}",
+            "[compaction/outcome] level={} trigger={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_tokens={} observed_input_tokens={:?}",
             level,
             outcome.trigger,
             outcome.duration_ms,
@@ -1244,7 +1264,7 @@ impl CompactionManager {
             self.total_turns,
             outcome.messages_compacted,
             outcome.messages_dropped.unwrap_or(0),
-            self.summary_chars(),
+            self.summary_tokens(),
             self.observed_input_tokens,
         );
         if grew {
@@ -1254,29 +1274,30 @@ impl CompactionManager {
         }
     }
 
-    fn active_message_chars_with(&self, all_messages: &[Message]) -> usize {
+    fn active_message_tokens_with(&self, all_messages: &[Message]) -> usize {
         // Recompute from history when the cache is stale, or when the
         // display-side turn estimate disagrees with the real active slice
         // length (the two can diverge across restore/clamp/compaction paths,
         // and trusting a mismatched cache is exactly what corrupts token
         // accounting).
-        if self.active_chars.is_dirty()
+        if self.active_tokens.is_dirty(self.family)
             || self.active_messages_count() != self.active_messages(all_messages).len()
         {
             self.active_messages(all_messages)
                 .iter()
-                .map(message_char_count)
+                .map(|message| message_token_estimate(self.family, message))
                 .sum()
         } else {
-            self.active_chars.value()
+            self.active_tokens.value()
         }
     }
 
     /// Get current token estimate using the caller's message list
     pub fn token_estimate_with(&self, all_messages: &[Message]) -> usize {
         estimate_compaction_tokens(
+            self.family,
             self.active_summary.as_ref(),
-            self.active_message_chars_with(all_messages),
+            self.active_message_tokens_with(all_messages),
             self.token_budget,
         )
     }
@@ -1284,10 +1305,11 @@ impl CompactionManager {
     /// Recount an arbitrary snapshot directly, without trusting the live cache.
     pub fn measure_token_estimate_with(&self, all_messages: &[Message]) -> usize {
         estimate_compaction_tokens(
+            self.family,
             self.active_summary.as_ref(),
             self.active_messages(all_messages)
                 .iter()
-                .map(message_char_count)
+                .map(|message| message_token_estimate(self.family, message))
                 .sum(),
             self.token_budget,
         )
@@ -1295,7 +1317,12 @@ impl CompactionManager {
 
     /// Get current token estimate (backward compat — uses 0 messages, only summary + observed)
     pub fn token_estimate(&self) -> usize {
-        estimate_compaction_tokens(self.active_summary.as_ref(), 0, self.token_budget)
+        estimate_compaction_tokens(
+            self.family,
+            self.active_summary.as_ref(),
+            0,
+            self.token_budget,
+        )
     }
 
     /// Effective shake thresholds, or `None` when shake is disabled.
@@ -1325,6 +1352,7 @@ impl CompactionManager {
             min_savings_tokens: cfg.shake_min_savings_tokens,
             code_blocks: cfg.shake_code_blocks,
             protected_tools: jcode_compaction_core::shake::PROTECTED_TOOLS_DEFAULT,
+            family: self.family,
         }
     }
 
@@ -1465,7 +1493,7 @@ impl CompactionManager {
         };
         self.observed_input_tokens = None;
         self.observed_estimate_tokens = None;
-        self.active_chars.invalidate();
+        self.active_tokens.invalidate();
         crate::logging::info(&format!(
             "[compaction] {}: elided {} regions, ~{} tokens saved",
             reason.label(),
@@ -1554,24 +1582,35 @@ impl CompactionManager {
         accepted
     }
 
-    /// Best-effort current token count using the caller's messages.
+    /// Current context size using the caller's messages.
+    ///
+    /// The provider's last report is exact for the request it measured, so it is
+    /// the base and only what was added since is estimated. Without an anchor
+    /// (no report, or history rewritten since) the larger of the estimate and
+    /// the report wins.
     pub fn effective_token_count_with(&self, all_messages: &[Message]) -> usize {
-        let estimate = self.token_estimate_with(all_messages);
-        let observed = self
-            .observed_input_tokens
-            .and_then(|tokens| usize::try_from(tokens).ok())
-            .unwrap_or(0);
-        estimate.max(observed)
+        self.anchored_token_count(self.token_estimate_with(all_messages))
     }
 
     /// Best-effort token count without message data (uses only observed tokens)
     pub fn effective_token_count(&self) -> usize {
-        let estimate = self.token_estimate();
-        let observed = self
+        self.anchored_token_count(self.token_estimate())
+    }
+
+    fn anchored_token_count(&self, estimate: usize) -> usize {
+        let Some(observed) = self
             .observed_input_tokens
             .and_then(|tokens| usize::try_from(tokens).ok())
-            .unwrap_or(0);
-        estimate.max(observed)
+        else {
+            return estimate;
+        };
+        match self
+            .observed_estimate_tokens
+            .and_then(|anchor| usize::try_from(anchor).ok())
+        {
+            Some(anchor) => observed.saturating_add(estimate.saturating_sub(anchor)),
+            None => estimate.max(observed),
+        }
     }
 
     /// Get current context usage as percentage (using caller's messages)
@@ -1895,9 +1934,8 @@ impl CompactionManager {
                 let semantic = self.semantic_cutoff(active);
                 let tail_tokens = active[semantic..]
                     .iter()
-                    .map(message_char_count)
-                    .sum::<usize>()
-                    / CHARS_PER_TOKEN;
+                    .map(|message| message_token_estimate(self.family, message))
+                    .sum::<usize>();
                 if tail_tokens > MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10) {
                     semantic.max(bounded_cutoff)
                 } else {
@@ -1926,7 +1964,13 @@ impl CompactionManager {
         let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
         let shake_config = self.shake_config();
-        let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
+        let remaining = summary_generation::RemainingTokens {
+            tokens: active[cutoff..]
+                .iter()
+                .map(|message| message_token_estimate(self.family, message))
+                .sum(),
+            family: self.family,
+        };
         let token_budget = if mode_label == CACHE_EXPIRY_COMPACTION_TRIGGER {
             self.token_budget.min(
                 self.compaction_config
@@ -1974,7 +2018,7 @@ impl CompactionManager {
                             prefix: messages_to_summarize,
                             archive_history,
                             previous: existing_summary,
-                            remaining_chars,
+                            remaining,
                             token_budget,
                             snapcompact_shape,
                         },
@@ -1993,7 +2037,7 @@ impl CompactionManager {
                         snapcompact_enabled,
                         snapcompact_shape,
                         shake_config,
-                        remaining_chars,
+                        remaining,
                         token_budget,
                         prefer_local,
                     )
@@ -2225,7 +2269,13 @@ impl CompactionManager {
             prefix: active[..cutoff].to_vec(),
             archive_history: all_messages[..self.active_start(all_messages) + cutoff].to_vec(),
             previous: self.active_summary.clone(),
-            remaining_chars: active[cutoff..].iter().map(message_char_count).sum(),
+            remaining: summary_generation::RemainingTokens {
+                tokens: active[cutoff..]
+                    .iter()
+                    .map(|message| message_token_estimate(self.family, message))
+                    .sum(),
+                family: self.family,
+            },
             token_budget: self.token_budget,
             snapcompact_shape: Some(self.compaction_config.snapcompact_shape.clone()).filter(
                 |shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"),
@@ -2316,7 +2366,7 @@ impl CompactionManager {
                             snapcompact_enabled,
                             input.snapcompact_shape,
                             shake_config,
-                            input.remaining_chars,
+                            input.remaining,
                             input.token_budget,
                             false,
                         ),
@@ -2418,15 +2468,15 @@ impl CompactionManager {
                     self.observed_input_tokens
                         .unwrap_or_else(|| self.token_estimate_with(all_messages) as u64)
                 };
-                let compacted_chars: usize = self
+                let compacted_tokens: usize = self
                     .active_messages(all_messages)
                     .iter()
                     .take(self.pending_cutoff)
-                    .map(message_char_count)
+                    .map(|message| message_token_estimate(self.family, message))
                     .sum();
-                let remaining_chars = self
-                    .active_message_chars_with(all_messages)
-                    .saturating_sub(compacted_chars);
+                let remaining_tokens = self
+                    .active_message_tokens_with(all_messages)
+                    .saturating_sub(compacted_tokens);
                 let mut summary = Summary {
                     text: result.summary_text,
                     openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
@@ -2450,7 +2500,7 @@ impl CompactionManager {
                 if !all_messages.is_empty() {
                     self.compacted_count = self.compacted_count.min(all_messages.len());
                 }
-                self.active_chars.set_exact(remaining_chars);
+                self.active_tokens.set_exact(remaining_tokens, self.family);
                 self.plan_context = None;
                 self.warned_missing_native_summary = false;
 
@@ -2536,7 +2586,7 @@ impl CompactionManager {
     /// Backward-compatible completion check without caller history.
     pub fn check_and_apply_compaction(&mut self) {
         self.check_and_apply_compaction_with(&[]);
-        self.active_chars.invalidate();
+        self.active_tokens.invalidate();
     }
 
     /// Take the last compaction event (if any)
@@ -2768,12 +2818,17 @@ impl CompactionManager {
         self.compacted_count
     }
 
-    /// Get the character count of the active summary (0 if none)
-    pub fn summary_chars(&self) -> usize {
+    /// Estimated tokens of the active summary (0 if none)
+    pub fn summary_tokens(&self) -> usize {
         self.active_summary
             .as_ref()
-            .map(summary_payload_char_count)
+            .map(|summary| summary_payload_tokens(self.family, summary))
             .unwrap_or(0)
+    }
+
+    /// Tokenizer family of the active model.
+    pub fn token_family(&self) -> TokenFamily {
+        self.family
     }
 
     /// Get the current number of active, un-compacted messages.
@@ -2892,11 +2947,14 @@ impl CompactionManager {
 
         let pre_tokens = self.effective_token_count_with(all_messages) as u64;
         self.log_compaction_state("hard_compact_start", trigger, all_messages);
-        let active_char_counts: Vec<usize> = active.iter().map(message_char_count).collect();
-        let mut remaining_suffix_chars = vec![0usize; active_char_counts.len() + 1];
-        for idx in (0..active_char_counts.len()).rev() {
-            remaining_suffix_chars[idx] =
-                remaining_suffix_chars[idx + 1].saturating_add(active_char_counts[idx]);
+        let active_token_counts: Vec<usize> = active
+            .iter()
+            .map(|message| message_token_estimate(self.family, message))
+            .collect();
+        let mut remaining_suffix_tokens = vec![0usize; active_token_counts.len() + 1];
+        for idx in (0..active_token_counts.len()).rev() {
+            remaining_suffix_tokens[idx] =
+                remaining_suffix_tokens[idx + 1].saturating_add(active_token_counts[idx]);
         }
 
         let mut turns_to_keep = RECENT_TURNS_TO_KEEP.min(active.len().saturating_sub(1));
@@ -2906,7 +2964,7 @@ impl CompactionManager {
             cutoff = safe_compaction_cutoff(active, cutoff);
 
             if cutoff > 0 {
-                let remaining_tokens = remaining_suffix_chars[cutoff] / CHARS_PER_TOKEN;
+                let remaining_tokens = remaining_suffix_tokens[cutoff];
                 if remaining_tokens <= tail_budget {
                     break;
                 }
@@ -2960,7 +3018,8 @@ impl CompactionManager {
             .compacted_count
             .saturating_add(cutoff)
             .min(all_messages.len());
-        self.active_chars.set_exact(remaining_suffix_chars[cutoff]);
+        self.active_tokens
+            .set_exact(remaining_suffix_tokens[cutoff], self.family);
         self.active_summary = Some(summary);
         self.plan_context = None;
         self.warned_missing_native_summary = false;
@@ -3015,7 +3074,7 @@ impl CompactionManager {
         if truncated > 0 {
             self.observed_input_tokens = None;
             self.observed_estimate_tokens = None;
-            self.active_chars.invalidate();
+            self.active_tokens.invalidate();
         }
         truncated
     }

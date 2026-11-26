@@ -19,7 +19,6 @@ use std::time::Duration;
 
 /// Default digest budget in approximate tokens.
 pub const DEFAULT_DIGEST_TOKENS: usize = 12_000;
-const CHARS_PER_TOKEN: usize = 4;
 const FIRST_REQUEST_CHARS: usize = 6_000;
 const USER_MESSAGE_CHARS: usize = 1_500;
 const ASSISTANT_TEXT_CHARS: usize = 1_200;
@@ -155,14 +154,16 @@ pub struct Digest {
 
 /// Build the digest from `messages`. `since` limits the timeline to messages
 /// from that index (an auto review covers only the last turn), while the
-/// first user request is always kept as the task statement.
+/// first user request is always kept as the task statement. `family` is the
+/// advisor model's: the digest is sized for its context.
 pub fn build_digest(
     messages: &[Message],
     since: usize,
     plan_lines: &[String],
     budget_tokens: usize,
+    family: jcode_message_types::TokenFamily,
 ) -> Digest {
-    let budget = budget_tokens.max(1_000) * CHARS_PER_TOKEN;
+    let budget = family.bytes_for_tokens(budget_tokens.max(1_000));
     let first_request = messages
         .iter()
         .filter(|message| message.role == Role::User)

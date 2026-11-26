@@ -15,8 +15,14 @@
 //! A trimmed result ends with a note giving both sizes (parsed by Desktop for
 //! its token badge) and how to get the full result.
 
-use jcode_core::util::estimate_tokens;
+use jcode_message_types::{TokenFamily, estimate_text};
 use serde_json::Value;
+
+/// Tokens of an MCP result. Results are trimmed before any model sees them and
+/// can be replayed to a different one later, so the budget is family-neutral.
+pub fn estimate_tokens(text: &str) -> usize {
+    estimate_text(TokenFamily::default(), text)
+}
 
 /// Default budget for one MCP tool result.
 pub const MCP_RESULT_TOKEN_BUDGET: usize = 8_000;

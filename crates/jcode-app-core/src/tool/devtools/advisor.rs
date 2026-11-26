@@ -53,6 +53,7 @@ impl Tool for AdvisorTool {
         let question = input.get("question").and_then(Value::as_str);
         let session_id = ctx.session_id.clone();
         let digest_tokens = settings.digest_tokens;
+        let family = jcode_message_types::TokenFamily::from_model(&settings.model);
         let digest = tokio::task::spawn_blocking(move || {
             let messages: Vec<_> = Session::load(&session_id)
                 .map(|session| {
@@ -63,7 +64,7 @@ impl Tool for AdvisorTool {
                 })
                 .unwrap_or_default();
             let plan = advisor::plan_lines(&session_id);
-            advisor::build_digest(&messages, 0, &plan, digest_tokens)
+            advisor::build_digest(&messages, 0, &plan, digest_tokens, family)
         })
         .await?;
         let consultation = advisor::consult(&self.provider, &settings, &digest, question).await?;

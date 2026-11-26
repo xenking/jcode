@@ -20,23 +20,25 @@ async fn assert_snapcompact_breakdown(supports_images: bool) {
             cache_control: None,
         }],
     );
-    agent.session.adopt_compaction(Some(crate::session::StoredCompactionState {
-        summary_text: "archive".into(),
-        plan_context: None,
-        openai_encrypted_content: None,
-        snapcompact: Some(jcode_message_types::SnapcompactArchive {
-            source: "history".into(),
-            pages: (0..74).map(|i| format!("page{i}")).collect(),
-            index: "[message 0, page 1 | user] old fact\n".into(),
-            decisions: "projected decision".into(),
-            deferred_decisions: "not sent".repeat(1_024),
-            page_ranges: Vec::new(),
-            render_key: String::new(),
-        }),
-        covers_up_to_turn: 0,
-        original_turn_count: 0,
-        compacted_count: 0,
-    }));
+    agent
+        .session
+        .adopt_compaction(Some(crate::session::StoredCompactionState {
+            summary_text: "archive".into(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: Some(jcode_message_types::SnapcompactArchive {
+                source: "history".into(),
+                pages: (0..74).map(|i| format!("page{i}")).collect(),
+                index: "[message 0, page 1 | user] old fact\n".into(),
+                decisions: "projected decision".into(),
+                deferred_decisions: "not sent".repeat(1_024),
+                page_ranges: Vec::new(),
+                render_key: String::new(),
+            }),
+            covers_up_to_turn: 0,
+            original_turn_count: 0,
+            compacted_count: 0,
+        }));
     agent.seed_compaction_from_session();
     let (request, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
@@ -65,12 +67,11 @@ async fn assert_snapcompact_breakdown(supports_images: bool) {
             .unwrap()
     };
     let estimate = |messages: &[Message]| {
-        (messages
-            .iter()
-            .map(crate::compaction::message_char_count)
-            .sum::<usize>()
-            / crate::util::APPROX_CHARS_PER_TOKEN)
-            .max(1) as u64
+        crate::test_tokens::request_tokens(
+            crate::message::TokenFamily::from_model(&agent.provider_model()),
+            messages,
+        )
+        .max(1) as u64
     };
     assert_eq!(tokens("snapcompact"), estimate(&request[..1]));
     assert_eq!(tokens("conversation"), estimate(&request[1..]));

@@ -30,7 +30,7 @@ fn reusable_context_snapshot<'a>(
         && cached.message_count == message_count
         && (
             cached.compaction_count,
-            cached.compaction_summary_chars,
+            cached.compaction_summary_tokens,
             cached.is_compacting,
         ) == compaction)
         .then_some(&cached.snapshot)
@@ -731,14 +731,14 @@ impl crate::tui::TuiState for App {
         } else {
             self.session.message_count()
         };
-        let (compaction_count, compaction_summary_chars, is_compacting, compaction_fresh) =
+        let (compaction_count, compaction_summary_tokens, is_compacting, compaction_fresh) =
             if self.is_remote {
                 (0, 0, false, true)
             } else if self.provider.uses_jcode_compaction() {
                 match self.registry.compaction().try_read() {
                     Ok(manager) => (
                         manager.compacted_count(),
-                        manager.summary_chars(),
+                        manager.summary_tokens(),
                         manager.is_compacting(),
                         true,
                     ),
@@ -764,7 +764,7 @@ impl crate::tui::TuiState for App {
                 cached,
                 &session_key,
                 message_count,
-                (compaction_count, compaction_summary_chars, is_compacting),
+                (compaction_count, compaction_summary_tokens, is_compacting),
             )
         {
             return snapshot.clone();
@@ -811,7 +811,7 @@ impl crate::tui::TuiState for App {
                 let result = compaction
                     .try_read()
                     .ok()
-                    .map(|manager| (manager.compacted_count(), manager.summary_chars()));
+                    .map(|manager| (manager.compacted_count(), manager.summary_tokens()));
                 if let Some((cc, sc)) = result {
                     if cc > 0 && sc > 0 {
                         user_count += 1;
@@ -944,7 +944,7 @@ impl crate::tui::TuiState for App {
                     context_revision: self.context_revision,
                     message_count,
                     compaction_count,
-                    compaction_summary_chars,
+                    compaction_summary_tokens,
                     is_compacting,
                     snapshot: crate::tui::ContextSnapshot {
                         info: Some(info.clone()),
@@ -1260,14 +1260,14 @@ impl crate::tui::TuiState for App {
             let compaction = self.registry.compaction();
             compaction.try_read().ok().and_then(|manager| {
                 let compacted_messages = manager.compacted_count();
-                let summary_chars = manager.summary_chars();
+                let summary_tokens = manager.summary_tokens();
                 let is_compacting = manager.is_compacting();
-                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
+                (is_compacting || compacted_messages > 0 || summary_tokens > 0).then(|| {
                     crate::tui::info_widget::CompactionInfo {
                         is_compacting,
                         compacted_messages,
                         active_messages: manager.active_messages_count(),
-                        summary_chars,
+                        summary_tokens,
                         mode: manager.mode().as_str().to_string(),
                     }
                 })

@@ -7,7 +7,9 @@ fn schedule_description_stays_one_short_sentence() {
     let description = tool.description();
     assert!(description.contains("independent future tasks"));
     assert!(!description.contains("blocker"));
-    assert!(crate::util::estimate_tokens(description) <= 20);
+    assert!(
+        crate::message::estimate_text(crate::message::TokenFamily::default(), description) <= 20
+    );
     let schema = tool.parameters_schema();
     for action in ["create", "list", "cancel"] {
         assert!(

@@ -1,9 +1,14 @@
 use super::*;
-use crate::message::ContentBlock;
+use crate::message::{ContentBlock, TokenFamily};
 use serde_json::json;
 
 fn estimate(messages: &[Message], tools: &[ToolDefinition]) -> (usize, usize) {
-    MultiProvider::estimate_request_input(messages, tools, CompletionMode::Unified { system: "" })
+    MultiProvider::estimate_request_input(
+        TokenFamily::default(),
+        messages,
+        tools,
+        CompletionMode::Unified { system: "" },
+    )
 }
 
 #[test]
@@ -54,7 +59,9 @@ fn request_estimate_only_charges_loaded_deferred_definitions_once() {
         2
     ]
     .into();
-    let message_chars = jcode_compaction_core::message_char_count(&message);
+    let message_chars =
+        jcode_compaction_core::content_estimator(TokenFamily::default(), &message.content)
+            .bytes_fed();
     assert_eq!(
         estimate(&[message], &tools).0,
         message_chars + eager.prompt_chars() + loaded.prompt_chars()
@@ -65,6 +72,7 @@ fn request_estimate_only_charges_loaded_deferred_definitions_once() {
 fn request_estimate_counts_split_and_unified_system_text_equally() {
     let messages = [Message::user("hello world")];
     let unified = MultiProvider::estimate_request_input(
+        TokenFamily::default(),
         &messages,
         &[],
         CompletionMode::Unified {
@@ -72,6 +80,7 @@ fn request_estimate_counts_split_and_unified_system_text_equally() {
         },
     );
     let split = MultiProvider::estimate_request_input(
+        TokenFamily::default(),
         &messages,
         &[],
         CompletionMode::Split {
@@ -80,6 +89,7 @@ fn request_estimate_counts_split_and_unified_system_text_equally() {
         },
     );
     assert_eq!(unified, split);
-    assert_eq!(unified, (24, 6));
+    assert_eq!(unified.0, 24, "hello world plus the 13 system bytes");
+    assert!(unified.1 > 0);
     assert_eq!(estimate(&[], &[]), (0, 0));
 }

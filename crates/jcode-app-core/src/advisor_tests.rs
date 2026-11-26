@@ -1,4 +1,5 @@
 use super::*;
+use jcode_message_types::TokenFamily;
 use serde_json::json;
 
 fn message(role: Role, blocks: Vec<ContentBlock>) -> Message {
@@ -91,7 +92,13 @@ fn verdict_line_is_parsed_and_unknown_degrades_to_note() {
 
 #[test]
 fn digest_keeps_requests_and_calls_but_not_raw_output() {
-    let digest = build_digest(&session(), 0, &["- [pending] fix login".into()], 4_000);
+    let digest = build_digest(
+        &session(),
+        0,
+        &["- [pending] fix login".into()],
+        4_000,
+        TokenFamily::default(),
+    );
     assert!(digest.text.contains("Fix the login bug"));
     assert!(!digest.text.contains("huge harness context"));
     assert!(digest.text.contains("- [pending] fix login"));
@@ -130,7 +137,7 @@ fn digest_budget_keeps_the_newest_steps_and_the_task() {
             )],
         ));
     }
-    let digest = build_digest(&messages, 0, &[], 1_000);
+    let digest = build_digest(&messages, 0, &[], 1_000, TokenFamily::default());
     assert!(digest.text.len() <= 1_000 * 4, "{}", digest.text.len());
     assert!(digest.text.contains("Fix the login bug"));
     assert!(digest.text.contains("src/file_1999.rs"));
@@ -141,7 +148,7 @@ fn digest_budget_keeps_the_newest_steps_and_the_task() {
 
 #[test]
 fn digest_since_limits_the_timeline_to_the_last_turn() {
-    let digest = build_digest(&session(), 3, &[], 4_000);
+    let digest = build_digest(&session(), 3, &[], 4_000, TokenFamily::default());
     assert!(digest.text.contains("Fix the login bug"));
     assert!(!digest.text.contains("cargo test -p auth"));
     assert!(digest.text.contains("TOOL edit: src/auth.rs"));

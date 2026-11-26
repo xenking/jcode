@@ -464,7 +464,12 @@ impl MultiProvider {
         {
             return None;
         }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        let (chars, tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
         self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
     }
 
@@ -677,8 +682,12 @@ impl MultiProvider {
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
-        let (estimated_input_chars, estimated_input_tokens) =
-            Self::estimate_request_input(messages, tools, mode);
+        let (estimated_input_chars, estimated_input_tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
 
         for candidate in sequence {
             let label = Self::provider_label(candidate);

@@ -1382,7 +1382,8 @@ fn test_observe_updates_latest_tool_context_only() {
     app.observe_tool_result(&tool_call, "1 use std::path::Path;", false, Some("read"));
 
     let page = app.side_panel.focused_page().expect("missing observe page");
-    let token_label = crate::util::format_approx_token_count(crate::util::estimate_tokens(
+    let token_label = crate::util::format_approx_token_count(crate::message::estimate_text(
+        crate::message::TokenFamily::default(),
         "1 use std::path::Path;",
     ));
     assert!(page.content.contains("Latest tool result added to context"));

@@ -397,6 +397,7 @@ fn agent_failover_context_limits_follow_exact_saved_account() {
         )
         .deferred()];
         let (_, tokens) = MultiProvider::estimate_request_input(
+            crate::message::TokenFamily::default(),
             &messages,
             &tools,
             CompletionMode::Unified { system: "" },

@@ -696,7 +696,8 @@ fn contextual_subgraph_prefers_memory_hub() {
         ..Default::default()
     };
 
-    let subgraph = super::subgraph_tests::select_contextual_subgraph(&info, 3, 6).expect("subgraph");
+    let subgraph =
+        super::subgraph_tests::select_contextual_subgraph(&info, 3, 6).expect("subgraph");
     assert_eq!(subgraph.nodes.len(), 3);
     assert!(
         subgraph
@@ -1713,7 +1714,7 @@ fn widget_gallery() {
             is_compacting: false,
             compacted_messages: 184,
             active_messages: 36,
-            summary_chars: 9_800,
+            summary_tokens: 2_450,
             mode: "semantic".into(),
         }),
         ambient_info: Some(AmbientWidgetData {

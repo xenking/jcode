@@ -10,8 +10,8 @@ fn dm_group_only_total_tokens_use_severity_color() {
         (6_000, rgb(224, 118, 118)),
     ] {
         let messages = [
-            DisplayMessage::swarm("DM from fox", "a".repeat(each * 4)),
-            DisplayMessage::swarm("DM from sheep", "b".repeat(each * 4)),
+            DisplayMessage::swarm("DM from fox", crate::test_tokens::text_of_tokens(each)),
+            DisplayMessage::swarm("DM from sheep", crate::test_tokens::text_of_tokens(each)),
         ];
         let row = render_agent_dm_run(&messages, 100);
         let text = row.to_string();
@@ -41,7 +41,7 @@ fn dm_total_ignores_collapsible_summary_and_stays_stable_after_toggle() {
         jcode_tui_messages::encode_collapsible_swarm_content("Summary adds no real tokens", body);
     assert_eq!(
         swarm_notification_token_count(&encoded),
-        crate::util::estimate_tokens(body)
+        crate::message::estimate_text(crate::message::TokenFamily::default(), body)
     );
     let toggled = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
     assert_eq!(
@@ -53,7 +53,8 @@ fn dm_total_ignores_collapsible_summary_and_stays_stable_after_toggle() {
 #[test]
 fn dm_group_reserves_total_and_badge_when_emoji_cluster_is_truncated() {
     markdown::set_center_code_blocks(false);
-    let messages = vec![DisplayMessage::swarm("DM from fox", "a".repeat(400)); 20];
+    let messages =
+        vec![DisplayMessage::swarm("DM from fox", crate::test_tokens::text_of_tokens(100)); 20];
     let row = render_agent_dm_run(&messages, 30);
     assert!(row.width() <= 30);
     let text = row.to_string();

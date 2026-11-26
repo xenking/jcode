@@ -248,7 +248,7 @@ pub(super) struct CachedContextSnapshot {
     pub context_revision: u64,
     pub message_count: usize,
     pub compaction_count: usize,
-    pub compaction_summary_chars: usize,
+    pub compaction_summary_tokens: usize,
     pub is_compacting: bool,
     pub snapshot: crate::tui::ContextSnapshot,
 }

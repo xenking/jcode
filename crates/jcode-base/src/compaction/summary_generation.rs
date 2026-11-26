@@ -22,8 +22,12 @@ pub(super) async fn generate_local_snapcompact(
             covers_up_to_turn: count,
             original_turn_count: count,
         };
-        let after =
-            estimate_compaction_tokens(Some(&summary), input.remaining_chars, input.token_budget);
+        let after = estimate_compaction_tokens(
+            input.remaining.family,
+            Some(&summary),
+            input.remaining.tokens,
+            input.token_budget,
+        );
         anyhow::ensure!(
             after < target,
             "Local snapcompact leaves {after} tokens (target <{target})"
@@ -44,16 +48,20 @@ pub(super) async fn generate_local_snapcompact(
     })
 }
 
+/// Bytes of transcript that fit the summarizer's window, leaving room for the
+/// instructions and the reply. Family-neutral: asking the provider for its model
+/// here would count as a billing attribution, and the summarizer is often not
+/// the session's model.
+fn prompt_byte_budget(provider: &dyn Provider) -> usize {
+    TokenFamily::default().bytes_for_tokens(provider.context_window().saturating_sub(4_000))
+}
+
 /// Best-effort LLM extraction, never a replacement for the verbatim index.
 pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index: &str) -> String {
     if index.is_empty() {
         return String::new();
     }
-    let budget = provider
-        .context_window()
-        .saturating_sub(4_000)
-        .saturating_mul(CHARS_PER_TOKEN)
-        .min(120_000);
+    let budget = prompt_byte_budget(provider).min(120_000);
     let input: String = index.chars().take(budget).collect();
     let prompt = format!(
         "Extract decisions with their reasons, user rules and preferences from the following indexed excerpts. Preserve negations, uncertainty, and who said what. Do not infer missing reasons. Each line must begin with the exact [message N, page P | role] tag from its supporting excerpt. Do not invent facts. Output only supported lines.\n\n{input}"
@@ -139,14 +147,14 @@ pub(super) async fn generate_effective_compaction_artifact(
     snapcompact_enabled: bool,
     snapcompact_shape: Option<String>,
     shake_config: Option<ShakeConfig>,
-    remaining_chars: usize,
+    remaining: RemainingTokens,
     token_budget: usize,
     prefer_local: bool,
 ) -> Result<CompactionResult> {
     let cost = CompactionCost::new(
         &messages,
         existing_summary.as_ref(),
-        remaining_chars,
+        remaining,
         token_budget,
     );
     let before = cost.before;
@@ -324,7 +332,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     .replace('\u{2588}', "\n")
                     .replace(['\u{e}', '\u{f}'], "");
             }
-            let max_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
+            let max_chars = prompt_byte_budget(&*provider);
             let prompt = build_compaction_prompt(&messages, prior.as_ref(), max_chars);
             if let Ok(Ok((text, usage))) = tokio::time::timeout(
                 Duration::from_secs(60),
@@ -383,7 +391,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
             ));
         }
     }
-    let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
+    let max_prompt_chars = prompt_byte_budget(&*provider);
     let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
 
     // Generate summary using simple completion
@@ -421,9 +429,16 @@ pub(super) async fn generate_compaction_artifact_indexed(
     })
 }
 
+/// The unchanged suffix of a request, already estimated in `family` tokens.
+#[derive(Clone, Copy)]
+pub(super) struct RemainingTokens {
+    pub(super) tokens: usize,
+    pub(super) family: TokenFamily,
+}
+
 pub(super) struct CompactionCost {
     pub(super) before: usize,
-    remaining_chars: usize,
+    remaining: RemainingTokens,
     token_budget: usize,
 }
 
@@ -431,23 +446,33 @@ impl CompactionCost {
     pub(super) fn new(
         messages: &[Message],
         existing_summary: Option<&Summary>,
-        remaining_chars: usize,
+        remaining: RemainingTokens,
         token_budget: usize,
     ) -> Self {
-        let before_chars = messages
+        let before_tokens = messages
             .iter()
-            .map(message_char_count)
+            .map(|message| message_token_estimate(remaining.family, message))
             .sum::<usize>()
-            .saturating_add(remaining_chars);
+            .saturating_add(remaining.tokens);
         Self {
-            before: estimate_compaction_tokens(existing_summary, before_chars, token_budget),
-            remaining_chars,
+            before: estimate_compaction_tokens(
+                remaining.family,
+                existing_summary,
+                before_tokens,
+                token_budget,
+            ),
+            remaining,
             token_budget,
         }
     }
 
     pub(super) fn after(&self, summary: &Summary) -> usize {
-        estimate_compaction_tokens(Some(summary), self.remaining_chars, self.token_budget)
+        estimate_compaction_tokens(
+            self.remaining.family,
+            Some(summary),
+            self.remaining.tokens,
+            self.token_budget,
+        )
     }
 
     fn target(&self) -> usize {

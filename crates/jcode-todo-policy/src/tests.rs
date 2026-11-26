@@ -365,7 +365,10 @@ fn static_quality_gate_messages_stay_within_token_budget() {
             message.starts_with("[auto] "),
             "{name} quality gate does not use the compact automation prefix: {message}"
         );
-        let tokens = jcode_core::util::estimate_tokens(message);
+        let tokens = jcode_message_types::estimate_text(
+            jcode_message_types::TokenFamily::default(),
+            message,
+        );
         assert!(
             tokens <= TODO_QUALITY_GATE_MAX_APPROX_TOKENS,
             "{name} quality-gate message is about {tokens} tokens; budget is {TODO_QUALITY_GATE_MAX_APPROX_TOKENS}: {message}"

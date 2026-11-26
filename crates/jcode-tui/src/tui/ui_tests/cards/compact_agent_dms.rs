@@ -126,7 +126,12 @@ fn compact_dm_single_and_group_have_only_one_total_and_badge() {
     ] {
         let total = messages
             .iter()
-            .map(|message| crate::util::estimate_tokens(message.content.trim()))
+            .map(|message| {
+                crate::message::estimate_text(
+                    crate::message::TokenFamily::default(),
+                    message.content.trim(),
+                )
+            })
             .sum();
         let icons = messages
             .iter()
@@ -162,7 +167,10 @@ fn compact_dm_single_and_group_have_only_one_total_and_badge() {
 #[test]
 fn compact_dm_group_chrome_stays_neutral_for_large_total() {
     let _guard = viewport_snapshot_test_lock();
-    let messages = vec![dm("fox", &"a".repeat(52_000)), dm("sheep", "short")];
+    let messages = vec![
+        dm("fox", &crate::test_tokens::text_of_tokens(13_000)),
+        dm("sheep", "short"),
+    ];
     let line = messages::render_agent_dm_run(&messages, 100);
     let neutral = Some(dim_color());
     let mut token_spans = 0;
@@ -250,7 +258,12 @@ fn compact_dm_body_edit_matches_full_prepare() {
     let expected = crate::util::format_approx_token_count(
         after[1..]
             .iter()
-            .map(|message| crate::util::estimate_tokens(message.content.trim()))
+            .map(|message| {
+                crate::message::estimate_text(
+                    crate::message::TokenFamily::default(),
+                    message.content.trim(),
+                )
+            })
             .sum(),
     );
     assert!(token_rows(&body)[0].contains(&expected));

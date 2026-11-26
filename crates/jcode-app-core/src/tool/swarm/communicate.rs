@@ -635,7 +635,10 @@ impl CommunicateTool {
 const SWARM_DESCRIPTION: &str = "Coordinate agents: spawn todo-lane workers and exchange messages. Use set_model (to_session, model, optional effort) or compact (to_session) on an owned running or idle worker. Both keep its session, worktree, and conversation. If busy, the change is scheduled for the next turn boundary.";
 const SWARM_PROMPT_SEPARATOR: &str = "\n\nSwarm prompt:\n";
 
-pub(crate) fn swarm_instruction_tokens(tool: &crate::message::ToolDefinition) -> usize {
+pub(crate) fn swarm_instruction_tokens(
+    tool: &crate::message::ToolDefinition,
+    family: jcode_message_types::TokenFamily,
+) -> usize {
     if tool.name != "swarm"
         || !tool
             .description
@@ -646,8 +649,8 @@ pub(crate) fn swarm_instruction_tokens(tool: &crate::message::ToolDefinition) ->
     }
     let mut schema_only = tool.clone();
     schema_only.description = SWARM_DESCRIPTION.to_string();
-    tool.prompt_token_estimate()
-        .saturating_sub(schema_only.prompt_token_estimate())
+    tool.prompt_token_estimate(family)
+        .saturating_sub(schema_only.prompt_token_estimate(family))
 }
 
 /// Swarm actions advertised to models. Real usage is dominated by messaging,

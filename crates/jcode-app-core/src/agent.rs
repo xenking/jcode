@@ -29,8 +29,6 @@ mod inline_tail;
 mod interrupts;
 #[path = "agent/context/messages.rs"]
 mod messages;
-#[path = "agent/context/setting_log.rs"]
-mod setting_log;
 #[cfg(test)]
 #[path = "agent/session/model_usage_tests.rs"]
 mod model_usage_tests;
@@ -38,6 +36,8 @@ mod model_usage_tests;
 mod parallel_reads;
 #[path = "agent/session/profile.rs"]
 mod profile;
+#[path = "agent/context/setting_log.rs"]
+mod setting_log;
 use profile::effective_tool_selection;
 #[path = "agent/context/prompt_context.rs"]
 mod prompt_context;
@@ -239,7 +239,12 @@ impl Agent {
     fn record_request_usage(
         &self,
         request_id: &str,
-        (input, output, cache_read, cache_creation): (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+        (input, output, cache_read, cache_creation): (
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+        ),
         miss: Option<&ServerEvent>,
     ) {
         let total = self.effective_context_tokens_from_usage(
@@ -261,7 +266,11 @@ impl Agent {
             session_id: self.session.id().to_owned(),
             provider: self.provider.name().to_owned(),
             model: self.provider.model(),
-            api_method: self.session.route_api_method().unwrap_or_default().to_owned(),
+            api_method: self
+                .session
+                .route_api_method()
+                .unwrap_or_default()
+                .to_owned(),
             cached_input,
             uncached_input: total.saturating_sub(cached_input),
             output: output.unwrap_or(0),
@@ -505,7 +514,10 @@ impl Agent {
 
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self.session.working_dir().map(std::path::Path::new);
-        self.prompt.reset_sources(crate::prompt::load_agents_md_files_from_dir(working_dir), working_dir);
+        self.prompt.reset_sources(
+            crate::prompt::load_agents_md_files_from_dir(working_dir),
+            working_dir,
+        );
         self.refresh_prompt_skills_snapshot();
     }
 
@@ -1410,13 +1422,15 @@ impl Agent {
                 let messages = Self::bounded_outbound_images(messages);
                 if let Some(budget) = switched_route_budget {
                     let target = budget.limit;
-                    let chars = messages
+                    let family = manager.token_family();
+                    let tokens = messages
                         .iter()
-                        .map(crate::compaction::message_char_count)
+                        .map(|message| crate::compaction::message_token_estimate(family, message))
                         .sum();
                     let projected = crate::compaction::estimate_compaction_tokens(
+                        family,
                         None,
-                        chars,
+                        tokens,
                         manager.token_budget(),
                     );
                     anyhow::ensure!(

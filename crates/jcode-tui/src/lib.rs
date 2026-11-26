@@ -24,5 +24,7 @@ pub use jcode_app_core::*;
 
 // Presentation layer (kept in this crate).
 pub mod swarm_compose;
+#[cfg(test)]
+mod test_tokens;
 pub mod tui;
 pub mod video_export;

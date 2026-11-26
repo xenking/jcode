@@ -99,7 +99,7 @@ fn contended_data() -> InfoWidgetData {
             is_compacting: false,
             compacted_messages: 12,
             active_messages: 6,
-            summary_chars: 500,
+            summary_tokens: 125,
             mode: "auto".to_string(),
         }),
         git_info: Some(GitInfo {

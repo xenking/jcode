@@ -116,8 +116,9 @@ impl Agent {
         tools: &[ToolDefinition],
     ) {
         logging::debug_lazy(|| {
-            let system_tokens = split.estimated_tokens();
-            let tool_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
+            let family = jcode_message_types::TokenFamily::from_model(&self.provider_model());
+            let system_tokens = split.estimated_tokens(family);
+            let tool_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools, family);
             let prefix_tokens = system_tokens + tool_tokens;
             format!(
                 "Prompt prefix estimate: total={prefix_tokens} tokens (system={system_tokens} tools={tool_tokens})"

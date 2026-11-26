@@ -288,12 +288,13 @@ impl Provider for AccountFailoverProvider {
         _: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.sizes.lock().unwrap().push(
-            messages
-                .iter()
-                .map(crate::compaction::message_char_count)
-                .sum(),
-        );
+        self.sizes
+            .lock()
+            .unwrap()
+            .push(crate::test_tokens::request_tokens(
+                crate::message::TokenFamily::Anthropic,
+                messages,
+            ));
         let (read, write) = if call == 0 { (33_000, 96) } else { (0, 39_721) };
         Ok(Box::pin(futures::stream::iter(vec![
             Ok(StreamEvent::TokenUsage {
@@ -406,7 +407,7 @@ async fn cold_route_switch_compacts_when_only_the_oauth_account_changes() {
         2,
         "compaction must not send a provider request"
     );
-    assert!(sizes[0] > 800_000 && sizes[1] < 600_000, "{sizes:?}");
+    assert!(sizes[0] > 200_000 && sizes[1] < 150_000, "{sizes:?}");
     assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(event,
         ServerEvent::Compaction { divider: Some(copy), .. } if copy.contains("cache is not shared across accounts")
     )));

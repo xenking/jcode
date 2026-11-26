@@ -321,8 +321,10 @@ fn test_handle_server_event_remote_observe_tracks_tool_exec_and_done() {
     );
 
     let page = app.side_panel.focused_page().expect("missing observe page");
-    let token_label =
-        crate::util::format_approx_token_count(crate::util::estimate_tokens("1 fn main() {}"));
+    let token_label = crate::util::format_approx_token_count(crate::message::estimate_text(
+        crate::message::TokenFamily::default(),
+        "1 fn main() {}",
+    ));
     assert!(page.content.contains("Latest tool result added to context"));
     assert!(page.content.contains("Status: completed"));
     assert!(page.content.contains("Returned to context"));
@@ -572,7 +574,7 @@ fn test_observe_marks_large_tool_results() {
         intent: None,
         thought_signature: None,
     };
-    let output = "x".repeat(48_000);
+    let output = crate::test_tokens::text_of_tokens(12_000);
     app.observe_tool_result(&tool_call, &output, false, Some("read"));
 
     let page = app.side_panel.focused_page().expect("missing observe page");
@@ -601,7 +603,7 @@ fn test_observe_repaint_does_not_leave_severity_badge_artifact() {
         thought_signature: None,
     };
 
-    let large_output = "x".repeat(48_000);
+    let large_output = crate::test_tokens::text_of_tokens(12_000);
     app.observe_tool_result(&tool_call, &large_output, false, Some("read"));
     let first = render_and_snap(&app, &mut terminal);
     assert!(first.contains("[very large]"));

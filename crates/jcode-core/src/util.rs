@@ -14,18 +14,11 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-pub const APPROX_CHARS_PER_TOKEN: usize = 4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApproxTokenSeverity {
     Normal,
     Warning,
     Danger,
-}
-
-/// Estimate token count using jcode's existing chars-per-token heuristic.
-pub fn estimate_tokens(s: &str) -> usize {
-    s.len() / APPROX_CHARS_PER_TOKEN
 }
 
 /// Format a number with ASCII thousands separators.

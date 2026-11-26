@@ -204,7 +204,7 @@ fn budget_report(
     store_saved: bool,
 ) -> RenderedReport {
     let (report, body_end) = render_report_with_body(out);
-    let max_bytes = max_tokens * jcode_core::util::APPROX_CHARS_PER_TOKEN;
+    let max_bytes = jcode_message_types::TokenFamily::default().bytes_for_tokens(max_tokens);
     if report.text.len() <= max_bytes {
         return report;
     }

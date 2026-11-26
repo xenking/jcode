@@ -140,7 +140,15 @@ fn test_render_direct_message_as_compact_agent_row() {
 
     assert_eq!(rendered.len(), 1);
     assert!(
-        rendered[0] == "DM · 🦊 · 6 tok ⊞" && !rendered[0].contains("parser tests"),
+        rendered[0]
+            == format!(
+                "DM · 🦊 · {} tok ⊞",
+                crate::message::estimate_text(
+                    crate::message::TokenFamily::default(),
+                    "Can you take parser tests?"
+                )
+            )
+            && !rendered[0].contains("parser tests"),
         "{rendered:?}"
     );
     assert!(

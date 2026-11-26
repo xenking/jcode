@@ -643,7 +643,7 @@ fn test_selfdev_prompt_template_placeholders_are_resolved() {
 fn split_prompt_estimated_tokens_is_positive_when_populated() {
     let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
     assert!(split.chars() > 0);
-    assert!(split.estimated_tokens() > 0);
+    assert!(split.estimated_tokens(jcode_message_types::TokenFamily::default()) > 0);
 }
 
 #[test]

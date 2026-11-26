@@ -6,7 +6,7 @@ use crate::provider::models::{
     context_limit_for_model_with_provider, provider_for_model_with_hint,
 };
 use crate::session_telemetry::{self, SessionTelemetry};
-use crate::util::APPROX_CHARS_PER_TOKEN;
+use jcode_message_types::TokenFamily;
 use jcode_session_types::{
     ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextActionStatus,
     ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind as Kind, ContextMeter,
@@ -81,6 +81,7 @@ impl Agent {
         let tools = self.inspect_tool_definitions(&projection.messages).await;
         let (prompt, skills_chars) = self.system_prompt_with_accounting(None, true);
         let mut counts = Counts {
+            family: TokenFamily::from_model(&model),
             include_snapcompact,
             action_forecast,
             ..Counts::default()
@@ -252,6 +253,9 @@ pub(crate) fn inspect_saved(
             .iter_messages()
             .any(|message| message.role == Role::Assistant);
     let mut counts = Counts {
+        family: session
+            .model()
+            .map_or_else(TokenFamily::default, TokenFamily::from_model),
         include_snapcompact,
         ..Counts::default()
     };
@@ -344,8 +348,9 @@ pub(crate) async fn inspect_draft(
         crate::tool::load_tools::apply_deferral(&mut tools, native, loader_allowed, |_| false);
     }
     let mut counts = Counts {
-        conversation_chars: Some(0),
-        snapcompact_chars: Some(0),
+        family: TokenFamily::from_model(model),
+        conversation_tokens: Some(0),
+        snapcompact_tokens: Some(0),
         include_snapcompact,
         ..Counts::default()
     };
@@ -490,17 +495,18 @@ fn apply_occupancy(
 
 #[derive(Default)]
 struct Counts {
+    family: TokenFamily,
     include_snapcompact: bool,
     prompt_present: bool,
-    system_chars: Option<usize>,
-    skill_chars: Option<usize>,
+    system_tokens: Option<usize>,
+    skill_tokens: Option<usize>,
     builtin_tokens: Option<usize>,
     dynamic_tokens: Option<usize>,
     agent_tokens: Option<usize>,
-    conversation_chars: Option<usize>,
-    snapcompact_chars: Option<usize>,
-    dynamic_reminder_chars: usize,
-    unattributed_chars: usize,
+    conversation_tokens: Option<usize>,
+    snapcompact_tokens: Option<usize>,
+    dynamic_reminder_tokens: usize,
+    unattributed_tokens: usize,
     action_forecast: Option<ContextActionForecast>,
 }
 
@@ -511,12 +517,14 @@ impl Counts {
 
     fn prompt(&mut self, prompt: &SplitSystemPrompt, skills_chars: Option<usize>) {
         self.prompt_present = true;
-        let chars = prompt.chars();
+        // Only the section sizes are known here, not their text.
+        let tokens = self.family.tokens_for_bytes(prompt.chars());
         if let Some(skills) = skills_chars.filter(|&skills| skills <= prompt.static_part.len()) {
-            self.system_chars = Some(chars - skills);
-            self.skill_chars = Some(skills);
+            let skills = self.family.tokens_for_bytes(skills);
+            self.system_tokens = Some(tokens.saturating_sub(skills));
+            self.skill_tokens = Some(skills);
         } else {
-            self.unattributed_chars += chars;
+            self.unattributed_tokens += tokens;
         }
     }
 
@@ -538,15 +546,15 @@ impl Counts {
                 reminder_kind(text).map(|kind| ((message.timestamp, text.as_str()), kind))
             })
             .collect();
-        let mut chars = 0;
-        self.snapcompact_chars = projection.snapcompact_message_index.is_none().then_some(0);
+        let mut tokens = 0;
+        self.snapcompact_tokens = projection.snapcompact_message_index.is_none().then_some(0);
         for (index, message) in projection.messages.iter().enumerate() {
             if self.include_snapcompact && projection.snapcompact_message_index == Some(index) {
-                self.snapcompact_chars =
-                    snapcompact_known.then(|| compaction::message_char_count(message));
+                self.snapcompact_tokens = snapcompact_known
+                    .then(|| compaction::message_token_estimate(self.family, message));
                 continue;
             }
-            let size = compaction::message_char_count(message);
+            let size = compaction::message_token_estimate(self.family, message);
             let kind = match (&message.role, message.content.as_ref()) {
                 (Role::User, [ContentBlock::Text { text, .. }]) => {
                     reminder_kind(text).filter(|kind| {
@@ -557,17 +565,17 @@ impl Counts {
             };
             match kind {
                 Some(Reminder::Skill) => {
-                    if let Some(skills) = &mut self.skill_chars {
+                    if let Some(skills) = &mut self.skill_tokens {
                         *skills += size;
                     } else {
-                        self.unattributed_chars += size;
+                        self.unattributed_tokens += size;
                     }
                 }
-                Some(Reminder::Mcp) => self.dynamic_reminder_chars += size,
-                None => chars += size,
+                Some(Reminder::Mcp) => self.dynamic_reminder_tokens += size,
+                None => tokens += size,
             }
         }
-        self.conversation_chars = Some(chars);
+        self.conversation_tokens = Some(tokens);
     }
 
     fn tools(
@@ -589,11 +597,11 @@ impl Counts {
             .iter()
             .filter(|tool| !tool.defer_loading || references.contains(tool.name.as_str()))
         {
-            let tokens = tool.prompt_token_estimate();
+            let tokens = tool.prompt_token_estimate(self.family);
             if tool.name.starts_with("mcp__") || custom(&tool.name) {
                 dynamic += tokens;
             } else {
-                let instructions = crate::tool::swarm_instruction_tokens(tool);
+                let instructions = crate::tool::swarm_instruction_tokens(tool, self.family);
                 agents += instructions;
                 builtin += tokens - instructions;
             }
@@ -609,42 +617,42 @@ impl Counts {
         model: Option<String>,
         mut meter: ContextMeter,
     ) -> ContextBreakdown {
-        fn estimate(chars: usize) -> u64 {
-            if chars == 0 {
-                0
-            } else {
-                (chars / APPROX_CHARS_PER_TOKEN).max(1) as u64
-            }
-        }
         let counts = [
-            (Kind::SystemPrompt, self.system_chars.map(estimate)),
+            (
+                Kind::SystemPrompt,
+                self.system_tokens.map(|tokens| tokens as u64),
+            ),
             (
                 Kind::BuiltinTools,
                 self.builtin_tokens.map(|tokens| tokens as u64),
             ),
-            (Kind::SkillsModes, self.skill_chars.map(estimate)),
+            (
+                Kind::SkillsModes,
+                self.skill_tokens.map(|tokens| tokens as u64),
+            ),
             (
                 Kind::DynamicTools,
                 self.dynamic_tokens
-                    .map(|tokens| tokens as u64 + estimate(self.dynamic_reminder_chars)),
+                    .map(|tokens| (tokens + self.dynamic_reminder_tokens) as u64),
             ),
             (Kind::Agents, self.agent_tokens.map(|tokens| tokens as u64)),
-            (Kind::Conversation, self.conversation_chars.map(estimate)),
+            (
+                Kind::Conversation,
+                self.conversation_tokens.map(|tokens| tokens as u64),
+            ),
         ];
-        let not_attributed = estimate(
-            self.unattributed_chars
-                + if self.dynamic_tokens.is_none() {
-                    self.dynamic_reminder_chars
-                } else {
-                    0
-                },
-        );
+        let not_attributed = (self.unattributed_tokens
+            + if self.dynamic_tokens.is_none() {
+                self.dynamic_reminder_tokens
+            } else {
+                0
+            }) as u64;
         let categories: Vec<_> = counts
             .into_iter()
-            .chain(
-                self.include_snapcompact
-                    .then_some((Kind::Snapcompact, self.snapcompact_chars.map(estimate))),
-            )
+            .chain(self.include_snapcompact.then_some((
+                Kind::Snapcompact,
+                self.snapcompact_tokens.map(|tokens| tokens as u64),
+            )))
             .chain([(
                 Kind::Unattributed,
                 (not_attributed > 0).then_some(not_attributed),
@@ -656,8 +664,8 @@ impl Counts {
             .filter_map(|category| category.tokens)
             .sum::<u64>();
         let local_total = (self.prompt_present
-            && self.conversation_chars.is_some()
-            && (!self.include_snapcompact || self.snapcompact_chars.is_some())
+            && self.conversation_tokens.is_some()
+            && (!self.include_snapcompact || self.snapcompact_tokens.is_some())
             && self.builtin_tokens.is_some())
         .then_some(estimated_total);
         if meter.occupied_tokens.is_none()

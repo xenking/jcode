@@ -728,11 +728,19 @@ pub struct CompactionInfo {
     pub is_compacting: bool,
     pub compacted_messages: usize,
     pub active_messages: usize,
-    pub summary_chars: usize,
+    pub summary_tokens: usize,
     pub mode: String,
 }
 
 impl InfoWidgetData {
+    /// Tokenizer family of the displayed model, for estimates before any report.
+    pub(crate) fn token_family(&self) -> crate::message::TokenFamily {
+        self.model.as_deref().map_or_else(
+            crate::message::TokenFamily::default,
+            crate::message::TokenFamily::from_model,
+        )
+    }
+
     fn widget_disabled(kind: WidgetKind) -> bool {
         matches!(kind, WidgetKind::AmbientMode | WidgetKind::Tips)
     }
@@ -1058,7 +1066,7 @@ fn overview_footer(data: &InfoWidgetData) -> String {
             data.context_info
                 .as_ref()
                 .filter(|info| info.total_chars > 0)
-                .map(|info| info.estimated_tokens() as u64)
+                .map(|info| info.estimated_tokens(data.token_family()) as u64)
         });
     let reported =
         data.observed_context_tokens.is_some() || data.last_reported_context_tokens.is_some();

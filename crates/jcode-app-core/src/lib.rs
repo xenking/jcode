@@ -25,6 +25,8 @@ pub use jcode_base::*;
 
 // Upper layer (server / tool / agent and supporting leaves).
 pub mod advisor;
+#[cfg(test)]
+mod test_tokens;
 pub mod agent;
 pub mod ambient;
 mod ambient_directives;

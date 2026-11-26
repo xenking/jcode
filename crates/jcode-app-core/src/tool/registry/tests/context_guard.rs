@@ -31,11 +31,17 @@ async fn test_context_guard_never_spends_more_than_it_reports() {
                         compaction,
                     };
 
-                    let payload = "x".repeat(payload_tokens * 4);
+                    let payload = crate::test_tokens::text_of_tokens(
+                        crate::message::TokenFamily::default(),
+                        payload_tokens,
+                    );
                     let result = registry
                         .guard_context_overflow("test", ToolOutput::new(payload.clone()), accept)
                         .await;
-                    let returned_tokens = result.output.len() / 4;
+                    let returned_tokens = crate::message::estimate_text(
+                        crate::message::TokenFamily::default(),
+                        &result.output,
+                    );
 
                     let threshold = (budget as f32 * 0.90) as usize;
                     let headroom = threshold.saturating_sub(used);
@@ -81,7 +87,14 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
     };
 
     let result = registry
-        .guard_context_overflow("agentgrep", ToolOutput::new("x".repeat(932_000)), false)
+        .guard_context_overflow(
+            "agentgrep",
+            ToolOutput::new(crate::test_tokens::text_of_tokens(
+                crate::message::TokenFamily::default(),
+                233_000,
+            )),
+            false,
+        )
         .await;
     println!("---\n{}\n---", result.output);
 
@@ -95,7 +108,7 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
 /// Tool that returns a fixed-size payload, for exercising the guard through the
 /// real `execute()` path rather than by calling the guard directly.
 struct BigOutputTool {
-    chars: usize,
+    tokens: usize,
 }
 
 #[async_trait]
@@ -113,7 +126,10 @@ impl Tool for BigOutputTool {
     }
 
     async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        Ok(ToolOutput::new("x".repeat(self.chars)))
+        Ok(ToolOutput::new(crate::test_tokens::text_of_tokens(
+            crate::message::TokenFamily::default(),
+            self.tokens,
+        )))
     }
 }
 
@@ -139,7 +155,7 @@ async fn execute_big_output_in(session_id: &str, input: Value) -> String {
     registry
         .register(
             "big_output".to_string(),
-            Arc::new(BigOutputTool { chars: 400_000 }),
+            Arc::new(BigOutputTool { tokens: 100_000 }),
         )
         .await;
 
@@ -194,7 +210,7 @@ async fn test_execute_honors_accept_large_output_from_raw_input() {
         &output[..output.len().min(200)]
     );
     assert!(
-        output.starts_with(&"x".repeat(200)),
+        output.starts_with(&"ab ".repeat(60)),
         "opt-in must actually return payload"
     );
 }
@@ -298,7 +314,7 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
     registry
         .register(
             "big_output".to_string(),
-            Arc::new(BigOutputTool { chars: 400_000 }),
+            Arc::new(BigOutputTool { tokens: 100_000 }),
         )
         .await;
 
@@ -399,7 +415,7 @@ async fn batch_subcalls_are_guarded_with_the_session_budget() {
     registry
         .register(
             "big_output".to_string(),
-            Arc::new(BigOutputTool { chars: 30_000 }),
+            Arc::new(BigOutputTool { tokens: 7_500 }),
         )
         .await;
 
@@ -455,7 +471,7 @@ async fn a_sibling_subcall_is_not_a_repeated_withheld_call() {
     registry
         .register(
             "big_output".to_string(),
-            Arc::new(BigOutputTool { chars: 400_000 }),
+            Arc::new(BigOutputTool { tokens: 100_000 }),
         )
         .await;
 
@@ -513,7 +529,10 @@ async fn test_guard_withholds_large_output_on_a_million_token_window() {
     };
 
     // ~233k tokens: the real size of the agentgrep result that started this.
-    let output = ToolOutput::new("x".repeat(932_000));
+    let output = ToolOutput::new(crate::test_tokens::text_of_tokens(
+        crate::message::TokenFamily::default(),
+        233_000,
+    ));
     let result = registry
         .guard_context_overflow("agentgrep", output, false)
         .await;
@@ -549,7 +568,10 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
         let result = registry
             .guard_context_overflow(
                 "test",
-                ToolOutput::new("x".repeat(over_ceiling_tokens * 4)),
+                ToolOutput::new(crate::test_tokens::text_of_tokens(
+                    crate::message::TokenFamily::default(),
+                    over_ceiling_tokens,
+                )),
                 false,
             )
             .await;

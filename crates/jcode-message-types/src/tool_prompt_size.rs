@@ -1,6 +1,19 @@
 //! Count prompt-visible tool JSON without cloning schemas.
-use crate::ToolDefinition;
+use crate::{Estimator, TokenFamily, ToolDefinition};
 use serde_json::Value;
+use std::fmt::Write as _;
+
+/// Stream the compact tool JSON through the estimator, without building it.
+pub(super) fn prompt_tokens(tool: &ToolDefinition, family: TokenFamily) -> usize {
+    let mut estimator = Estimator::new(family);
+    estimator
+        .text(r#"{"name":"","description":"","input_schema":}"#)
+        .text(&tool.name)
+        .text(&tool.description);
+    // Writing to the estimator cannot fail.
+    let _ = write!(estimator, "{}", tool.input_schema);
+    estimator.tokens()
+}
 
 pub(super) fn prompt_chars(tool: &ToolDefinition) -> usize {
     b"{\"name\":,\"description\":,\"input_schema\":}".len()
@@ -75,7 +88,6 @@ mod tests {
                 tool.defer_loading = deferred;
                 let expected = legacy_chars(&tool);
                 assert_eq!(tool.prompt_chars(), expected);
-                assert_eq!(tool.prompt_token_estimate(), expected / 4);
             }
             tool.input_schema = json!({"changed": "after construction"});
             assert_eq!(tool.prompt_chars(), legacy_chars(&tool));

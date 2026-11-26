@@ -161,12 +161,13 @@ impl Provider for TwoAccountProvider {
     ) -> anyhow::Result<EventStream> {
         let on_openai = *self.on_openai.lock().unwrap();
         self.calls.lock().unwrap().push((on_openai, messages.len()));
-        self.input_chars.lock().unwrap().push(
-            messages
-                .iter()
-                .map(crate::compaction::message_char_count)
-                .sum(),
-        );
+        self.input_chars
+            .lock()
+            .unwrap()
+            .push(crate::test_tokens::request_tokens(
+                crate::message::TokenFamily::default(),
+                messages,
+            ));
         if !on_openai && !self.allow_claude_success {
             if let Some((_, error)) = &self.claude_failure {
                 anyhow::bail!("{error}");
@@ -370,13 +371,13 @@ async fn check_cold_route_switch(
         [false, true]
     );
     let sizes = provider.input_chars.lock().unwrap();
-    eprintln!("first source / first target request sizes: {sizes:?} estimated chars");
+    eprintln!("first source / first target request sizes: {sizes:?} estimated tokens");
     assert!(
-        sizes[0] > 400_000,
+        sizes[0] > 100_000,
         "initial provider requests should be large: {sizes:?}"
     );
     assert!(
-        sizes[1] < expected_bound.unwrap_or(150_000) * 4,
+        sizes[1] < expected_bound.unwrap_or(150_000),
         "first request on the target route was not compacted: {sizes:?}"
     );
     let mut events = Vec::new();

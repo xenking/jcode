@@ -22,15 +22,16 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
+pub mod token_estimate;
 mod tool_prompt_size;
+pub use token_estimate::{Estimator, TokenFamily, estimate_text};
 
 /// Tool definition advertised to model providers.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.
-    /// Approximate prompt cost: description.len() / 4. Use
-    /// ToolDefinition::description_token_estimate() when reviewing tool bloat.
+    /// Use ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
     /// Provider-native deferred loading. A deferred definition is sent in the
@@ -75,30 +76,24 @@ impl ToolDefinition {
     }
 
     /// Approximate prompt-token cost of this tool's top-level description.
-    ///
-    /// This uses jcode's standard chars/4 heuristic, matching other token
-    /// budget estimates in the codebase.
-    pub fn description_token_estimate(&self) -> usize {
-        estimate_tokens(&self.description)
+    pub fn description_token_estimate(&self, family: TokenFamily) -> usize {
+        estimate_text(family, &self.description)
     }
 
     /// Approximate prompt-token cost of the full tool definition payload.
-    pub fn prompt_token_estimate(&self) -> usize {
-        self.prompt_chars() / 4
+    pub fn prompt_token_estimate(&self, family: TokenFamily) -> usize {
+        tool_prompt_size::prompt_tokens(self, family)
     }
 
     pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
         defs.iter().map(Self::prompt_chars).sum()
     }
 
-    pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition]) -> usize {
-        defs.iter().map(Self::prompt_token_estimate).sum()
+    pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition], family: TokenFamily) -> usize {
+        defs.iter()
+            .map(|def| def.prompt_token_estimate(family))
+            .sum()
     }
-}
-
-fn estimate_tokens(s: &str) -> usize {
-    const APPROX_CHARS_PER_TOKEN: usize = 4;
-    s.len() / APPROX_CHARS_PER_TOKEN
 }
 
 /// Role in conversation

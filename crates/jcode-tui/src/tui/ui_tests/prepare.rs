@@ -914,7 +914,7 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
     };
     let final_message = DisplayMessage {
         role: "tool".to_string(),
-        content: "x".repeat(7_600),
+        content: crate::test_tokens::text_of_tokens(1_900),
         tool_calls: vec![],
         duration_secs: None,
         title: None,
@@ -946,7 +946,10 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         .collect();
 
     assert!(
-        first_rendered.iter().any(|line| line.contains("1 tok")),
+        first_rendered.iter().any(|line| line.contains(&format!(
+            "{} tok",
+            crate::message::estimate_text(crate::message::TokenFamily::default(), "pending")
+        ))),
         "expected initial render to reflect placeholder tool output: {first_rendered:?}"
     );
     assert!(

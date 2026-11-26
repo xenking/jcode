@@ -356,11 +356,20 @@ fn estimates_tokens_with_large_budget_overhead() {
         covers_up_to_turn: 1,
         original_turn_count: 1,
     };
-
-    assert_eq!(estimate_compaction_tokens(Some(&summary), 0, 1000), 100);
-    assert_eq!(
-        estimate_compaction_tokens(Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
-        100 + SYSTEM_OVERHEAD_TOKENS
+    let small = estimate_compaction_tokens(TokenFamily::Generic, Some(&summary), 0, 1000);
+    assert!(small > 0);
+    // The system prompt and tools only count against a real context window,
+    // and the overhead is the family's own.
+    for family in [TokenFamily::Generic, TokenFamily::Anthropic] {
+        let summary_only = estimate_compaction_tokens(family, Some(&summary), 0, 1000);
+        assert_eq!(
+            estimate_compaction_tokens(family, Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
+            summary_only + family.system_overhead_tokens()
+        );
+    }
+    assert_ne!(
+        TokenFamily::Anthropic.system_overhead_tokens(),
+        TokenFamily::OpenAi.system_overhead_tokens()
     );
 }
 
@@ -377,21 +386,20 @@ fn image_token_cost_is_bounded_not_base64_length() {
     }]
     .into();
 
-    let chars = message_char_count(&image_msg);
-    // Flat per-image cost in char-equivalents, far below the raw payload.
-    assert_eq!(chars, IMAGE_TOKEN_COST * CHARS_PER_TOKEN);
+    // Flat per-image cost, far below the raw payload.
+    let family = TokenFamily::Generic;
+    let image_tokens = message_token_estimate(family, &image_msg);
+    assert_eq!(image_tokens, IMAGE_TOKEN_COST);
     assert!(
-        chars < huge_base64.len() / 10,
+        image_tokens < huge_base64.len() / 100,
         "image should not be charged anywhere near its base64 length"
     );
 
     // The token estimate for four such images stays small.
-    let tokens = estimate_compaction_tokens_from_chars(chars * 4, DEFAULT_TOKEN_BUDGET);
-    assert!(
-        tokens < SYSTEM_OVERHEAD_TOKENS + 4 * IMAGE_TOKEN_COST + 10,
-        "four images should cost ~{} tokens, got {}",
-        SYSTEM_OVERHEAD_TOKENS + 4 * IMAGE_TOKEN_COST,
-        tokens
+    let tokens = estimate_compaction_tokens(family, None, image_tokens * 4, DEFAULT_TOKEN_BUDGET);
+    assert_eq!(
+        tokens,
+        family.system_overhead_tokens() + 4 * IMAGE_TOKEN_COST
     );
 }
 
@@ -411,7 +419,7 @@ fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
         ..Message::user("")
     };
     let cost = 1932 * 1920 / 750;
-    assert_eq!(message_char_count(&image), cost * CHARS_PER_TOKEN);
+    assert_eq!(message_token_estimate(TokenFamily::Generic, &image), cost);
     let summary = Summary {
         text: String::new(),
         openai_encrypted_content: None,
@@ -428,8 +436,8 @@ fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
         original_turn_count: 0,
     };
     assert_eq!(
-        summary_payload_char_count(&summary),
-        cost * CHARS_PER_TOKEN * SNAPCOMPACT_REQUEST_PAGE_LIMIT
+        summary_payload_tokens(TokenFamily::Generic, &summary),
+        cost * SNAPCOMPACT_REQUEST_PAGE_LIMIT
     );
 }
 
@@ -470,8 +478,8 @@ fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
         original_turn_count: 229,
     };
     assert_eq!(
-        estimate_compaction_tokens(Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
-        OPENAI_COMPACTION_TOKEN_COST + SYSTEM_OVERHEAD_TOKENS
+        estimate_compaction_tokens(TokenFamily::OpenAi, Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
+        OPENAI_COMPACTION_TOKEN_COST + TokenFamily::OpenAi.system_overhead_tokens()
     );
 
     let mut msg = Message::user("");
@@ -480,8 +488,8 @@ fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
     }]
     .into();
     assert_eq!(
-        message_char_count(&msg),
-        OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN
+        message_token_estimate(TokenFamily::OpenAi, &msg),
+        OPENAI_COMPACTION_TOKEN_COST
     );
 }
 

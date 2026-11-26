@@ -71,6 +71,7 @@ async fn fixture_with_provider(
     tool_tokens: usize,
     provider: Arc<dyn Provider>,
 ) -> (TestHome, Agent, usize) {
+    let family = crate::message::TokenFamily::from_model(&provider.model());
     let home = TestHome(std::env::var_os("JCODE_HOME"), tempfile::tempdir().unwrap());
     crate::env::set_var("JCODE_HOME", home.1.path());
     std::fs::write(
@@ -102,7 +103,7 @@ reactive_threshold_tokens = 900000
         vec![ContentBlock::Text {
             // Shake cannot remove prose. Even after eliding tool outputs the
             // context remains above 200K, requiring a completed compaction.
-            text: "p".repeat(prose_tokens * 4),
+            text: crate::test_tokens::text_of_tokens(family, prose_tokens),
             cache_control: None,
         }],
     );
@@ -121,7 +122,7 @@ reactive_threshold_tokens = 900000
             Role::User,
             vec![ContentBlock::ToolResult {
                 tool_use_id: id,
-                content: "x".repeat(tool_tokens * 4),
+                content: crate::test_tokens::text_of_tokens(family, tool_tokens),
                 is_error: None,
             }],
         );
@@ -531,15 +532,15 @@ async fn prompt_arriving_during_idle_fold_joins_it_without_shaking() {
 async fn cold_request(configured_ttl: u64) {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(configured_ttl, 315_000, 5_000).await;
-    assert!((430_000..440_000).contains(&before), "fixture: {before}");
+    // 315k prose + 100k tool output + the family's system overhead and per-call framing.
+    assert!((430_000..460_000).contains(&before), "fixture: {before}");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::stream_batching::BatchingSender::new(tx, agent.session_id().into());
     let (_, _, outgoing) = agent.prepare_stream_request(&tx).await.unwrap();
-    let after = outgoing
-        .iter()
-        .map(crate::compaction::message_char_count)
-        .sum::<usize>()
-        / crate::compaction::CHARS_PER_TOKEN;
+    let after = crate::test_tokens::request_tokens(
+        crate::message::TokenFamily::from_model(&agent.provider_model()),
+        &outgoing,
+    );
     assert!(
         after < 200_000,
         "cold request escaped before compaction: {before} -> {after}"
@@ -571,11 +572,10 @@ async fn one_cold_cache_runs_one_compaction() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 250_000, 9_000).await;
     let (outgoing, _) = agent.messages_for_provider(None).await.unwrap();
-    let after = outgoing
-        .iter()
-        .map(crate::compaction::message_char_count)
-        .sum::<usize>()
-        / crate::compaction::CHARS_PER_TOKEN;
+    let after = crate::test_tokens::request_tokens(
+        crate::message::TokenFamily::from_model(&agent.provider_model()),
+        &outgoing,
+    );
     assert!(before > 400_000 && after < 200_000, "{before} -> {after}");
     assert_eq!(
         compaction_dividers(&agent),
@@ -607,11 +607,10 @@ async fn daemon_cold_cache_shake_alone_avoids_background_compaction() {
         "the shake divider must be persisted: {:?}",
         shake_dividers(&agent)
     );
-    let after = outgoing
-        .iter()
-        .map(crate::compaction::message_char_count)
-        .sum::<usize>()
-        / crate::compaction::CHARS_PER_TOKEN;
+    let after = crate::test_tokens::request_tokens(
+        crate::message::TokenFamily::from_model(&agent.provider_model()),
+        &outgoing,
+    );
     assert!(before > 400_000 && after < 60_000, "{before} -> {after}");
     assert!(!agent.is_compacting_now());
     eprintln!("cold-cache shake-only outgoing tokens: {before} -> {after}");
@@ -633,11 +632,10 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
 
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none(), "a shake is not a background compaction");
-    let after = outgoing
-        .iter()
-        .map(crate::compaction::message_char_count)
-        .sum::<usize>()
-        / crate::compaction::CHARS_PER_TOKEN;
+    let after = crate::test_tokens::request_tokens(
+        crate::message::TokenFamily::from_model(&agent.provider_model()),
+        &outgoing,
+    );
     assert!(before > 400_000 && after < 60_000, "{before} -> {after}");
     assert!(
         shake_dividers(&agent).contains(&"shake_cache_expiry".to_string()),
@@ -1064,6 +1062,12 @@ async fn the_cold_cache_notice_estimates_prompt_size_without_claiming_cache_writ
     }
     assert_eq!(dividers.len(), 1, "{dividers:?}");
     let (label, detail) = dividers[0].split_once("\n\n").unwrap();
-    assert_eq!(label, format!("cache cold · ~{}k prompt", last_request / 1_000));
-    assert!(detail.contains("Cache writes are not confirmed"), "{detail}");
+    assert_eq!(
+        label,
+        format!("cache cold · ~{}k prompt", last_request / 1_000)
+    );
+    assert!(
+        detail.contains("Cache writes are not confirmed"),
+        "{detail}"
+    );
 }

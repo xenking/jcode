@@ -365,7 +365,11 @@ impl App {
             // Count stats before restoring
             let mut user_turns = 0;
             let mut assistant_turns = 0;
-            let mut total_chars = 0;
+            let mut estimated_tokens = 0;
+            let family = session.model().map_or_else(
+                crate::message::TokenFamily::default,
+                crate::message::TokenFamily::from_model,
+            );
 
             for item in jcode_tui_messages::display_messages_from_rendered_messages(
                 crate::session::render_messages(&session),
@@ -375,7 +379,7 @@ impl App {
                 } else if item.role == "assistant" {
                     assistant_turns += 1;
                 }
-                total_chars += item.content.len();
+                estimated_tokens += crate::message::estimate_text(family, &item.content);
 
                 self.push_display_message(item);
             }
@@ -445,7 +449,6 @@ impl App {
 
             // Build stats message
             let total_turns = user_turns + assistant_turns;
-            let estimated_tokens = total_chars / 4; // Rough estimate: ~4 chars per token
             let stats = if total_turns > 0 {
                 format!(
                     " ({} turns, ~{}k tokens)",

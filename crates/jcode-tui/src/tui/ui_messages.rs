@@ -922,7 +922,7 @@ fn swarm_notification_token_count(content: &str) -> usize {
     let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
         .map(|parsed| parsed.body)
         .unwrap_or(content);
-    crate::util::estimate_tokens(body.trim())
+    crate::message::estimate_text(crate::message::TokenFamily::default(), body.trim())
 }
 
 #[path = "ui_messages/cards/swarm_cards.rs"]
@@ -955,7 +955,7 @@ struct ToolOutputTokenBadge {
 }
 
 fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
-    let tokens = crate::util::estimate_tokens(content);
+    let tokens = crate::message::estimate_text(crate::message::TokenFamily::default(), content);
     token_badge_for_count(tokens)
 }
 

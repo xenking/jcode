@@ -862,7 +862,7 @@ pub(super) fn render_tool_message_keeps_error_summary_when_details_hidden() {
 pub(super) fn render_tool_message_shows_token_badge() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
-        content: "x".repeat(7_600),
+        content: crate::test_tokens::text_of_tokens(1_900),
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,

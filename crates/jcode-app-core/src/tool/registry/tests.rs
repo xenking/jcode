@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::message::{Message, ToolDefinition};
+use crate::message::{Message, TokenFamily, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -582,25 +582,28 @@ async fn print_tool_definition_token_report() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     let mut defs = registry.definitions(None).await;
-    defs.sort_by_key(|def| std::cmp::Reverse(def.prompt_token_estimate()));
+    defs.sort_by_key(|def| std::cmp::Reverse(def.prompt_token_estimate(TokenFamily::default())));
 
     println!("name,total_tokens,description_tokens");
     for def in defs {
         println!(
             "{},{},{}",
             def.name,
-            def.prompt_token_estimate(),
-            def.description_token_estimate()
+            def.prompt_token_estimate(TokenFamily::default()),
+            def.description_token_estimate(TokenFamily::default())
         );
     }
 }
 
 /// Tool descriptions are always-on prompt cost, so they are capped at ~20
-/// estimated tokens. Behavioral guidance belongs in parameter descriptions.
+/// tokens (83 bytes). Behavioral guidance belongs in parameter descriptions.
 /// Exemptions must be justified inline.
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
-    const DESCRIPTION_TOKEN_CAP: usize = 20;
+    // A length policy: the longest description that counted as 20 tokens on the
+    // old bytes/4 rule. Kept as bytes so it does
+    // not loosen or tighten when the token estimator is recalibrated.
+    const DESCRIPTION_BYTE_CAP: usize = 83;
     // swarm appends the user-tunable swarm-prompt.md by design.
     // batch carries a deliberate parallel-call example (2f4abae33, pinned by
     // batch_tests::description_includes_parallel_tool_call_example).
@@ -637,19 +640,19 @@ async fn tool_descriptions_stay_under_token_cap() {
         .await
         .into_iter()
         .filter(|def| !EXEMPT.contains(&def.name.as_str()))
-        .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
+        .filter(|def| def.description.len() > DESCRIPTION_BYTE_CAP)
         .map(|def| {
             format!(
-                "{} (~{} tokens): {}",
+                "{} ({} bytes): {}",
                 def.name,
-                def.description_token_estimate(),
+                def.description.len(),
                 def.description
             )
         })
         .collect();
     assert!(
         over_cap.is_empty(),
-        "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        "tool descriptions over the {DESCRIPTION_BYTE_CAP}-byte cap:\n{}",
         over_cap.join("\n")
     );
 }
@@ -712,7 +715,9 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 /// the gate continuation messages in jcode-base::todo).
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
-    const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // A length policy: the longest description that counted as 25 tokens on the
+    // old bytes/4 rule, kept as bytes so a recalibrated estimator does not change what passes.
+    const PARAM_DESCRIPTION_BYTE_CAP: usize = 103;
     // The feedback-loop relevance rubric defines every enum state inline
     // (abb0baabc, d21916db5) and todo::tests pins each concept, so it is
     // deliberately longer than the cap.
@@ -747,20 +752,20 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         let mut descriptions = Vec::new();
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
-            let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP
+            let bytes = description.len();
+            if bytes > PARAM_DESCRIPTION_BYTE_CAP
                 && !EXEMPT.contains(&(def.name.as_str(), path.as_str()))
             {
                 over_cap.push(format!(
-                    "{} {} (~{} tokens): {}",
-                    def.name, path, tokens, description
+                    "{} {} ({} bytes): {}",
+                    def.name, path, bytes, description
                 ));
             }
         }
     }
     assert!(
         over_cap.is_empty(),
-        "{} parameter descriptions over the {PARAM_DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        "{} parameter descriptions over the {PARAM_DESCRIPTION_BYTE_CAP}-byte cap:\n{}",
         over_cap.len(),
         over_cap.join("\n")
     );
@@ -984,7 +989,10 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
         compaction,
     };
 
-    let output = ToolOutput::new("x".repeat(360_000)); // ~90k tokens
+    let output = ToolOutput::new(crate::test_tokens::text_of_tokens(
+        crate::message::TokenFamily::default(),
+        90_000,
+    ));
     let result = registry.guard_context_overflow("test", output, false).await;
 
     assert!(result.output.contains("OUTPUT WITHHELD"));

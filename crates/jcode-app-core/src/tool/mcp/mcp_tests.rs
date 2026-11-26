@@ -429,7 +429,7 @@ fn search_results_fit_the_budget_adaptively() {
     let (out, detailed) =
         fit_search_results(&medium, SEARCH_TOKEN_BUDGET).expect("serializable search results");
     assert_eq!(detailed, 10);
-    assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET);
+    assert!(crate::mcp::budget::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET);
     assert!(!out.contains("more matches"));
 
     // Far over budget: leading matches keep detail, the rest are named.
@@ -439,7 +439,7 @@ fn search_results_fit_the_budget_adaptively() {
     assert!(detailed > 0 && detailed < 400, "{detailed}");
     assert!(out.contains(&format!("{} more matches", 400 - detailed)));
     assert!(out.contains("mcp__s__tool_399"));
-    assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET + 2_000);
+    assert!(crate::mcp::budget::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET + 2_000);
 
     // Opting in returns everything.
     let (_, detailed) =

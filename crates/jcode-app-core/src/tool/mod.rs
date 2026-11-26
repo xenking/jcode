@@ -624,11 +624,6 @@ impl Registry {
         jcode_tool_types::resolve_tool_name(name)
     }
 
-    /// Estimate token count for a string (chars / 4, matching compaction heuristic)
-    fn estimate_tokens(s: &str) -> usize {
-        crate::util::estimate_tokens(s)
-    }
-
     /// Maximum fraction of context budget a single tool output may occupy.
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
@@ -1007,9 +1002,10 @@ impl Registry {
         if budget == 0 {
             return output;
         }
+        let family = compaction.token_family();
 
         let current_tokens = compaction.effective_token_count();
-        let output_tokens = Self::estimate_tokens(&output.output);
+        let output_tokens = jcode_message_types::estimate_text(family, &output.output);
 
         // Check 1: Would adding this output push us over the safety threshold?
         let projected = current_tokens + output_tokens;
@@ -1063,10 +1059,7 @@ impl Registry {
         // How much of this output the remaining context could absorb.
         let max_tokens = (threshold_tokens - current_tokens).min(single_max_tokens);
 
-        // Convert token limit back to approximate character limit
-        let max_chars = max_tokens * 4;
-
-        if output.output.len() <= max_chars {
+        if output_tokens <= max_tokens {
             return output;
         }
 
@@ -1107,13 +1100,13 @@ impl Registry {
             (current_tokens as f32 / budget as f32) * 100.0,
         ));
 
-        // Truncate the output, keeping the beginning (usually most relevant)
-        // Keep the beginning, which is usually the most relevant part, and leave
-        // headroom for the notice itself. `max_chars` is at least 800 here: the
-        // exhaustion check above already returned for anything tighter.
-        let kept = &output.output[..output
-            .output
-            .floor_char_boundary(max_chars.saturating_sub(150))];
+        // Truncate the output, keeping the beginning (usually the most relevant
+        // part) and leaving headroom for the notice itself. The exhaustion check
+        // above already returned when no room is left, and the subtraction
+        // saturates.
+        const NOTICE_TOKENS: usize = 40;
+        let kept = &output.output
+            [..family.prefix_within(&output.output, max_tokens.saturating_sub(NOTICE_TOKENS))];
         let truncated = format!(
             "{}\n\n⚠️ OUTPUT TRUNCATED: you passed accept_large_output, so this ~{:.0}k \
              token result was returned truncated instead of withheld \

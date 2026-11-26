@@ -839,7 +839,7 @@ fn parse_background_task_progress_notification_supports_legacy_inline_layout() -
 }
 
 #[test]
-fn description_token_estimate_uses_chars_per_token_heuristic() {
+fn description_token_estimate_follows_the_family() {
     let def = ToolDefinition {
         name: "read".to_string(),
         description: "abcdwxyz".to_string(),
@@ -847,7 +847,10 @@ fn description_token_estimate_uses_chars_per_token_heuristic() {
         defer_loading: false,
     };
 
-    assert_eq!(def.description_token_estimate(), 2);
+    let claude = def.description_token_estimate(crate::message::TokenFamily::Anthropic);
+    let gpt = def.description_token_estimate(crate::message::TokenFamily::OpenAi);
+    assert!(claude > 0 && gpt > 0);
+    assert!(claude > gpt, "the same text is more tokens for Claude");
 }
 
 #[test]

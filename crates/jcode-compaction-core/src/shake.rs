@@ -25,9 +25,9 @@
 //!   and already-elided regions are never re-elided, so shaking is idempotent:
 //!   a second call on a shaken log returns `NoChange` and leaves bytes equal.
 //!
-//! Token counts use the `chars / 4` heuristic.
+//! Token counts come from the family estimator in `jcode_message_types`.
 
-use jcode_message_types::{ContentBlock, Message};
+use jcode_message_types::{ContentBlock, Message, TokenFamily, estimate_text};
 use std::collections::HashMap;
 
 /// Prefix shared by every shake placeholder. Used to detect already-elided
@@ -55,6 +55,8 @@ pub struct ShakeConfig {
     pub code_blocks: bool,
     /// Tool names whose results are never elided.
     pub protected_tools: &'static [&'static str],
+    /// Tokenizer family the token thresholds are measured in.
+    pub family: TokenFamily,
 }
 
 impl Default for ShakeConfig {
@@ -67,6 +69,7 @@ impl Default for ShakeConfig {
             min_savings_tokens: 4_000,
             code_blocks: true,
             protected_tools: PROTECTED_TOOLS_DEFAULT,
+            family: TokenFamily::Generic,
         }
     }
 }
@@ -81,6 +84,7 @@ impl ShakeConfig {
             min_savings_tokens: 0,
             code_blocks: true,
             protected_tools: PROTECTED_TOOLS_DEFAULT,
+            family: TokenFamily::Generic,
         }
     }
 
@@ -113,32 +117,16 @@ impl ShakeOutcome {
     }
 }
 
-#[inline]
-fn estimate_tokens(text: &str) -> usize {
-    text.chars().count() / 4
-}
-
-fn estimate_block_tokens(block: &ContentBlock) -> usize {
-    match block {
-        ContentBlock::Text { text, .. }
-        | ContentBlock::Reasoning { text }
-        | ContentBlock::ReasoningTrace { text } => estimate_tokens(text),
-        ContentBlock::AnthropicThinking { thinking, .. } => estimate_tokens(thinking),
-        ContentBlock::ToolResult { content, .. } => estimate_tokens(content),
-        ContentBlock::ToolUse { name, input, .. } => {
-            estimate_tokens(name) + input.to_string().len() / 4 + 12
-        }
-        ContentBlock::Image { .. } => 8,
-        _ => 10,
-    }
-}
-
-fn estimate_message_tokens(message: &Message) -> usize {
-    message.content.iter().map(estimate_block_tokens).sum()
+fn estimate_message_tokens(family: TokenFamily, message: &Message) -> usize {
+    crate::content_token_estimate(family, &message.content)
 }
 
 /// Index of the first protected message. Messages `[..boundary]` are eligible.
-fn find_protect_boundary(messages: &[Message], protect_window_tokens: usize) -> usize {
+fn find_protect_boundary(
+    messages: &[Message],
+    protect_window_tokens: usize,
+    family: TokenFamily,
+) -> usize {
     if protect_window_tokens == 0 {
         return messages.len();
     }
@@ -147,7 +135,8 @@ fn find_protect_boundary(messages: &[Message], protect_window_tokens: usize) -> 
         if accumulated_after >= protect_window_tokens {
             return idx + 1;
         }
-        accumulated_after = accumulated_after.saturating_add(estimate_message_tokens(message));
+        accumulated_after =
+            accumulated_after.saturating_add(estimate_message_tokens(family, message));
     }
     0
 }
@@ -163,28 +152,28 @@ fn short_hash(text: &str) -> String {
     format!("{:08x}", (h >> 32) as u32)
 }
 
-pub fn tool_result_placeholder(tool: &str, content: &str) -> String {
+pub fn tool_result_placeholder(family: TokenFamily, tool: &str, content: &str) -> String {
     format!(
         "{SHAKE_PLACEHOLDER_PREFIX}tool_result {tool} ~{} tokens, hash:{}; re-run tool to view]",
-        estimate_tokens(content),
+        estimate_text(family, content),
         short_hash(content)
     )
 }
 
-fn xml_block_placeholder(slice: &str) -> String {
+fn xml_block_placeholder(family: TokenFamily, slice: &str) -> String {
     format!(
         "{SHAKE_PLACEHOLDER_PREFIX}xml block {} lines ~{} tokens, hash:{}]",
         slice.lines().count(),
-        estimate_tokens(slice),
+        estimate_text(family, slice),
         short_hash(slice)
     )
 }
 
-fn code_block_placeholder(body: &str) -> String {
+fn code_block_placeholder(family: TokenFamily, body: &str) -> String {
     format!(
         "```\n{SHAKE_PLACEHOLDER_PREFIX}code block {} lines ~{} tokens, hash:{}]\n```",
         body.lines().count(),
-        estimate_tokens(body),
+        estimate_text(family, body),
         short_hash(body)
     )
 }
@@ -359,7 +348,7 @@ fn collect_candidates(
                     if is_protected(tool_calls.get(tool_use_id.as_str()), config.protected_tools) {
                         continue;
                     }
-                    let tokens = estimate_tokens(content);
+                    let tokens = estimate_text(config.family, content);
                     if tokens < config.min_elidable_tokens {
                         continue;
                     }
@@ -367,7 +356,7 @@ fn collect_candidates(
                         .get(tool_use_id.as_str())
                         .map(|(name, _)| *name)
                         .unwrap_or("tool");
-                    let placeholder = tool_result_placeholder(tool, content);
+                    let placeholder = tool_result_placeholder(config.family, tool, content);
                     let s = tokens.saturating_sub(PLACEHOLDER_TOKEN_ESTIMATE);
                     if s == 0 {
                         continue;
@@ -385,7 +374,7 @@ fn collect_candidates(
                         if slice.trim_start().starts_with(SHAKE_PLACEHOLDER_PREFIX) {
                             continue;
                         }
-                        let tokens = estimate_tokens(slice);
+                        let tokens = estimate_text(config.family, slice);
                         if tokens < config.min_elidable_tokens {
                             continue;
                         }
@@ -399,9 +388,9 @@ fn collect_candidates(
                                     .filter(|at| *at > body_start)
                                     .or_else(|| slice.rfind("~~~").filter(|at| *at > body_start))
                                     .unwrap_or(slice.len());
-                                code_block_placeholder(&slice[body_start..body_end])
+                                code_block_placeholder(config.family, &slice[body_start..body_end])
                             }
-                            BlockKind::Xml => xml_block_placeholder(slice),
+                            BlockKind::Xml => xml_block_placeholder(config.family, slice),
                         };
                         let s = tokens.saturating_sub(PLACEHOLDER_TOKEN_ESTIMATE);
                         if s == 0 {
@@ -426,12 +415,12 @@ fn collect_candidates(
 
 /// Estimate how many tokens [`shake`] would recover, without mutating.
 pub fn shake_savings(messages: &[Message], config: &ShakeConfig) -> usize {
-    let boundary = find_protect_boundary(messages, config.protect_window_tokens);
+    let boundary = find_protect_boundary(messages, config.protect_window_tokens, config.family);
     collect_candidates(messages, boundary, config).1
 }
 
 fn plan(messages: &[Message], config: &ShakeConfig) -> (Vec<Candidate>, ShakeOutcome) {
-    let boundary = find_protect_boundary(messages, config.protect_window_tokens);
+    let boundary = find_protect_boundary(messages, config.protect_window_tokens, config.family);
     let (candidates, saved) = collect_candidates(messages, boundary, config);
     if candidates.is_empty() || saved < config.min_savings_tokens {
         return (Vec::new(), ShakeOutcome::NoChange);
