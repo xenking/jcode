@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from check_test_isolation import feature_closure, violations
+from check_test_isolation import feature_closure, runtime_dir_violations, violations
 
 
 def dependency(name, kind=None, features=(), optional=False, target=None, rename=None):
@@ -23,6 +23,40 @@ def fixture():
                    dependencies=[dependency("jcode-storage")])
     app = package("app", dependencies=[dependency("jcode-base"), dependency("jcode-base", "dev", ["test-support"])])
     return dict(packages=[base, app, storage], workspace_members=["jcode-base", "app", "jcode-storage"])
+
+
+RUNTIME_SOURCE = """
+pub fn user_runtime_dir() -> PathBuf {
+    if let Some(dir) = test_runtime_dir() {
+        return dir;
+    }
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+    darwin_user_temp_dir()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_runtime_dir() -> Option<PathBuf> {
+    Some(isolated_test_runtime_dir().to_path_buf())
+}
+"""
+
+
+class RuntimeDirIsolationTests(unittest.TestCase):
+    def test_isolated_runtime_dir_passes(self):
+        self.assertEqual(runtime_dir_violations(RUNTIME_SOURCE), [])
+
+    def test_test_builds_reaching_the_real_runtime_dir_fail(self):
+        unguarded = RUNTIME_SOURCE.replace("test_runtime_dir() {\n        return dir;", "never() {\n        return dir;")
+        self.assertIn("before resolving the real", "\n".join(runtime_dir_violations(unguarded)))
+        late = RUNTIME_SOURCE.replace("if let Some(dir) = test_runtime_dir() {\n        return dir;\n    }\n", "").replace(
+            "    darwin_user_temp_dir()", "    if let Some(dir) = test_runtime_dir() { return dir; }\n    darwin_user_temp_dir()")
+        self.assertIn("before resolving the real", "\n".join(runtime_dir_violations(late)))
+
+    def test_old_resolver_without_isolation_fails(self):
+        old = "pub fn user_runtime_dir() -> PathBuf {\n    if let Ok(d) = std::env::var(\"XDG_RUNTIME_DIR\") { return d.into(); }\n    real()\n}\n"
+        self.assertTrue(runtime_dir_violations(old))
 
 
 class TestIsolationTests(unittest.TestCase):

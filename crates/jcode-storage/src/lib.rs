@@ -89,7 +89,7 @@ pub use active_pids::{
     unregister_active_pid, user_session_counts, user_session_presence,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use test_home::isolated_test_home;
+pub use test_home::{isolated_test_home, isolated_test_runtime_dir};
 
 mod session_lease;
 pub use session_lease::{
@@ -113,7 +113,8 @@ pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
 ///   own, so `$TMPDIR` would split one user into several daemons.
 /// - Fallback: `std::env::temp_dir()`
 ///
-/// Can be overridden with `$JCODE_RUNTIME_DIR`.
+/// Can be overridden with `$JCODE_RUNTIME_DIR`. A test build with no override
+/// gets [`isolated_test_runtime_dir`], never the machine's real one.
 pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
         return PathBuf::from(dir);
@@ -123,6 +124,9 @@ pub fn runtime_dir() -> PathBuf {
 
 /// Default runtime directory, independent of daemon-specific overrides.
 pub fn user_runtime_dir() -> PathBuf {
+    if let Some(dir) = test_runtime_dir() {
+        return dir;
+    }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
@@ -139,6 +143,16 @@ pub fn user_runtime_dir() -> PathBuf {
     let dir = fallback_runtime_dir();
     ensure_private_runtime_dir(&dir);
     dir
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_runtime_dir() -> Option<PathBuf> {
+    Some(isolated_test_runtime_dir().to_path_buf())
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn test_runtime_dir() -> Option<PathBuf> {
+    None
 }
 
 /// The Darwin per-user temp dir is fixed for the life of the process, while

@@ -760,7 +760,6 @@ mod runtime_context_tests {
             .env("JCODE_CONTEXT_TEST_HOME", &home)
             .env("JCODE_CONTEXT_TEST_RUNTIME", &runtime_dir)
             .env("JCODE_CONTEXT_TEST_JCODE_HOME", &jcode_home)
-            .env("JCODE_CONTEXT_TEST_XDG_RUNTIME", &xdg_runtime_dir)
             .env("JCODE_CONTEXT_TEST_API_SOCKET", &api_socket);
         if mode == "custom" {
             command
@@ -811,8 +810,6 @@ mod runtime_context_tests {
             std::env::var("JCODE_CONTEXT_TEST_JCODE_HOME").expect("isolated jcode home");
         let runtime_dir =
             std::env::var("JCODE_CONTEXT_TEST_RUNTIME").expect("isolated runtime dir");
-        let xdg_runtime_dir =
-            std::env::var("JCODE_CONTEXT_TEST_XDG_RUNTIME").expect("isolated XDG runtime dir");
         let api_socket =
             std::env::var("JCODE_CONTEXT_TEST_API_SOCKET").expect("isolated API socket");
         let socket = std::path::Path::new(&home).join("connected socket/it's 🧪.sock");
@@ -827,15 +824,14 @@ mod runtime_context_tests {
             assert_eq!(value(&context, "JCODE_API_SOCKET"), None);
             assert_eq!(value(&context, "JCODE_NO_AUTO_UPDATE"), None);
         } else {
-            // The default context must name the home the process really uses;
-            // a test build keeps that outside the developer's real ~/.jcode.
+            // The default context must name the home and runtime dir the process
+            // really uses; a test build keeps both outside the developer's real ones.
             let expected_home = crate::storage::jcode_dir().expect("jcode home");
             let expected_home = expected_home.to_str().expect("utf-8 jcode home");
+            let expected_runtime = crate::storage::runtime_dir();
+            let expected_runtime = expected_runtime.to_str().expect("utf-8 runtime dir");
             assert_eq!(value(&context, "JCODE_HOME"), Some(expected_home));
-            assert_eq!(
-                value(&context, "JCODE_RUNTIME_DIR"),
-                Some(xdg_runtime_dir.as_str())
-            );
+            assert_eq!(value(&context, "JCODE_RUNTIME_DIR"), Some(expected_runtime));
             assert_eq!(
                 value(&context, "JCODE_API_SOCKET"),
                 Some(api_socket.as_str())

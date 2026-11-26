@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -98,6 +99,34 @@ def violations(metadata: dict) -> list[str]:
     return errors
 
 
+STORAGE_LIB = "crates/jcode-storage/src/lib.rs"
+
+
+def runtime_dir_violations(source: str) -> list[str]:
+    """`runtime_dir()` is the real per-user dir that the daemon's sockets share.
+
+    Tests that forgot JCODE_RUNTIME_DIR left hundreds of ledger/state files there,
+    so test and test-support builds must resolve it to an isolated dir first,
+    before $XDG_RUNTIME_DIR or the Darwin temp dir are consulted.
+    """
+    body = re.search(r"pub fn user_runtime_dir\(\) -> PathBuf \{(.*?)\n\}", source, re.S)
+    if body is None:
+        return [f"{STORAGE_LIB}: user_runtime_dir is missing; restore the runtime-dir isolation owner"]
+    body = body.group(1)
+    guard = body.find("test_runtime_dir()")
+    real = [i for i in (body.find("XDG_RUNTIME_DIR"), body.find("darwin_user_temp_dir")) if i >= 0]
+    errors = []
+    if guard < 0 or (real and min(real) < guard):
+        errors.append(
+            f"{STORAGE_LIB}: user_runtime_dir must return test_runtime_dir() before resolving the real "
+            "per-user runtime dir, or tests write into the daemon's runtime directory"
+        )
+    if not re.search(r'cfg\(any\(test, feature = "test-support"\)\)\]\s*fn test_runtime_dir\(\) -> Option<PathBuf> \{\s*Some\(',
+                     source):
+        errors.append(f"{STORAGE_LIB}: test and test-support builds must resolve test_runtime_dir() to Some(isolated dir)")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT, help="source tree to check (also accepts a git archive)")
@@ -110,6 +139,7 @@ def main() -> int:
         print(result.stderr, file=sys.stderr)
         return result.returncode
     errors = violations(json.loads(result.stdout))
+    errors += runtime_dir_violations((args.root / STORAGE_LIB).read_text())
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     if errors:
