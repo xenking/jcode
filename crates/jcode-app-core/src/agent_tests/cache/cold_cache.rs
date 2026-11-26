@@ -1027,7 +1027,7 @@ async fn a_cold_cache_does_not_shake_for_a_few_percent() {
 /// own count lived in memory and did not survive the restart. The restored
 /// cache checkpoint still holds the last request's real size.
 #[tokio::test]
-async fn the_cold_cache_notice_reports_the_whole_prompt_after_a_restart() {
+async fn the_cold_cache_notice_estimates_prompt_size_without_claiming_cache_writes() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 100_000, 1_200).await;
     let last_request = before as u64 + 40_000;
@@ -1062,11 +1062,8 @@ async fn the_cold_cache_notice_reports_the_whole_prompt_after_a_restart() {
             dividers.extend(divider);
         }
     }
-    let expected = format!("cache cold · {}k re-cached", last_request / 1_000);
     assert_eq!(dividers.len(), 1, "{dividers:?}");
-    assert!(
-        dividers[0].starts_with(&expected),
-        "{} vs {expected}",
-        dividers[0]
-    );
+    let (label, detail) = dividers[0].split_once("\n\n").unwrap();
+    assert_eq!(label, format!("cache cold · ~{}k prompt", last_request / 1_000));
+    assert!(detail.contains("Cache writes are not confirmed"), "{detail}");
 }

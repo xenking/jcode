@@ -930,8 +930,7 @@ impl Agent {
     ///
     /// `fold_planned` says a cold-cache fold will reduce this request anyway.
     /// Without one, a cold shake has to earn its place: on 2026-11-20 it cut
-    /// three tool outputs out of a 102K context to save 4K (4%), and the prompt
-    /// was re-cached in full either way. Below
+    /// three tool outputs out of a 102K context to save 4K (4%). Below
     /// [`COLD_SHAKE_MIN_SAVINGS_PERCENT`] the history is left alone and the
     /// transcript says the cache went cold instead.
     fn maybe_shake_at(
@@ -1026,8 +1025,7 @@ impl Agent {
             return Some((detail, event));
         }
         // Nothing was trimmed. When a fold follows, its divider tells the
-        // story; otherwise the whole prompt is about to be re-cached and the
-        // transcript should say so once.
+        // story; otherwise report the estimated cold request size once.
         if fold_planned || matches!(boundary, CompactionBoundary::Idle) {
             return None;
         }
@@ -1041,10 +1039,7 @@ impl Agent {
                 .and_then(|tokens| usize::try_from(tokens).ok())
                 .unwrap_or(0),
         );
-        let detail = format!(
-            "🧊 Cache cold · ~{}K tok re-cached in full",
-            prompt_tokens / 1000
-        );
+        let detail = format!("🧊 Cache cold · ~{}K tok prompt", prompt_tokens / 1000);
         let already_noted = self.session.replay_events().last().is_some_and(|last| {
             matches!(
                 &last.kind,

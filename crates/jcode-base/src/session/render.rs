@@ -1063,16 +1063,14 @@ pub fn compaction_divider_content(
     use std::fmt::Write as _;
     let method = method.unwrap_or("summary");
     if method == CACHE_COLD_DIVIDER_METHOD {
-        // Nothing was compacted: the provider's prompt cache expired and the
-        // whole prompt is written to it again.
         let size = pre_tokens.map(compact_token_count);
         let label = match &size {
-            Some(size) => format!("cache cold · {size} re-cached"),
+            Some(size) => format!("cache cold · ~{size} prompt"),
             None => "cache cold".to_string(),
         };
         return format!(
-            "{label}\n\nThe provider's prompt cache expired while this session was idle, so \
-             this request writes the whole prompt to the cache again. Nothing was removed \
+            "{label}\n\nThe prompt cache was expected to be cold. The size is an estimate \
+             from before the request. Cache writes are not confirmed. Nothing was removed \
              from the conversation."
         );
     }
