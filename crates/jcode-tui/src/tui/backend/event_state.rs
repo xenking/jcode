@@ -46,12 +46,13 @@ impl RemoteEventState for RemoteConnection {
         Self::handle_tool_exec(self, id, name);
     }
 
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        Self::handle_tool_done(self, id, name, output)
-    }
-
-    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
-        self.tool_diff.take_tool_duration(id)
+    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion {
+        let observed_duration = self.tool_diff.take_tool_duration(id);
+        let display_output = self.tool_diff.finish_tool(id, name, output);
+        RemoteToolCompletion {
+            display_output,
+            observed_duration,
+        }
     }
 
     fn clear_pending(&mut self) {
@@ -96,8 +97,12 @@ impl RemoteEventState for ReplayRemoteState {
         self.tool_diff.handle_tool_exec(id, name);
     }
 
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
+    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion {
+        RemoteToolCompletion {
+            display_output: self.tool_diff.finish_tool(id, name, output),
+            // Playback speed is arbitrary; only protocol timing is meaningful.
+            observed_duration: None,
+        }
     }
 
     fn clear_pending(&mut self) {

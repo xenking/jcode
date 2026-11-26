@@ -243,6 +243,11 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
         .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
 }
 
+pub(crate) struct RemoteToolCompletion {
+    pub(crate) display_output: String,
+    pub(crate) observed_duration: Option<f32>,
+}
+
 pub(crate) trait RemoteEventState {
     fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
         false
@@ -262,11 +267,7 @@ pub(crate) trait RemoteEventState {
     fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
     fn handle_tool_exec(&mut self, id: &str, name: &str);
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
-    // Replays deliberately do not use wall-clock time: playback speed is arbitrary.
-    fn take_tool_duration(&mut self, _id: &str) -> Option<f32> {
-        None
-    }
+    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion;
     fn clear_pending(&mut self);
     fn call_output_tokens_seen(&mut self) -> &mut u64;
     fn reset_call_output_tokens_seen(&mut self);
@@ -1693,11 +1694,6 @@ impl RemoteConnection {
     /// Handle tool exec - cache file content if edit/write
     pub fn handle_tool_exec(&mut self, id: &str, name: &str) {
         self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    /// Handle tool done - generate diff if we have pending data
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
     }
 
     /// Clear pending diff state

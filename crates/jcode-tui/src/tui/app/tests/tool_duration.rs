@@ -133,6 +133,43 @@ fn tool_duration_replay_does_not_measure_playback_clock() {
 }
 
 #[test]
+fn tool_completion_live_and_replay_agree_on_protocol_timing_and_error_output() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::{RemoteConnection, RemoteEventState, ReplayRemoteState};
+
+    fn complete(mut remote: impl RemoteEventState) -> (String, Option<f32>) {
+        let mut app = create_test_app();
+        app.handle_server_event(
+            ServerEvent::ToolExec {
+                id: "comparison".into(),
+                name: "bash".into(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            ServerEvent::ToolDone {
+                codemode: None,
+                id: "comparison".into(),
+                name: "bash".into(),
+                output: "[tool timing: duration=2.4s] failed".into(),
+                error: Some("failed".into()),
+            },
+            &mut remote,
+        );
+        let row = app.display_messages().last().unwrap();
+        (row.content.clone(), row.duration_secs)
+    }
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let live = complete(RemoteConnection::dummy());
+    let replay = complete(ReplayRemoteState::default());
+    assert_eq!(live, replay);
+    assert_eq!(live.1, Some(2.4));
+    assert!(live.0.starts_with("Error:"), "{}", live.0);
+}
+
+#[test]
 fn codemode_receipt_from_tool_done_reaches_the_transcript_row() {
     use jcode_session_types::{CodemodeCall, CodemodeCallStatus, CodemodeStatus, CodemodeSummary};
     let mut app = create_test_app();

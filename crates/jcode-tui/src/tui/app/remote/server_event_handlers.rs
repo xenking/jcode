@@ -9,10 +9,11 @@ pub(super) fn handle_tool_done(
     error: Option<String>,
     codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
 ) -> bool {
-    // Read the raw output before client-side diff rendering replaces it.
-    let observed_duration = remote.take_tool_duration(&id);
-    let duration_secs = DisplayMessage::tool_duration_from_output(&output).or(observed_duration);
-    let display_output = remote.handle_tool_done(&id, &name, &output);
+    // Prefer protocol timing from the raw output, not the rendered diff.
+    let completion = remote.complete_tool(&id, &name, &output);
+    let duration_secs =
+        DisplayMessage::tool_duration_from_output(&output).or(completion.observed_duration);
+    let display_output = completion.display_output;
     let display_output = if error.is_some()
         && !display_output.starts_with("Error:")
         && !display_output.starts_with("error:")
