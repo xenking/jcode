@@ -1085,7 +1085,7 @@ fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() 
 }
 
 #[test]
-fn test_account_switch_shorthand_switches_openai_account_by_label() {
+fn test_saved_oauth_account_switch_picker_and_command_agree() {
     with_temp_jcode_home(|| {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -1133,8 +1133,98 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             );
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
-                Some(second.as_str()),
-                "the shorthand must move the active account to the requested label"
+                Some(second.as_str())
+            );
+
+            crate::auth::codex::set_active_account(&first).unwrap();
+            *applied_route.lock().unwrap() = None;
+            app.open_account_picker(Some("openai"));
+            let action = app
+                .inline_interactive_state
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .find_map(|entry| match &entry.action {
+                    crate::tui::PickerAction::Account(
+                        action @ crate::tui::AccountPickerAction::Switch { provider_id, label },
+                    ) if provider_id == "openai" && label == &second => Some(action.clone()),
+                    _ => None,
+                })
+                .expect("picker should list the second saved OpenAI account");
+            app.handle_account_picker_selection(action);
+            let expected_route = format!("openai-oauth@{second}");
+            assert_eq!(
+                applied_route.lock().unwrap().as_deref(),
+                Some(expected_route.as_str())
+            );
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some(second.as_str())
+            );
+
+            crate::auth::codex::set_active_account(&first).unwrap();
+            *applied_route.lock().unwrap() = None;
+            app.inline_interactive_state = None;
+            app.input = format!("/account openai switch {second}");
+            app.submit_input();
+            assert_eq!(
+                applied_route.lock().unwrap().as_deref(),
+                Some(expected_route.as_str())
+            );
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some(second.as_str())
+            );
+
+            let mut claude = crate::auth::claude::JcodeAuthFile::default();
+            claude
+                .anthropic_accounts
+                .push(crate::auth::claude::AnthropicAccount {
+                    label: second.clone(),
+                    access: "fixture-access".into(),
+                    refresh: "fixture-refresh".into(),
+                    expires: now_ms + 60_000,
+                    email: None,
+                    scopes: Vec::new(),
+                    subscription_type: None,
+                });
+            crate::auth::claude::save_auth_file(&claude).unwrap();
+            *applied_route.lock().unwrap() = None;
+            app.input = format!("/account switch {second}");
+            app.submit_input();
+            assert!(
+                app.display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("exists for both Anthropic and OpenAI")
+            );
+
+            app.handle_account_picker_selection(crate::tui::AccountPickerAction::Switch {
+                provider_id: "jcode".into(),
+                label: second.clone(),
+            });
+            assert!(
+                app.display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("does not support account switching")
+            );
+            app.input = format!("/account jcode switch {second}");
+            app.submit_input();
+            assert!(
+                app.display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("does not support account switching")
+            );
+            assert!(applied_route.lock().unwrap().is_none());
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some(second.as_str())
             );
         });
     });
