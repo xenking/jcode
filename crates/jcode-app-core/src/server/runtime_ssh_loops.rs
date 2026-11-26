@@ -323,7 +323,7 @@ pub(super) async fn execute(
     })
 }
 
-fn snapshot(session_id: &str) -> Result<todo::followup::TodoSnapshot> {
+pub(super) fn snapshot(session_id: &str) -> Result<todo::followup::TodoSnapshot> {
     Ok(todo::store::load_snapshot(
         &crate::storage::jcode_dir()?,
         session_id,
@@ -333,7 +333,10 @@ fn snapshot(session_id: &str) -> Result<todo::followup::TodoSnapshot> {
 /// `load_snapshot` already resolved durable `await_members` dependencies.
 /// Live process-backed tasks extend that set and must never replace it, or a
 /// todo waiting on a pending swarm await is poked as actionable.
-fn merge_live_background_tasks(snapshot: &mut todo::followup::TodoSnapshot, live: Vec<String>) {
+pub(super) fn merge_live_background_tasks(
+    snapshot: &mut todo::followup::TodoSnapshot,
+    live: Vec<String>,
+) {
     for id in live {
         if !snapshot.running_background_tasks.contains(&id) {
             snapshot.running_background_tasks.push(id);
@@ -351,7 +354,7 @@ pub(super) fn session_has_pending_await(session_id: &str) -> bool {
 
 /// Whether the turn that appended `messages[before..]` called any tool. A
 /// shrunken transcript (compaction) is treated as progress, never as a stall.
-fn turn_had_tool_calls<'a>(
+pub(super) fn turn_had_tool_calls<'a>(
     new: Option<impl IntoIterator<Item = &'a crate::session::StoredMessage>>,
 ) -> bool {
     let Some(new) = new else {
@@ -365,7 +368,7 @@ fn turn_had_tool_calls<'a>(
     })
 }
 
-fn apply_effects(session_id: &str, effects: &todo::followup::TodoEffects) -> Result<()> {
+pub(super) fn apply_effects(session_id: &str, effects: &todo::followup::TodoEffects) -> Result<()> {
     if effects.clear_gate_observations {
         todo::clear_gate_observations(session_id)?;
     }
@@ -407,6 +410,40 @@ fn next_followup_after_turn(
     next_followup(state, snapshot)
 }
 
+pub(super) fn decide_followup(
+    session_id: &str,
+    snapshot: &todo::followup::TodoSnapshot,
+    reload: bool,
+) -> Result<todo::followup::Decision> {
+    update_state(session_id, |state| {
+        state
+            .policy
+            .set_gate_digest_enabled(crate::config::config().features.todo_gate_digest);
+        Ok(next_followup_after_turn(state, snapshot, reload))
+    })
+}
+
+pub(super) fn record_followup(session_id: &str, had_tool_calls: bool) -> Result<()> {
+    update_state(session_id, |state| {
+        state.policy.record_turn(had_tool_calls);
+        Ok(())
+    })
+}
+
+pub(super) fn pause_followups(session_id: &str, error: &anyhow::Error) -> Result<()> {
+    update_state(session_id, |state| {
+        state.policy.disable();
+        state.poke_enabled = false;
+        if let Some(workflow) = state.workflow.as_mut() {
+            workflow.active = false;
+        }
+        state.last_notice = Some(format!(
+            "Paused after runtime error: {error}. Use /poke or /improve resume after recovery."
+        ));
+        Ok(())
+    })
+}
+
 /// Run inside the server turn task before releasing its processing guard. Never
 /// recursively invokes turn_failover, and rereads durable state each turn so
 /// stop/status work from another connection while a model/tool is busy.
@@ -416,145 +453,7 @@ pub(super) async fn run_followups(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let lease = agent.claim_server_turn()?;
-    run_reserved_followups(agent, &lease, event_tx, false).await
-}
-
-pub(super) async fn run_reserved_followups(
-    agent: &mut Agent,
-    lease: &crate::agent::TurnLease,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
-    reload_continuation: bool,
-) -> Result<()> {
-    agent.validate_server_turn(lease)?;
-    let session_id = agent.session_id().to_string();
-    initialize_remote_session(&session_id, crate::config::config().features.auto_poke)?;
-    // Bound retries by unchanged todo state, not total productive turns. A long
-    // cloud campaign can legitimately make progress across hundreds of turns.
-    // The persisted policy still limits no-progress retries and quality gates.
-    loop {
-        if agent.graceful_shutdown_signal().is_set()
-            || crate::turn_activity::session_is_stopped(&session_id)
-        {
-            return Ok(());
-        }
-        let mut snapshot = snapshot(&session_id)?;
-        let live = crate::background::global()
-            .list()
-            .await
-            .into_iter()
-            .filter(|task| {
-                task.session_id == session_id
-                    && matches!(task.status, crate::bus::BackgroundTaskStatus::Running)
-            })
-            .map(|task| task.task_id)
-            .collect();
-        merge_live_background_tasks(&mut snapshot, live);
-        snapshot.running_swarm_members =
-            super::lane_dispatch::running_members_for(&session_id).await;
-        if session_has_pending_await(&session_id) {
-            crate::logging::info(&format!(
-                "Remote continuation deferred for session {session_id}: await_members in flight"
-            ));
-            return Ok(());
-        }
-        let decision = update_state(&session_id, |state| {
-            state
-                .policy
-                .set_gate_digest_enabled(crate::config::config().features.todo_gate_digest);
-            Ok(next_followup_after_turn(
-                state,
-                &snapshot,
-                reload_continuation,
-            ))
-        })?;
-        apply_effects(&session_id, &decision.effects)?;
-        let Some(followup) = decision.follow_up else {
-            if let Some(notice) = decision.notice {
-                crate::logging::info(&format!(
-                    "Remote continuation paused for session {session_id}: {notice}"
-                ));
-                if let Err(error) = event_tx.send(ServerEvent::Notification {
-                    from_session: "runtime".into(),
-                    from_name: Some("cloud continuation".into()),
-                    notification_type: crate::protocol::NotificationType::Message {
-                        scope: Some("runtime".into()),
-                        channel: None,
-                        tldr: None,
-                    },
-                    message: notice,
-                }) {
-                    crate::logging::debug(&format!(
-                        "Could not broadcast remote continuation pause for {session_id}: {error}"
-                    ));
-                }
-            }
-            return Ok(());
-        };
-        // Publish continuation as progress, never a terminal event. Every
-        // observer sees the same harness decision without dispatching a poke.
-        let _ = event_tx.send(ServerEvent::Notification {
-            from_session: "runtime".into(),
-            from_name: Some("daemon continuation".into()),
-            notification_type: crate::protocol::NotificationType::Message {
-                scope: Some("runtime".into()),
-                channel: None,
-                tldr: None,
-            },
-            message: followup.notice.clone(),
-        });
-        crate::logging::info(&format!(
-            "AUTO_POKE_DECISION owner=daemon session={session_id} action=continue kind={:?}",
-            followup.kind
-        ));
-        // Persisted budgets are committed before the request. A daemon restart
-        // cannot turn a failing continuation into an unlimited retry loop.
-        let messages_before = agent.message_count();
-        let result = super::turn_execution::process_reserved_message_streaming_mpsc(
-            agent,
-            lease,
-            &followup.message,
-            Vec::new(),
-            None,
-            event_tx.clone(),
-            None,
-            None,
-        )
-        .await;
-        let allowed_models = super::turn_failover::effective_worker_allowed_models(agent);
-        let result = super::turn_failover::retry_turn_with_server_failover(
-            agent,
-            lease,
-            result,
-            messages_before,
-            None,
-            event_tx.clone(),
-            &allowed_models,
-        )
-        .await;
-        if result.is_ok() {
-            // A poke that made no tool calls changed nothing. Block repeats of
-            // the same open state instead of looping on "nothing to do".
-            let had_tool_calls = turn_had_tool_calls(agent.iter_messages_since(messages_before));
-            update_state(&session_id, |state| {
-                state.policy.record_turn(had_tool_calls);
-                Ok(())
-            })?;
-        }
-        if let Err(error) = &result {
-            update_state(&session_id, |state| {
-                state.policy.disable();
-                state.poke_enabled = false;
-                if let Some(workflow) = state.workflow.as_mut() {
-                    workflow.active = false;
-                }
-                state.last_notice = Some(format!(
-                    "Paused after runtime error: {error}. Use /poke or /improve resume after recovery."
-                ));
-                Ok(())
-            })?;
-        }
-        result?;
-    }
+    super::turn_failover::run_reserved_followups(agent, &lease, event_tx, false).await
 }
 
 #[cfg(test)]

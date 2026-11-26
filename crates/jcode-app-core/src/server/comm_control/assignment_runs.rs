@@ -157,11 +157,10 @@ pub(in crate::server) fn spawn_assigned_task_run(
         // worker model allowlist exactly like the spawn path does.
         let failover = crate::config::config().agents.failover_policy();
         let worker_allowed_models = failover.allowed_models.clone();
-        let worker_fallbacks =
-            super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
-                &worker_allowed_models,
-                &failover.fallbacks,
-            );
+        let worker_fallbacks = super::super::spawn_model_selection::worker_allowed_fallbacks(
+            &worker_allowed_models,
+            &failover.fallbacks,
+        );
         let result = match agent.mark_swarm_worker() {
             Ok(()) => {
                 super::super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks(

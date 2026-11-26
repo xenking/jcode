@@ -283,7 +283,7 @@ pub(super) async fn handle(
 
 fn monitor_compaction(target: WorkerTarget, agent: Arc<Mutex<Agent>>, name: String) {
     crate::runtime_activity::spawn(async move {
-        if let Some(event) = super::client_lifecycle::poll_worker_compaction_completion(agent).await
+        if let Some(event) = super::worker_compaction::poll_agent_compaction_completion(agent).await
         {
             let summary = match &event {
                 ServerEvent::CompactResult { .. } => "context compaction failed",

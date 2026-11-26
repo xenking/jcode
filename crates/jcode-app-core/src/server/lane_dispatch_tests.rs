@@ -134,8 +134,11 @@ fn only_working_members_spawned_by_the_session_count() {
     .map(|m| (m.session_id.clone(), m))
     .collect();
     assert_eq!(
-        super::working_members_spawned_by(&members, "coord"),
+        crate::server::swarm_working_members::working_members_spawned_by(&members, "coord"),
         vec!["w-queued".to_string(), "w-running".to_string()]
     );
-    assert!(super::working_members_spawned_by(&members, "w-done").is_empty());
+    assert!(
+        crate::server::swarm_working_members::working_members_spawned_by(&members, "w-done")
+            .is_empty()
+    );
 }

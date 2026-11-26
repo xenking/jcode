@@ -46,21 +46,8 @@ pub(super) struct LaneDispatchContext {
 
 static CONTEXT: OnceLock<LaneDispatchContext> = OnceLock::new();
 
-/// The live swarm member map of the most recently started server. Unlike the
-/// once-only dispatch context it is replaced on every start, so a process that
-/// hosts several servers in turn (tests, embedders) never reads a dead one.
-type LiveMembers = StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>>;
-
-fn live_members() -> &'static LiveMembers {
-    static MEMBERS: OnceLock<LiveMembers> = OnceLock::new();
-    MEMBERS.get_or_init(|| StdMutex::new(None))
-}
-
 pub(super) fn register_context(context: LaneDispatchContext) {
-    *live_members()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some(Arc::clone(&context.swarm_state.members));
+    super::swarm_working_members::set_live_members(Arc::clone(&context.swarm_state.members));
     if CONTEXT.set(context).is_err() {
         crate::logging::warn(
             "lane dispatch context already registered, retaining original context",
@@ -92,39 +79,6 @@ pub(super) fn spawn_startup_scan(delay: Duration) {
             }
         }
     });
-}
-
-/// Swarm members spawned by `session_id` that are still working. Their
-/// completion wakes the spawner, so the spawner must not be poked meanwhile.
-pub(super) fn working_members_spawned_by(
-    members: &HashMap<String, SwarmMember>,
-    session_id: &str,
-) -> Vec<String> {
-    let mut working: Vec<String> = members
-        .values()
-        .filter(|member| {
-            member.session_id != session_id
-                && member.report_back_to_session_id.as_deref() == Some(session_id)
-                && crate::todo::swarm_member_is_working(&member.status)
-        })
-        .map(|member| member.session_id.clone())
-        .collect();
-    working.sort();
-    working
-}
-
-/// Live working members spawned by `session_id`. Empty without a registered
-/// server context (tests, embedders), which preserves the previous behavior.
-pub(super) async fn running_members_for(session_id: &str) -> Vec<String> {
-    let Some(members) = live_members()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-    else {
-        return Vec::new();
-    };
-    let members = members.read().await;
-    working_members_spawned_by(&members, session_id)
 }
 
 /// Lanes with a spawn in flight, keyed by `(coordinator, lane id)`. The

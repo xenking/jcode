@@ -1,4 +1,21 @@
-use super::*;
+use super::SessionAgents;
+use super::spawn_policy::is_inherit_sentinel;
+use crate::session::Session;
+
+pub(super) fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
+    fn normalize(model: &str) -> String {
+        let model = model.trim().to_ascii_lowercase();
+        let bare = model.rsplit('/').next().unwrap_or(&model);
+        let bare = bare.split(':').next_back().unwrap_or(bare);
+        bare.split('[').next().unwrap_or(bare).trim().to_string()
+    }
+    let resolved = normalize(resolved);
+    let requested = normalize(requested);
+    if resolved.is_empty() || requested.is_empty() {
+        return true;
+    }
+    resolved.starts_with(&requested) || requested.starts_with(&resolved)
+}
 
 pub(super) fn provider_key_for_spawn_model(
     model: Option<&str>,

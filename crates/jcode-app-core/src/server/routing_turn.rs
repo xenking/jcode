@@ -27,6 +27,16 @@ impl GateSink for EventSink<'_> {
     }
 }
 
+pub(super) fn error_wants_failover(error: &str) -> bool {
+    if crate::provider::parse_failover_prompt_message(error).is_some() {
+        return true;
+    }
+    matches!(
+        jcode_provider_core::classify_failover_error_message(error),
+        jcode_provider_core::FailoverDecision::RetryAndMarkUnavailable
+    )
+}
+
 fn routing_enabled() -> bool {
     crate::config::config().routing.mode != RoutingMode::Off
 }
@@ -303,7 +313,7 @@ pub(super) async fn on_failure(
     message: &str,
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) -> Option<FailureRoute> {
-    if !routing_enabled() || !super::turn_failover::error_wants_failover(message) {
+    if !routing_enabled() || !error_wants_failover(message) {
         return None;
     }
     // A failed turn is always a seam: the account cannot serve it anyway.

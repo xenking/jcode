@@ -10,10 +10,10 @@
 //! pool, the target must be pool-approved, and `cross_provider_failover` must
 //! be in countdown (automatic) mode.
 
+use super::routing_turn::error_wants_failover;
 use crate::agent::Agent;
 use crate::protocol::ServerEvent;
 use crate::provider::RouteSelection;
-use jcode_provider_core::FailoverDecision;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -21,15 +21,6 @@ use tokio::sync::{Mutex, mpsc};
 const MAX_SERVER_FAILOVERS: usize = 3;
 
 /// Whether `error` is the kind of failure the account router should handle.
-pub(super) fn error_wants_failover(error: &str) -> bool {
-    if crate::provider::parse_failover_prompt_message(error).is_some() {
-        return true;
-    }
-    matches!(
-        jcode_provider_core::classify_failover_error_message(error),
-        FailoverDecision::RetryAndMarkUnavailable
-    )
-}
 
 pub(super) fn usage_limit_event(
     agent: &Agent,
@@ -172,7 +163,10 @@ pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
     if !agent.is_swarm_worker() {
         return Vec::new();
     }
-    crate::config::config().agents.failover_policy().allowed_models
+    crate::config::config()
+        .agents
+        .failover_policy()
+        .allowed_models
 }
 
 /// Configured model fallbacks for a swarm worker turn, inside its allowlist.
@@ -183,7 +177,7 @@ pub(super) fn effective_worker_fallbacks(agent: &Agent) -> Vec<String> {
         return Vec::new();
     }
     let policy = crate::config::config().agents.failover_policy();
-    super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+    super::spawn_model_selection::worker_allowed_fallbacks(
         &policy.allowed_models,
         &policy.fallbacks,
     )
@@ -330,7 +324,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
     )
     .await?;
     let reload = is_reload_continuation(guard.session_id(), content, reminder.as_deref());
-    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, reload).await
+    run_reserved_followups(&mut guard, lease, event_tx, reload).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
@@ -382,7 +376,7 @@ pub(super) async fn process_reserved_resume_with_server_failover(
         },
     )
     .await?;
-    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, true).await?;
+    run_reserved_followups(&mut guard, lease, event_tx, true).await?;
     Ok(outcome)
 }
 
@@ -487,7 +481,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     )
     .await?;
     let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
+    run_reserved_followups(agent, lease, event_tx, reload).await
 }
 
 /// Route identity of a fallback selection.
@@ -606,10 +600,8 @@ async fn retry_turn_with_model_fallbacks(
     // Defence in depth: the spawn path already filters the configured
     // fallbacks, but a config change mid-turn must not leak a model outside the
     // worker allowlist.
-    let fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
-        allowed_models,
-        fallbacks,
-    );
+    let fallbacks =
+        super::spawn_model_selection::worker_allowed_fallbacks(allowed_models, fallbacks);
     let mut tried: Vec<FallbackTarget> = vec![current_target(agent)];
     for fallback in &fallbacks {
         let Err(error) = &result else {
@@ -746,7 +738,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
     )
     .await?;
     let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
+    run_reserved_followups(agent, lease, event_tx, reload).await
 }
 
 fn is_reload_continuation(session_id: &str, content: &str, reminder: Option<&str>) -> bool {
@@ -789,6 +781,126 @@ pub(super) async fn process_server_initiated_message(
 fn attempt_produced_reply(agent: &Agent, attempt_start: usize) -> bool {
     agent.message_count() > attempt_start
         && agent.last_message_role() != Some(crate::message::Role::User)
+}
+
+pub(super) async fn run_reserved_followups(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    reload_continuation: bool,
+) -> anyhow::Result<()> {
+    use super::runtime_ssh_loops::{
+        apply_effects, decide_followup, initialize_remote_session, merge_live_background_tasks,
+        pause_followups, record_followup, session_has_pending_await, snapshot, turn_had_tool_calls,
+    };
+    agent.validate_server_turn(lease)?;
+    let session_id = agent.session_id().to_string();
+    initialize_remote_session(&session_id, crate::config::config().features.auto_poke)?;
+    // Bound retries by unchanged todo state, not total productive turns. A long
+    // cloud campaign can legitimately make progress across hundreds of turns.
+    // The persisted policy still limits no-progress retries and quality gates.
+    loop {
+        if agent.graceful_shutdown_signal().is_set()
+            || crate::turn_activity::session_is_stopped(&session_id)
+        {
+            return Ok(());
+        }
+        let mut snapshot = snapshot(&session_id)?;
+        let live = crate::background::global()
+            .list()
+            .await
+            .into_iter()
+            .filter(|task| {
+                task.session_id == session_id
+                    && matches!(task.status, crate::bus::BackgroundTaskStatus::Running)
+            })
+            .map(|task| task.task_id)
+            .collect();
+        merge_live_background_tasks(&mut snapshot, live);
+        snapshot.running_swarm_members =
+            super::swarm_working_members::running_members_for(&session_id).await;
+        if session_has_pending_await(&session_id) {
+            crate::logging::info(&format!(
+                "Remote continuation deferred for session {session_id}: await_members in flight"
+            ));
+            return Ok(());
+        }
+        let decision = decide_followup(&session_id, &snapshot, reload_continuation)?;
+        apply_effects(&session_id, &decision.effects)?;
+        let Some(followup) = decision.follow_up else {
+            if let Some(notice) = decision.notice {
+                crate::logging::info(&format!(
+                    "Remote continuation paused for session {session_id}: {notice}"
+                ));
+                if let Err(error) = event_tx.send(ServerEvent::Notification {
+                    from_session: "runtime".into(),
+                    from_name: Some("cloud continuation".into()),
+                    notification_type: crate::protocol::NotificationType::Message {
+                        scope: Some("runtime".into()),
+                        channel: None,
+                        tldr: None,
+                    },
+                    message: notice,
+                }) {
+                    crate::logging::debug(&format!(
+                        "Could not broadcast remote continuation pause for {session_id}: {error}"
+                    ));
+                }
+            }
+            return Ok(());
+        };
+        // Publish continuation as progress, never a terminal event. Every
+        // observer sees the same harness decision without dispatching a poke.
+        let _ = event_tx.send(ServerEvent::Notification {
+            from_session: "runtime".into(),
+            from_name: Some("daemon continuation".into()),
+            notification_type: crate::protocol::NotificationType::Message {
+                scope: Some("runtime".into()),
+                channel: None,
+                tldr: None,
+            },
+            message: followup.notice.clone(),
+        });
+        crate::logging::info(&format!(
+            "AUTO_POKE_DECISION owner=daemon session={session_id} action=continue kind={:?}",
+            followup.kind
+        ));
+        // Persisted budgets are committed before the request. A daemon restart
+        // cannot turn a failing continuation into an unlimited retry loop.
+        let messages_before = agent.message_count();
+        let result = super::turn_execution::process_reserved_message_streaming_mpsc(
+            agent,
+            lease,
+            &followup.message,
+            Vec::new(),
+            None,
+            event_tx.clone(),
+            None,
+            None,
+        )
+        .await;
+        let allowed_models = effective_worker_allowed_models(agent);
+        let result = retry_turn_with_server_failover(
+            agent,
+            lease,
+            result,
+            messages_before,
+            None,
+            event_tx.clone(),
+            &allowed_models,
+        )
+        .await;
+        if result.is_ok() {
+            // A poke that made no tool calls changed nothing. Block repeats of
+            // the same open state instead of looping on "nothing to do".
+            let had_tool_calls = turn_had_tool_calls(agent.iter_messages_since(messages_before));
+            record_followup(&session_id, had_tool_calls)?;
+        }
+        if let Err(error) = &result {
+            pause_followups(&session_id, error)?;
+        }
+        result?;
+    }
 }
 
 /// Given the result of a turn attempt, switch to the next pool-approved

@@ -173,7 +173,6 @@ use request_watchdog::{
 };
 #[path = "client_event_control.rs"]
 mod client_event_control;
-pub(super) use client_event_control::poll_agent_compaction_completion as poll_worker_compaction_completion;
 use client_event_control::*;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

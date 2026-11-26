@@ -206,8 +206,7 @@ fn spawn_visible_session_window_with_context(
     }
 }
 
-#[path = "spawn_model_selection.rs"]
-pub(super) mod spawn_model_selection;
+use super::spawn_model_selection;
 #[cfg(test)]
 use spawn_model_selection::CoordinatorSpawnIdentity;
 use spawn_model_selection::{
@@ -418,27 +417,9 @@ async fn register_visible_spawned_member(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
-/// Resolve the reasoning effort for a spawned swarm worker (#1165).
-///
-/// The swarm tool no longer lets agents choose worker effort, so
-/// `requested_effort` only arrives from direct protocol clients (SDK). It wins
-/// when present, then the user's `agents.swarm_effort` config pin, and
-/// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
-#[path = "spawn_policy.rs"]
-mod spawn_policy;
-pub(super) use spawn_policy::{
-    is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
-};
-
-pub(super) fn stopped_spawn_message(worker: &str) -> Option<String> {
-    crate::turn_activity::session_is_stopped(worker).then(|| stopped_spawn_detail(worker))
-}
-
-fn stopped_spawn_detail(worker: &str) -> String {
-    format!(
-        "Worker '{worker}' for this spawn is stopped. Resume it explicitly to keep its context, or use a new lane label."
-    )
-}
+use super::spawn_policy;
+use spawn_policy::stopped_spawn_detail;
+pub(super) use spawn_policy::{resolve_swarm_spawn_effort, resolve_swarm_spawn_mode};
 
 async fn existing_spawn_worker(
     worker: String,
@@ -550,30 +531,26 @@ pub(super) async fn spawn_swarm_agent(
         profile_model.or_else(|| agents_config.swarm_model.clone()),
     )
     .await;
-    let configured_swarm_model =
-        if requested_model.is_none() && !failover.fallbacks.is_empty() {
-            let routes = match sessions.get(req_session_id).await {
-                Some(agent) => agent
-                    .try_lock()
-                    .map(|guard| guard.model_routes())
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
-            let picked = pick_available_swarm_model(
-                preferred_swarm_model.clone(),
-                &failover.fallbacks,
-                &routes,
-            );
-            if picked != preferred_swarm_model {
-                crate::logging::info(&format!(
-                    "Swarm spawn: configured model {:?} not available, using fallback {:?}",
-                    preferred_swarm_model, picked
-                ));
-            }
-            picked
-        } else {
-            preferred_swarm_model.clone()
+    let configured_swarm_model = if requested_model.is_none() && !failover.fallbacks.is_empty() {
+        let routes = match sessions.get(req_session_id).await {
+            Some(agent) => agent
+                .try_lock()
+                .map(|guard| guard.model_routes())
+                .unwrap_or_default(),
+            None => Vec::new(),
         };
+        let picked =
+            pick_available_swarm_model(preferred_swarm_model.clone(), &failover.fallbacks, &routes);
+        if picked != preferred_swarm_model {
+            crate::logging::info(&format!(
+                "Swarm spawn: configured model {:?} not available, using fallback {:?}",
+                preferred_swarm_model, picked
+            ));
+        }
+        picked
+    } else {
+        preferred_swarm_model.clone()
+    };
     let using_startup_fallback = configured_swarm_model != preferred_swarm_model;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     // Only a worker running on the configured default model gets the configured

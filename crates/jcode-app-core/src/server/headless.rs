@@ -310,24 +310,10 @@ pub(super) async fn create_headless_session(
 /// and vendor prefixes like `anthropic/`), so compare on a normalized form and
 /// allow either side to be a prefix of the other. This exists only to decide
 /// whether to log a mismatch, so it errs toward staying quiet.
-pub(super) fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
-    fn normalize(model: &str) -> String {
-        let model = model.trim().to_ascii_lowercase();
-        let bare = model.rsplit('/').next().unwrap_or(&model);
-        let bare = bare.split(':').next_back().unwrap_or(bare);
-        bare.split('[').next().unwrap_or(bare).trim().to_string()
-    }
-    let resolved = normalize(resolved);
-    let requested = normalize(requested);
-    if resolved.is_empty() || requested.is_empty() {
-        return true;
-    }
-    resolved.starts_with(&requested) || requested.starts_with(&resolved)
-}
 
 #[cfg(test)]
 mod tests {
-    use super::models_are_equivalent;
+    use crate::server::spawn_model_selection::models_are_equivalent;
 
     #[test]
     fn equivalent_models_tolerate_route_canonicalization() {

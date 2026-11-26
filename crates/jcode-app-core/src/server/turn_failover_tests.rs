@@ -116,9 +116,7 @@ fn server_router_rejects_excluded_prompt_and_ranked_route() {
                 "config not persisted"
             );
             assert!(
-                super::super::provider_control::automatic_failover_source_is_pool_member(
-                    &agent
-                ),
+                super::super::provider_control::automatic_failover_source_is_pool_member(&agent),
                 "source not enrolled"
             );
             assert!(
@@ -355,11 +353,8 @@ async fn check_cold_route_switch(
         .await
         .unwrap();
         let mut agent = agent.lock().await;
-        crate::server::provider_control::switch_session_model(
-            &mut agent,
-            "openai-api:gpt-6.1-sol",
-        )
-        .unwrap();
+        crate::server::provider_control::switch_session_model(&mut agent, "openai-api:gpt-6.1-sol")
+            .unwrap();
     }
     process_message_with_server_failover(agent, "continue", Vec::new(), None, tx, failover)
         .await
@@ -495,16 +490,21 @@ fn usage_limit_switches_pool_account_and_retries_same_turn() {
                 event,
                 ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
             )));
-            assert!(events.iter().any(|event| {
-                let value = serde_json::to_value(event).unwrap();
-                value["type"] == "usage_limit"
-                    && value["provider"] == "Claude"
-                    && value["model"] == "claude-sonnet-4-6"
-                    && value["window"] == "unknown"
-                    && value["reset"] == "unknown"
-                    && value["action"] == "failed_over"
-                    && value["target"].as_str().is_some_and(|target| target.contains("gpt-6.1-sol"))
-            }), "usage limit and actual failover must be published as structured data: {events:?}");
+            assert!(
+                events.iter().any(|event| {
+                    let value = serde_json::to_value(event).unwrap();
+                    value["type"] == "usage_limit"
+                        && value["provider"] == "Claude"
+                        && value["model"] == "claude-sonnet-4-6"
+                        && value["window"] == "unknown"
+                        && value["reset"] == "unknown"
+                        && value["action"] == "failed_over"
+                        && value["target"]
+                            .as_str()
+                            .is_some_and(|target| target.contains("gpt-6.1-sol"))
+                }),
+                "usage limit and actual failover must be published as structured data: {events:?}"
+            );
             assert!(events.iter().any(|event| matches!(
                 event,
                 ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
@@ -1075,17 +1075,12 @@ fn worker_allowed_fallbacks_keeps_order_and_drops_outside_models() {
         "claude:claude-sonnet-5-5".to_string(),
     ];
     assert_eq!(
-        super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
-            &allowed, &fallbacks
-        ),
+        super::super::spawn_model_selection::worker_allowed_fallbacks(&allowed, &fallbacks),
         vec!["claude:claude-sonnet-5-5".to_string()]
     );
     // Without an allowlist, the failover exclusion still applies.
     assert_eq!(
-        super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
-            &[],
-            &fallbacks
-        ),
+        super::super::spawn_model_selection::worker_allowed_fallbacks(&[], &fallbacks),
         vec![
             "claude:claude-sonnet-5-5".to_string(),
             "claude:claude-fable-5".to_string()
@@ -1143,9 +1138,7 @@ impl Provider for RouteSwitchingProvider {
         let model = self.model.lock().unwrap().clone();
         self.calls.lock().unwrap().push((route.clone(), model));
         if self.failing_routes.lock().unwrap().contains(&route) {
-            anyhow::bail!(
-                "400 Bad Request: this credential route is not entitled for the model"
-            );
+            anyhow::bail!("400 Bad Request: this credential route is not entitled for the model");
         }
         let events = vec![
             Ok(StreamEvent::TextDelta(
@@ -1220,11 +1213,8 @@ fn swarm_fallback_retries_the_same_model_on_a_second_route() {
         .build()
         .expect("test runtime")
         .block_on(async {
-            let provider = RouteSwitchingProvider::new(
-                "claude-oauth",
-                "claude-sonnet-5-5",
-                &["claude-oauth"],
-            );
+            let provider =
+                RouteSwitchingProvider::new("claude-oauth", "claude-sonnet-5-5", &["claude-oauth"]);
             let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
             let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
             let session = crate::session::Session::create_with_id(
@@ -1277,11 +1267,8 @@ fn rejected_fallback_switch_does_not_consume_the_next_candidate() {
         .build()
         .expect("test runtime")
         .block_on(async {
-            let provider = RouteSwitchingProvider::new(
-                "claude-oauth",
-                "claude-opus-5-5",
-                &["claude-oauth"],
-            );
+            let provider =
+                RouteSwitchingProvider::new("claude-oauth", "claude-opus-5-5", &["claude-oauth"]);
             *provider.reject_switches.lock().unwrap() = 2;
             let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
             let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
@@ -1338,15 +1325,9 @@ fn disabled_clients_keep_the_original_error() {
             let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
             let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
             let (tx, _rx) = mpsc::unbounded_channel();
-            let result = process_message_with_server_failover(
-                agent,
-                "hello",
-                Vec::new(),
-                None,
-                tx,
-                false,
-            )
-            .await;
+            let result =
+                process_message_with_server_failover(agent, "hello", Vec::new(), None, tx, false)
+                    .await;
             assert!(result.is_err());
             assert_eq!(provider.calls.lock().unwrap().len(), 1);
         });
@@ -1485,8 +1466,7 @@ fn swarm_worker_never_sends_a_request_outside_the_spawn_allowlist() {
                 };
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
-                let mut session =
-                    crate::session::Session::create_with_id(id.into(), None, None);
+                let mut session = crate::session::Session::create_with_id(id.into(), None, None);
                 session.apply_route(crate::session::Route {
                     provider_key: Some("test".into()),
                     ..session.route()

@@ -170,7 +170,7 @@ impl ClientConnection {
                             let agent = Arc::clone(&self.agent);
                             let session_id = self.client_session_id.clone();
                             tokio::spawn(async move {
-                                if let Some(event) = poll_agent_compaction_completion(agent).await {
+                                if let Some(event) = crate::server::worker_compaction::poll_agent_compaction_completion(agent).await {
                                     publish_compaction_completion(Bus::global(), &session_id, event);
                                 }
                             });

@@ -54,7 +54,7 @@ impl PersistedSwarmMutationResponse {
             Self::Spawn {
                 new_session_id,
                 worker_speed,
-            } => match super::comm_session::stopped_spawn_message(&new_session_id) {
+            } => match super::spawn_policy::stopped_spawn_message(&new_session_id) {
                 Some(message) => ServerEvent::Error {
                     id,
                     message,

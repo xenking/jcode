@@ -1,4 +1,4 @@
-use super::comm_session::spawn_model_selection::SwarmSpawnSelection;
+use super::spawn_model_selection::SwarmSpawnSelection;
 use super::*;
 use crate::protocol::{AskOption, AskQuestion};
 use crate::session::{StoredSpeedSelection, WorkerModelApproval};
@@ -84,7 +84,7 @@ impl PreparedSwarmWorker {
             }
             let actual = model_with_provider_pin(provider.as_ref());
             anyhow::ensure!(
-                super::headless::models_are_equivalent(&actual, &model),
+                super::spawn_model_selection::models_are_equivalent(&actual, &model),
                 "Cannot spawn on '{model}': it would run '{actual}' instead ({})",
                 restore
                     .as_ref()

@@ -7,9 +7,6 @@ use super::client_comm_swarms::{
     handle_comm_focus_session, handle_comm_list_sessions, handle_comm_list_swarms,
     handle_comm_set_swarm_label,
 };
-use super::client_lifecycle::actions::{
-    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
-};
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
@@ -23,6 +20,9 @@ use super::comm_session::{handle_comm_list_models, handle_comm_spawn, handle_com
 use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
+};
+use super::session_notifications::{
+    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
 };
 use super::{
     AwaitMembersRuntime, ChannelSubscriptions, ClientConnectionInfo, FileTouchService,

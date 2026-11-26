@@ -1,4 +1,14 @@
-use super::*;
+use crate::config::SwarmSpawnMode;
+
+pub(super) fn stopped_spawn_message(worker: &str) -> Option<String> {
+    crate::turn_activity::session_is_stopped(worker).then(|| stopped_spawn_detail(worker))
+}
+
+pub(super) fn stopped_spawn_detail(worker: &str) -> String {
+    format!(
+        "Worker '{worker}' for this spawn is stopped. Resume it explicitly to keep its context, or use a new lane label."
+    )
+}
 
 pub(in crate::server) fn resolve_swarm_spawn_effort(
     requested_effort: Option<&str>,

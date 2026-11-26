@@ -82,7 +82,10 @@ mod runtime_ssh_host;
 mod runtime_ssh_loops;
 mod runtime_ssh_sessions;
 mod runtime_upgrade;
+mod session_notifications;
 mod socket;
+mod spawn_model_selection;
+mod spawn_policy;
 mod swarm;
 mod swarm_ancestry;
 mod swarm_channels;
@@ -95,13 +98,15 @@ mod swarm_plan;
 mod swarm_policy;
 mod swarm_salvage;
 mod swarm_status;
-mod swarm_todo_projection;
 pub(crate) mod swarm_todo_link;
+mod swarm_todo_projection;
 mod swarm_watchdog;
 mod swarm_watchdog_delivery;
+mod swarm_working_members;
 mod turn_execution;
 mod turn_failover;
 mod util;
+mod worker_compaction;
 mod worker_revive;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -111,19 +116,17 @@ use self::background_tasks::{
     dispatch_swarm_batch_progress, dispatch_swarm_output_tail, dispatch_swarm_runtime_status,
     dispatch_swarm_todo_progress, dispatch_swarm_tool_activity, dispatch_ui_activity,
 };
-use self::session_connections::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
 use self::headless::create_headless_session;
 use self::reload::await_reload_signal;
 use self::runtime::ServerRuntime;
-use self::swarm::{
-    MAX_SWARM_MEMBERS, remove_session_from_swarm, run_swarm_message,
-};
+use self::session_connections::{ClientConnectionInfo, ClientDebugState};
+use self::swarm::{MAX_SWARM_MEMBERS, remove_session_from_swarm, run_swarm_message};
+use self::swarm_ancestry::swarm_is_self_or_ancestor;
 use self::swarm_channels::{
     remove_session_channel_subscriptions, subscribe_session_to_channel,
     unsubscribe_session_from_channel,
 };
-use self::swarm_ancestry::swarm_is_self_or_ancestor;
 use self::swarm_event_history::{record_swarm_event, record_swarm_event_for_session};
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{
@@ -133,8 +136,8 @@ use self::swarm_persistence::{
     swarm_operation_lock,
 };
 use self::swarm_plan::{
-    broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
-    remove_plan_participant, rename_plan_participant, send_swarm_plan_to_session,
+    broadcast_swarm_plan, broadcast_swarm_plan_with_previous, remove_plan_participant,
+    rename_plan_participant, send_swarm_plan_to_session,
 };
 use self::swarm_policy::{expired_terminal_member_ids, member_consumes_swarm_capacity};
 use self::swarm_salvage::refresh_swarm_task_staleness;
