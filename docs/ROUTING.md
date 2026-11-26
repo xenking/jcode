@@ -3,8 +3,7 @@
 The one design document for how Jcode chooses which login (account) serves a
 session, when it leaves it, and what it says about it. It is derived from the
 code and replaces the earlier usage-limit, routing-policy and API-key-account
-notes. Where a statement is about work still landing, it sits in a block marked
-**Intended (in progress)**; adjust those once the code lands.
+notes.
 
 Code owners: `crates/jcode-routing-policy` (pure engine and config types),
 `crates/jcode-routing-meters` (meters to readings), `crates/jcode-base/src/routing_service`
@@ -24,7 +23,7 @@ each role (workers, review, titles, compaction) uses, not which account.
 
 | Layer | Switch | What it is |
 | --- | --- | --- |
-| Account pool (legacy) | always present | `account-pool.json`: membership, order and priority of logins. Used for session start, same-provider failover and cross-provider failover when the routing policy is not in charge. |
+| Account pool (legacy) | always present | `account-pool.json`: membership, order and priority of logins. Used for session start, same-provider failover and cross-provider failover **only while the routing policy is not in charge**: with `[routing] mode = "auto"` routing is the one decider per provider, and the pool's pre-request rotation, banked-reset redemption and same-provider failover prompts stand down (the pool still supplies membership, order and priority). |
 | Routing policy | `[routing] mode` | Every saved login is a routing account, ranked by the pool's priority and order; `[[routing.accounts]]` only overrides one account's kind, priority, limits, egress, models or icon. `[[routing.budgets]]` adds budgets. A pure engine decides per turn; a daemon service applies it. |
 
 `[routing] mode` (default **`off`**):
@@ -307,7 +306,9 @@ The code and its tests refer to these by number (`economics_tests.rs`,
    if that restores used quota, and until then routing counts it as free room so
    load drains there first.
 6. Keepalive pings follow the ping-versus-rebuild rule in the Keepalive subsection.
-7. Children start on their parent's account when it can serve them.
+7. Children start on their parent's account when it can serve them. A resumed
+   session starts on the account that last served it (an OAuth login through the
+   session route, a labelled API key through `routed_key_account`).
 
 ### Reset grants
 
@@ -604,19 +605,14 @@ opens the gate view with the options of section 5.
 windows, budgets and API-key credentials for a settings UI. It performs no
 network I/O and reads no key value.
 
-### Intended (in progress): icons, popover, account-aware picker
-
-These behaviors are being landed by parallel work and describe the target; verify
-against the code before relying on them.
+### Icons, popover, account-aware picker
 
 - **No transcript dump.** The routing table is never written into the chat. In
   Desktop the account chip opens/toggles the **Account routing** popover with the
-  same rows (running account, why, per-account kind/priority/state); in the TUI and
-  CLI it is `/acct status` / `jcode routing status`. The only chat notice about a
-  change is the single `setting_change` row `old -> new (cause)`, written when the
-  account actually changes. Until that lands the TUI prints the
-  `RoutingStatus` text of `/acct` into the transcript (that goes away) and writes a
-  `Routing: now on <account> (<reason>)` system line when the chip's account changes.
+  same rows (running account, why, per-account kind/priority/state); in the TUI it
+  is `/acct status` (a scrollable view) and in the CLI `jcode routing status`. The
+  only chat notice about a change is the single `setting_change` row
+  `old -> new (cause)`, written when the account actually changes.
 - **Per-account icon.** Every account has a stable emoji, shown **first**
   wherever the account is named: model picker rows, the status-bar chip, the
   routing popover and `routing status`, the change notices, and the usage views
