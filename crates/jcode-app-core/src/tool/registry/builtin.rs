@@ -57,6 +57,7 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            // Sessions see `applet` only in the `native-ui` mode (see `agent_profile`).
             Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "user_response", || {
                 user_response::UserResponseTool

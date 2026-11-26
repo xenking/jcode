@@ -322,6 +322,10 @@ pub(crate) async fn inspect_draft(
     let selection = crate::config::config().tools.selection();
     let mut tools = registry.definitions(selection.allowed_tools.as_ref()).await;
     tools.retain(|tool| !registry.tool_is_disabled(&selection.disabled_tools, &tool.name));
+    // A draft has no pinned mode, so mode-gated tools are not part of it.
+    tools.retain(|tool| {
+        !crate::agent_profile::tools_withheld_without_mode(&[]).any(|name| name == tool.name)
+    });
     Agent::apply_selfdev_tool_surface(
         &mut tools,
         false,

@@ -368,6 +368,7 @@ impl Agent {
         let previous = self.active_skill_announcement();
         self.begin_setting_change();
         self.session.set_pinned_skill_invocation(name, arguments);
+        self.refresh_profile_tool_policy();
         self.active_skill = Some(name.to_owned());
         if self.active_skill_announcement() != previous {
             self.announce_active_skill_inner();
@@ -387,6 +388,7 @@ impl Agent {
         }
         self.begin_setting_change();
         self.session.set_pinned_skill_names(next);
+        self.refresh_profile_tool_policy();
         self.active_skill = self.session.pinned_skill().map(str::to_owned);
         if self.active_skill.is_some() {
             self.announce_active_skill();
@@ -410,6 +412,7 @@ impl Agent {
 
     pub(crate) fn inherit_pinned_skill(&mut self, parent: &Session) -> Result<()> {
         self.session.inherit_pinned_skill(parent);
+        self.refresh_profile_tool_policy();
         self.restore_pinned_skill();
         self.session.save()?;
         Ok(())
@@ -480,6 +483,7 @@ impl Agent {
         }
         if !self.session.pinned_skill_names().contains(&name) {
             self.session.set_pinned_skill_names(vec![name.clone()]);
+            self.refresh_profile_tool_policy();
         }
         self.active_skill = Some(name);
         self.announce_active_skill_inner()

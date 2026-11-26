@@ -272,6 +272,7 @@ impl Agent {
                             self.session.truncate_messages(previous_count);
                             self.active_skill = previous_skill;
                             self.session.set_pinned_skill_names(previous_pinned_skills);
+                            self.refresh_profile_tool_policy();
                         }
                         result
                     } else {

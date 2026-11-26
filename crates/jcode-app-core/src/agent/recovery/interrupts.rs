@@ -663,6 +663,7 @@ impl Agent {
             self.session.truncate_messages(initial_message_count);
             self.active_skill = initial_active_skill;
             self.session.set_pinned_skill_names(initial_pinned_skills);
+            self.refresh_profile_tool_policy();
             *queue = previous_queue;
             logging::warn(&format!(
                 "Failed to persist soft interrupt injection for {}: {}",

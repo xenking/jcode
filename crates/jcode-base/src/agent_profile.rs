@@ -59,6 +59,19 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
 /// UI-driving tools a delegated implementer has no use for.
 const TASK_EXCLUDED_TOOLS: &[&str] = &["macos_computer_use", "desktop", "applet", "rollout_wait"];
 
+/// Tools a session sees only while the named session mode (a pinned skill) is
+/// on. The `native-ui` skill is that mode for `applet`: Express/applet authoring
+/// costs no tokens, in the tool list or the prompt, until a user selects it.
+const MODE_GATED_TOOLS: &[(&str, &str)] = &[("applet", "native-ui")];
+
+/// Mode-gated tools that stay hidden for a session pinning `pinned`.
+pub fn tools_withheld_without_mode(pinned: &[String]) -> impl Iterator<Item = &'static str> {
+    MODE_GATED_TOOLS
+        .iter()
+        .filter(|(_, mode)| !pinned.iter().any(|name| name == mode))
+        .map(|(tool, _)| *tool)
+}
+
 pub const BUILTIN_PROFILE_NAMES: &[&str] = &["orchestrator", "task", "sonic", "scout", "reviewer"];
 
 fn names(list: &[&str]) -> Option<Vec<String>> {

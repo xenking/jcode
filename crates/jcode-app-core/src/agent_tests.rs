@@ -24,6 +24,8 @@ mod session_restore;
 #[path = "agent_tests/compaction.rs"]
 mod compaction;
 
+#[path = "agent_tests/session/express_mode.rs"]
+mod express_mode;
 #[path = "agent_tests/session/pinned_mode.rs"]
 mod pinned_mode;
 #[path = "agent_tests/session/setting_log.rs"]

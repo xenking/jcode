@@ -83,3 +83,26 @@ fn rejects_unsupported_or_unsafe_programs() {
     }
     assert!(compile_express(&" ".repeat(65_537)).is_err());
 }
+
+/// Every call the tool hint advertises must compile, so a model that copies a
+/// signature from the definition never gets a parse error back.
+#[test]
+fn every_advertised_macro_compiles_with_sample_arguments() {
+    let mut advertised = 0;
+    for sentence in jcode_applet_types::express::TOOL_HINT.split(". ") {
+        let Some((name, args)) = sentence.strip_suffix(')').and_then(|s| s.split_once('(')) else {
+            continue;
+        };
+        if !name.starts_with(|c: char| c.is_ascii_uppercase())
+            || !name.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        advertised += 1;
+        let samples = args.split(", ").map(|_| "\"sample\"").collect::<Vec<_>>();
+        let source = format!("root = {name}({})", samples.join(", "));
+        let view = compile_express(&source).unwrap_or_else(|e| panic!("{source}: {e}"));
+        assert!(view.key.is_some(), "{name} root is not keyed");
+    }
+    assert!(advertised > 0, "no macro signature found in the tool hint");
+}

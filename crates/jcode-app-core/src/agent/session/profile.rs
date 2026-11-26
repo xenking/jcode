@@ -6,11 +6,18 @@ use anyhow::Result;
 
 type ToolSelection = (Option<HashSet<String>>, HashSet<String>);
 
-/// Narrow `base` by the named profile. A stored profile that no longer
-/// resolves (for example a custom profile removed from config) keeps the base
-/// selection and logs why, so the session still opens.
-pub(super) fn profile_tool_selection(base: &ToolSelection, profile: Option<&str>) -> ToolSelection {
+/// Narrow `base` by the named profile and by the session's pinned modes: a
+/// mode-gated tool (see `tools_withheld_without_mode`) is disabled unless its
+/// mode is pinned. A stored profile that no longer resolves (for example a
+/// custom profile removed from config) keeps the base selection and logs why,
+/// so the session still opens.
+pub(super) fn effective_tool_selection(
+    base: &ToolSelection,
+    profile: Option<&str>,
+    pinned: &[String],
+) -> ToolSelection {
     let (mut allowed, mut disabled) = base.clone();
+    disabled.extend(crate::agent_profile::tools_withheld_without_mode(pinned).map(str::to_owned));
     let Some(name) = profile else {
         return (allowed, disabled);
     };
@@ -63,10 +70,14 @@ impl Agent {
     }
 
     /// Recompute the effective tool policy for the current session's profile
-    /// and re-register it. Called whenever `self.session` is replaced.
+    /// and pinned modes, and re-register it. Called whenever `self.session` is
+    /// replaced or its pinned modes change.
     pub(super) fn refresh_profile_tool_policy(&mut self) {
-        let (allowed, disabled) =
-            profile_tool_selection(&self.base_tool_selection, self.agent_profile());
+        let (allowed, disabled) = effective_tool_selection(
+            &self.base_tool_selection,
+            self.agent_profile(),
+            self.session.pinned_skill_names(),
+        );
         let changed = allowed != self.allowed_tools || disabled != self.disabled_tools;
         self.allowed_tools = allowed;
         self.disabled_tools = disabled;
@@ -76,8 +87,11 @@ impl Agent {
             self.disabled_tools.clone(),
         );
         if changed {
-            // The cached tool surface was computed for the old policy.
+            // The cached tool surface was computed for the old policy. The
+            // tool list leads the cached prefix, so the next request is cold.
             self.tool_lock.unlock();
+            self.cache_tracker.reset();
+            self.kv_cache_monitor.reset();
         }
     }
 

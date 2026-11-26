@@ -38,7 +38,7 @@ mod model_usage_tests;
 mod parallel_reads;
 #[path = "agent/session/profile.rs"]
 mod profile;
-use profile::profile_tool_selection;
+use profile::effective_tool_selection;
 #[path = "agent/context/prompt_context.rs"]
 mod prompt_context;
 #[path = "agent/context/prompting.rs"]
@@ -561,8 +561,11 @@ impl Agent {
         let prompt = prompt_context::PromptContext::new(agents_md_snapshot, static_prompt);
         let initial_provider_model = provider.model();
         let base_tool_selection = (allowed_tools, disabled_tools);
-        let (allowed_tools, disabled_tools) =
-            profile_tool_selection(&base_tool_selection, session.agent_profile());
+        let (allowed_tools, disabled_tools) = effective_tool_selection(
+            &base_tool_selection,
+            session.agent_profile(),
+            session.pinned_skill_names(),
+        );
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             session.id(),
             allowed_tools.clone(),

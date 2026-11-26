@@ -6,6 +6,8 @@ mode: true
 
 # Native UI in Jcode Desktop
 
+Pinning this mode is what adds `applet` to the tool list; without it the tool is not advertised at all.
+
 For a live table of the current chat's tasks, if `TaskTable(title)` is advertised, mount `root = TaskTable("Tasks")` inline once without `wait`. The native renderer follows the owning session's task events. Do not send patches to keep it fresh. This macro does not watch arbitrary jobs, files, URLs or other sessions. Ordinary `table` and `progress` nodes still need a producer for updates.
 
 If `applet` is unavailable, give a text equivalent. Do not enable permissions or open a browser just to render UI. For a useful visual or choice, call `applet` instead of printing JSON in prose. Use `placement: "end"` when the user asks to see a demo in the current chat.

@@ -97,7 +97,12 @@ impl App {
                 provider_messages = self.messages_for_provider().0;
             }
 
-            let tools = self.registry.definitions(None).await;
+            let mut tools = self.registry.definitions(None).await;
+            let pinned = self.session.pinned_skill_names();
+            tools.retain(|tool| {
+                !crate::agent_profile::tools_withheld_without_mode(pinned)
+                    .any(|name| name == tool.name)
+            });
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not.
