@@ -85,9 +85,7 @@ impl Agent {
             "claude" | "anthropic" => "claude-oauth",
             "openai" => "openai-oauth",
             _ => {
-                if self.session.routed_key_account() != Some(account.as_str()) {
-                    self.session
-                        .set_routed_key_account(Some(account.as_str().to_owned()));
+                if self.session.record_routed_key_account(account.as_str()) {
                     self.persist_session_best_effort("routed key account");
                 }
                 return;

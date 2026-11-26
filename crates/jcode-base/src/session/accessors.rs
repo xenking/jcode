@@ -132,8 +132,13 @@ impl Session {
         self.routed_key_account.as_deref()
     }
 
-    pub fn set_routed_key_account(&mut self, account: Option<String>) {
-        self.routed_key_account = account;
+    /// Records the account; true when it differs from the one already kept.
+    pub fn record_routed_key_account(&mut self, account: &str) -> bool {
+        let changed = self.routed_key_account.as_deref() != Some(account);
+        if changed {
+            self.routed_key_account = Some(account.to_owned());
+        }
+        changed
     }
 
     pub fn agent_model_overrides(&self) -> AgentModelOverrides {
