@@ -328,7 +328,12 @@ impl ServerRuntime {
         }
 
         if let Some(Err(e)) = result {
-            crate::logging::error(&format!("{}: {}", error_prefix, e));
+            let message = format!("{}: {}", error_prefix, e);
+            if is_client_disconnect(&e) {
+                crate::logging::debug(&message);
+            } else {
+                crate::logging::error(&message);
+            }
         }
     }
 
@@ -380,9 +385,28 @@ impl ServerRuntime {
     }
 }
 
+/// A peer that vanished mid-write is a normal disconnect, not a server error.
+fn is_client_disconnect(error: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| matches!(io.kind(), BrokenPipe | ConnectionReset | ConnectionAborted))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::RuntimeTaskScope;
+    use super::{RuntimeTaskScope, is_client_disconnect};
+
+    #[test]
+    fn broken_pipe_is_a_client_disconnect_but_other_errors_are_not() {
+        let pipe = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            .context("write failed");
+        assert!(is_client_disconnect(&pipe));
+        assert!(!is_client_disconnect(&anyhow::anyhow!("bad frame")));
+    }
+
     #[cfg(unix)]
     use crate::server::tests::ScopedEnvVar;
     use std::sync::Arc;

@@ -102,6 +102,21 @@ struct SkillCopyStats {
     failed: usize,
 }
 
+/// True only the first time this process sees `winner` shadow `shadowed`: the
+/// registry reloads on every skill refresh and would otherwise repeat the warning.
+fn shadow_warning_is_new(name: &str, winner: &Path, shadowed: &Path) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<(String, PathBuf, PathBuf)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((
+            name.to_string(),
+            winner.to_path_buf(),
+            shadowed.to_path_buf(),
+        ))
+}
+
 impl SkillRegistry {
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
@@ -877,6 +892,7 @@ impl SkillRegistry {
     fn insert_shared_skill(&mut self, skill: Arc<Skill>) {
         if let Some(shadowed) = self.skills.get(&skill.name)
             && shadowed.path != skill.path
+            && shadow_warning_is_new(&skill.name, &skill.path, &shadowed.path)
         {
             crate::logging::warn(&format!(
                 "Skill '{}' from '{}' shadows '{}'",

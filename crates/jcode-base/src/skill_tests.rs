@@ -854,3 +854,15 @@ fn mode_classification_is_explicit_frontmatter_then_name() {
         assert_eq!(skill.is_mode(), expected, "{name} {explicit:?}");
     }
 }
+
+#[test]
+fn shadow_warning_fires_once_per_skill_pair_per_process() {
+    let (name, win, lose) = (
+        "shadow-once-test",
+        Path::new("/a/SKILL.md"),
+        Path::new("/b/SKILL.md"),
+    );
+    assert!(shadow_warning_is_new(name, win, lose));
+    assert!(!shadow_warning_is_new(name, win, lose));
+    assert!(shadow_warning_is_new(name, lose, win));
+}
