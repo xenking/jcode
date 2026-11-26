@@ -1442,7 +1442,7 @@ impl Agent {
             if saw_message_end {
                 let _ = event_tx.send(ServerEvent::RequestUsage {
                     session_id: self.session.id().to_owned(),
-                    request_id,
+                    request_id: request_id.clone(),
                     provider: provider.name().into(),
                     model: reported_model.unwrap_or_else(|| provider.model()),
                     input: usage_input,
@@ -1507,11 +1507,19 @@ impl Agent {
                         self.kv_cache_monitor.note_openai_ws_delta();
                     }
                 }
-                if let Some(miss) = self.finish_kv_cache_monitor_request(
+                let miss = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),
                     usage_cache_read,
                     usage_cache_creation,
-                ) {
+                );
+                if saw_message_end {
+                    self.record_request_usage(
+                        &request_id,
+                        (usage_input, usage_output, usage_cache_read, usage_cache_creation),
+                        miss.as_ref(),
+                    );
+                }
+                if let Some(miss) = miss {
                     let _ = event_tx.send(miss);
                 }
             }

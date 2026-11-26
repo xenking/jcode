@@ -394,6 +394,10 @@ pub(crate) enum Command {
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,
+        /// Show the durable per-route request, cache and miss totals recorded
+        /// on this machine instead of provider limits
+        #[arg(long)]
+        requests: bool,
     },
 
     /// Inspect and steer account routing: policy, holds, paid accounts, acknowledgements

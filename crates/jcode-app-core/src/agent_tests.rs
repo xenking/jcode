@@ -872,6 +872,57 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     );
 }
 
+#[tokio::test]
+async fn completed_requests_add_cached_and_uncached_tokens_to_the_durable_route_totals() {
+    let _guard = crate::storage::lock_test_env();
+    // Other agent tests also record requests; count only this one's home.
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = Restore(previous_home);
+    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "count this".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    // The write is off the turn's path; wait for it to land.
+    let routes = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let routes = jcode_base::request_usage::summarize().unwrap();
+            if !routes.is_empty() {
+                break routes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("request usage must be recorded");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].provider, "openai");
+    // The provider's compaction makes the turn issue several requests.
+    let requests = routes[0].requests;
+    assert!(requests >= 1);
+    assert_eq!(routes[0].cached_input, 0);
+    assert_eq!(routes[0].uncached_input, 24_000 * requests);
+    assert_eq!(routes[0].output, 10 * requests);
+}
+
 /// Provider that transparently switches its model mid-stream, mimicking the
 /// Anthropic retired-model fallback (`claude-fable-5` -> `claude-opus-4-8`).
 struct MidStreamModelSwitchProvider {

@@ -522,6 +522,52 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Durable per-route request totals: cached vs uncached prompt tokens and misses.
+pub(super) fn run_request_usage_command(emit_json: bool) -> Result<()> {
+    let routes = crate::request_usage::summarize()?;
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&routes)?);
+        return Ok(());
+    }
+    if routes.is_empty() {
+        println!("No requests recorded yet");
+        return Ok(());
+    }
+    for route in routes {
+        let prompt = route.cached_input + route.uncached_input;
+        let hit = if prompt == 0 {
+            0.0
+        } else {
+            route.cached_input as f64 * 100.0 / prompt as f64
+        };
+        let method = if route.api_method.is_empty() {
+            String::new()
+        } else {
+            format!(" via {}", route.api_method)
+        };
+        println!("{} / {}{method}", route.provider, route.model);
+        println!(
+            "  {} requests, {} cached + {} uncached input tokens ({hit:.0}% cached), {} output",
+            route.requests, route.cached_input, route.uncached_input, route.output
+        );
+        if route.misses > 0 {
+            let reasons: Vec<_> = route
+                .miss_reasons
+                .iter()
+                .map(|(reason, count)| format!("{reason} x{count}"))
+                .collect();
+            println!(
+                "  {} cache misses ({} tokens missed): {}",
+                route.misses,
+                route.missed_tokens,
+                reasons.join(", ")
+            );
+        }
+        println!("  {} .. {}", route.first_request, route.last_request);
+    }
+    Ok(())
+}
+
 pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
     let providers = crate::usage::fetch_all_provider_usage().await;
 

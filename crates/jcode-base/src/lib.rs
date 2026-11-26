@@ -81,6 +81,7 @@ pub mod mobile_sync;
 pub mod model_pricing;
 pub mod model_prompt;
 pub mod model_usage;
+pub mod request_usage;
 pub mod output_style;
 pub mod persistence_batch;
 pub mod plan;

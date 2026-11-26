@@ -963,7 +963,7 @@ fn version_subcommand_parses() {
 fn usage_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "usage", "--json"]).unwrap();
     match args.command {
-        Some(Command::Usage { json }) => assert!(json),
+        Some(Command::Usage { json, .. }) => assert!(json),
         other => panic!("unexpected command: {:?}", other),
     }
 }

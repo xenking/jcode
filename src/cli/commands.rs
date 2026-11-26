@@ -2161,7 +2161,10 @@ pub fn run_version_command(emit_json: bool) -> Result<()> {
     report_info::run_version_command(emit_json)
 }
 
-pub async fn run_usage_command(emit_json: bool) -> Result<()> {
+pub async fn run_usage_command(emit_json: bool, requests: bool) -> Result<()> {
+    if requests {
+        return report_info::run_request_usage_command(emit_json);
+    }
     report_info::run_usage_command(emit_json).await
 }
 

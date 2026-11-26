@@ -234,6 +234,46 @@ impl Agent {
         self.kv_cache_monitor.begin_request(route, signature);
     }
 
+    /// Add the completed request to the durable per-route usage totals.
+    fn record_request_usage(
+        &self,
+        request_id: &str,
+        (input, output, cache_read, cache_creation): (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+        miss: Option<&ServerEvent>,
+    ) {
+        let total = self.effective_context_tokens_from_usage(
+            input.unwrap_or(0),
+            cache_read,
+            cache_creation,
+        );
+        let cached_input = cache_read.unwrap_or(0);
+        let (miss_reason, missed_tokens) = match miss {
+            Some(ServerEvent::KvCacheMiss {
+                reason,
+                missed_tokens,
+                ..
+            }) => (Some(reason.clone()), *missed_tokens),
+            _ => (None, 0),
+        };
+        let record = jcode_base::request_usage::RequestRecord {
+            request_id: request_id.to_owned(),
+            session_id: self.session.id().to_owned(),
+            provider: self.provider.name().to_owned(),
+            model: self.provider.model(),
+            api_method: self.session.route_api_method().unwrap_or_default().to_owned(),
+            cached_input,
+            uncached_input: total.saturating_sub(cached_input),
+            output: output.unwrap_or(0),
+            miss_reason,
+            missed_tokens,
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = jcode_base::request_usage::record(&record) {
+                logging::warn(&format!("Cannot record request usage: {error:#}"));
+            }
+        });
+    }
+
     /// Classify the completed request's usage. Returns the event to send when
     /// the request missed the KV cache.
     fn finish_kv_cache_monitor_request(
