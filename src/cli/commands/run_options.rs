@@ -61,14 +61,58 @@ pub(in crate::cli) async fn run_single_message_command(
         RunPersistence::Ephemeral => crate::agent::Agent::new_ephemeral(provider.clone(), registry),
         _ => crate::agent::Agent::new(provider.clone(), registry),
     };
-    if let RunPersistence::Resume(session_id) = persistence
-        && let Err(error) = agent.restore_session(session_id)
-    {
-        agent.mark_closed();
-        return Err(error);
+    if let RunPersistence::Resume(session_id) = persistence {
+        // `-p`/`-m` are an explicit route choice that outranks the saved one.
+        let requested_route = (*choice != crate::cli::provider_init::ProviderChoice::Auto
+            || model.is_some())
+        .then(|| agent.provider_model());
+        if let Err(error) =
+            resume_session_for_run(&mut agent, session_id, requested_route.as_deref(), message)
+        {
+            agent.mark_closed();
+            return Err(error);
+        }
     }
 
     run_single_message_with_agent(&mut agent, provider, message, output).await
+}
+
+/// Restore `session_id` for a one-shot run. A requested route replaces the
+/// session's saved one (and is persisted), and an unanswered earlier copy of
+/// `message` is dropped so a retried run delivers it exactly once.
+pub(super) fn resume_session_for_run(
+    agent: &mut crate::agent::Agent,
+    session_id: &str,
+    requested_route: Option<&str>,
+    message: &str,
+) -> Result<()> {
+    agent.restore_session(session_id)?;
+    if let Some(route) = requested_route {
+        agent
+            .set_model(route)
+            .with_context(|| format!("Selecting {route} for resumed session {session_id}"))?;
+    }
+    agent.discard_unanswered_retry(message);
+    Ok(())
+}
+
+/// A failover offer is a machine-readable wire string; a one-shot run has no
+/// one to ask, so say what is blocked and how to proceed instead.
+pub(super) fn explain_run_error(error: anyhow::Error) -> anyhow::Error {
+    let text = format!("{error:#}");
+    let Some(prompt) = crate::provider::parse_failover_prompt_message(&text) else {
+        return error;
+    };
+    let reset = crate::provider::usage_limit_details(&text)
+        .and_then(|details| details.reset)
+        .map(|reset| format!(", resets {reset}"))
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "{} is unavailable ({}{reset}). The message was not delivered: jcode run never switches provider on its own. Pass -p/--provider or -m/--model (for example `jcode --resume <id> -p {} run ...`) to continue on another route.",
+        prompt.from_label,
+        prompt.reason,
+        prompt.to_provider,
+    )
 }
 
 pub(in crate::cli) enum RunInput {

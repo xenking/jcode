@@ -151,6 +151,31 @@ impl Agent {
         Ok(())
     }
 
+    /// Drop a trailing user message that no turn ever answered when it is the
+    /// same prompt the caller is about to send again.
+    ///
+    /// A turn stores its prompt before the first request, so a run that fails
+    /// at once (exhausted account, blocked failover) leaves it in the session
+    /// and every retry of the same command would append another copy.
+    /// Returns whether a stale copy was removed.
+    pub fn discard_unanswered_retry(&mut self, user_message: &str) -> bool {
+        let wrapped = crate::prompt::with_swarm_user_message_reminder(
+            user_message,
+            self.provider.reasoning_effort().as_deref(),
+        );
+        let stale = self
+            .session
+            .last_message()
+            .is_some_and(|last| last.role == Role::User && last.display_role.is_none())
+            && self.last_message_text() == Some(wrapped.as_str());
+        if !stale {
+            return false;
+        }
+        let visible = self.session.rewind_target_count();
+        let kept = self.message_count() - 1;
+        self.rewind_stored_prefix(kept, visible).is_ok()
+    }
+
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
         let compaction = self.registry.compaction();
         let mut manager = compaction

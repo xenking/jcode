@@ -2653,7 +2653,8 @@ async fn run_single_message_with_agent(
         }
         Ok(())
     }
-    .await;
+    .await
+    .map_err(run_options::explain_run_error);
 
     // `Agent::new` and session restore both register this process as the active
     // owner. Unlike the interactive lifecycle, `jcode run` has no later quit
