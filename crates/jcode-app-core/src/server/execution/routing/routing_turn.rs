@@ -386,3 +386,7 @@ pub(super) async fn on_failure(
 #[cfg(test)]
 #[path = "routing_turn_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "routing_headless_decider_tests.rs"]
+mod headless_decider_tests;
