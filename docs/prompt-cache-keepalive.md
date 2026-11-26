@@ -16,12 +16,22 @@ max_daily_usd_micros = 10000000  # $10 per session, reset at UTC midnight
 ```
 
 Default eligibility is first-party Anthropic Messages on the 1-hour tier with
-known standard prices. Pings run only while the session is parked on a pending
-`swarm await_members` with internal auto-wake, waiting on its workers. A
-blocking `bg wait`, `rollout_wait` or `ask` never pings: the turn that resumes
-after them is cheap to rebuild or soon enough not to need it. Checks start
-inside the last 5 minutes of a 1-hour window or the last minute of an opted-in
-5-minute window, but never within 15 seconds of expiry.
+known standard prices. A ping costs money, so exactly one situation may send
+one: the session is waiting for its own swarm workers. That is
+
+- a blocking `swarm await_members` (the tool is the wait),
+- a background `await_members` with internal auto-wake once the turn ended, and
+- a turn that ended while the session still has live workers (spawned, queued
+  or running), with or without an `await_members` call.
+
+Nothing else pings: not a human wait (turn ended, no live workers), an idle or
+closed session, an `ask`, `bg wait`, `rollout_wait` or any other tool wait, and
+not a debug session. The wait ends the pings when the last live worker
+finishes, the session is stopped, a new request starts or the daily limit is
+spent. Workers are rechecked every few seconds, so a wait that ends silently
+frees its request snapshot. Checks start inside the last 5 minutes of a 1-hour
+window or the last minute of an opted-in 5-minute window, but never within 15
+seconds of expiry.
 
 Each ping follows rule 6 of the routing economics
 ([ROUTING.md](ROUTING.md), section 6, rule 6):
@@ -29,7 +39,9 @@ Each ping follows rule 6 of the routing economics
 - A ping costs a read of the cached prefix plus ordinary input rates on any
   uncached tail. A rebuild costs a cache write plus the tail. Pinging continues
   while the pings needed until the wait's deadline cost less than one rebuild.
-  A wake before expiry needs no ping.
+  A wake before expiry needs no ping. An `await_members` deadline is the wait's
+  deadline. With no definite wake (a turn that ended with live workers) it
+  rolls one TTL past the current expiry and is re-evaluated after each ping.
 - On an account with free room (quota that would expire unused), pings cost
   nothing and always run.
 - When routing has a pending move for the session that is worth its cache miss
