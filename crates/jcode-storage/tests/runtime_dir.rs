@@ -2,6 +2,9 @@
 //! subprocesses that jcode points at a scratch dir) must still find the one
 //! per-user daemon socket. Own test binary with one test: it mutates process env.
 
+// Workspace builds unify `test-support` on, which isolates storage's runtime dir by design;
+// the real resolver only runs with `-p jcode-storage`.
+#[cfg(not(feature = "test-support"))]
 #[test]
 fn runtime_dir_is_stable_across_tmpdir_and_honours_override() {
     let scratch = tempfile::tempdir().unwrap();
