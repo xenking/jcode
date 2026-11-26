@@ -290,7 +290,8 @@ async fn stdio_stream_rejects_bad_hello_without_dialing_daemon() {
 async fn session_tool_capabilities_are_negotiated_before_forwarding() {
     use serde_json::json;
     for supported in [false, true] {
-        let root = std::env::temp_dir().join(format!(
+        // Unix socket paths are capped near 104 bytes; macOS TMPDIR alone is ~50.
+        let root = std::path::Path::new("/tmp").join(format!(
             "jcode-tools-{}-{}-{supported}",
             std::process::id(),
             std::time::SystemTime::now()

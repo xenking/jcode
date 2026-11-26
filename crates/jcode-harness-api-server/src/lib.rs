@@ -978,7 +978,8 @@ mod public_acceptance_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
         let _home_lock = translate::jcode_home_test_lock();
-        let root = std::env::temp_dir().join(format!(
+        // Unix socket paths are capped near 104 bytes; macOS TMPDIR alone is ~50.
+        let root = std::path::Path::new("/tmp").join(format!(
             "jcode-api-attachment-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
