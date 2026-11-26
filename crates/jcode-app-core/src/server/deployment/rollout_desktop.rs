@@ -411,25 +411,56 @@ struct BridgeProcess {
 #[cfg(target_os = "macos")]
 impl BridgeProcess {
     fn is_live(&self) -> Result<bool> {
-        if unsafe { libc::kill(self.pid as libc::pid_t, 0) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
+        self.is_live_with(
+            || {
+                if unsafe { libc::kill(self.pid as libc::pid_t, 0) } == 0 {
+                    return Ok(true);
+                }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(false)
+                } else {
+                    Err(error.into())
+                }
+            },
+            || (started_at(self.pid), executable_of(self.pid)),
+            std::thread::sleep,
+        )
+    }
+
+    fn is_live_with(
+        &self,
+        mut exists: impl FnMut() -> Result<bool>,
+        mut identity: impl FnMut() -> (Result<std::time::SystemTime>, Option<PathBuf>),
+        mut wait: impl FnMut(Duration),
+    ) -> Result<bool> {
+        for attempt in 0..=5 {
+            if !exists()? {
                 return Ok(false);
             }
-            return Err(error.into());
+            let (start, executable) = identity();
+            anyhow::ensure!(
+                start.as_ref().map_or(true, |start| *start == self.start)
+                    && executable
+                        .as_ref()
+                        .is_none_or(|path| same_path(path, &self.executable)),
+                "bridge process {} identity changed since discovery",
+                self.pid
+            );
+            match (start, executable) {
+                (Ok(_), Some(_)) => return Ok(true),
+                (start, executable) if attempt == 5 => {
+                    if !exists()? {
+                        return Ok(false);
+                    }
+                    start?;
+                    let _ = executable;
+                    bail!("cannot inspect bridge {} executable", self.pid);
+                }
+                _ => wait(Duration::from_millis(100)),
+            }
         }
-        let current_start = started_at(self.pid);
-        let current_executable = executable_of(self.pid);
-        if (current_start.is_err() || current_executable.is_none()) && !process_exists(self.pid) {
-            return Ok(false);
-        }
-        anyhow::ensure!(
-            current_start? == self.start
-                && current_executable.is_some_and(|path| same_path(&path, &self.executable)),
-            "bridge process {} identity changed since discovery",
-            self.pid
-        );
-        Ok(true)
+        unreachable!()
     }
 }
 
@@ -1341,6 +1372,74 @@ mod tests {
                 exits_during_inspection: false,
             },
         )
+    }
+
+    #[test]
+    fn bridge_identity_race_waits_for_exit_but_rejects_live_or_changed_pids() {
+        let (process, _) = fake_bridge(&[], false);
+        for scenario in 0..5 {
+            let checks = std::cell::Cell::new(0);
+            let waits = std::cell::Cell::new(0);
+            let result = process.is_live_with(
+                || {
+                    checks.set(checks.get() + 1);
+                    if scenario == 4 {
+                        bail!("permission denied");
+                    }
+                    Ok(scenario != 0 || checks.get() < 3)
+                },
+                || match scenario {
+                    2 => (Ok(process.start + Duration::from_secs(1)), None),
+                    3 => (
+                        Err(anyhow::anyhow!("missing start")),
+                        Some("/foreign".into()),
+                    ),
+                    _ => (Err(anyhow::anyhow!("missing start")), None),
+                },
+                |_| waits.set(waits.get() + 1),
+            );
+            if scenario == 0 {
+                assert!(!result.unwrap());
+                assert_eq!(waits.get(), 2);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(waits.get(), if scenario == 1 { 5 } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn failed_identity_never_sends_retirement_or_signal() {
+        struct Inconclusive<'a> {
+            process: &'a BridgeProcess,
+            fake: FakeBridge,
+        }
+        impl BridgeRetirement for Inconclusive<'_> {
+            fn request(&mut self) -> jcode_sdk::Result<()> {
+                panic!("identity not established")
+            }
+            fn alive(&mut self) -> Result<bool> {
+                self.process.is_live_with(
+                    || Ok(true),
+                    || (Err(anyhow::anyhow!("missing start")), None),
+                    |_| {},
+                )
+            }
+            fn no_clients(&mut self) -> Result<bool> {
+                panic!("identity not established")
+            }
+            fn signal(&mut self, signal: i32) -> Result<()> {
+                self.fake.signal(signal)
+            }
+            fn wait(&mut self, _: Duration) {}
+        }
+        let (process, fake) = fake_bridge(&[], false);
+        let mut ops = Inconclusive {
+            process: &process,
+            fake,
+        };
+        assert!(retire_with_fallback(&process, &mut ops).is_err());
+        assert!(ops.fake.signals.is_empty());
     }
 
     #[test]
