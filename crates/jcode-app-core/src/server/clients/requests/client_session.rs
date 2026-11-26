@@ -1068,9 +1068,6 @@ pub(super) async fn handle_reload(
         return;
     }
 
-    let request_id = crate::id::new_id("reload");
-    mark_remote_reload_started(&request_id);
-
     let (triggering_session, prefer_selfdev_binary) = match agent.try_lock() {
         Ok(agent_guard) => (
             Some(agent_guard.session_id().to_string()),
@@ -1078,8 +1075,8 @@ pub(super) async fn handle_reload(
         ),
         Err(_) => {
             crate::logging::warn(&format!(
-                "SERVER_RELOAD_AGENT_BUSY request_id={} client_session_id={} fallback_triggering_session={} prefer_selfdev_binary=false",
-                request_id, client_session_id, client_session_id
+                "SERVER_RELOAD_AGENT_BUSY client_session_id={} fallback_triggering_session={} prefer_selfdev_binary=false",
+                client_session_id, client_session_id
             ));
             (Some(client_session_id.to_string()), false)
         }
@@ -1121,11 +1118,13 @@ pub(super) async fn handle_reload(
     let hash = jcode_build_meta::git_hash().to_string();
     let signal_request_id =
         crate::server::send_reload_signal(hash, triggering_session.clone(), prefer_selfdev_binary);
+    // The marker must carry the id the new daemon will confirm; a second,
+    // locally minted id here is never confirmed and strands the waiting CLI.
+    mark_remote_reload_started(&signal_request_id);
 
     crate::logging::info(&format!(
-        "handle_reload: queued reload signal {} from remote client request {} (triggering_session={:?}, prefer_selfdev_binary={}, reload_notified_sessions={}, reload_notified_clients={})",
+        "handle_reload: queued reload signal {} (triggering_session={:?}, prefer_selfdev_binary={}, reload_notified_sessions={}, reload_notified_clients={})",
         signal_request_id,
-        request_id,
         triggering_session,
         prefer_selfdev_binary,
         live_sessions.len(),

@@ -537,6 +537,42 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
 }
 
 #[tokio::test]
+async fn handle_reload_marker_carries_the_id_the_new_daemon_confirms() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let mut rx = crate::server::subscribe_reload_signal_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(build_test_agent(provider, registry, Vec::new())));
+    let (tx, _events) = mpsc::unbounded_channel::<ServerEvent>();
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+
+    handle_reload(13, true, "session_marker_id", &agent, &swarm_members, &tx).await;
+
+    rx.changed()
+        .await
+        .map_err(|e| anyhow!("reload signal: {e}"))?;
+    let signal = rx
+        .borrow_and_update()
+        .clone()
+        .ok_or_else(|| anyhow!("reload signal payload should exist"))?;
+    let state = crate::server::recent_reload_state(std::time::Duration::from_secs(5))
+        .ok_or_else(|| anyhow!("reload state should exist"))?;
+    assert_eq!(state.request_id, signal.request_id);
+
+    crate::server::clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn handle_reload_does_not_wait_for_busy_agent_lock() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
