@@ -393,6 +393,27 @@ impl Config {
         })
     }
 
+    /// One-time migration: raise a persisted `[dictation] timeout_secs = 90`
+    /// to the current 300 s default.
+    ///
+    /// 90 s was the old default, and a full `Config::save()` baked it into
+    /// users' config.toml. That value cuts any dictation command at a minute
+    /// and a half, so a long dictation was lost. A user who explicitly sets 90
+    /// after the migration is never raised again. Best-effort, returns `true`
+    /// when it rewrote the config.
+    pub fn migrate_legacy_dictation_timeout_once() -> bool {
+        migrate_line_once(LineMigration {
+            marker: "dictation-timeout-300",
+            marker_text: "dictation timeout_secs default migration: 90 -> 300\n",
+            key: "timeout_secs",
+            rewrite: |value| {
+                let value = value.split('#').next().unwrap_or("");
+                (value.trim() == "90").then(|| "300".to_string())
+            },
+            migrated: "Migrated legacy dictation timeout_secs 90 to 300 in config.toml",
+        })
+    }
+
     /// One-time migration: flip a persisted `idle_animation = true` to `false`.
     ///
     /// The idle animation is being turned off for everyone. Users who toggled

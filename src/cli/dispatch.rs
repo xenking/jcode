@@ -68,6 +68,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     // One-time config migration: force idle_animation off for all existing
     // users; anyone re-enabling it afterwards keeps their choice.
     crate::config::Config::migrate_idle_animation_off_once();
+    // One-time config migration: the old 90 s dictation timeout cut long dictations.
+    crate::config::Config::migrate_legacy_dictation_timeout_once();
 
     if let Some(profile_name) = args
         .provider_profile
