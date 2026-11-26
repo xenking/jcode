@@ -1,10 +1,15 @@
-//! Live request snapshots exist only while a turn or a confirmed pause owns them.
+//! Live request snapshots exist only while a turn or a worker wait owns them.
+//!
+//! A cache ping is paid, so exactly one state may send it: the session waits
+//! for its own swarm workers. That is a blocking `await_members` (the tool is
+//! the wait) or a background `await_members` with wake once the turn ended.
+//! Nothing else pings: not a human wait, an idle or closed session, `ask`,
+//! any other tool, or a debug session.
 
 mod ledger;
 
 use jcode_provider_core::cache_keepalive::{Capture, Decision, Replay, decide};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
@@ -12,6 +17,9 @@ use tokio::sync::watch;
 pub(crate) use ledger::load_usage;
 
 static HUBS: LazyLock<Mutex<HashMap<String, Weak<Hub>>>> = LazyLock::new(Mutex::default);
+
+/// Rechecks a wait this often, so one that ended silently stops pinging.
+const RECHECK: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 5_000 });
 
 type CompactionClock = Arc<tokio::sync::RwLock<crate::compaction::CompactionManager>>;
 
@@ -25,6 +33,29 @@ struct Hub {
 struct State {
     phase: Phase,
     replay: Option<ArmedReplay>,
+    holds: HashMap<u64, Hold>,
+    next_hold: u64,
+    runner: bool,
+}
+
+struct Hold {
+    kind: WaitKind,
+    deadline: SystemTime,
+}
+
+impl State {
+    /// The latest moment the session may wake, when it waits for its workers
+    /// right now. `None` means no ping is allowed.
+    fn wake_deadline(&self) -> Option<SystemTime> {
+        self.holds
+            .values()
+            .filter(|hold| match hold.kind {
+                WaitKind::Blocking => self.phase == Phase::InTurn,
+                WaitKind::Background => self.phase == Phase::Parked,
+            })
+            .map(|hold| hold.deadline)
+            .max()
+    }
 }
 
 struct ArmedReplay {
@@ -101,10 +132,12 @@ impl Turn {
                 })
         };
         hub.update(|state| {
-            *state = State {
-                phase: Phase::InTurn,
-                replay: None,
-            }
+            state.phase = Phase::InTurn;
+            state.replay = None;
+            // A background wait outlives turns; a blocking one ended with its turn.
+            state
+                .holds
+                .retain(|_, hold| hold.kind == WaitKind::Background);
         });
         Some(Self {
             hub,
@@ -144,30 +177,76 @@ impl Drop for Turn {
                 state.replay = None;
             }
         });
+        if self.park_on_drop {
+            // Ends at once unless a background wait holds the session.
+            ensure_runner(&self.hub);
+        }
     }
 }
 
-pub(crate) struct Pause {
-    live: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WaitKind {
+    /// A blocking `await_members`: the running tool is the wait.
+    Blocking,
+    /// A background `await_members` with wake, once the turn has ended.
+    Background,
 }
 
-impl Drop for Pause {
+/// Declares that the session waits for its workers until `deadline_ms`.
+pub(crate) struct Wait {
+    hub: Arc<Hub>,
+    id: u64,
+    kind: WaitKind,
+}
+
+impl Drop for Wait {
     fn drop(&mut self) {
-        self.live.store(false, Ordering::Release);
-        self.task.abort();
+        self.hub.state().holds.remove(&self.id);
     }
 }
 
-impl Pause {
-    /// Keeps the parked session's cache warm while it waits on swarm workers
-    /// until `deadline_ms`, as long as rule 6 of the routing economics allows.
-    pub(crate) fn detached(session_id: &str, deadline_ms: u64) -> Option<Self> {
+impl Wait {
+    pub(crate) fn begin(session_id: &str, kind: WaitKind, deadline_ms: u64) -> Option<Self> {
         let hub = lookup(session_id)?;
         let deadline = SystemTime::UNIX_EPOCH + Duration::from_millis(deadline_ms);
-        let live = Arc::new(AtomicBool::new(true));
-        let task = tokio::spawn(run_pause(hub, deadline, Arc::clone(&live)));
-        Some(Self { live, task })
+        let id = {
+            let mut state = hub.state();
+            state.next_hold += 1;
+            let id = state.next_hold;
+            state.holds.insert(id, Hold { kind, deadline });
+            id
+        };
+        ensure_runner(&hub);
+        Some(Self { hub, id, kind })
+    }
+
+    pub(crate) fn kind(&self) -> WaitKind {
+        self.kind
+    }
+}
+
+fn ensure_runner(hub: &Arc<Hub>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    {
+        let mut state = hub.state();
+        if state.runner || state.replay.is_none() {
+            return;
+        }
+        state.runner = true;
+    }
+    runtime.spawn(run_pause(Arc::clone(hub)));
+}
+
+/// Marks the hub's runner gone however `run_pause` ends.
+struct RunnerExit(Option<Arc<Hub>>);
+
+impl Drop for RunnerExit {
+    fn drop(&mut self) {
+        if let Some(hub) = self.0.take() {
+            hub.state().runner = false;
+        }
     }
 }
 
@@ -177,23 +256,25 @@ enum Next {
     Ping(ArmedReplay, u64),
 }
 
-async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
-    let phase = Phase::Parked;
+async fn run_pause(hub: Arc<Hub>) {
+    let mut exit = RunnerExit(Some(Arc::clone(&hub)));
     let mut changed = hub.changed.subscribe();
     loop {
-        if !live.load(Ordering::Acquire)
-            || crate::turn_activity::session_is_stopped(&hub.session_id)
-        {
+        if crate::turn_activity::session_is_stopped(&hub.session_id) {
             return;
         }
         changed.borrow_and_update();
-        let next = {
+        let (deadline, next) = {
             let mut state = hub.state();
             let now = SystemTime::now();
             let config = &crate::config::config().cache;
-            if state.phase != phase {
-                Next::Changed
-            } else if let Some(armed) = state.replay.as_ref() {
+            let Some(deadline) = state.wake_deadline() else {
+                // Not waiting for workers: stop, and free the replay with the hub.
+                state.runner = false;
+                exit.0 = None;
+                return;
+            };
+            let next = if let Some(armed) = state.replay.as_ref() {
                 match decide(config, armed.replay.cache, now, deadline, 0) {
                     Decision::Stop => Next::Changed,
                     Decision::Sleep(delay) => Next::Sleep(delay),
@@ -204,18 +285,20 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
                 }
             } else {
                 Next::Changed
-            }
+            };
+            (deadline, next)
         };
         match next {
-            Next::Changed => {
-                let _ = changed.changed().await;
-            }
+            Next::Changed => tokio::select! {
+                _ = changed.changed() => {},
+                _ = tokio::time::sleep(RECHECK) => {},
+            },
             Next::Sleep(delay) => tokio::select! {
                 _ = changed.changed() => {},
-                _ = tokio::time::sleep(delay) => {},
+                _ = tokio::time::sleep(delay.min(RECHECK)) => {},
             },
             Next::Ping(mut armed, reserve_micros) => {
-                if !live.load(Ordering::Acquire) || changed.has_changed().unwrap_or(true) {
+                if changed.has_changed().unwrap_or(true) {
                     return;
                 }
                 if armed
@@ -245,8 +328,8 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
                     }
                 };
                 let started = SystemTime::now();
-                if !live.load(Ordering::Acquire)
-                    || crate::turn_activity::session_is_stopped(&hub.session_id)
+                if crate::turn_activity::session_is_stopped(&hub.session_id)
+                    || hub.state().wake_deadline().is_none()
                     || !matches!(
                         decide(
                             &crate::config::config().cache,
@@ -294,7 +377,7 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
                 // A normal request may have superseded the replay while the
                 // response was in flight. Never overwrite its snapshot.
                 let mut state = hub.state();
-                if changed.has_changed().unwrap_or(true) || state.phase != phase {
+                if changed.has_changed().unwrap_or(true) {
                     return;
                 }
                 if let Some(clock) = clock.as_mut() {
@@ -307,3 +390,6 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

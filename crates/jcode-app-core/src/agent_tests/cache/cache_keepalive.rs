@@ -38,7 +38,12 @@ async fn cache_keepalive_for_detached_wait_starts_only_after_parking() {
     let id = agent.session_id();
     let mut events = crate::bus::Bus::global().subscribe_runtime();
     let deadline_ms = (chrono::Utc::now() + chrono::Duration::hours(2)).timestamp_millis() as u64;
-    let pause = crate::cache_keepalive::Pause::detached(id, deadline_ms).unwrap();
+    let pause = crate::cache_keepalive::Wait::begin(
+        id,
+        crate::cache_keepalive::WaitKind::Background,
+        deadline_ms,
+    )
+    .unwrap();
     tokio::task::yield_now().await;
     assert_eq!(
         pings.load(Ordering::Relaxed),

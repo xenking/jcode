@@ -419,7 +419,7 @@ pub(super) async fn spawn_or_resume_await_members(
         let mut recheck = tokio::time::interval(Duration::from_secs(1));
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         recheck.tick().await;
-        let mut cache_pause = None;
+        let mut cache_wait = None;
         let mut checkin = checkin_interval();
 
         loop {
@@ -440,7 +440,7 @@ pub(super) async fn spawn_or_resume_await_members(
 
             // Empty membership during startup is not successful completion.
             if !member_statuses.is_empty() && mode_satisfied(&member_statuses, mode.as_deref()) {
-                drop(cache_pause.take());
+                drop(cache_wait.take());
                 let summary = mode_summary(&member_statuses, mode.as_deref());
                 finalize_await(
                     &await_members_runtime,
@@ -464,23 +464,29 @@ pub(super) async fn spawn_or_resume_await_members(
                 return;
             }
 
-            if latest.background
-                && latest.wake
+            // Both forms of waiting on one's own workers keep the cache warm.
+            let wait_kind = if !latest.background {
+                Some(crate::cache_keepalive::WaitKind::Blocking)
+            } else if latest.wake
                 && crate::config::config().server.wake_mode == crate::config::WakeMode::Internal
             {
-                if cache_pause.is_none() {
-                    cache_pause = crate::cache_keepalive::Pause::detached(
-                        &req_session_id,
-                        latest.deadline_unix_ms,
-                    );
-                }
+                Some(crate::cache_keepalive::WaitKind::Background)
             } else {
-                drop(cache_pause.take());
+                None
+            };
+            if cache_wait.as_ref().map(crate::cache_keepalive::Wait::kind) != wait_kind {
+                cache_wait = wait_kind.and_then(|kind| {
+                    crate::cache_keepalive::Wait::begin(
+                        &req_session_id,
+                        kind,
+                        latest.deadline_unix_ms,
+                    )
+                });
             }
 
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    drop(cache_pause.take());
+                    drop(cache_wait.take());
                     let summary = timeout_summary(&member_statuses);
                     finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
                     return;
