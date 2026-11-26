@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 #[test]
 fn prompt_stash_survives_reload_handoff() {
+    let _home = TempJcodeHome::new();
     let mut app = create_test_app();
     let session_id = format!("stash-test-{}", std::process::id());
     app.input = "saved [paste 1] [image 1]".into();

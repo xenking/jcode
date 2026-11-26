@@ -506,33 +506,61 @@ impl Drop for EnvRestoreGuard {
     }
 }
 
+/// A hermetic `JCODE_HOME` for the guard's lifetime: holds the env lock, so no
+/// other test can flip the home between this test's save and its reload.
+///
+/// Tests that persist a session and read it back MUST hold one. `create_test_app`
+/// takes no lock, so without it a concurrent `with_temp_jcode_home` test swapping
+/// `JCODE_HOME` sends the load to a different home than the save (empty transcript).
+struct TempJcodeHome {
+    // Drop order matters: restore the env before the temp dir goes, release the lock last.
+    _env: EnvRestoreGuard,
+    _temp: tempfile::TempDir,
+    _provider_env: ProviderEnvGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl TempJcodeHome {
+    fn new() -> Self {
+        let lock = crate::storage::lock_test_env();
+        let provider_env = ProviderEnvGuard::clear();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = EnvRestoreGuard::capture(["JCODE_HOME"]);
+        crate::env::set_var("JCODE_HOME", temp.path());
+        // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
+        // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
+        // opt-out must keep blocking delivery for tests that exercise onboarding.
+        crate::auth::claude::set_active_account_override(None);
+        crate::auth::codex::set_active_account_override(None);
+        crate::auth::AuthStatus::invalidate_cache();
+        // The config cache is keyed by content, not by home, so a config written
+        // under the previous home would otherwise be read inside this one.
+        crate::config::invalidate_config_cache();
+        clear_persisted_test_ui_state();
+        Self {
+            _env: env,
+            _temp: temp,
+            _provider_env: provider_env,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for TempJcodeHome {
+    fn drop(&mut self) {
+        crate::auth::claude::set_active_account_override(None);
+        crate::auth::codex::set_active_account_override(None);
+        crate::auth::AuthStatus::invalidate_cache();
+        crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
+        // Drop any config loaded from the temp home so it cannot leak into the next
+        // test, which is process-global state shared across this suite.
+        crate::config::invalidate_config_cache();
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = crate::storage::lock_test_env();
-    let _provider_env = ProviderEnvGuard::clear();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
-    crate::env::set_var("JCODE_HOME", temp.path());
-    // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
-    // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
-    // opt-out must keep blocking delivery for tests that exercise onboarding.
-    crate::auth::claude::set_active_account_override(None);
-    crate::auth::codex::set_active_account_override(None);
-    crate::auth::AuthStatus::invalidate_cache();
-    // The config cache is keyed by content, not by home, so a config written
-    // under the previous home would otherwise be read inside this one.
-    crate::config::invalidate_config_cache();
-    clear_persisted_test_ui_state();
-
-    let result = f();
-
-    crate::auth::claude::set_active_account_override(None);
-    crate::auth::codex::set_active_account_override(None);
-    crate::auth::AuthStatus::invalidate_cache();
-    crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    // Drop any config loaded from the temp home so it cannot leak into the next
-    // test, which is process-global state shared across this suite.
-    crate::config::invalidate_config_cache();
-    result
+    let _home = TempJcodeHome::new();
+    f()
 }
 
 /// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
