@@ -644,6 +644,7 @@ impl App {
             let suggestions = vec![
                 ("/cache stats".into(), "Show KV cache stats"),
                 ("/cache status".into(), "Alias for /cache stats"),
+                ("/cache resume".into(), "Clear the cache protection pause without sending"),
                 ("/cache extend".into(), "Save 1 hour Anthropic cache TTL"),
                 ("/cache 1h".into(), "Save 1 hour Anthropic cache TTL"),
                 ("/cache 5m".into(), "Save 5 minute Anthropic cache TTL"),

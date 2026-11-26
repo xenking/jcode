@@ -130,6 +130,7 @@ impl Agent {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.ensure_session_lease()?;
+        self.ensure_cache_protection_allows_request()?;
         let mut cache_turn =
             crate::cache_keepalive::Turn::begin(&self.session, self.registry.compaction());
         self.set_log_context();
@@ -302,7 +303,7 @@ impl Agent {
             }
             let prompt_has_recent_tool_result =
                 Self::messages_end_with_tool_result(&messages_with_memory);
-            if self.provider.name() != "openai" {
+            if !self.provider.name().eq_ignore_ascii_case("openai") {
                 messages_with_memory.extend(self.user_ask_instructions());
             }
 
@@ -313,6 +314,7 @@ impl Agent {
                     tools.len()
                 )
             });
+            let cache_breaker_route = self.cache_breaker_route();
             let api_start = Instant::now();
 
             // Publish status for TUI to show during Task execution
@@ -1239,9 +1241,12 @@ impl Agent {
                 None
             };
 
+            let cache_breaker_invalidated = !saw_message_end || openai_native_compaction.is_some();
             if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
                 let _ = self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
             }
+
+            self.observe_cache_protection(cache_breaker_route, cache_breaker_invalidated)?;
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
             // with null/empty inputs since they were likely truncated mid-generation.

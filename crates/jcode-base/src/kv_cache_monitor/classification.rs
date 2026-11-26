@@ -168,14 +168,14 @@ pub(super) fn classify(
         };
     if low_read && let Some(previous_read) = baseline.read_tokens {
         let read_drop = previous_read.saturating_sub(read_tokens);
-        if prefix_unchanged
+        if (prefix_unchanged || (wire_suffix_change.is_some() && canonical_change.is_none()))
             && is_warm_openai_read_shortfall(&new.provider, expected, previous_read, read_tokens)
         {
             let idle_ms = idle_duration(baseline, pending).map(|idle| idle.as_millis());
             let previous_uncached = expected.saturating_sub(previous_read);
             let uncached = prefix_tokens.map(|input| input.saturating_sub(read_tokens));
             crate::logging::info(&format!(
-                "KV_CACHE_SHORTFALL prefix_unchanged=true provider={} model={} expected={expected} previous_read={previous_read} input={prefix_tokens:?} read={read_tokens} shortfall={missed} read_drop={read_drop} previous_uncached={previous_uncached} uncached={uncached:?} idle_ms={idle_ms:?}",
+                "KV_CACHE_SHORTFALL prefix_unchanged={prefix_unchanged} wire_suffix_change={wire_suffix_change:?} provider={} model={} expected={expected} previous_read={previous_read} input={prefix_tokens:?} read={read_tokens} shortfall={missed} read_drop={read_drop} previous_uncached={previous_uncached} uncached={uncached:?} idle_ms={idle_ms:?}",
                 new.provider, new.model,
             ));
             return None;

@@ -55,7 +55,7 @@ fn provider_switch_uses_the_new_providers_uncached_input() {
 }
 
 #[test]
-fn unchanged_read_does_not_hide_an_observed_responses_suffix_change() {
+fn changed_responses_suffix_does_not_turn_a_warm_tail_into_a_miss() {
     let route = RequestRoute {
         provider: "openai".into(),
         model: "fixture".into(),
@@ -72,19 +72,21 @@ fn unchanged_read_does_not_hide_an_observed_responses_suffix_change() {
         request_options_hash: Some(3),
     };
     let stable: Vec<u64> = (1..=396).collect();
-    let mut monitor = KvCacheMonitor::new();
-    monitor.begin_request(route.clone(), sig(&[10]));
-    monitor.note_canonical_input(snapshot(stable.clone(), vec![500]));
-    assert!(monitor.finish_request(195_557, Some(190_720)).is_none());
-    monitor.begin_request(route.clone(), sig(&[10, 11]));
-    monitor.note_canonical_input(snapshot([stable, vec![501, 502]].concat(), vec![503]));
-    let notice = monitor
-        .finish_request_with_prefix(196_490, Some(196_490), Some(190_720))
-        .unwrap();
-    assert_eq!(notice.wire_suffix_change, Some(396));
-    assert_eq!(notice.missed_tokens, 4_837);
-    assert!(notice.message().contains("[wire suffix changed]"));
-    assert!(notice.message().contains("observed read drop 0 tokens"));
+    for (read, expected_miss) in [(294_272, false), (230_000, true)] {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route.clone(), sig(&[10]));
+        monitor.note_canonical_input(snapshot(stable.clone(), vec![500]));
+        assert!(monitor.finish_request(295_912, Some(294_272)).is_none());
+        monitor.begin_request(route.clone(), sig(&[10, 11]));
+        monitor.note_canonical_input(snapshot([stable.clone(), vec![501, 502]].concat(), vec![503]));
+        let miss = monitor.finish_request_with_prefix(296_212, Some(296_212), Some(read));
+        assert_eq!(miss.is_some(), expected_miss);
+        if let Some(notice) = miss {
+            assert_eq!(notice.wire_suffix_change, Some(396));
+            assert_eq!(notice.missed_tokens, 295_912 - read);
+            assert!(notice.message().contains("[wire suffix changed]"));
+        }
+    }
 }
 
 #[tokio::test]

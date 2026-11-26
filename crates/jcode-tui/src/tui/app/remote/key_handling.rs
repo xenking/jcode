@@ -221,7 +221,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
         if let Some((command, args)) = ssh_runtime_command(trimmed)
-            && (crate::tui::is_ssh_remote() || command == "poke")
+            && (crate::tui::is_ssh_remote() || command == "poke"
+                || (command == "cache" && args == ["resume"]))
         {
             remote.runtime_command(command, args).await?;
             app.set_status_notice(format!("Requested remote {command}"));

@@ -165,6 +165,11 @@ pub(super) async fn start_next_queued_prompt(
     if *state.client_is_processing || crate::turn_cancel_registry::has_active_turn(session_id) {
         return;
     }
+    if let Ok(guard) = agent.try_lock()
+        && guard.ensure_cache_protection_allows_request().is_err()
+    {
+        return;
+    }
     let prompts = match control.take_user_prompt_batch(interrupted_only) {
         Ok(prompts) if !prompts.is_empty() => prompts,
         Ok(_) => return,
@@ -404,6 +409,18 @@ pub(super) async fn start_processing_message(
         return;
     }
     let mut agent_guard = agent.lock().await;
+    if let Err(error) = agent_guard.ensure_cache_protection_allows_request() {
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            },
+            "client_processing: cache protection",
+        );
+        return;
+    }
     let turn_lease = match agent_guard.claim_server_turn() {
         Ok(lease) => lease,
         Err(error) => {

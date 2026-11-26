@@ -10,6 +10,7 @@ impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
         let _turn = self.claim_server_turn()?;
+        self.ensure_cache_protection_allows_request()?;
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
@@ -56,6 +57,7 @@ impl Agent {
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
         let _turn = self.claim_server_turn()?;
+        self.ensure_cache_protection_allows_request()?;
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         self.announce_late_mcp_tools().await;
@@ -142,6 +144,7 @@ impl Agent {
         attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
+        self.ensure_cache_protection_allows_request()?;
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(self.session.id())?;
         // Inject any pending notifications before the user message
@@ -912,6 +915,7 @@ impl Agent {
         durable_intent: bool,
     ) -> Result<ResumeOutcome> {
         self.validate_server_turn(lease)?;
+        self.ensure_cache_protection_allows_request()?;
         if self.is_graceful_shutdown() {
             return Ok(ResumeOutcome::NothingToResume);
         }

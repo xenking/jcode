@@ -124,7 +124,7 @@ impl Agent {
     }
 
     pub(super) fn append_openai_request_snapshot(&mut self, messages: &mut Vec<Message>) {
-        if self.provider.name() != "openai" || self.is_swarm_worker() {
+        if !self.provider.name().eq_ignore_ascii_case("openai") || self.is_swarm_worker() {
             return;
         }
         let previous = messages.iter().rev().find_map(|message| {

@@ -4,6 +4,8 @@
 mod advisor_review;
 #[path = "agent/recovery/ask_recovery.rs"]
 mod ask_recovery;
+#[path = "agent/context/cache_breaker.rs"]
+mod cache_breaker;
 #[cfg(test)]
 #[path = "agent/context/cache_monitor_tests.rs"]
 mod cache_monitor_tests;
@@ -400,6 +402,7 @@ pub struct Agent {
     cache_tracker: CacheTracker,
     /// Classifies provider-reported KV cache misses for every client.
     kv_cache_monitor: crate::kv_cache_monitor::KvCacheMonitor,
+    cache_breaker: cache_breaker::CacheBreaker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
     sent_tool_surface: Option<tool_replay::ToolSurface>,
@@ -547,6 +550,7 @@ impl Agent {
             auto_title_owned: false,
             cache_tracker: CacheTracker::new(),
             kv_cache_monitor: Default::default(),
+            cache_breaker: Default::default(),
             last_usage: TokenUsage::default(),
             sent_tool_surface: None,
             compaction_persist_pending: false,

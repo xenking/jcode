@@ -237,16 +237,26 @@ pub(super) async fn execute(
             match args {
                 [] => {}
                 [arg] if matches!(arg.as_str(), "stats" | "status" | "show") => {}
+                [arg] if arg == "resume" => {
+                    let resumed = agent.resume_cache_protection()?;
+                    let message = if resumed {
+                        "Cache protection cleared. No request was sent; explicitly continue when ready."
+                    } else {
+                        "This session is not paused by cache protection."
+                    };
+                    return Ok((json!({"resumed": resumed}), message.into()));
+                }
                 [arg] if matches!(arg.as_str(), "extend" | "1h" | "5m") => {
                     crate::config::Config::set_anthropic_cache_ttl_1h(arg != "5m")?;
                 }
                 _ => bail!(
-                    "Usage: /cache [stats|status|extend|1h|5m]. Cache eviction/prewarming is not available through this runtime API."
+                    "Usage: /cache [stats|status|resume|extend|1h|5m]. Cache eviction/prewarming is not available through this runtime API."
                 ),
             }
             json!({"anthropic_cache_ttl": if crate::provider::anthropic::is_cache_ttl_1h() { "1h" } else { "5m" },
                 "setting_scope": "Anthropic, subsequent requests only", "provider": agent.provider_name(),
                 "last_usage": agent.last_usage_json(), "token_usage_totals": agent.token_usage_totals(),
+                "cache_pause": agent.cache_pause_status()?,
                 "expiry": null, "expiry_available": false})
         }
         RuntimeCommand::Memory => {
