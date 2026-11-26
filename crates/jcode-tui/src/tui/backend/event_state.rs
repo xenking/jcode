@@ -30,33 +30,8 @@ impl RemoteEventState for RemoteConnection {
         self.pending_context_meters.remove(&id)
     }
 
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        Self::handle_tool_start(self, id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        Self::handle_tool_input(self, id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        Self::get_tool_input(self, id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        Self::handle_tool_exec(self, id, name);
-    }
-
-    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion {
-        let observed_duration = self.tool_diff.take_tool_duration(id);
-        let display_output = self.tool_diff.finish_tool(id, name, output);
-        RemoteToolCompletion {
-            display_output,
-            observed_duration,
-        }
-    }
-
-    fn clear_pending(&mut self) {
-        Self::clear_pending(self);
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker {
+        &mut self.tool_diff
     }
 
     fn call_output_tokens_seen(&mut self) -> &mut u64 {
@@ -81,32 +56,8 @@ impl RemoteEventState for RemoteConnection {
 }
 
 impl RemoteEventState for ReplayRemoteState {
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion {
-        RemoteToolCompletion {
-            display_output: self.tool_diff.finish_tool(id, name, output),
-            // Playback speed is arbitrary; only protocol timing is meaningful.
-            observed_duration: None,
-        }
-    }
-
-    fn clear_pending(&mut self) {
-        self.tool_diff.clear();
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker {
+        &mut self.tool_diff
     }
 
     fn call_output_tokens_seen(&mut self) -> &mut u64 {

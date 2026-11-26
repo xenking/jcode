@@ -243,11 +243,6 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
         .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
 }
 
-pub(crate) struct RemoteToolCompletion {
-    pub(crate) display_output: String,
-    pub(crate) observed_duration: Option<f32>,
-}
-
 pub(crate) trait RemoteEventState {
     fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
         false
@@ -263,12 +258,7 @@ pub(crate) trait RemoteEventState {
         false
     }
 
-    fn handle_tool_start(&mut self, id: &str, name: &str);
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
-    fn get_tool_input(&self, id: &str) -> serde_json::Value;
-    fn handle_tool_exec(&mut self, id: &str, name: &str);
-    fn complete_tool(&mut self, id: &str, name: &str, output: &str) -> RemoteToolCompletion;
-    fn clear_pending(&mut self);
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker;
     fn call_output_tokens_seen(&mut self) -> &mut u64;
     fn reset_call_output_tokens_seen(&mut self);
     fn set_session_id(&mut self, id: String);
@@ -385,7 +375,7 @@ impl RemoteConnection {
             pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
-            tool_diff: RemoteDiffTracker::default(),
+            tool_diff: RemoteDiffTracker::live(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
             #[cfg(test)]
@@ -1622,7 +1612,7 @@ impl RemoteConnection {
             pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
-            tool_diff: RemoteDiffTracker::default(),
+            tool_diff: RemoteDiffTracker::live(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
             #[cfg(test)]
@@ -1674,31 +1664,6 @@ impl RemoteConnection {
     /// Mark history as loaded
     pub fn mark_history_loaded(&mut self) {
         self.has_loaded_history = true;
-    }
-
-    /// Handle tool start - begin tracking for diff generation
-    pub fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    /// Handle tool input delta
-    pub fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    /// Get parsed input for this call (before handle_tool_exec clears it)
-    pub fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    /// Handle tool exec - cache file content if edit/write
-    pub fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    /// Clear pending diff state
-    fn clear_pending(&mut self) {
-        self.tool_diff.clear();
     }
 
     /// Per-API-call output token watermark (for TPS delta accumulation).

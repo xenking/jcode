@@ -46,7 +46,7 @@ pub(super) fn handle_error_event(
     // queue and re-adopt the running-turn state so the queue
     // dispatches once the real turn completes.
     if message == "Already processing a message" && recover_rejected_queued_continuation(app) {
-        remote.clear_pending();
+        remote.tool_events().clear();
         app.current_message_id = None;
         if app.remote_turn_fence.scoped() && !app.remote_turn_fence.has_active_turn() {
             // Done was already observed. The owner can still hold its
@@ -129,7 +129,7 @@ pub(super) fn handle_error_event(
         app.processing_started = None;
         app.clear_visible_turn_started();
         app.current_message_id = None;
-        remote.clear_pending();
+        remote.tool_events().clear();
         remote.reset_call_output_tokens_seen();
         return false;
     }
@@ -179,7 +179,7 @@ pub(super) fn handle_error_event(
             app.pending_soft_interrupts.len()
         ));
     }
-    remote.clear_pending();
+    remote.tool_events().clear();
     remote.reset_call_output_tokens_seen();
     // Account quota exhaustion (e.g. OpenAI `usage_limit_reached`):
     // the error line above is the whole explanation. Offer the next
@@ -474,7 +474,7 @@ pub(super) fn handle_done_event(
         app.thought_line_inserted = false;
         app.thinking_prefix_emitted = false;
         app.thinking_buffer.clear();
-        remote.clear_pending();
+        remote.tool_events().clear();
         remote.reset_call_output_tokens_seen();
         app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
         crate::process_memory::release_retained_heap_debounced(

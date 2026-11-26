@@ -411,7 +411,7 @@ fn handle_server_event_inner(
             // tool execution time is excluded after that point.
             app.resume_streaming_tps();
             app.clear_active_experimental_feature_notice();
-            remote.handle_tool_start(&id, &name);
+            remote.tool_events().handle_tool_start(&id, &name);
             app.commit_pending_streaming_assistant_message();
             if matches!(name.as_str(), "memory") {
                 crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
@@ -427,9 +427,11 @@ fn handle_server_event_inner(
             eager_stream_redraw
         }
         ServerEvent::ToolInput { id, delta } => {
-            remote.handle_tool_input(id.as_deref(), &delta);
+            remote
+                .tool_events()
+                .handle_tool_input(id.as_deref(), &delta);
             if let Some(id) = id.as_deref() {
-                let input = remote.get_tool_input(id);
+                let input = remote.tool_events().tool_input_json(id);
                 if !input.is_null()
                     && let Some(tc) = app.streaming_tool_calls.iter_mut().find(|tc| tc.id == id)
                 {
@@ -448,7 +450,7 @@ fn handle_server_event_inner(
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
             app.pause_streaming_tps(true);
-            let parsed_input = remote.get_tool_input(&id);
+            let parsed_input = remote.tool_events().tool_input_json(&id);
             let tool_call = ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -466,7 +468,7 @@ fn handle_server_event_inner(
                 tc.input = parsed_input;
                 tc.refresh_intent_from_input();
             }
-            remote.handle_tool_exec(&id, &name);
+            remote.tool_events().handle_tool_exec(&id, &name);
             app.observe_tool_call(&tool_call);
             eager_stream_redraw
                 || app.side_panel.focused_page_id.as_deref()
@@ -672,7 +674,7 @@ fn handle_server_event_inner(
                 attempt, max
             ));
             app.rollback_streaming_attempt();
-            remote.clear_pending();
+            remote.tool_events().clear();
             app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
                 attempt,
@@ -864,7 +866,7 @@ fn handle_server_event_inner(
             app.stream_message_ended = false;
             app.processing_started = None;
             app.current_message_id = None;
-            remote.clear_pending();
+            remote.tool_events().clear();
             remote.reset_call_output_tokens_seen();
             let auto_poked = app.schedule_turn_end_followups();
             if !auto_poked {

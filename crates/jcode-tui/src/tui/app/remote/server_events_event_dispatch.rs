@@ -213,7 +213,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     }
                     app.clear_pending_remote_retry();
                     app.current_message_id = None;
-                    remote.clear_pending();
+                    remote.tool_events().clear();
                     // The rejected request never acquired this running turn.
                     // Preserve its stream, timing and identity-owned busy state.
                     app.is_processing = true;

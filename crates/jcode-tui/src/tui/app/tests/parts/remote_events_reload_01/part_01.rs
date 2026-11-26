@@ -1213,9 +1213,12 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
     app.pending_soft_interrupt_requests
         .push((77, "pending soft interrupt".to_string()));
 
-    remote.handle_tool_start("tool_1", "bash");
-    remote.handle_tool_input(None, "{\"command\":\"sleep 10\"}");
-    remote.handle_tool_exec("tool_1", "edit");
+    use crate::tui::backend::RemoteEventState as _;
+    remote.tool_events().handle_tool_start("tool_1", "bash");
+    remote
+        .tool_events()
+        .handle_tool_input(None, "{\"command\":\"sleep 10\"}");
+    remote.tool_events().handle_tool_exec("tool_1", "edit");
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
 

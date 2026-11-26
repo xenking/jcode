@@ -10,7 +10,7 @@ pub(super) fn handle_tool_done(
     codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
 ) -> bool {
     // Prefer protocol timing from the raw output, not the rendered diff.
-    let completion = remote.complete_tool(&id, &name, &output);
+    let completion = remote.tool_events().complete_tool(&id, &name, &output);
     let duration_secs =
         DisplayMessage::tool_duration_from_output(&output).or(completion.observed_duration);
     let display_output = completion.display_output;

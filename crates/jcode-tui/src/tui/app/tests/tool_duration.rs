@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn native_search_duration_includes_execution_and_preserves_late_query() {
     use crate::protocol::ServerEvent;
+    use crate::tui::backend::RemoteEventState as _;
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -31,7 +32,10 @@ fn native_search_duration_includes_execution_and_preserves_late_query() {
         },
         &mut remote,
     );
-    assert_eq!(remote.get_tool_input("ws_timed")["query"], "jcode timing");
+    assert_eq!(
+        remote.tool_events().tool_input_json("ws_timed")["query"],
+        "jcode timing"
+    );
     assert_eq!(app.streaming_tool_calls[0].input["query"], "jcode timing");
     app.handle_server_event(
         ServerEvent::ToolDone {

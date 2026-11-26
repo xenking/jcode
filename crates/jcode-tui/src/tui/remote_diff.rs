@@ -4,20 +4,51 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Tracks a pending file edit for diff generation.
-pub(crate) struct PendingFileDiff {
-    pub(crate) file_path: String,
-    pub(crate) original_content: String,
+struct PendingFileDiff {
+    file_path: String,
+    original_content: String,
+}
+
+pub(crate) struct RemoteToolCompletion {
+    pub(crate) display_output: String,
+    pub(crate) observed_duration: Option<f32>,
 }
 
 #[derive(Default)]
 pub(crate) struct RemoteDiffTracker {
-    pub(crate) pending_diffs: HashMap<String, PendingFileDiff>,
-    pub(crate) current_tool_id: Option<String>,
+    pending_diffs: HashMap<String, PendingFileDiff>,
+    current_tool_id: Option<String>,
+    observe_execution_time: bool,
     tool_inputs: HashMap<String, String>,
     tool_exec_starts: HashMap<String, std::time::Instant>,
 }
 
 impl RemoteDiffTracker {
+    pub(crate) fn live() -> Self {
+        Self {
+            observe_execution_time: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn complete_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        output: &str,
+    ) -> RemoteToolCompletion {
+        let observed_duration = if self.observe_execution_time {
+            self.take_tool_duration(id)
+        } else {
+            None
+        };
+        let display_output = self.finish_tool(id, name, output);
+        RemoteToolCompletion {
+            display_output,
+            observed_duration,
+        }
+    }
+
     pub(crate) fn handle_tool_start(&mut self, id: &str, _name: &str) {
         self.current_tool_id = Some(id.to_string());
         self.tool_inputs.insert(id.to_string(), String::new());
@@ -72,13 +103,13 @@ impl RemoteDiffTracker {
         }
     }
 
-    pub(crate) fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
+    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
         self.tool_exec_starts
             .remove(id)
             .map(|start| start.elapsed().as_secs_f32())
     }
 
-    pub(crate) fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
+    fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
         self.tool_inputs.remove(id);
         self.tool_exec_starts.remove(id);
         if let Some(pending) = self.pending_diffs.remove(id) {
