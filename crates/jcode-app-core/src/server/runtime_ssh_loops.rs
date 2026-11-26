@@ -1,7 +1,7 @@
 //! Daemon-owned turn-end continuation for every client. The persisted session
 //! policy owns auto-poke and workflow follow-ups, including while disconnected.
 //! Clients only control and display this state.
-use crate::{agent::Agent, protocol::ServerEvent, todo};
+use crate::{agent::Agent, todo};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
-use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Workflow {
@@ -442,18 +441,6 @@ pub(super) fn pause_followups(session_id: &str, error: &anyhow::Error) -> Result
         ));
         Ok(())
     })
-}
-
-/// Run inside the server turn task before releasing its processing guard. Never
-/// recursively invokes turn_failover, and rereads durable state each turn so
-/// stop/status work from another connection while a model/tool is busy.
-#[cfg(test)]
-pub(super) async fn run_followups(
-    agent: &mut Agent,
-    event_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> Result<()> {
-    let lease = agent.claim_server_turn()?;
-    super::turn_failover::run_reserved_followups(agent, &lease, event_tx, false).await
 }
 
 #[cfg(test)]

@@ -1,5 +1,18 @@
 #![allow(clippy::await_holding_lock)]
 use super::*;
+use crate::protocol::ServerEvent;
+use tokio::sync::mpsc;
+
+/// Run inside the server turn task before releasing its processing guard. Never
+/// recursively invokes turn_failover, and rereads durable state each turn so
+/// stop/status work from another connection while a model/tool is busy.
+async fn run_followups(
+    agent: &mut Agent,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    let lease = agent.claim_server_turn()?;
+    crate::server::turn_failover::run_reserved_followups(agent, &lease, event_tx, false).await
+}
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use std::sync::{
@@ -803,9 +816,15 @@ fn turn_tool_call_detection_only_looks_at_new_messages() {
     assert!(!turn_had_tool_calls(history.get(2..)), "no new messages");
     let mut with_text = history.clone();
     with_text.push(stored(vec![text()]));
-    assert!(!turn_had_tool_calls(with_text.get(2..)), "old tool use ignored");
+    assert!(
+        !turn_had_tool_calls(with_text.get(2..)),
+        "old tool use ignored"
+    );
     let mut with_tool = with_text.clone();
     with_tool.push(stored(vec![tool()]));
     assert!(turn_had_tool_calls(with_tool.get(2..)));
-    assert!(turn_had_tool_calls(history.get(5..)), "compaction is progress");
+    assert!(
+        turn_had_tool_calls(history.get(5..)),
+        "compaction is progress"
+    );
 }
