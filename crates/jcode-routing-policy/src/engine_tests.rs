@@ -1058,3 +1058,44 @@ fn cold_session_moves_off_the_soft_ceiling() {
     let decision = decide(&policy, &snap, &Intents::default(), request, NOW);
     assert_eq!(moved_to(&decision), Some("claude:b"), "{decision:?}");
 }
+
+fn reason_of(decision: &Decision) -> &str {
+    match decision {
+        Decision::Use { reason, .. } | Decision::CompactThenMove { reason, .. } => reason,
+        other => panic!("expected a move, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_forced_move_names_why_the_account_could_not_serve() {
+    let cases = [
+        (
+            state_at(99.0, Availability::Ready, BurnRing::default()),
+            vec!["claude:a", "5h", "99%"],
+        ),
+        (
+            state_at(
+                10.0,
+                Availability::Evicted { until: NOW + 600 },
+                BurnRing::default(),
+            ),
+            vec!["claude:a", "evicted"],
+        ),
+        (
+            state_at(10.0, Availability::EgressDown, BurnRing::default()),
+            vec!["claude:a", "proxy"],
+        ),
+    ];
+    for (blocked, needles) in cases {
+        let (policy, snap, current) = warm_pair(blocked);
+        let request = warm_request(&current, Seam::Warm);
+        let decision = decide(&policy, &snap, &Intents::default(), request, NOW);
+        for needle in needles {
+            assert!(
+                reason_of(&decision).contains(needle),
+                "`{needle}` missing from: {}",
+                reason_of(&decision)
+            );
+        }
+    }
+}

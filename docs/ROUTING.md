@@ -172,7 +172,10 @@ context. In order:
 
 The reason string of a decision names the cause, for example `priority 2`,
 `behind pace, room would be lost at the reset`, `a reset grant would expire
-unused`, `claude:a outranked by claude:b (priority 1)`, `pinned to claude:a`.
+unused`, `claude:a outranked by claude:b (priority 1)`, `pinned to claude:a`,
+`claude:a cannot serve (claude:a 5h 99%), moving to claude:b`. A forced move
+always names why the old account could not serve: the window and percent, an
+eviction, a down proxy or a `block` budget.
 
 ### Limits (when an account counts as spent)
 

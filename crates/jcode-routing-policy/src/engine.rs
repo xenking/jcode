@@ -178,10 +178,11 @@ struct Standing<'p> {
     account: &'p Account,
     index: usize,
     ready: bool,
-    /// Cannot serve at all: a percent window at [`HARD_LIMIT_PCT`], a provider
-    /// cap or a `block` budget reached, or the account is evicted or its
-    /// proxy is down. A merely `spent` account (the soft ceiling) still serves.
-    hard: bool,
+    /// Why it cannot serve at all, empty when it can: a percent window at
+    /// [`HARD_LIMIT_PCT`], a provider cap or a `block` budget reached, or the
+    /// account is evicted or its proxy is down. A merely `spent` account (the
+    /// soft ceiling) still serves.
+    hard: Vec<String>,
     /// The strictest action among the limits it reached, with their reasons.
     spent: Option<(OnLimit, Vec<String>)>,
     warnings: Vec<String>,
@@ -296,8 +297,9 @@ pub fn decide(
     };
     let allowed = |s: &Standing<'_>| s.usable() && (paid_allowed || !s.account.kind.is_paid());
     // A warm session keeps an account that can still serve, past its soft ceiling.
-    let serves_warm =
-        |s: &Standing<'_>| s.ready && !s.hard && (paid_allowed || !s.account.kind.is_paid());
+    let serves_warm = |s: &Standing<'_>| {
+        s.ready && s.hard.is_empty() && (paid_allowed || !s.account.kind.is_paid())
+    };
     let mut ranked: Vec<&Standing<'_>> = standings.iter().filter(|s| allowed(s)).collect();
     ranked.sort_by(|a, b| rank(a, b, request));
 
@@ -417,12 +419,21 @@ fn use_account(standing: &Standing<'_>, reason: String, pending: Option<AccountI
 fn leave_warm(request: Request<'_>, current: &Standing<'_>, best: &Standing<'_>) -> Decision {
     let to = &best.account.id;
     let from = &current.account.id;
+    let why = if current.hard.is_empty() {
+        "paid accounts are off".to_string()
+    } else {
+        current.hard.join("; ")
+    };
     match warm_options(request, current, best).cheapest_move() {
-        (Leave::Move, _) => use_account(best, format!("{from} cannot serve, moving to {to}"), None),
+        (Leave::Move, _) => use_account(
+            best,
+            format!("{from} cannot serve ({why}), moving to {to}"),
+            None,
+        ),
         (Leave::CompactThenMove, _) => Decision::CompactThenMove {
             account: to.clone(),
             reason: format!(
-                "compacting on warm {from}, then moving to {to}: cheaper than a full move"
+                "compacting on warm {from} ({why}), then moving to {to}: cheaper than a full move"
             ),
             warnings: best.warnings.clone(),
         },
@@ -783,13 +794,31 @@ fn stand<'p>(
         );
     }
     // An acknowledged limit is spent on purpose, so it is not a wall. A budget `block` still is.
-    let hard = !ready
-        || hits.iter().any(|(action, _)| *action == OnLimit::Block)
-        || (!acked
-            && readings.iter().any(|r| match r.unit {
-                Unit::Percent => r.used >= HARD_LIMIT_PCT,
-                _ => r.limit.is_some_and(|limit| r.used >= limit),
-            }));
+    let mut hard: Vec<String> = Vec::new();
+    if !ready {
+        hard.push(match state.map(|state| state.availability) {
+            Some(Availability::Evicted { .. }) => {
+                format!("{} is evicted after repeated failures", account.id)
+            }
+            _ => format!("{}'s required proxy is down", account.id),
+        });
+    }
+    hard.extend(
+        hits.iter()
+            .filter(|(action, _)| *action == OnLimit::Block)
+            .map(|(_, line)| line.clone()),
+    );
+    if !acked {
+        hard.extend(
+            readings
+                .iter()
+                .filter(|r| match r.unit {
+                    Unit::Percent => r.used >= HARD_LIMIT_PCT,
+                    _ => r.limit.is_some_and(|limit| r.used >= limit),
+                })
+                .map(|r| format!("{} {} {}", account.id, r.window, amount(r.unit, r.used))),
+        );
+    }
     let spent = hits.iter().map(|(action, _)| *action).max().map(|action| {
         (
             action,
