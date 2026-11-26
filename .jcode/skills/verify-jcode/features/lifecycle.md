@@ -38,6 +38,6 @@ Preconditions: Launch and doctor passed. The provider uses the existing file-gat
 ## Source entry points
 
 - `crates/jcode-tui/src/tui/app/remote/key_handling/key_events.rs` sends `keyboard_cancel` on Escape.
-- `crates/jcode-app-core/src/server/client_lifecycle.rs` handles turn cancellation and reload fencing.
+- `crates/jcode-app-core/src/server/clients/connection/client_lifecycle.rs` handles turn cancellation and reload fencing.
 - `crates/jcode-base/src/session/persistence.rs` restores the snapshot and journal.
-- `crates/jcode-app-core/src/server/reload_recovery.rs` owns reload continuation records, outside these two journeys.
+- `crates/jcode-app-core/src/server/runtime_support/recovery/reload_recovery.rs` owns reload continuation records, outside these two journeys.

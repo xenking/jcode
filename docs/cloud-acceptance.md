@@ -98,8 +98,8 @@ needs `/run/sshd`. Package installation and this host setup may need administrat
 privileges. **Do not run the acceptance runner with sudo or as root.**
 
 Unprivileged user and mount namespaces must work. Ubuntu's AppArmor user-namespace
-restriction can block them. The workflow conditionally disables
-`kernel.apparmor_restrict_unprivileged_userns` and enables
+restriction can block them. The upstream CI workflow conditionally disabled
+`kernel.apparmor_restrict_unprivileged_userns` and enabled
 `kernel.unprivileged_userns_clone` only on its disposable GitHub-hosted runner.
 Do not copy that system-wide policy change onto a shared workstation or production
 host. Use a disposable Linux VM with suitable namespace policy instead.
@@ -110,7 +110,7 @@ sockets use short private directories under `/tmp` to avoid Linux socket path
 limits even when artifact directories are deeply nested. Those socket directories
 are removed after their fixture processes stop. Fixtures are not
 intended to access your real accounts, shared daemon or managed VM. Never add
-production tokens, account files or SSH keys to the fixtures or workflow.
+production tokens, account files or SSH keys to the fixtures.
 
 ## Manual use and focused diagnosis
 
@@ -159,25 +159,14 @@ have their own bounded deadlines and are not controlled by that flag. If a run i
 externally killed, inspect the last saved evidence rather than assuming a complete
 report or successful cleanup.
 
-## CI and evidence
+## Evidence
 
-`.github/workflows/cloud-acceptance.yml` runs daily at 09:23 UTC, on manual dispatch,
-and on relevant PRs/pushes targeting `main` or `master`. Its intentionally broad
-`src/**`, `crates/**`, `scripts/**` and `tests/**` filters include TUI input/remote
-handling, cloud CLI, transport, credential code and harness changes. Cargo/build
-configuration and this documentation also trigger it.
+The fork has no CI workflow for this gate (`cloud-acceptance.yml` was removed with
+the other upstream workflows); run `scripts/test_cloud_acceptance.py` by hand. The
+existing quality CI stays responsible for the code-size/test-size and other ratchet
+budgets, this gate does not replace them.
 
-The workflow follows existing CI conventions: recursive checkout, stable Rust
-with `rust-src`, Rust cache, wrapper disabled and clang/mold linking. It installs
-the repository-pinned justrust client and uses its local CI build path without a
-hosted account, building the locked release `jcode` binary for Linux x86_64. It
-checks module declarations before building. Existing quality CI remains responsible
-for the code-size/test-size and other ratchet budgets, this gate does not replace
-them. Build, acceptance and whole-job limits are 75, 40 and 120 minutes respectively.
-
-The artifact upload runs with `always()`, retaining available evidence for seven
-days, including hidden files. A failure before the runner starts may leave no
-artifact. The bundle includes `report.json`, `junit.xml`, per-stage output logs,
+The evidence bundle includes `report.json`, `junit.xml`, per-stage output logs,
 provider requests, SSH logs, captured TUI `frame*.txt`, and retained fixture homes
 and workspaces. The root evidence directory is mode 0700 locally. Credential-suite
 temporary homes are normally cleaned by unittest, while other fixture homes remain.

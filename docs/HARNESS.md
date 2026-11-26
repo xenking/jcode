@@ -210,7 +210,7 @@ runtime does not advertise `routing_v1`.
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.
 
-See the [agentgrep implementation](../crates/jcode-app-core/src/tool/agentgrep.rs).
+See the [agentgrep implementation](../crates/jcode-app-core/src/tool/search/agentgrep.rs).
 
 ## KV cache
 
@@ -330,4 +330,4 @@ A hill-climbable task has a concrete objective and a repeatable way to measure p
 
 Jcode's todo assessments record the feedback loop, its coverage, how directly it tests the requested outcome, and the evidence for stopping. This distinguishes an implementation change from a validated user workflow.
 
-See the [todo tool implementation](../crates/jcode-app-core/src/tool/todo.rs).
+See the [todo tool implementation](../crates/jcode-app-core/src/tool/todo/todo.rs).

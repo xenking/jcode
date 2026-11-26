@@ -51,4 +51,7 @@ The managed cloud bootstrap downloads published Linux x86_64 tarballs plus
 ## Upstream sync
 
 The `upstream` remote (1jehuang) is untouched. Sync with
-`git fetch upstream && git merge upstream/master`.
+`scripts/xk-upstream-agent.sh` (`--dry-run` shows the gap), which runs
+`scripts/xk-upstream-sync.sh` for jcode and Desktop. The sync script runs the
+`scripts/check_fork_removals.py` guard before any push, even after a clean merge;
+do not `git merge upstream/master` by hand.

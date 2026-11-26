@@ -25,7 +25,7 @@ surfaces live in this repo; backend surfaces live in `solosystems-backend`.
 - Onboarding auth funnel: `auth_provider`, `auth_method`,
   `auth_failure_reason` on onboarding step events
   (`crates/jcode-telemetry-core/src/lib.rs:369-400`).
-- Failure classification labels: `crates/jcode-base/src/auth/login_diagnostics.rs`
+- Failure classification labels: `crates/jcode-base/src/auth/status/login_diagnostics.rs`
   (`AuthFailureReason::label`) — the only failure detail that may be reported.
 - Local logs: `~/.jcode/logs/jcode-YYYY-MM-DD.log`.
 - Backend telemetry store: `telemetry-worker/` (D1; subscription analytics

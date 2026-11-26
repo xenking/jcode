@@ -1,7 +1,7 @@
 //! Pinned diagram pane state: which diagram is shown, where the pane sits, how
 //! large it is and how the diagram is panned and zoomed.
 //!
-//! This is a leaf sub-state of `App` (see `docs/TUI_APP_LAYERING.md`). It never
+//! This is a leaf sub-state of `App` (see `docs/plans/TUI_APP_LAYERING.md`). It never
 //! names `App`. Anything that needs the status line, the side panel or the diff
 //! pane stays on `App`, which calls the behaviour here and reports the result.
 

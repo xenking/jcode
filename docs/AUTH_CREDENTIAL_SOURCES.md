@@ -79,7 +79,7 @@ state. An OAuth token that has since auto-refreshed can still show a days-old
 "validation failed / expired" entry here.
 
 To avoid presenting stale records as current fact, `format_record_label`
-(`crates/jcode-base/src/auth/validation.rs`) flags any record older than
+(`crates/jcode-base/src/auth/status/validation.rs`) flags any record older than
 `doctor::VALIDATION_STALE_AFTER_MS` (7 days) as `stale, ... re-validate`. Treat a
 stale record as "unknown, re-check", never as ground truth. Re-validate with:
 
@@ -101,7 +101,7 @@ jcode auth-test --provider <id>
 On a fresh install jcode can **reuse logins left behind by other coding
 agents**, both OAuth tokens and API keys. Detection is consent-gated: jcode
 lists the sources it found and only reads them after you approve each one
-(`crates/jcode-base/src/auth/external.rs`, `unconsented_sources` /
+(`crates/jcode-base/src/auth/providers/external.rs`, `unconsented_sources` /
 `trust_external_auth_source`). Nothing is copied into jcode's own stores; the
 external file is read in place.
 

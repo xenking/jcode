@@ -9,6 +9,7 @@ Reference documentation for the jcode codebase.
 - `docs/audits/` — point-in-time audits and reviews. Historical snapshots, not kept up to date.
 - `docs/proposals/` — design proposals not yet committed to.
 - `docs/dev/` — developer-facing process and testing notes.
+- `docs/benchmarks/` — dated measurement records. `docs/research/` — dated investigations and the measurements behind them. Both are snapshots, not kept up to date.
 
 ## Key entry points
 
@@ -16,11 +17,13 @@ Reference documentation for the jcode codebase.
 - Swarm: `SWARM_ARCHITECTURE.md`
 - Memory: `MEMORY_ARCHITECTURE.md`, `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Refactoring and quality: `REFACTORING.md`, `plans/CODE_QUALITY_10_10_PLAN.md`
-- Desktop app: `DESKTOP_APP_ARCHITECTURE.md`, `DESKTOP_CODEBASE_ARCHITECTURE.md`
 - Providers: `PROVIDER_DOCTOR.md`, `AWS_BEDROCK_PROVIDER.md`
 - CLI and TUI: [Run in CI, review Git changes, and start in a worktree](CLI_GIT_WORKFLOWS.md)
 - MCP servers: `MCP_REMOTE.md`
 - Platform: `WINDOWS.md`, `TERMINAL_CAPABILITIES.md`
+- Fork (xenking/jcode): `FORK_LEDGER.md`, `FORK_UPDATES.md`, `PAIRED_DESKTOP.md`, `rollout-daemon-transaction.md`
+- Routing: `ROUTING.md`, `ACCOUNT_ROUTING.md`, `MODEL_ROUTING.md`
+- Code Mode and MCP: `CODEMODE.md`, `MCP_TOOLS.md`
 
 ## Conventions
 

@@ -14,7 +14,7 @@ happened. It must not send a prompt "from the user".
 - **Prompt cache is preserved.** The resumed provider request is the
   pre-restart request plus at most that one `tool_result`. No message is
   reordered, removed, or inserted before it, so the provider's cached prefix
-  still matches. `crates/jcode-app-core/src/agent/reload_resume_tests.rs`
+  still matches. `crates/jcode-app-core/src/agent/recovery/reload_resume_tests.rs`
   asserts this on the neutral provider request.
 - **Idle sessions are not touched.** A finished turn has no recovery intent and
   is never re-prompted.
