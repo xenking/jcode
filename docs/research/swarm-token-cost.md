@@ -7,11 +7,10 @@ such as `status` with `session_ids`. The run below does not measure that shortcu
 
 ## Reproduce the measurement
 
-```bash
-uv run --no-project --with tiktoken==0.12.0 python scripts/swarm_token_cost.py /path/to/jcode
-```
+The measurement script is no longer in the repository. Rebuild the harness from
+the method below to repeat it.
 
-Measured on CLI `1ced95d9c7682c939992f4f4b47a7df63c1b08d7`. The script runs
+Measured on CLI `1ced95d9c7682c939992f4f4b47a7df63c1b08d7`. The harness ran
 Jcode against a loopback OpenAI-compatible Chat Completions fixture. It uses a
 private home and socket and sets `JCODE_TEST_SESSION=1`. Only the tokenizer
 installation and its public vocabulary may need a download. The script uses
