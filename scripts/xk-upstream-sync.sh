@@ -84,25 +84,6 @@ check_removals() {
     die 4 "$1: fork-removal guard failed for $3 in $2. See docs/FORK_LEDGER.md."
 }
 
-upstream_prs() {
-  git -C "$ROOT/jcode" show "$guard_ref:scripts/xk-upstream-prs.py" |
-    python3 - --forks "$ROOT" --ledger-ref "$guard_ref" "$@"
-}
-
-pr_repo() {
-  case "$1" in jcode) echo jcode ;; desktop) echo jcode-desktop ;; esac
-}
-
-check_port_reconciliation() {
-  local name=$1 dir=$2 rc=0
-  upstream_prs reconcile "$(pr_repo "$name")" "$dir" || rc=$?
-  case "$rc" in
-    0) ;;
-    3) die 3 "$name: resolve the merged upstream ports listed above in $dir, record the choice, then rerun with --continue. See docs/upstream-pr-workflow.md." ;;
-    *) die 4 "$name: could not check merged upstream ports in $dir. Fix the error and rerun with --continue." ;;
-  esac
-}
-
 behind() {
   local src branch _up
   read -r src branch _up < <(fork_info "$1")
@@ -207,8 +188,6 @@ ship() {
   if ! git -C "$dir" merge-base --is-ancestor "origin/$branch" HEAD; then
     git -C "$dir" merge -q --no-edit "origin/$branch" ||
       die 3 "$name: origin/$branch moved and conflicts with the merge in $dir; resolve, then --continue"
-    # A port can land on origin after the first merge and safety check.
-    check_port_reconciliation "$name" "$dir"
     run_checks "$name"
   fi
   tip=$(git -C "$dir" rev-parse HEAD)
@@ -237,9 +216,6 @@ if [ "$repo" = desktop ]; then
   git -C "$ROOT/jcode" fetch -q origin master
 fi
 guard_ref=$(git -C "$ROOT/jcode" rev-parse --verify refs/remotes/origin/master)
-status_args=(status --brief)
-for n in "${names[@]}"; do status_args+=(--repo "$(pr_repo "$n")"); done
-upstream_prs "${status_args[@]}" || die 4 "Could not fetch upstream PR status. Fix GitHub access before syncing."
 
 if $dry; then
   for n in "${names[@]}"; do
@@ -253,21 +229,13 @@ synced=()
 for n in "${names[@]}"; do
   if ! $resume && [ "$(behind "$n")" = 0 ]; then
     read -r src branch _up < <(fork_info "$n")
-    rc=0
-    upstream_prs reconcile "$(pr_repo "$n")" "$src" --check --ref "origin/$branch" || rc=$?
-    case "$rc" in
-      0)
-        check_removals "$n" "$src" "origin/$branch"
-        log "$n: nothing new upstream"
-        continue ;;
-      3) log "$n: checking already merged ports in a sync worktree" ;;
-      *) die 4 "$n: could not check merged upstream ports" ;;
-    esac
+    check_removals "$n" "$src" "origin/$branch"
+    log "$n: nothing new upstream"
+    continue
   fi
   ensure_worktree "$n"
   merge_upstream "$n"
   read -r src branch _up < <(fork_info "$n")
-  check_port_reconciliation "$n" "$WT/$(basename "$src")"
   check_removals "$n" "$WT/$(basename "$src")" HEAD
   synced+=("$n")
 done
