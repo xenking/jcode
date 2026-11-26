@@ -176,3 +176,54 @@ async fn a_client_reporting_its_primary_skill_keeps_the_other_pinned_modes() {
         ["second-probe"]
     );
 }
+
+#[tokio::test]
+async fn three_pinned_modes_survive_messages_reconnects_and_a_daemon_restart() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let modes = ["selfdev", "swarm", "poteto-mode"];
+    for name in modes {
+        let dir = project.path().join(".jcode/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} mode\n---\nBODY_{name}\n"),
+        )
+        .unwrap();
+    }
+    let provider = || Arc::new(ArchiveReplayProvider { images: true });
+    let mut agent =
+        Agent::new_with_initial_working_dir(provider(), Registry::empty(), project.path().to_str());
+    agent
+        .set_pinned_skills(modes.map(str::to_owned).to_vec())
+        .unwrap();
+    let id = agent.session_id().to_owned();
+    // Every client message and queued prompt reports only its primary skill.
+    for primary in ["selfdev", "poteto-mode"] {
+        assert!(agent.set_remote_active_skill(Some(primary.into())));
+        assert!(agent.set_queued_active_skill(Some(primary.into())));
+        assert_eq!(agent.session_for_split().pinned_skill_names(), modes);
+    }
+    // A reconnect reports the primary again and a client may report none.
+    assert!(agent.set_remote_active_skill(None));
+    assert_eq!(agent.session_for_split().pinned_skill_names(), modes);
+    // Daemon restart: a fresh instance over the same JCODE_HOME restores the
+    // persisted session, then the reattached client reports its primary skill.
+    let mut restarted = Agent::new_with_session(
+        provider(),
+        Registry::empty(),
+        Session::load(&id).unwrap(),
+        None,
+    );
+    assert_eq!(
+        restarted.runtime_skills_snapshot()["pinned_skills"],
+        serde_json::json!(modes)
+    );
+    assert!(restarted.set_remote_active_skill(Some("selfdev".into())));
+    assert_eq!(restarted.session_for_split().pinned_skill_names(), modes);
+    assert_eq!(
+        serde_json::to_value(Session::load(&id).unwrap()).unwrap()["pinned_skills"],
+        serde_json::json!(modes),
+        "the pins are what reached disk, not only memory"
+    );
+}
