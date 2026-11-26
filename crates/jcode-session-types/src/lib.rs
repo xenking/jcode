@@ -3,8 +3,8 @@ use jcode_message_types::{ContentBlock, Message, Role, SharedContent, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-mod ask;
 pub mod account_icon;
+mod ask;
 pub mod assistant_text;
 mod codemode;
 pub use codemode::*;
