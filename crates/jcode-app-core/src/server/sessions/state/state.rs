@@ -96,8 +96,10 @@ impl SwarmState {
         plans: HashMap<String, VersionedPlan>,
         coordinators: HashMap<String, String>,
     ) -> Self {
+        let members = Arc::new(RwLock::new(members));
+        crate::cache_keepalive::register_workers(members.clone());
         Self {
-            members: Arc::new(RwLock::new(members)),
+            members,
             swarms_by_id: Arc::new(RwLock::new(swarms_by_id)),
             plans: Arc::new(RwLock::new(plans)),
             coordinators: Arc::new(RwLock::new(coordinators)),
@@ -193,7 +195,26 @@ pub struct SwarmMember {
     pub runtime: crate::protocol::SwarmMemberRuntime,
 }
 
+#[async_trait::async_trait]
+impl crate::cache_keepalive::Workers for RwLock<HashMap<String, SwarmMember>> {
+    async fn has_live_workers(&self, session_id: &str) -> bool {
+        self.read()
+            .await
+            .values()
+            .any(|member| member.is_live_worker_of(session_id))
+    }
+}
+
 impl SwarmMember {
+    /// Whether this is a worker the session spawned that is still working.
+    pub(crate) fn is_live_worker_of(&self, coordinator_session_id: &str) -> bool {
+        self.report_back_to_session_id.as_deref() == Some(coordinator_session_id)
+            && matches!(
+                self.status.as_str(),
+                "spawned" | "queued" | "running" | "running_stale" | "streaming" | "thinking"
+            )
+    }
+
     pub fn durable_record(&self) -> SwarmMemberRecord {
         SwarmMemberRecord {
             session_id: self.session_id.clone(),

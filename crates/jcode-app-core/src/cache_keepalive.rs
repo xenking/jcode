@@ -2,13 +2,13 @@
 //!
 //! A cache ping is paid, so exactly one state may send it: the session waits
 //! for its own swarm workers. That is a blocking `await_members` (the tool is
-//! the wait) or a background `await_members` with wake once the turn ended.
-//! Nothing else pings: not a human wait, an idle or closed session, `ask`,
-//! any other tool, or a debug session.
+//! the wait), a background `await_members` with wake, or a turn that ended
+//! while the session still has live workers. Nothing else pings: not a human
+//! wait, an idle or closed session, `ask`, any other tool, or a debug session.
 
 mod ledger;
 
-use jcode_provider_core::cache_keepalive::{Capture, Decision, Replay, decide};
+use jcode_provider_core::cache_keepalive::{Cache, Capture, Decision, Replay, decide};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, SystemTime};
@@ -18,8 +18,37 @@ pub(crate) use ledger::load_usage;
 
 static HUBS: LazyLock<Mutex<HashMap<String, Weak<Hub>>>> = LazyLock::new(Mutex::default);
 
+/// Swarm membership says who a session's live workers are.
+#[async_trait::async_trait]
+pub(crate) trait Workers: Send + Sync {
+    async fn has_live_workers(&self, session_id: &str) -> bool;
+}
+
+static ROSTERS: LazyLock<Mutex<Vec<Weak<dyn Workers>>>> = LazyLock::new(Mutex::default);
+
 /// Rechecks a wait this often, so one that ended silently stops pinging.
 const RECHECK: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 5_000 });
+
+pub(crate) fn register_workers(workers: Arc<dyn Workers>) {
+    ROSTERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(Arc::downgrade(&workers));
+}
+
+async fn has_live_workers(session_id: &str) -> bool {
+    let rosters: Vec<Arc<dyn Workers>> = {
+        let mut rosters = ROSTERS.lock().unwrap_or_else(|error| error.into_inner());
+        rosters.retain(|roster| roster.strong_count() > 0);
+        rosters.iter().filter_map(Weak::upgrade).collect()
+    };
+    for roster in rosters {
+        if roster.has_live_workers(session_id).await {
+            return true;
+        }
+    }
+    false
+}
 
 type CompactionClock = Arc<tokio::sync::RwLock<crate::compaction::CompactionManager>>;
 
@@ -45,16 +74,23 @@ struct Hold {
 
 impl State {
     /// The latest moment the session may wake, when it waits for its workers
-    /// right now. `None` means no ping is allowed.
-    fn wake_deadline(&self) -> Option<SystemTime> {
-        self.holds
+    /// right now. `None` means no ping is allowed. A turn that ended with live
+    /// workers has no definite wake, so it rolls one TTL past the cache expiry.
+    fn wake_deadline(&self, workers_live: bool, cache: Option<Cache>) -> Option<SystemTime> {
+        let held = self
+            .holds
             .values()
             .filter(|hold| match hold.kind {
                 WaitKind::Blocking => self.phase == Phase::InTurn,
                 WaitKind::Background => self.phase == Phase::Parked,
             })
             .map(|hold| hold.deadline)
-            .max()
+            .max();
+        let rolling = (self.phase == Phase::Parked && workers_live)
+            .then_some(cache)
+            .flatten()
+            .map(|cache| cache.touched_at + 2 * cache.tier.ttl());
+        held.max(rolling)
     }
 }
 
@@ -178,7 +214,7 @@ impl Drop for Turn {
             }
         });
         if self.park_on_drop {
-            // Ends at once unless a background wait holds the session.
+            // Ends at once unless the session still has live workers.
             ensure_runner(&self.hub);
         }
     }
@@ -264,11 +300,13 @@ async fn run_pause(hub: Arc<Hub>) {
             return;
         }
         changed.borrow_and_update();
+        let workers_live = has_live_workers(&hub.session_id).await;
         let (deadline, next) = {
             let mut state = hub.state();
             let now = SystemTime::now();
             let config = &crate::config::config().cache;
-            let Some(deadline) = state.wake_deadline() else {
+            let cache = state.replay.as_ref().map(|armed| armed.replay.cache);
+            let Some(deadline) = state.wake_deadline(workers_live, cache) else {
                 // Not waiting for workers: stop, and free the replay with the hub.
                 state.runner = false;
                 exit.0 = None;
@@ -329,7 +367,10 @@ async fn run_pause(hub: Arc<Hub>) {
                 };
                 let started = SystemTime::now();
                 if crate::turn_activity::session_is_stopped(&hub.session_id)
-                    || hub.state().wake_deadline().is_none()
+                    || hub
+                        .state()
+                        .wake_deadline(workers_live, Some(armed.replay.cache))
+                        .is_none()
                     || !matches!(
                         decide(
                             &crate::config::config().cache,
