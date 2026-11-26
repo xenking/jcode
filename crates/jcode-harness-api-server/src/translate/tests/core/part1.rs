@@ -1200,6 +1200,24 @@ fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
 }
 
 #[test]
+fn fifo_queue_requires_capability_and_preserves_snapshot_mode() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        queued_prompts_supported: true,
+        ..Default::default()
+    };
+    let request = json!({"req":"queue_prompt","id":41,"session_id":"s1","client_id":"p1","content":"look","mode":"queue","images":[["image/png","aW1hZ2U="]]});
+    assert!(matches!(&state.api_request_to_legacy(&request)[..], [Outbound::Reply(_)]));
+    state.queued_prompt_fifo_supported = true;
+    let out = state.api_request_to_legacy(&request);
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["mode"], "queue");
+    assert_eq!(legacy["images"], request["images"]);
+    let snapshot = state.legacy_event_to_api(&json!({"type":"queued_prompts","id":0,"prompts":[{"client_id":"p1","content":"look","mode":"after_yield","fifo_queue":true,"images":[["image/png","aW1hZ2U="]]}]}));
+    assert!(matches!(&snapshot[..], [frame] if matches!(&frame.event, ApiEvent::QueuedPrompts { prompts, .. } if prompts[0].mode == jcode_harness_api::QueuedPromptMode::Queue && prompts[0].images[0].1 == "aW1hZ2U=")));
+}
+
+#[test]
 fn queued_skill_requires_capability_and_preserves_typed_rejection() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),
