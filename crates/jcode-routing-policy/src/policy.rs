@@ -296,27 +296,8 @@ impl Policy {
             }
         };
 
-        let mut accounts: Vec<Account> = Vec::new();
-        for raw in &routing.accounts {
-            match account_from_config(raw, egress) {
-                Ok(account) if accounts.iter().any(|seen| seen.id == account.id) => {
-                    err(format!("routing.accounts: duplicate id `{}`", account.id));
-                }
-                Ok(account) => accounts.push(account),
-                Err(message) => err(message),
-            }
-        }
-
-        let mut budgets: Vec<Budget> = Vec::new();
-        for raw in &routing.budgets {
-            match budget_from_config(raw, &accounts) {
-                Ok(budget) if budgets.iter().any(|seen| seen.name == budget.name) => {
-                    err(format!("routing.budgets: duplicate name `{}`", budget.name));
-                }
-                Ok(budget) => budgets.push(budget),
-                Err(message) => err(message),
-            }
-        }
+        let accounts = routing.validated_accounts(egress, &mut err);
+        let budgets = routing.validated_budgets(&accounts, &mut err);
 
         if errors.is_empty() {
             Ok(Self {
@@ -337,6 +318,40 @@ impl Policy {
 
     pub fn account(&self, id: &AccountId) -> Option<&Account> {
         self.accounts.iter().find(|account| &account.id == id)
+    }
+}
+
+impl RoutingConfig {
+    fn validated_accounts(
+        &self,
+        egress: &BTreeMap<String, EgressConfig>,
+        err: &mut impl FnMut(String),
+    ) -> Vec<Account> {
+        let mut accounts: Vec<Account> = Vec::new();
+        for raw in &self.accounts {
+            match account_from_config(raw, egress) {
+                Ok(account) if accounts.iter().any(|seen| seen.id == account.id) => {
+                    err(format!("routing.accounts: duplicate id `{}`", account.id));
+                }
+                Ok(account) => accounts.push(account),
+                Err(message) => err(message),
+            }
+        }
+        accounts
+    }
+
+    fn validated_budgets(&self, accounts: &[Account], err: &mut impl FnMut(String)) -> Vec<Budget> {
+        let mut budgets: Vec<Budget> = Vec::new();
+        for raw in &self.budgets {
+            match budget_from_config(raw, accounts) {
+                Ok(budget) if budgets.iter().any(|seen| seen.name == budget.name) => {
+                    err(format!("routing.budgets: duplicate name `{}`", budget.name));
+                }
+                Ok(budget) => budgets.push(budget),
+                Err(message) => err(message),
+            }
+        }
+        budgets
     }
 }
 

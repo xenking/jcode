@@ -79,10 +79,9 @@ fn secs(raw: &str) -> Result<i64> {
 /// Intents may only name accounts the policy knows, so a typo cannot hold nothing.
 fn known_account(raw: &str) -> Result<AccountId> {
     let id = AccountId::parse(raw).with_context(|| format!("`{raw}` is not an account id"))?;
-    if !crate::routing_accounts::routing()
-        .accounts
-        .iter()
-        .any(|account| account.id.trim() == id.as_str())
+    if crate::routing_accounts::routing()
+        .account(id.as_str(), |_| Some(()))
+        .is_none()
     {
         bail!("`{id}` is not a routed account (saved logins the pool excludes are not)");
     }
@@ -98,7 +97,7 @@ fn status(json: bool, now: i64) -> Result<()> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&status_json(&config.routing.mode, &policy, &state, now))?
+            serde_json::to_string_pretty(&status_json(config.routing.mode, &policy, &state, now))?
         );
         return Ok(());
     }
@@ -194,7 +193,7 @@ fn status(json: bool, now: i64) -> Result<()> {
 }
 
 fn status_json(
-    mode: &RoutingMode,
+    mode: RoutingMode,
     policy: &Result<Policy, Vec<jcode_routing_policy::PolicyError>>,
     state: &RoutingState,
     now: i64,

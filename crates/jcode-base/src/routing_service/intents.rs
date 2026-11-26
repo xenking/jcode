@@ -107,14 +107,10 @@ impl RoutingService {
     pub fn named(&self, account: impl std::fmt::Display) -> String {
         let id = account.to_string();
         let (routing, _) = self.env.routing();
-        let configured = routing
-            .accounts
-            .iter()
-            .find(|raw| raw.id.trim() == id)
-            .and_then(|raw| raw.icon.as_deref());
+        let configured = routing.account(&id, |raw| Some(raw.icon.clone())).flatten();
         format!(
             "{} {id}",
-            jcode_session_types::account_icon::account_icon(&id, configured)
+            jcode_session_types::account_icon::account_icon(&id, configured.as_deref())
         )
     }
 
@@ -150,10 +146,8 @@ impl RoutingService {
         let id = AccountId::parse(raw).ok_or_else(|| format!("`{raw}` is not an account id"))?;
         let (routing, _) = self.env.routing();
         routing
-            .accounts
-            .iter()
-            .any(|account| account.id.trim() == id.as_str())
-            .then_some(id)
+            .account(id.as_str(), |_| Some(()))
+            .map(|()| id)
             .ok_or_else(|| {
                 format!("`{raw}` is not a routed account (saved logins the pool excludes are not)")
             })

@@ -66,6 +66,27 @@ impl RoutingConfig {
         self == &Self::default()
     }
 
+    /// What `pick` makes of the first `[[routing.accounts]]` entry for `id`
+    /// that it yields a value for.
+    pub fn account<T>(&self, id: &str, pick: impl FnMut(&AccountConfig) -> Option<T>) -> Option<T> {
+        self.accounts
+            .iter()
+            .filter(|entry| entry.id.trim() == id)
+            .find_map(pick)
+    }
+
+    /// Maps every `[[routing.accounts]]` and `[[routing.budgets]]` entry as written.
+    pub fn each<A, B>(
+        &self,
+        account: impl FnMut(&AccountConfig) -> A,
+        budget: impl FnMut(&BudgetConfig) -> B,
+    ) -> (Vec<A>, Vec<B>) {
+        (
+            self.accounts.iter().map(account).collect(),
+            self.budgets.iter().map(budget).collect(),
+        )
+    }
+
     /// One line naming every retired key the config still sets, or none. They
     /// are ignored, never a load error.
     pub fn retired_keys(&self) -> Vec<String> {

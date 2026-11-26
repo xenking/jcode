@@ -182,15 +182,9 @@ pub fn build(
             .unwrap_or_default()
     };
 
-    let accounts = routing
-        .accounts
-        .iter()
-        .map(|raw| account_view(raw, routed_readings(&raw.id)))
-        .collect();
-    let budgets = routing
-        .budgets
-        .iter()
-        .map(|raw| {
+    let (accounts, budgets) = routing.each(
+        |raw| account_view(raw, routed_readings(&raw.id)),
+        |raw| {
             let resolved = policy.as_ref().and_then(|policy| {
                 policy
                     .budgets
@@ -199,15 +193,10 @@ pub fn build(
                     .map(|budget| (policy, &snapshot, budget))
             });
             budget_view(raw, resolved)
-        })
-        .collect();
+        },
+    );
 
-    let routed = |id: &AccountId| {
-        routing
-            .accounts
-            .iter()
-            .any(|account| AccountId::parse(&account.id).as_ref() == Some(id))
-    };
+    let routed = |id: &AccountId| routing.account(id.as_str(), |_| Some(())).is_some();
     let api_keys = keys
         .iter()
         .filter(|provider| !provider.accounts.is_empty())

@@ -4,13 +4,10 @@ pub(crate) use jcode_session_types::routing_acct::{complete_acct, parse_acct};
 
 /// Routing account ids from the loaded config, in file order.
 pub(crate) fn configured_account_ids() -> Vec<String> {
-    crate::config::config()
+    let (ids, _) = crate::config::config()
         .routing
-        .accounts
-        .iter()
-        .map(|account| account.id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect()
+        .each(|account| account.id.trim().to_string(), |_| ());
+    ids.into_iter().filter(|id| !id.is_empty()).collect()
 }
 
 impl super::App {

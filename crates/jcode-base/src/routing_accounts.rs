@@ -38,7 +38,7 @@ pub fn effective(
     saved: &[SavedAccount],
     pool: &AccountPool,
 ) -> RoutingConfig {
-    let listed = |id: &str| routing.accounts.iter().find(|entry| entry.id.trim() == id);
+    let listed = |id: &str| routing.account(id, |entry| Some(entry.clone()));
     let mut saved: Vec<&SavedAccount> = saved.iter().collect();
     saved.sort_by_key(|account| {
         let key = pool_key(&account.id);
@@ -64,19 +64,20 @@ pub fn effective(
         accounts.push(match entry {
             Some(entry) => AccountConfig {
                 kind: entry.kind.or(found.kind),
-                priority: entry.priority.clone().or(found.priority),
-                ..entry.clone()
+                priority: entry.priority.or(found.priority),
+                ..entry
             },
             None => found,
         });
     }
-    accounts.extend(
-        routing
-            .accounts
-            .iter()
-            .filter(|entry| !saved.iter().any(|account| account.id == entry.id.trim()))
-            .cloned(),
+    let (unsaved, _) = routing.each(
+        |entry| {
+            let taken = saved.iter().any(|account| account.id == entry.id.trim());
+            (!taken).then(|| entry.clone())
+        },
+        |_| (),
     );
+    accounts.extend(unsaved.into_iter().flatten());
     RoutingConfig {
         accounts,
         ..routing.clone()

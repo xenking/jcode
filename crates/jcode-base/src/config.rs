@@ -373,11 +373,9 @@ fn populate_context_limits_from_config_ref(cfg: &Config) {
 pub fn resolved_account_icon(account: &str) -> String {
     let configured = config()
         .routing
-        .accounts
-        .iter()
-        .find(|raw| raw.id.trim() == account)
-        .and_then(|raw| raw.icon.as_deref());
-    jcode_session_types::account_icon::account_icon(account, configured)
+        .account(account, |raw| Some(raw.icon.clone()))
+        .flatten();
+    jcode_session_types::account_icon::account_icon(account, configured.as_deref())
 }
 
 pub fn config() -> &'static Config {

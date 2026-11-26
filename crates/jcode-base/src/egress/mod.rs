@@ -324,18 +324,13 @@ fn assignment<'a>(
     config: &'a Config,
     provider: &str,
     label: Option<&str>,
-) -> Option<(&'a str, Option<&'a EgressConfig>)> {
-    let find = |id: &str| {
-        config.routing.accounts.iter().find_map(|account| {
-            (account.id.trim() == id)
-                .then_some(account.egress.as_deref())
-                .flatten()
-        })
-    };
+) -> Option<(String, Option<&'a EgressConfig>)> {
+    let find = |id: &str| config.routing.account(id, |account| account.egress.clone());
     let name = label
         .and_then(|label| find(&format!("{provider}:{label}")))
         .or_else(|| find(provider))?;
-    Some((name, config.egress.get(name)))
+    let spec = config.egress.get(&name);
+    Some((name, spec))
 }
 
 async fn select(config: &Config, provider: &str, label: Option<&str>) -> Result<Transport> {
