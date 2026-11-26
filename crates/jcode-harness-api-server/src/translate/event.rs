@@ -402,28 +402,39 @@ impl BridgeState {
                     None => vec![],
                 }
             }
-            "ask_user_request" => match serde_json::from_value(event["questions"].clone()) {
-                Ok(questions) => vec![ServerFrame::event(ApiEvent::AskRequest {
-                    // The daemon can replay a pending ask before the correlated
-                    // state reply establishes this new connection's identity.
-                    session_id: self
-                        .session_id
-                        .clone()
-                        .or_else(|| {
-                            self.pending_attach_id
-                                .as_ref()
-                                .and_then(|(_, _, target)| target.clone())
-                        })
-                        .unwrap_or_default(),
-                    request_id: event["request_id"].as_str().unwrap_or("").to_string(),
-                    tool_call_id: event["tool_call_id"].as_str().unwrap_or("").to_string(),
-                    questions,
-                })],
-                Err(error) => Self::invalid_daemon_event(
-                    None,
-                    format!("invalid daemon ask questions: {error}"),
-                ),
-            },
+            "ask_user_request" => {
+                match serde_json::from_value(event["questions"].clone()).and_then(|questions| {
+                    // Absent means a plain question; an unknown kind is an error, never a downgrade.
+                    let kind = event
+                        .get("kind")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?;
+                    Ok((questions, kind.unwrap_or_default()))
+                }) {
+                    Ok((questions, kind)) => vec![ServerFrame::event(ApiEvent::AskRequest {
+                        // The daemon can replay a pending ask before the correlated
+                        // state reply establishes this new connection's identity.
+                        session_id: self
+                            .session_id
+                            .clone()
+                            .or_else(|| {
+                                self.pending_attach_id
+                                    .as_ref()
+                                    .and_then(|(_, _, target)| target.clone())
+                            })
+                            .unwrap_or_default(),
+                        request_id: event["request_id"].as_str().unwrap_or("").to_string(),
+                        tool_call_id: event["tool_call_id"].as_str().unwrap_or("").to_string(),
+                        questions,
+                        kind,
+                    })],
+                    Err(error) => Self::invalid_daemon_event(
+                        None,
+                        format!("invalid daemon ask questions: {error}"),
+                    ),
+                }
+            }
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),

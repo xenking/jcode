@@ -97,6 +97,34 @@ fn ask_request_and_response_bridge_both_ways() {
 }
 
 #[test]
+fn ask_request_carries_who_may_answer_and_rejects_an_unknown_kind() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let ask = |kind: Option<&str>| {
+        let mut event = json!({
+            "type": "ask_user_request", "request_id": "r1", "tool_call_id": "c1",
+            "questions": [{"question": "Q?", "options": [{"label": "A"}, {"label": "B"}]}]
+        });
+        if let Some(kind) = kind {
+            event["kind"] = json!(kind);
+        }
+        event
+    };
+    let kind_of = |state: &mut BridgeState, kind| match &state.legacy_event_to_api(&ask(kind))[0].event {
+        jcode_harness_api::ApiEvent::AskRequest { kind, .. } => Some(*kind),
+        _ => None,
+    };
+    assert_eq!(kind_of(&mut state, None), Some(jcode_session_types::AskKind::Question));
+    assert_eq!(
+        kind_of(&mut state, Some("cold_wake")),
+        Some(jcode_session_types::AskKind::ColdWake)
+    );
+    assert_eq!(kind_of(&mut state, Some("from_the_future")), None);
+}
+
+#[test]
 fn rejected_ask_answer_reaches_the_client_as_an_error() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

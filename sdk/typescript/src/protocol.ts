@@ -894,6 +894,8 @@ export type ApiEvent =
       request_id: string;
       tool_call_id: string;
       questions: AskQuestion[];
+      /** Who may answer; omitted means a plain question. */
+      kind?: "mcp_approval" | "worker_mcp_approval" | "premium_spawn" | "cold_wake";
     }
   | {
       ev: "permission_request";

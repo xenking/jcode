@@ -337,10 +337,14 @@ pub enum ApiEvent {
     },
 
     /// Text answer to `RoutingIntent`, ready to show.
-    RoutingStatus { text: String },
+    RoutingStatus {
+        text: String,
+    },
 
     /// Reply to `GetRoutingView`.
-    RoutingView { view: crate::RoutingView },
+    RoutingView {
+        view: crate::RoutingView,
+    },
 
     /// A session context override changed, including its resolved budget.
     ContextCapChanged {
@@ -612,6 +616,12 @@ pub enum ApiEvent {
         request_id: String,
         tool_call_id: String,
         questions: Vec<crate::AskQuestion>,
+        /// Who may answer; omitted means a plain question.
+        #[serde(
+            default,
+            skip_serializing_if = "jcode_session_types::AskKind::is_question"
+        )]
+        kind: jcode_session_types::AskKind,
     },
 
     /// The harness needs a permission decision from the user.
