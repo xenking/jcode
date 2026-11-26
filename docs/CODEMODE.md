@@ -27,8 +27,8 @@ Three places now carry that guidance:
   for small windows, and return only relevant `path:line` entries. Use
   `Promise.allSettled` when independent reads can succeed or fail separately.
   Call `swarm` directly for short coordination. Use `codemode` for dependent
-  swarm reads or to return only needed fields from large results. See the
-  [swarm wire measurement](research/swarm-token-cost.md).
+  swarm reads or to return only needed fields from large results. See
+  [Swarm token cost](#swarm-token-cost).
 - The tool description leads with the same shapes before the mechanics, and
   says which tool wins for each (`batch` for 1-10 independent calls, `bash`
   for shell work). Both it and `CODEMODE_PROMPT` say that MCP tools are
@@ -36,6 +36,42 @@ Three places now carry that guidance:
   `listTools('mcp__')`) even when a deferred catalog keeps them out of the
   tool list, and that the typed ones return typed results.
 - `batch`'s description points at `codemode` for dependent or looping work.
+
+## Swarm token cost
+
+Call `swarm` directly for short coordination. Use `codemode` when a script can
+resolve dependencies without the model, or when the model needs only part of a
+large result. Use the native multi-target action when it does the whole job,
+such as `status` with `session_ids`; the measurement below does not cover it.
+
+Measured once on CLI `1ced95d9c7682c939992f4f4b47a7df63c1b08d7` against a
+loopback OpenAI-compatible fixture (private home and socket,
+`JCODE_TEST_SESSION=1`, no real credentials, no billing or latency data).
+Calls cycled through `list`, `status` and `plan_status` on a solo synthetic
+swarm; five runs per arm, order rotated. Counts are local `o200k_base` proxy
+tokens, not provider usage. The harness script is no longer in the repository.
+Cells are median extra input / median output (extra input is the request history
+beyond the first request):
+
+| Shape | N | Native | Code Mode passthrough | Code Mode projection |
+| --- | ---: | ---: | ---: | ---: |
+| Independent | 1 | 155 / 54 | 231 / 88 | 211 / 104 |
+| Independent | 3 | 510 / 123 | 484 / 111 | 314 / 171 |
+| Independent | 16 | 2681 / 569 | 1699 / 125 | 637 / 185 |
+| Chain | 4 | 2088 / 255 | 712 / 134 | 324 / 165 |
+| Chain | 16 | 31776 / 1059 | 2440 / 134 | 529 / 165 |
+
+- Native wins for a single short call; passthrough crosses over between N=2 and
+  N=3. That is a fixture-dependent tradeoff, not a universal cutoff.
+- Chains are where the script wins: an N-step native chain takes N+1 requests,
+  both Code Mode chain arms take two.
+- Projection changes what reaches the model, not what the nested calls read.
+- The `swarm` schema advertises 25 properties; sending the 23 unused ones as
+  `null` costs about 102 output tokens per call here. Omit unused arguments where
+  the endpoint allows it.
+
+Compare script output and receipt text against the results omitted and the turns
+avoided; do not estimate a bill from this run.
 
 ## Enabling
 
