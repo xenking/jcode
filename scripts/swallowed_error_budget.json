@@ -476,42 +476,42 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm.rs": {
+    "crates/jcode-app-core/src/server/swarms/membership/swarm.rs": {
       "dot_ok": 8,
       "let_underscore": 5,
       "unwrap_or_default": 10
     },
-    "crates/jcode-app-core/src/server/swarm_channels.rs": {
+    "crates/jcode-app-core/src/server/swarms/membership/swarm_channels.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm_event_history.rs": {
+    "crates/jcode-app-core/src/server/swarms/membership/swarm_event_history.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/swarm_labels.rs": {
+    "crates/jcode-app-core/src/server/swarms/membership/swarm_labels.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm_mutation_state.rs": {
+    "crates/jcode-app-core/src/server/swarms/state/swarm_mutation_state.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm_persistence.rs": {
+    "crates/jcode-app-core/src/server/swarms/state/swarm_persistence.rs": {
       "dot_ok": 3,
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm_todo_link.rs": {
+    "crates/jcode-app-core/src/server/swarms/state/swarm_todo_link.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/swarm_watchdog.rs": {
+    "crates/jcode-app-core/src/server/swarms/supervision/swarm_watchdog.rs": {
       "dot_ok": 1,
       "let_underscore": 2,
       "unwrap_or_default": 2

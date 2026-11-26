@@ -23,7 +23,7 @@
     "crates/jcode-app-core/src/server/reload_recovery.rs": 1766,
     "crates/jcode-app-core/src/server/deployment/rollout_desktop.rs": 1836,
     "crates/jcode-app-core/src/server/state.rs": 1751,
-    "crates/jcode-app-core/src/server/swarm.rs": 2085,
+    "crates/jcode-app-core/src/server/swarms/membership/swarm.rs": 2085,
     "crates/jcode-app-core/src/server/turn_failover.rs": 2179,
     "crates/jcode-app-core/src/tool/bash/bash.rs": 1785,
     "crates/jcode-app-core/src/tool/browser/browser.rs": 1203,

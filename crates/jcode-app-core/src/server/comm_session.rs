@@ -1315,7 +1315,7 @@ pub(super) async fn handle_comm_stop(
 
 mod stop_cleanup;
 
-#[path = "swarm_stop_target.rs"]
+#[path = "swarms/supervision/swarm_stop_target.rs"]
 pub(super) mod swarm_stop_target;
 use swarm_stop_target::*;
 

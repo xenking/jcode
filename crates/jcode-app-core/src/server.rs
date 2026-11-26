@@ -89,22 +89,39 @@ mod session_notifications;
 mod socket;
 mod spawn_model_selection;
 mod spawn_policy;
+#[path = "server/swarms/membership/swarm.rs"]
 mod swarm;
+#[path = "server/swarms/membership/swarm_ancestry.rs"]
 mod swarm_ancestry;
+#[path = "server/swarms/membership/swarm_channels.rs"]
 mod swarm_channels;
+#[path = "server/swarms/membership/swarm_event_history.rs"]
 mod swarm_event_history;
+#[path = "server/swarms/membership/swarm_labels.rs"]
 mod swarm_labels;
+#[path = "server/swarms/membership/swarm_membership.rs"]
 mod swarm_membership;
+#[path = "server/swarms/state/swarm_mutation_state.rs"]
 mod swarm_mutation_state;
+#[path = "server/swarms/state/swarm_persistence.rs"]
 mod swarm_persistence;
+#[path = "server/swarms/state/swarm_plan.rs"]
 mod swarm_plan;
+#[path = "server/swarms/state/swarm_policy.rs"]
 mod swarm_policy;
+#[path = "server/swarms/supervision/swarm_salvage.rs"]
 mod swarm_salvage;
+#[path = "server/swarms/state/swarm_status.rs"]
 mod swarm_status;
+#[path = "server/swarms/state/swarm_todo_link.rs"]
 pub(crate) mod swarm_todo_link;
+#[path = "server/swarms/state/swarm_todo_projection.rs"]
 mod swarm_todo_projection;
+#[path = "server/swarms/supervision/swarm_watchdog.rs"]
 mod swarm_watchdog;
+#[path = "server/swarms/supervision/swarm_watchdog_delivery.rs"]
 mod swarm_watchdog_delivery;
+#[path = "server/swarms/membership/swarm_working_members.rs"]
 mod swarm_working_members;
 mod turn_execution;
 mod turn_failover;
