@@ -491,6 +491,7 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
         });
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg_spawn_fresh_skip".to_string(),
             role: crate::message::Role::Assistant,
@@ -564,6 +565,7 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
         });
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg_remote_restore_1".to_string(),
             role: crate::message::Role::Assistant,
@@ -601,6 +603,7 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
         let body = "Detailed implementation report. ".repeat(40);
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg_restored_dm".to_string(),
             role: crate::message::Role::User,

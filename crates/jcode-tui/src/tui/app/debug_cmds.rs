@@ -1015,6 +1015,7 @@ impl App {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 }
             };
             self.push_display_message(message);

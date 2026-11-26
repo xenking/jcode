@@ -13,6 +13,7 @@ fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessag
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);

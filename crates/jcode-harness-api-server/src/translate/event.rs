@@ -445,6 +445,11 @@ impl BridgeState {
             }
             "tool_done" => vec![ServerFrame::event(ApiEvent::ToolDone {
                 codemode: Self::codemode_summary(event),
+                ask: Self::ask_record(
+                    event,
+                    event["name"].as_str().unwrap_or(""),
+                    event["output"].as_str().unwrap_or(""),
+                ),
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),
                 name: event["name"].as_str().unwrap_or("").to_string(),

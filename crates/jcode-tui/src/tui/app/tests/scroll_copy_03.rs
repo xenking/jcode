@@ -55,6 +55,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -64,6 +65,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     ];
     app.bump_display_messages_version();
@@ -763,6 +765,7 @@ fn test_history_anchor_keeps_distance_from_bottom_after_prepend() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     );
     app.bump_display_messages_version();
@@ -817,6 +820,7 @@ fn test_history_anchor_reconciles_into_scroll_offset_after_render() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     );
     app.bump_display_messages_version();
@@ -890,6 +894,7 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
             title: None,
             tool_data: msg.tool_data,
             codemode: None,
+            ask: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -1689,6 +1694,7 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         msgs.push(DisplayMessage {
             role: "assistant".to_string(),
@@ -1698,6 +1704,7 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
     }
     app.display_messages = msgs;

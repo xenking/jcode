@@ -875,6 +875,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
             timestamp_ms: row.timestamp_ms,
             tool_duration_ms: None,
             codemode: row.codemode,
+            ask: row.ask,
         })
         .collect();
     let mut state = state_with_session();

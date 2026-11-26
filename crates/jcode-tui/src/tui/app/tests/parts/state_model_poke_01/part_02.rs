@@ -232,6 +232,7 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
 
@@ -279,6 +280,7 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
 

@@ -77,6 +77,7 @@ fn live_ask_result_preserves_questions_without_tool_input_event() {
         &mut app,
         ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "call-1".into(),
             name: "ask".into(),
             output: "User answers:\n1. Which? -> B\n".into(),

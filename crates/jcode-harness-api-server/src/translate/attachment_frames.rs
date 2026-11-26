@@ -17,6 +17,22 @@ impl BridgeState {
         serde::Deserialize::deserialize(event).ok()
     }
 
+    /// The typed answer of an `ask` row or event; sessions saved before records
+    /// existed carry only the result text, which is rebuilt here.
+    pub(super) fn ask_record(
+        event: &Value,
+        name: &str,
+        content: &str,
+    ) -> Option<Box<jcode_session_types::AskRecord>> {
+        if let Some(typed) = event.get("ask").filter(|typed| !typed.is_null()) {
+            return serde_json::from_value(typed.clone()).ok();
+        }
+        if !jcode_session_types::is_ask_tool(name) {
+            return None;
+        }
+        jcode_session_types::AskRecord::from_legacy(content).map(Box::new)
+    }
+
     pub(super) fn daemon_list<T: serde::de::DeserializeOwned>(
         event: &Value,
         field: &str,
@@ -47,6 +63,11 @@ impl BridgeState {
         let id = data["id"].as_str().filter(|id| !id.is_empty())?;
         (message["role"] == "tool").then(|| jcode_harness_api::HistoryTool {
             codemode: Self::codemode_summary(message),
+            ask: Self::ask_record(
+                message,
+                data["name"].as_str().unwrap_or(""),
+                message["content"].as_str().unwrap_or(""),
+            ),
             duration_ms: message["tool_duration_ms"].as_u64(),
             id: id.to_string(),
             name: data["name"].as_str().unwrap_or("").to_string(),

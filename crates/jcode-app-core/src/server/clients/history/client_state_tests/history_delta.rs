@@ -4,6 +4,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -20,6 +21,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
 fn rendered_tool_history_preserves_timing_on_wire() {
     let row = crate::session::RenderedMessage {
         codemode: None,
+        ask: None,
         timestamp_ms: Some(20_000),
         tool_duration_ms: Some(7_000),
         response_stats: None,
@@ -58,6 +60,7 @@ fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
         1,
         crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -164,6 +167,7 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -199,6 +203,7 @@ fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, role: "system".to_owned(),
@@ -322,6 +327,7 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
     for index in 0..8 {
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("message-{index}"),
             role: if index % 2 == 0 {

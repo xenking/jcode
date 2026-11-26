@@ -1155,6 +1155,7 @@ mod tests {
                 finish_tool.await.unwrap();
                 let event = ServerEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     id: "busy-tool".into(),
                     name: "bash".into(),
                     output: "finished after background acknowledgement".into(),

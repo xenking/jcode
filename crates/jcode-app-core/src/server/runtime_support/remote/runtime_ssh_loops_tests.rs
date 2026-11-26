@@ -789,6 +789,7 @@ fn server_loop_stops_after_a_poke_turn_without_tool_calls() {
 fn stored(content: Vec<ContentBlock>) -> crate::session::StoredMessage {
     crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "m".into(),
         role: Role::Assistant,

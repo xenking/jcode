@@ -49,7 +49,7 @@ mod notifications;
 pub use jcode_session_types::TurnStopReason;
 pub use jcode_session_types::{
     ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer,
-    AskKind, AskOption, AskQuestion, AskResponse, format_ask_answers, validate_ask_questions,
+    AskKind, AskOption, AskQuestion, AskRecord, AskResponse, validate_ask_questions,
 };
 pub use notifications::{FeatureToggle, NotificationType};
 
@@ -290,6 +290,9 @@ pub struct HistoryMessage {
     pub tool_duration_ms: Option<u64>,
     #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
     pub codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    /// The typed answer when this row is a completed `ask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Box<jcode_session_types::AskRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,

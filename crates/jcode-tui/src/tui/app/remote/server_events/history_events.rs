@@ -86,6 +86,7 @@ pub(super) fn handle_history_event(
         messages.extend(prefix.into_iter().map(|msg| {
             crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 attachments: Vec::new(),
                 response_stats: None,
                 timestamp_ms: None,
@@ -618,6 +619,7 @@ pub(super) fn handle_history_event(
                         title: None,
                         tool_data: msg.tool_data,
                         codemode: None,
+                        ask: None,
                     })
                     .collect();
                 super::super::super::remote_notifications::normalize_swarm_delivery_messages(

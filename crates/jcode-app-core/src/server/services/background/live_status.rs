@@ -340,6 +340,7 @@ mod tests {
         p.observe(
             &ServerEvent::ToolDone {
                 codemode: None,
+                ask: None,
                 id: "native".into(),
                 name: "search".into(),
                 output: String::new(),
@@ -438,6 +439,7 @@ mod tests {
         p.observe(
             &ServerEvent::ToolDone {
                 codemode: None,
+                ask: None,
                 id: "t".into(),
                 name: "bash".into(),
                 output: "ok".into(),

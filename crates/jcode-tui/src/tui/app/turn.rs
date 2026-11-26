@@ -423,6 +423,7 @@ impl App {
                                                     title: None,
                                                     tool_data: None,
                                                     codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }
@@ -478,6 +479,7 @@ impl App {
                                                     title: None,
                                                     tool_data: None,
                                                     codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }
@@ -492,6 +494,7 @@ impl App {
                                             title: None,
                                             tool_data: None,
                                             codemode: None,
+                                            ask: None,
                                         });
                                         // Clear streaming state and continue with new turn
                                         self.clear_streaming_render_state();
@@ -705,6 +708,7 @@ impl App {
                                                 title: None,
                                                 tool_data: Some(tool.clone()),
                                                 codemode: None,
+                                                ask: None,
                                             });
 
                                             tool_calls.push(tool);
@@ -1069,6 +1073,7 @@ impl App {
                                                 title: None,
                                                 tool_data: Some(tool_call),
                                                 codemode: None,
+                                                ask: None,
                                             });
                                             self.status = ProcessingStatus::Streaming;
                                         }
@@ -1108,6 +1113,7 @@ impl App {
                                             title: Some("Generated image".to_string()),
                                             tool_data: Some(tool_call),
                                             codemode: None,
+                                            ask: None,
                                         });
                                         if let Some(image) = crate::message::generated_image_rendered_image(
                                             &id,
@@ -1310,6 +1316,7 @@ impl App {
                         title: None,
                         tool_data: None,
                         codemode: None,
+                        ask: None,
                     });
                     self.push_turn_footer(duration);
                 }
@@ -1328,6 +1335,7 @@ impl App {
                             title: None,
                             tool_data: None,
                             codemode: None,
+                            ask: None,
                         });
                     }
                 }
@@ -1504,6 +1512,7 @@ impl App {
                                                     title: None,
                                                     tool_data: None,
                                                     codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }

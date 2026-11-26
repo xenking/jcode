@@ -23,6 +23,7 @@ fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
         }))
         .map(|message| crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             role: message.role,

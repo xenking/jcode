@@ -18,6 +18,7 @@ fn invalidated_in_flight_load_does_not_repopulate_session_list_cache() {
         );
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("msg-{idx}"),
             role: crate::message::Role::User,
@@ -117,6 +118,7 @@ fn onboarding_scoped_loader_returns_only_codex_sessions() {
     );
     jcode_session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg-1".to_string(),
         role: crate::message::Role::User,
@@ -162,6 +164,7 @@ fn parallel_fill_skips_many_recent_empty_sessions_to_reach_scan_limit() {
     let push_message = |session: &mut Session, text: &str| {
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("msg-{text}"),
             role: crate::message::Role::User,
@@ -227,6 +230,7 @@ fn hidden_debug_sessions_do_not_consume_default_resume_budget() {
     let push_message = |session: &mut Session, text: &str| {
         session.append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("msg-{text}"),
             role: crate::message::Role::User,
@@ -298,6 +302,7 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
     );
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg1".to_string(),
         role: crate::message::Role::User,

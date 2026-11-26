@@ -311,6 +311,7 @@ fn test_handle_server_event_remote_observe_tracks_tool_exec_and_done() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "tool_read".to_string(),
             name: "read".to_string(),
             output: "1 fn main() {}".to_string(),
@@ -530,6 +531,7 @@ fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
             &mut state,
             crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolDone {
                 codemode: None,
+                ask: None,
                 id: "tool_read".to_string(),
                 name: "read".to_string(),
                 output: "1 fn main() {}".to_string(),

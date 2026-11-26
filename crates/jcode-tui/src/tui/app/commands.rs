@@ -1653,6 +1653,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             title: None,
                             tool_data: None,
                             codemode: None,
+                            ask: None,
                         });
                     }
                     Err(reason) => {
@@ -1668,6 +1669,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             title: None,
                             tool_data: None,
                             codemode: None,
+                            ask: None,
                         });
                     }
                 }
@@ -1681,6 +1683,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -1711,6 +1714,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -1730,6 +1734,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
             Err(e) => {
@@ -1741,6 +1746,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -1761,6 +1767,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
                 return true;
             }

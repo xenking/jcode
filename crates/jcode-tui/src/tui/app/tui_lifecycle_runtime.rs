@@ -408,6 +408,7 @@ impl App {
                             title: None,
                             tool_data: None,
                             codemode: None,
+                            ask: None,
                         });
                     }
                     Ok(restore) => {
@@ -526,6 +527,7 @@ impl App {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -716,6 +718,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
             return true;
         }
@@ -727,6 +730,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         app.session.apply_route(crate::session::Route {
             provider_session_id: app.provider_session_id.clone(),
@@ -749,6 +753,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         app.session.apply_route(crate::session::Route {
             provider_session_id: app.provider_session_id.clone(),

@@ -120,6 +120,7 @@ impl Agent {
                 logging::warn(&error_msg);
                 let _ = event_tx.send(ServerEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     output: error_msg.clone(),
@@ -317,6 +318,7 @@ impl Agent {
                         let output = cap_tool_output_for_history(&tc.name, output);
                         let codemode =
                             crate::tool::codemode_ledger::output_summary(&tc.name, &output);
+                        let ask = crate::tool::ask_output_record(&tc.name, &output);
                         let mut side_pane_images =
                             tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
                         let mut blocks = tool_output_to_content_blocks(tc.id.clone(), output);
@@ -332,6 +334,7 @@ impl Agent {
                             blocks,
                             tool_elapsed.as_millis() as u64,
                             codemode.clone(),
+                            ask.clone(),
                         );
                         label_session_images(&self.session, &message_id, 0, &mut side_pane_images);
                         if !side_pane_images.is_empty() {
@@ -354,6 +357,7 @@ impl Agent {
                             .unwrap_or_default();
                         let _ = event_tx.send(ServerEvent::ToolDone {
                             codemode,
+                            ask,
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             output: output_text,
@@ -379,6 +383,7 @@ impl Agent {
                         let error_msg = format!("Error: {}", e);
                         let _ = event_tx.send(ServerEvent::ToolDone {
                             codemode: codemode.clone(),
+                            ask: None,
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             output: error_msg.clone(),
@@ -393,6 +398,7 @@ impl Agent {
                             }],
                             tool_elapsed.as_millis() as u64,
                             codemode,
+                            None,
                         );
                         tool_results_dirty = true;
                     }
@@ -436,9 +442,10 @@ impl Agent {
                 // An ask interrupted by reload is still pending, not a
                 // completed decision. Keep its durable marker for recovery
                 // but do not publish a false ToolDone to live clients.
-                if !(is_reload && tc.name == "ask") {
+                if !(is_reload && jcode_session_types::is_ask_tool(&tc.name)) {
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         codemode: None,
+                        ask: None,
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: interrupted_msg.clone(),
@@ -529,6 +536,7 @@ impl Agent {
 
                 let _ = event_tx.send(ServerEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     output: bg_msg.clone(),

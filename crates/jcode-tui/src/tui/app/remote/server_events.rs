@@ -480,8 +480,9 @@ fn handle_server_event_inner(
             output,
             error,
             codemode,
+            ask,
         } => {
-            if name == "ask"
+            if jcode_session_types::is_ask_tool(&name)
                 && app
                     .ask_picker
                     .as_ref()
@@ -490,7 +491,13 @@ fn handle_server_event_inner(
                 app.dismiss_ask_picker();
             }
             super::server_event_handlers::handle_tool_done(
-                app, remote, id, name, output, error, codemode,
+                app,
+                remote,
+                id,
+                name,
+                output,
+                error,
+                super::server_event_handlers::ToolReceipts { codemode, ask },
             )
         }
         ServerEvent::GeneratedImage {
@@ -836,6 +843,7 @@ fn handle_server_event_inner(
                         title: None,
                         tool_data: None,
                         codemode: None,
+                        ask: None,
                     });
                 }
             }
@@ -1072,6 +1080,7 @@ fn handle_server_event_inner(
                     title: None,
                     tool_data: msg.tool_data,
                     codemode: None,
+                    ask: None,
                 })
                 .collect();
             for message in &mut restored_messages {
@@ -1534,6 +1543,7 @@ fn handle_server_event_inner(
                         title: None,
                         tool_data: None,
                         codemode: None,
+                        ask: None,
                     });
                 }
                 app.push_turn_footer(duration);
@@ -1611,6 +1621,7 @@ fn handle_server_event_inner(
                     title,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
             if let Some(n) = tools_skipped {
@@ -1746,7 +1757,7 @@ fn handle_server_event_inner(
                 } else {
                     app.streaming_tool_calls.push(ToolCall {
                         id: tool_call_id.clone(),
-                        name: "ask".into(),
+                        name: jcode_session_types::ASK_TOOL_NAME.into(),
                         input,
                         intent: None,
                         thought_signature: None,

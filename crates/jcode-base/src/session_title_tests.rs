@@ -99,6 +99,7 @@ impl Provider for TitleProvider {
 fn user(text: &str) -> StoredMessage {
     StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: format!("m{}", text.len()),
         role: Role::User,
@@ -117,6 +118,7 @@ fn user(text: &str) -> StoredMessage {
 fn assistant(text: &str) -> StoredMessage {
     StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: format!("a{}", text.len()),
         role: Role::Assistant,

@@ -837,6 +837,7 @@ impl App {
                 };
                 let stored_message = crate::session::StoredMessage {
                     codemode: None,
+                    ask: None,
                     attachment_data: None,
                     id: id::new_id("message"),
                     role: Role::User,
@@ -942,6 +943,7 @@ impl App {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
             let _ = self.session.add_message(role, kept_blocks);
         }

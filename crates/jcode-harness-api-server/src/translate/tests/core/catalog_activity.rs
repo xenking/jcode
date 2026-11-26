@@ -180,6 +180,7 @@ fn catalog_republishes_prompt_and_reply_after_each_save() {
         }],
         1,
         None,
+        None,
     );
     session.save().unwrap();
     assert_eq!(listed_activity(&mut bridge), (Some(reply), Some(reply)));

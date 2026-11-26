@@ -128,6 +128,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
     let assistant = |tool_calls: Vec<String>| DisplayMessage {
         role: "assistant".to_string(),
@@ -137,6 +138,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     };
     let render = |messages: Vec<DisplayMessage>| {
         let state = TestState {

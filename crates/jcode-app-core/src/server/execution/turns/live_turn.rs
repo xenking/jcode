@@ -253,6 +253,7 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
                 for (id, name) in agent.repair_force_stopped_tools(start_message_index) {
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         codemode: None,
+                        ask: None,
                         id,
                         name,
                         output: "[Tool stopped by user]".into(),

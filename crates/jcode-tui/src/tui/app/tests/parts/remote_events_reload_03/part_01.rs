@@ -208,6 +208,7 @@ fn test_handle_server_event_history_with_interruption_preserves_transcript() {
             session_id: "ses_test_123".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,
@@ -298,6 +299,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         session_id: "ses_server_owned_reload".to_string(),
         messages: vec![crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -395,6 +397,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             session_id: "ses_test_456".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,
@@ -474,6 +477,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             session_id: "ses_reload_done".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,

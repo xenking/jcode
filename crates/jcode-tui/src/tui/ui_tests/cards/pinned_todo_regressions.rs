@@ -293,6 +293,7 @@ fn hidden_todo(payload: &str) -> DisplayMessage {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     }
 }
 

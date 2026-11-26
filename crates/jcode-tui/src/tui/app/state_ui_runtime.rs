@@ -175,6 +175,7 @@ impl App {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
         }
     }

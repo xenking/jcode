@@ -1421,6 +1421,9 @@ impl Session {
         }
         for msg in &mut redacted.messages {
             redaction::redact_shared_content(&mut msg.content);
+            // The typed answer is not run through the secret redactor; the
+            // redacted result text above is what a shared copy keeps.
+            msg.ask = None;
             if let Some(summary) = msg.codemode.as_mut() {
                 summary.report_body_bytes = None;
                 for call in &mut summary.calls {
@@ -1585,6 +1588,7 @@ impl Session {
             token_usage,
             display_role,
             None,
+            None,
         )
     }
 
@@ -1593,8 +1597,17 @@ impl Session {
         content: impl Into<crate::message::SharedContent>,
         duration_ms: u64,
         codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     ) -> String {
-        self.push_message(Role::User, content, Some(duration_ms), None, None, codemode)
+        self.push_message(
+            Role::User,
+            content,
+            Some(duration_ms),
+            None,
+            None,
+            codemode,
+            ask,
+        )
     }
 
     fn push_message(
@@ -1605,6 +1618,7 @@ impl Session {
         token_usage: Option<StoredTokenUsage>,
         display_role: Option<StoredDisplayRole>,
         codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     ) -> String {
         let id = new_id("message");
         self.append_stored_message(StoredMessage {
@@ -1617,6 +1631,7 @@ impl Session {
             tool_duration_ms,
             token_usage,
             codemode,
+            ask,
         });
         id
     }

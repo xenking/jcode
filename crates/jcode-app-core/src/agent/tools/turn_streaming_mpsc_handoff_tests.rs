@@ -168,15 +168,15 @@ async fn bash_handoff_budget_starts_after_slow_pre_tool_hook() {
 /// suppress the machine's hooks by default (jcode-base `hooks_suppressed`), so the
 /// paused clock sees only the tool's own wait.
 #[tokio::test(start_paused = true)]
-async fn ask_user_waits_past_budget_and_returns_its_answer() {
+async fn ask_waits_past_budget_and_returns_its_answer() {
     let registry = Registry::empty();
     registry
-        .register("ask_user".into(), Arc::new(WaitProbe))
+        .register("ask".into(), Arc::new(WaitProbe))
         .await;
     let ctx = ToolContext {
-        session_id: "foreground-ask-user-probe".into(),
+        session_id: "foreground-ask-probe".into(),
         message_id: "message".into(),
-        tool_call_id: "ask-user-probe".into(),
+        tool_call_id: "ask-probe".into(),
         working_dir: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
@@ -185,7 +185,7 @@ async fn ask_user_waits_past_budget_and_returns_its_answer() {
     let start = tokio::time::Instant::now();
     let result = execute_with_background_budget(
         registry,
-        "ask_user".into(),
+        "ask".into(),
         serde_json::json!({"question": "Continue?"}),
         ctx,
         Duration::from_secs(3),
@@ -197,17 +197,17 @@ async fn ask_user_waits_past_budget_and_returns_its_answer() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn streaming_ask_user_wait_is_not_automatically_backgrounded() {
+async fn streaming_ask_wait_is_not_automatically_backgrounded() {
     for input in [
         serde_json::json!({}),
         serde_json::json!({"action": "choose"}),
     ] {
-        assert!(!auto_background_allowed("ask_user", &input));
+        assert!(!auto_background_allowed("ask", &input));
         let bg = InterruptSignal::new();
         let shutdown = InterruptSignal::new();
         tokio::select! {
             biased;
-            _ = wait_for_tool_handoff(&bg, &shutdown, handoff_budget("ask_user", &input, Duration::from_secs(3)), None) => {
+            _ = wait_for_tool_handoff(&bg, &shutdown, handoff_budget("ask", &input, Duration::from_secs(3)), None) => {
                 panic!("human decision was automatically backgrounded");
             }
             _ = tokio::time::sleep(Duration::from_secs(30)) => {}

@@ -275,6 +275,7 @@ fn render_tool_message_colors_high_token_badge() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -307,6 +308,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
             }),
             intent: None, thought_signature: None, }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -340,6 +342,7 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -376,6 +379,7 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -419,6 +423,7 @@ fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction()
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -463,6 +468,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
                 thought_signature: None,
             }),
             codemode: None,
+            ask: None,
         };
 
         let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -495,6 +501,7 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -538,6 +545,7 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::Inline);
@@ -603,6 +611,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::FullInline);
@@ -679,6 +688,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -734,6 +744,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -780,6 +791,7 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -824,6 +836,7 @@ fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -981,6 +994,7 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -1017,6 +1031,7 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
                 thought_signature: None,
             }),
             codemode: None,
+            ask: None,
         };
 
         let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);

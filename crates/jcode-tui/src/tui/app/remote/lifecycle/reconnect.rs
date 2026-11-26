@@ -211,6 +211,7 @@ fn set_disconnect_status_message(app: &mut App, state: &mut RemoteRunState, cont
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
     }

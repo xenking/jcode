@@ -74,6 +74,7 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
                 app.set_status_notice(format!("Model → {}", model_name));
             }

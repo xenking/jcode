@@ -222,6 +222,9 @@ pub enum ServerEvent {
         error: Option<String>,
         #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
         codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        /// The typed answer when this is a completed `ask`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     },
 
     /// Rendered images produced during the live turn, including image-bearing

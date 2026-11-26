@@ -1166,6 +1166,7 @@ impl App {
                 title: None,
                 tool_data: msg.tool_data,
                 codemode: None,
+                ask: None,
             })
             .collect();
         self.apply_compacted_history_window(

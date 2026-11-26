@@ -31,25 +31,44 @@ fn session_loads_future_status() {
     assert_eq!(restored.id, session.id);
 }
 
-/// Sessions saved while the open-requests ledger existed still carry its field.
+/// A session saved before `ask` answers were typed holds only the result prose.
+/// It still loads, and every consumer gets the same answers from it.
 #[test]
-fn session_loads_retired_open_request_ledger() -> Result<()> {
-    let mut session = Session::create_with_id("session_retired_ledger".into(), None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "kept".into(),
-            cache_control: None,
-        }],
+fn a_session_saved_with_prose_ask_answers_still_loads_and_renders() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("session_with_legacy_ask_answers.json");
+    std::fs::write(
+        &path,
+        include_str!("../../tests/fixtures/session_with_legacy_ask_answers.json"),
+    )?;
+    let session = Session::load_from_path(&path)?;
+    let rows = crate::session::render_messages(&session);
+    let answers: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.tool_data
+                .as_ref()
+                .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
+        })
+        .collect();
+    assert_eq!(answers.len(), 2);
+    assert!(answers.iter().all(|row| row.ask.is_none()), "nothing was typed yet");
+
+    let record = jcode_session_types::AskRecord::resolve(None, &answers[0].content)
+        .expect("the prose answer rebuilds");
+    let first = &record.response.answers.as_ref().unwrap()[0];
+    assert_eq!(first.selected, ["Postgres", "SQLite"]);
+    assert_eq!(first.comments["Postgres"], "reliable; battle tested");
+    assert_eq!(first.other.as_deref(), Some("maybe libsql"));
+    assert_eq!(
+        record.human_turn().as_deref(),
+        Some(
+            "Q: Which database? → Postgres (comment: reliable; battle tested); SQLite; Other: maybe libsql\nQ: When? → unanswered (user skipped)"
+        )
     );
-    let ledger = serde_json::json!({"last_id": 3, "open": [{"id": 3, "preview": "Fix it"}]});
-    let mut json = serde_json::to_value(&session)?;
-    json["user_asks"] = ledger.clone();
-    let restored: Session = serde_json::from_value(json)?;
-    assert_eq!(restored.messages[0].content_preview(), "kept");
-    let mut meta = serde_json::to_value(session.journal_meta())?;
-    meta["user_asks"] = ledger;
-    serde_json::from_value::<SessionJournalMeta>(meta)?;
+
+    let declined = jcode_session_types::AskRecord::resolve(None, &answers[1].content).unwrap();
+    assert!(declined.declined());
     Ok(())
 }
 
@@ -443,6 +462,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.set_canary("self-dev");
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg_1".to_string(),
         role: Role::User,
@@ -520,6 +540,7 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     session.reasoning_effort = Some("medium".to_string());
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg_remote_1".to_string(),
         role: Role::Assistant,
@@ -2357,6 +2378,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg_assistant".to_string(),
         role: Role::Assistant,
@@ -3098,6 +3120,7 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg_env_1".to_string(),
         role: Role::User,
@@ -3175,6 +3198,7 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     for i in 0..24 {
         session.append_stored_message(StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("msg_{i}"),
             role: Role::User,
@@ -3243,6 +3267,7 @@ fn route_journal_roundtrip(large: bool) -> Result<()> {
     session.route_api_method = Some("account:first".into());
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "message".into(),
         role: Role::User,
@@ -3353,6 +3378,7 @@ fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> 
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     let msg = |i: usize| StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: format!("m{i}"),
         role: Role::User,
@@ -3425,6 +3451,7 @@ fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "m0".into(),
         role: Role::User,
@@ -3475,6 +3502,7 @@ fn write_compaction_elision_compat_fixture() -> Result<()> {
     for i in 0..4 {
         session.append_stored_message(StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("m{i}"),
             role: Role::User,

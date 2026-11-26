@@ -290,6 +290,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         app.set_status_notice("Visual debug: ON");
         return true;
@@ -306,6 +307,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         app.set_status_notice("Visual debug: OFF");
         return true;
@@ -331,6 +333,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
             Err(e) => {
@@ -342,6 +345,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -373,6 +377,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -389,6 +394,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -411,6 +417,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
         }
         return true;
@@ -431,6 +438,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -478,6 +486,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -493,6 +502,7 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
         return true;
     }

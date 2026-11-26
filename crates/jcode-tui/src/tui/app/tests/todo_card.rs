@@ -697,6 +697,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -706,6 +707,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     ];
     app.bump_display_messages_version();
@@ -1020,6 +1022,7 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.status = ProcessingStatus::Idle;

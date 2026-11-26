@@ -1852,6 +1852,7 @@ fn run_turn_tool_call_detection_only_looks_at_new_messages() {
     use crate::message::{ContentBlock, Role};
     let stored = |content: Vec<ContentBlock>| crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "m".into(),
         role: Role::Assistant,

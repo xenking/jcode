@@ -51,6 +51,7 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 },
                 DisplayMessage {
                     role: "assistant".into(),
@@ -62,6 +63,7 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 },
             ]
         })

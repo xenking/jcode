@@ -81,6 +81,7 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
     for width in [40, 72, 120] {
         for mode in [

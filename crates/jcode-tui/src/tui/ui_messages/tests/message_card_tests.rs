@@ -57,6 +57,7 @@ pub(super) fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             title: Some("1 todos".to_string()),
             tool_data,
             codemode: None,
+            ask: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -182,6 +183,7 @@ pub(super) fn visually_appealing_prompt_batched_retry_renders_complete_todo_card
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let rendered = render_tool_message(&msg, 84, crate::config::DiffDisplayMode::Off)
@@ -264,6 +266,7 @@ pub(super) fn render_ownership_gated_todo_result_keeps_the_full_card() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -346,6 +349,7 @@ pub(super) fn render_tool_message_uses_scheduled_card() {
             }),
             intent: None, thought_signature: None, }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
@@ -459,6 +463,7 @@ pub(super) fn transcript_assistant_message_omits_tool_summary_restored_from_hist
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     };
     let live = DisplayMessage {
         tool_calls: Vec::new(),
@@ -725,6 +730,7 @@ pub(super) fn render_tool_message_prefers_subagent_title_with_model() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 80, crate::config::DiffDisplayMode::Off);
@@ -757,6 +763,7 @@ pub(super) fn render_tool_message_shows_intent_and_technical_preview_on_one_line
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -789,6 +796,7 @@ pub(super) fn render_tool_message_hides_technical_preview_by_default() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -825,6 +833,7 @@ pub(super) fn render_tool_message_keeps_error_summary_when_details_hidden() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -865,6 +874,7 @@ pub(super) fn render_tool_message_shows_token_badge() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -911,6 +921,7 @@ pub(super) fn render_tool_message_failures_keep_normal_headers_and_muted_reasons
                     thought_signature: None,
                 }),
                 codemode: None,
+                ask: None,
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
             assert_eq!(lines.len(), 2, "{name}");
@@ -989,6 +1000,7 @@ pub(super) fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failu
             ]}), intent: None, thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 4);
@@ -1042,6 +1054,7 @@ pub(super) fn render_tool_message_batch_level_failure_does_not_invent_successful
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
@@ -1167,6 +1180,7 @@ pub(super) fn render_tool_message_hides_bash_output() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1193,6 +1207,7 @@ pub(super) fn render_tool_message_shows_bash_output_when_enabled() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let rendered = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
@@ -1241,6 +1256,7 @@ pub(super) fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() 
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)

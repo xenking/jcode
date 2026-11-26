@@ -44,6 +44,8 @@ pub struct DisplayMessage {
     pub tool_data: Option<ToolCall>,
     /// Display-only receipt of the calls one codemode run dispatched.
     pub codemode: Option<Box<CodemodeSummary>>,
+    /// The typed answer when this row is a completed `ask`.
+    pub ask: Option<Box<jcode_session_types::AskRecord>>,
 }
 
 impl DisplayMessage {
@@ -53,14 +55,23 @@ impl DisplayMessage {
             && self
                 .tool_data
                 .as_ref()
-                .is_some_and(|tool| tool.name == "ask")
+                .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
+    }
+
+    /// The typed answer of a completed ask: the stored record, or one rebuilt
+    /// from the prose of a session saved before records existed. `None` for an
+    /// ask that has no answer (error, cancelled, still running).
+    pub fn ask_record(&self) -> Option<jcode_session_types::AskRecord> {
+        if !self.is_ask_decision() {
+            return None;
+        }
+        jcode_session_types::AskRecord::resolve(self.ask.as_deref(), &self.content)
     }
 
     pub fn is_answered_ask(&self) -> bool {
         self.is_ask_decision()
-            && (self.content.starts_with("User answers:")
-                || self.content.contains(" -> ")
-                || self.content.contains("declined"))
+            && (self.ask.is_some()
+                || jcode_session_types::AskRecord::from_legacy(&self.content).is_some())
     }
 
     /// Create an error message.
@@ -73,6 +84,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -86,6 +98,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -99,6 +112,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -113,6 +127,7 @@ impl DisplayMessage {
             title: Some("Usage".to_string()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -127,6 +142,7 @@ impl DisplayMessage {
             title: Some("Overnight".to_string()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -143,6 +159,7 @@ impl DisplayMessage {
             title: Some("Todos".to_string()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -160,6 +177,7 @@ impl DisplayMessage {
             title: Some(COMPACTION_COLLAPSED_TITLE.to_string()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -173,6 +191,7 @@ impl DisplayMessage {
             title: Some(COMPACTION_RUNNING_TITLE.to_string()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -217,6 +236,7 @@ impl DisplayMessage {
             title: Some(title.into()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -230,6 +250,7 @@ impl DisplayMessage {
             title: Some(title.into()),
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -243,6 +264,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -256,6 +278,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -269,6 +292,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -282,6 +306,7 @@ impl DisplayMessage {
             title: None,
             tool_data: Some(tool_data),
             codemode: None,
+            ask: None,
         }
     }
 
@@ -295,6 +320,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -308,6 +334,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -324,6 +351,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -339,6 +367,7 @@ impl DisplayMessage {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }
     }
 
@@ -362,6 +391,7 @@ impl DisplayMessage {
             title,
             tool_data: item.tool_data,
             codemode: item.codemode,
+            ask: item.ask,
         };
         row.normalize_jarvis_role();
         row
@@ -381,6 +411,7 @@ impl DisplayMessage {
             title: Some(title.into()),
             tool_data: Some(tool_data),
             codemode: None,
+            ask: None,
         }
     }
 
@@ -612,6 +643,7 @@ mod tests {
                 thought_signature: None,
             }),
             codemode: None,
+            ask: None,
         }
     }
 
@@ -665,6 +697,7 @@ mod tests {
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
             codemode: None,
+            ask: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
@@ -701,6 +734,7 @@ mod tests {
     fn rendered_attachments_are_collapsed_in_transcript() {
         let rendered = RenderedMessage {
             codemode: None,
+            ask: None,
             attachments: vec![
                 jcode_session_types::StoredAttachment::File {
                     name: "main.rs".into(),
@@ -731,6 +765,7 @@ mod tests {
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
             codemode: None,
+            ask: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,

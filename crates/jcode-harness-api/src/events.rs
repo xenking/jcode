@@ -245,6 +245,9 @@ pub enum ApiEvent {
         error: Option<String>,
         #[serde(flatten)]
         codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        /// The typed answer when this is a completed `ask`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     },
 
     /// Images the model just received from a tool result or image generator.
@@ -1130,6 +1133,9 @@ pub struct HistoryTool {
     pub input: serde_json::Value,
     #[serde(flatten)]
     pub codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    /// The typed answer when this row is a completed `ask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Box<jcode_session_types::AskRecord>>,
 }
 
 #[test]
@@ -1168,6 +1174,7 @@ fn codemode_live_and_history_metadata_round_trip_without_touching_output() {
         input: serde_json::Value::Null,
         duration_ms: None,
         codemode: Some(codemode),
+        ask: None,
     };
     let history = serde_json::to_value(&history_tool).unwrap();
     assert_eq!(history["codemode_calls"], live["codemode_calls"]);

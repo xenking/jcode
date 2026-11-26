@@ -760,6 +760,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     });
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg-startup-stub".to_string(),
         role: crate::message::Role::User,
@@ -2684,6 +2685,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             messages: vec![
                 crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     timestamp_ms: Some(1),
                     attachments: Vec::new(),
@@ -2695,6 +2697,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
                 },
                 crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     timestamp_ms: Some(2),
                     attachments: Vec::new(),

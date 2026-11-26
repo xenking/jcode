@@ -157,3 +157,30 @@ async fn answers_and_decline_round_trip_through_the_client() {
         assert!(out.output.contains(expect), "{}", out.output);
     }
 }
+
+#[tokio::test]
+async fn multi_select_comments_and_images_reach_the_typed_record_and_the_model_text() {
+    let mut input = input();
+    input["questions"][0]["multi_select"] = json!(true);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(AskTool.execute(input, ctx("ask-typed", Some(tx))));
+    rx.recv()
+        .await
+        .unwrap()
+        .response_tx
+        .send(
+            json!({"answers":[{"selected":["A (Recommended)","B"],"comments":{"B":"why"},
+                "other":"more [#image 1]","other_images":[["image/png","aGk="]]}]})
+            .to_string(),
+        )
+        .unwrap();
+    let out = task.await.unwrap().unwrap();
+    let record = super::output_record("ask", &out).expect("typed record rides on the output");
+    let answer = &record.response.answers.as_ref().unwrap()[0];
+    assert_eq!(answer.selected, ["A (Recommended)", "B"]);
+    assert_eq!(answer.comments["B"], "why");
+    assert_eq!(out.images.len(), 1, "image bytes travel as an image block");
+    assert!(answer.other_images.iter().all(|(_, data)| data.is_empty()));
+    assert_eq!(out.output, record.model_text());
+    assert!(super::output_record("bash", &out).is_none());
+}

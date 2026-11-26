@@ -83,6 +83,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         title: Some("old title".to_string()),
         tool_data: Some(tool_call.clone()),
         codemode: None,
+        ask: None,
     });
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -92,6 +93,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         title: None,
         tool_data: Some(tool_call),
         codemode: None,
+        ask: None,
     });
     let before = app.display_messages_version;
 
@@ -138,6 +140,7 @@ fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() 
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     });
     let before = app.display_messages_version;
 
@@ -229,6 +232,7 @@ fn test_incremental_display_message_counts_match_full_recompute() {
                     thought_signature: None,
                 }),
                 codemode: None,
+                ask: None,
             });
         }
     }
@@ -479,6 +483,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "tool_a".to_string(),
             name: "webfetch".to_string(),
             output: "page A body".to_string(),
@@ -500,6 +505,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "tool_b".to_string(),
             name: "webfetch".to_string(),
             output: "page B body".to_string(),
@@ -605,6 +611,7 @@ fn send_native_search_row(
     app.handle_server_event(
         ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: id.to_string(),
             name: "web_search".to_string(),
             output: "1. Rust\n   https://www.rust-lang.org/".to_string(),
@@ -649,6 +656,7 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
     app.handle_server_event(
         ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "toolu_earlier".to_string(),
             name: "bash".to_string(),
             output: "ok".to_string(),
@@ -724,6 +732,7 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
     app.handle_server_event(
         ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "toolu_bash".to_string(),
             name: "bash".to_string(),
             output: "ok".to_string(),

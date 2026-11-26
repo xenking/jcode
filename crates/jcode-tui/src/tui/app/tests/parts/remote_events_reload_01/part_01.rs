@@ -466,6 +466,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,
@@ -591,6 +592,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,
@@ -688,6 +690,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     attachments: Vec::new(),
                     response_stats: None,
@@ -805,6 +808,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,

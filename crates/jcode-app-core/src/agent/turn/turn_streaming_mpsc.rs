@@ -836,6 +836,7 @@ impl Agent {
                                 }
                                 let _ = event_tx.send(ServerEvent::ToolDone {
                                     codemode: None,
+                                    ask: None,
                                     id,
                                     name,
                                     output,
@@ -985,6 +986,7 @@ impl Agent {
                             .unwrap_or_default();
                         let _ = event_tx.send(ServerEvent::ToolDone {
                             codemode: None,
+                            ask: None,
                             id: tool_use_id.clone(),
                             name: tool_name,
                             output: content.clone(),

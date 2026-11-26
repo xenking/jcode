@@ -327,6 +327,7 @@ fn test_wrapped_input_line_count_respects_two_digit_prompt_width() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
     }
 

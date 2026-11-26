@@ -389,6 +389,7 @@ fn history_restore_renders_swarm_deliveries_as_one_row() {
         ] {
             messages.push(crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None, timestamp_ms: None,

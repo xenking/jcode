@@ -103,6 +103,7 @@ fn preview_loading_preserves_live_tool_duration_metadata() {
     let mut session = Session::create_with_id("preview_metadata".into(), None, None);
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "tool-result".into(),
         role: crate::message::Role::User,
@@ -137,6 +138,7 @@ fn cloud_sessions_are_loaded_outside_the_recent_window_and_grouped_by_host() {
     let mut session = Session::create_with_id(id.to_string(), None, Some("Cloud work".into()));
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg1".into(),
         role: crate::message::Role::User,

@@ -179,7 +179,7 @@ impl SessionState {
             Participant::Execution => !std::mem::replace(&mut execution, true),
             Participant::Tool {
                 name, call: owned, ..
-            } => name == "ask" && owned == call,
+            } => jcode_session_types::is_ask_tool(name) && owned == call,
             Participant::AskWait { .. } => true,
             Participant::RolloutWait { .. } => false,
         })

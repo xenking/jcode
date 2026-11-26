@@ -1655,6 +1655,7 @@ impl Agent {
                 };
                 let stored_message = StoredMessage {
                     codemode: None,
+                    ask: None,
                     attachment_data: None,
                     id: id::new_id("message"),
                     role: Role::User,

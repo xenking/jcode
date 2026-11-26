@@ -76,9 +76,10 @@ pub fn build_brief(session: &Session) -> CatchupBrief {
             && msg
                 .tool_data
                 .as_ref()
-                .is_some_and(|tool| tool.name == "ask")
+                .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
         {
-            jcode_session_types::stored_ask_answer_text(&msg.content)
+            jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), &msg.content)
+                .and_then(|record| record.human_turn())
         } else {
             None
         }

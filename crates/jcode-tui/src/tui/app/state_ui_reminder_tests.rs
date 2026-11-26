@@ -10,6 +10,7 @@ fn stored_actionable_reminders_render_as_short_system_notices() {
     ] {
         let stored = crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "saved-reminder".into(),
             role: Role::User,

@@ -146,7 +146,7 @@ impl Agent {
             .filter(|pending| {
                 // An unanswered ask must be presented again, never answered by
                 // a synthetic interruption result.
-                pending.name != "ask" && !crate::tool::inflight::is_tool_in_flight(&pending.id)
+                !jcode_session_types::is_ask_tool(&pending.name) && !crate::tool::inflight::is_tool_in_flight(&pending.id)
             })
             .collect();
         if !pending.is_empty() {
@@ -185,6 +185,7 @@ impl Agent {
                     message_index + 1 + inserted + offset,
                     StoredMessage {
                         codemode: None,
+                        ask: None,
                         id: id::new_id("message"),
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
@@ -290,6 +291,7 @@ impl Agent {
         self.persist_session_now()?;
         let _ = event_tx.send(ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: tool.id.clone(),
             name: tool.name.clone(),
             output: content,

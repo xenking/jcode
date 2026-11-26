@@ -17,7 +17,7 @@ pub(crate) const MAX_BLOCKING_TOOL_WAIT: Duration =
     Duration::from_secs(crate::tool::MAX_BLOCKING_TOOL_WAIT_SECS);
 
 fn is_human_decision(name: &str) -> bool {
-    matches!(name, "ask" | "ask_user")
+    jcode_session_types::is_ask_tool(name)
 }
 
 /// How long a call may run in the foreground before it moves to the
@@ -60,8 +60,8 @@ pub(crate) async fn foreground_limit(
 
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
-    // `ask` is the registered tool name; `ask_user` is the legacy spelling.
-    !(matches!(name, "ask" | "ask_user" | "macos_computer_use")
+    !(is_human_decision(name)
+        || name == "macos_computer_use"
         || is_reload_replayable_wait(name, input))
 }
 

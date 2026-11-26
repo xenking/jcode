@@ -420,6 +420,7 @@ pub(super) fn apply_replay_event(
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
         }
         ReplayEvent::StartProcessing => {
@@ -463,6 +464,7 @@ pub(super) fn apply_replay_event(
                 title: title.clone(),
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
         }
         ReplayEvent::SwarmStatus { members } => {
@@ -598,6 +600,7 @@ mod tests {
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
                 pane
             })

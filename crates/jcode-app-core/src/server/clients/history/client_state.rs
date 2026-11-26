@@ -454,8 +454,9 @@ pub(super) fn recent_history_window(
                 && message
                     .tool_data
                     .as_ref()
-                    .is_some_and(|tool| tool.name == "ask")
-                && jcode_session_types::stored_ask_answer_text(&message.content).is_some()
+                    .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
+                && jcode_session_types::AskRecord::resolve(message.ask.as_deref(), &message.content)
+                    .is_some()
         })
         .count();
     let hidden_user_prompts = archived_prompts + excluded_prompts + excluded_ask_answers;
@@ -471,6 +472,7 @@ pub(super) fn recent_history_window(
     messages = messages.split_off(start);
     messages.insert(0, HistoryMessage {
         codemode: None,
+        ask: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, tool_duration_ms: None,
         role: "system".to_owned(),
@@ -585,6 +587,7 @@ pub(super) fn apply_history_images_base(
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
         codemode: msg.codemode,
+        ask: msg.ask,
         attachments: msg.attachments,
         response_stats: msg.response_stats,
         timestamp_ms: msg.timestamp_ms,

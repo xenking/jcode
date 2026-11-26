@@ -49,6 +49,7 @@ pub(super) fn emit_ndjson_event(
             output,
             error,
             codemode,
+            ask,
         } => {
             let mut row = serde_json::json!({
                 "type": "tool_done",
@@ -57,6 +58,9 @@ pub(super) fn emit_ndjson_event(
                 "output": output,
                 "error": error,
             });
+            if let Some(ask) = ask {
+                row["ask"] = serde_json::to_value(ask)?;
+            }
             if let Some(codemode) = codemode
                 && let serde_json::Value::Object(fields) = serde_json::to_value(codemode)?
             {

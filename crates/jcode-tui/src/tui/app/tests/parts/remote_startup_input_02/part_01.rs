@@ -1423,6 +1423,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             .messages_mut_for_tests()
             .push(crate::session::StoredMessage {
                 codemode: None,
+                ask: None,
                 attachment_data: None,
                 id: "msg-1".to_string(),
                 role: Role::User,

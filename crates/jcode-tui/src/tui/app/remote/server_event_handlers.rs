@@ -1,5 +1,11 @@
 use super::*;
 
+/// Typed data a finished tool result carries next to its text.
+pub(super) struct ToolReceipts {
+    pub(super) codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    pub(super) ask: Option<Box<jcode_session_types::AskRecord>>,
+}
+
 pub(super) fn handle_tool_done(
     app: &mut App,
     remote: &mut impl RemoteEventState,
@@ -7,7 +13,7 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
-    codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    receipts: ToolReceipts,
 ) -> bool {
     // Prefer protocol timing from the raw output, not the rendered diff.
     let completion = remote.tool_events().complete_tool(&id, &name, &output);
@@ -46,6 +52,13 @@ pub(super) fn handle_tool_done(
         &output,
         error.is_some(),
     );
+    // A daemon from before ask records sends only the result text.
+    let ask = receipts.ask.or_else(|| {
+        jcode_session_types::is_ask_tool(&name)
+            .then(|| jcode_session_types::AskRecord::from_legacy(&output))
+            .flatten()
+            .map(Box::new)
+    });
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
         content: display_output,
@@ -53,7 +66,8 @@ pub(super) fn handle_tool_done(
         duration_secs,
         title: None,
         tool_data: Some(tool_call.clone()),
-        codemode,
+        codemode: receipts.codemode,
+        ask,
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
@@ -106,6 +120,7 @@ pub(super) fn handle_generated_image(
         title: Some("Generated image".to_string()),
         tool_data: Some(tool_call),
         codemode: None,
+        ask: None,
     });
     app.status = ProcessingStatus::Streaming;
     true

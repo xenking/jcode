@@ -68,6 +68,7 @@ fn reload_interrupt_never_triggers_an_auto_poke() {
             .messages_mut_for_tests()
             .push(crate::session::StoredMessage {
                 codemode: None,
+                ask: None,
                 attachment_data: None,
                 id: "interrupted".into(),
                 role: Role::Assistant,

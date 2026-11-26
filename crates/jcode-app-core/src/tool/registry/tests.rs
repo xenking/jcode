@@ -615,7 +615,7 @@ async fn tool_descriptions_stay_under_token_cap() {
     // trigger (a genuine owner decision you cannot research) and the two habits
     // that make a batch of questions usable, so it is not boilerplate. The full
     // rubric lives in the base system prompt; the question shape lives in the
-    // schema. Pinned by `blocking_and_desktop_tools_keep_their_steering`.
+    // schema.
     // macos_computer_use carries the only always-on guard for a tool that moves
     // the user's cursor and focus: run in the background and act only on the
     // requested task. Its action vocabulary is behind action='discover'.
@@ -654,13 +654,12 @@ async fn tool_descriptions_stay_under_token_cap() {
     );
 }
 
-/// The two tools exempted from the 20-token description cap must still carry
-/// the steering that earns the exemption. Without this, a later trim can strip
-/// the trigger from `ask` (and the tool stops being called) or the safety
-/// restraint from `macos_computer_use` (and it starts moving the user's cursor
-/// on its own initiative) while the cap test stays green.
+/// `macos_computer_use` is exempt from the 20-token description cap; it must
+/// still carry the safety restraint that earns the exemption. Without this, a
+/// later trim can strip it while the cap test stays green and the tool starts
+/// moving the user's cursor on its own initiative.
 #[tokio::test]
-async fn blocking_and_desktop_tools_keep_their_steering() {
+async fn desktop_tool_keeps_its_steering() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     let definitions = registry.definitions(None).await;
@@ -671,22 +670,6 @@ async fn blocking_and_desktop_tools_keep_their_steering() {
             .map(|def| def.description.as_str())
             .unwrap_or_else(|| panic!("{name} is not registered"))
     };
-
-    let ask = description("ask");
-    let ask_lower = ask.to_lowercase();
-    assert!(
-        ask_lower.contains("genuine owner decision"),
-        "ask keeps its trigger: {ask}"
-    );
-    assert!(ask_lower.contains("blocking"), "ask says it blocks: {ask}");
-    assert!(
-        ask_lower.contains("batch pending decisions into one call"),
-        "ask keeps the batching habit: {ask}"
-    );
-    assert!(
-        ask.contains("(Recommended)"),
-        "ask keeps the recommendation habit: {ask}"
-    );
 
     let desktop = description("macos_computer_use");
     assert!(

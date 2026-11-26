@@ -127,11 +127,14 @@ fn read_archived_image(id: &str) -> Option<String> {
     }
 }
 
-fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
-    if !content.starts_with("User answers:\n") {
-        return content.to_owned();
-    }
-    let mut result = content.to_owned();
+/// Point the `[#image N]` placeholders in an ask answer's free text and option
+/// comments at the stable ids of the images attached to them. Each label names
+/// the answer field its image belongs to. Returns whether anything changed.
+fn remap_ask_images(
+    record: &mut jcode_session_types::AskRecord,
+    labels: &[(String, String)],
+) -> bool {
+    let mut changed = false;
     for (label, id) in labels {
         let Some(label) = label
             .strip_prefix("[Attached image associated with the preceding tool result: Question ")
@@ -148,8 +151,16 @@ fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
         if !number.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
+        let Some(answer) = question
+            .parse::<usize>()
+            .ok()
+            .and_then(|question| question.checked_sub(1))
+            .and_then(|index| record.response.answers.as_mut()?.get_mut(index))
+        else {
+            continue;
+        };
         let field = if kind == "free answer" {
-            "Other: ".to_owned()
+            answer.other.as_mut()
         } else if let Some(option) = kind
             .strip_prefix("option ")
             .and_then(|s| s.strip_suffix(" comment"))
@@ -157,49 +168,39 @@ fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
             let Ok(option) = serde_json::from_str::<String>(option) else {
                 continue;
             };
-            format!("{option} (comment: ")
+            answer.comments.get_mut(&option)
         } else {
             continue;
         };
-        let prefix = format!("{question}. ");
-        let mut offset = 0;
-        for line in result.split_inclusive('\n') {
-            if line.starts_with(&prefix) {
-                if let Some(field_start) = line.find(&field) {
-                    let start = field_start + field.len();
-                    let mut depth = 0usize;
-                    for ch in line[..start].chars() {
-                        match ch {
-                            '(' => depth += 1,
-                            ')' => depth = depth.saturating_sub(1),
-                            _ => {}
-                        }
-                    }
-                    let mut end = line.len();
-                    for (relative, ch) in line[start..].char_indices() {
-                        let index = start + relative;
-                        match ch {
-                            '(' => depth += 1,
-                            ')' => depth = depth.saturating_sub(1),
-                            ';' if depth == 0 && line[index..].starts_with("; ") => {
-                                end = index;
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    let old = format!("[#image {number}]");
-                    if let Some(pos) = line[start..end].find(&old) {
-                        let pos = offset + start + pos;
-                        result.replace_range(pos..pos + old.len(), &format!("[#{id}]"));
-                    }
-                }
-                break;
-            }
-            offset += line.len();
+        let old = format!("[#image {number}]");
+        if let Some(text) = field
+            && text.contains(&old)
+        {
+            *text = text.replace(&old, &format!("[#{id}]"));
+            changed = true;
         }
     }
-    result
+    changed
+}
+
+/// The ask record of `stored` with its image placeholders remapped, when that
+/// changes anything: the typed record, or one rebuilt from a session saved
+/// before records existed.
+fn ask_with_remapped_images(
+    stored: &super::StoredMessage,
+    labels: &[(String, String)],
+) -> Option<jcode_session_types::AskRecord> {
+    if labels.is_empty() {
+        return None;
+    }
+    stored.content.iter().find_map(|block| match block {
+        ContentBlock::ToolResult { content, .. } => {
+            let mut record =
+                jcode_session_types::AskRecord::resolve(stored.ask.as_deref(), content)?;
+            remap_ask_images(&mut record, labels).then_some(record)
+        }
+        _ => None,
+    })
 }
 
 /// Ensure model-visible IDs are persisted alongside the image blocks. Mutating
@@ -238,14 +239,8 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
             _ => false,
         })
     });
-    let needs_ask_remap = !labels.is_empty()
-        && stored.content.iter().any(|block| match block {
-            ContentBlock::ToolResult { content, .. } if content.starts_with("User answers:\n") => {
-                remap_ask_images(content, &labels) != *content
-            }
-            _ => false,
-        });
-    if already_marked && !needs_ask_remap {
+    let remapped_ask = ask_with_remapped_images(stored, &labels);
+    if already_marked && remapped_ask.is_none() {
         return false;
     }
     let has_tool_result = stored
@@ -269,8 +264,8 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
                 }
             }
         } else if let ContentBlock::ToolResult { content, .. } = block {
-            if !labels.is_empty() && content.starts_with("User answers:\n") {
-                *content = remap_ask_images(content, &labels);
+            if let Some(record) = &remapped_ask {
+                *content = record.model_text();
             }
             let missing = ids
                 .iter()
@@ -284,6 +279,11 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
             }
             mapped.fill(true);
         }
+    }
+    if let Some(record) = remapped_ask
+        && stored.ask.is_some()
+    {
+        stored.ask = Some(Box::new(record));
     }
     let remaining = ids
         .iter()

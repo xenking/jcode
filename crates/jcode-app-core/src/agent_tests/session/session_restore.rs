@@ -400,6 +400,7 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
         .session
         .append_stored_message(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg_env_snapshot_detail".to_string(),
             role: crate::message::Role::User,

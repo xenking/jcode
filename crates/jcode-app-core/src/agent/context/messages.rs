@@ -65,8 +65,11 @@ impl Agent {
         content: Vec<ContentBlock>,
         duration_ms: u64,
         codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     ) -> String {
-        let id = self.session.add_tool_result(content, duration_ms, codemode);
+        let id = self
+            .session
+            .add_tool_result(content, duration_ms, codemode, ask);
         self.note_session_message_added();
         id
     }

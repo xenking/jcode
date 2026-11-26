@@ -334,6 +334,7 @@ fn test_copy_selection_reconstructs_wrapped_chat_lines_without_hard_wraps() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
 
@@ -408,6 +409,7 @@ fn test_copy_selection_centered_list_keeps_logical_list_text() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
 
@@ -842,6 +844,7 @@ fn test_ctrl_a_copies_chat_viewport_with_context_when_input_empty() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 12;
@@ -911,6 +914,7 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
@@ -1033,6 +1037,7 @@ fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
@@ -1128,6 +1133,7 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
@@ -1231,6 +1237,7 @@ fn test_copy_selection_drag_to_bottom_edge_when_pinned_does_not_snap_or_autoscro
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
@@ -1341,6 +1348,7 @@ fn test_copy_selection_drag_below_last_line_fully_selects_last_line() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
@@ -1460,6 +1468,7 @@ fn test_alt_a_copies_chat_viewport_with_context_when_input_empty() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.scroll_offset = 4;

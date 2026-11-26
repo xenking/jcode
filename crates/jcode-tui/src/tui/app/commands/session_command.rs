@@ -379,6 +379,7 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
                 title: None,
                 tool_data: rendered.tool_data,
                 codemode: None,
+                ask: None,
             });
         }
 
@@ -461,6 +462,7 @@ pub(in super::super) fn handle_session_command(app: &mut App, trimmed: &str) -> 
                         title: None,
                         tool_data: rendered.tool_data,
                         codemode: None,
+                        ask: None,
                     });
                 }
 

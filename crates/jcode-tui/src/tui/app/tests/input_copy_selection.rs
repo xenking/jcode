@@ -425,6 +425,7 @@ fn test_chat_drag_into_composer_clamps_to_chat_pane() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }];
     app.bump_display_messages_version();
     app.input = "draft under composition".to_string();

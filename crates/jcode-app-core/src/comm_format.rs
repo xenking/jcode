@@ -704,6 +704,7 @@ mod truncation_tests {
         );
         let messages = vec![HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,

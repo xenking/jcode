@@ -39,6 +39,7 @@ fn measure() -> (RoleAreas, RoleAdjacency) {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         };
         let app = TestState {
             display_messages: vec![

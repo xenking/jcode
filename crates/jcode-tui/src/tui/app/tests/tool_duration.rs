@@ -40,6 +40,7 @@ fn native_search_duration_includes_execution_and_preserves_late_query() {
     app.handle_server_event(
         ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "ws_timed".into(),
             name: "web_search".into(),
             output: "Searched: jcode timing".into(),
@@ -68,6 +69,7 @@ fn tool_duration_remote_completion_and_local_update() {
         app.handle_server_event(
             crate::protocol::ServerEvent::ToolDone {
                 codemode: None,
+                ask: None,
                 id: id.into(),
                 name: "bash".into(),
                 output: output.into(),
@@ -90,6 +92,7 @@ fn tool_duration_remote_completion_and_local_update() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "observed".into(),
             name: "bash".into(),
             output: "failed".into(),
@@ -126,6 +129,7 @@ fn tool_duration_replay_does_not_measure_playback_clock() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "replay".into(),
             name: "bash".into(),
             output: "done".into(),
@@ -153,6 +157,7 @@ fn tool_completion_live_and_replay_agree_on_protocol_timing_and_error_output() {
         app.handle_server_event(
             ServerEvent::ToolDone {
                 codemode: None,
+                ask: None,
                 id: "comparison".into(),
                 name: "bash".into(),
                 output: "[tool timing: duration=2.4s] failed".into(),
@@ -200,6 +205,7 @@ fn codemode_receipt_from_tool_done_reaches_the_transcript_row() {
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolDone {
             codemode: Some(Box::new(summary.clone())),
+            ask: None,
             id: "cm1".into(),
             name: "codemode".into(),
             output: "ok".into(),

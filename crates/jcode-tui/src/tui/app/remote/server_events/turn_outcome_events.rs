@@ -163,6 +163,7 @@ pub(super) fn handle_error_event(
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         });
     }
     app.is_processing = false;
@@ -450,6 +451,7 @@ pub(super) fn handle_done_event(
                     title: None,
                     tool_data: None,
                     codemode: None,
+                    ask: None,
                 });
             }
             app.push_turn_footer(duration);

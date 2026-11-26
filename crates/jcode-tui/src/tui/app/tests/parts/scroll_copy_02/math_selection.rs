@@ -9,6 +9,7 @@ fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Test
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -18,6 +19,7 @@ fn create_math_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Test
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     ];
     app.bump_display_messages_version();

@@ -692,6 +692,7 @@ impl Agent {
             .into_iter()
             .map(|msg| HistoryMessage {
                 codemode: msg.codemode,
+                ask: msg.ask,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
@@ -716,6 +717,7 @@ impl Agent {
             .into_iter()
             .map(|msg| HistoryMessage {
                 codemode: msg.codemode,
+                ask: msg.ask,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
@@ -750,6 +752,7 @@ impl Agent {
             .into_iter()
             .map(|msg| HistoryMessage {
                 codemode: msg.codemode,
+                ask: msg.ask,
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
@@ -930,6 +933,7 @@ impl Agent {
                 for (id, name, content) in self.append_interrupted_tool_results(&interrupted)? {
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         codemode: None,
+                        ask: None,
                         id,
                         name,
                         output: content.clone(),

@@ -27,7 +27,7 @@ fn interrupted_ask(session: &Session) -> Option<InterruptedAsk> {
         else {
             continue;
         };
-        if name != "ask" {
+        if !jcode_session_types::is_ask_tool(name) {
             continue;
         }
         let result = session
@@ -113,16 +113,20 @@ impl Agent {
                     }
                     (crate::tool::ToolOutput::new("[Tool 'ask' cancelled by the user]"), true)
                 }
-                result = self.registry.execute("ask", ask.input.clone(), ctx) => {
+                result = self.registry
+                    .execute(jcode_session_types::ASK_TOOL_NAME, ask.input.clone(), ctx) => {
                     // No attached user or another transient failure is not an answer.
                     // Leave the durable marker intact for the next recovery attempt.
                     let output = result?;
-                    let declined = output.title.as_deref() == Some("User declined");
+                    let declined = crate::tool::ask_output_record(jcode_session_types::ASK_TOOL_NAME, &output)
+                        .is_some_and(|record| record.declined());
                     (output, declined)
                 }
             };
             let mut side_pane_images =
                 tool_output_side_pane_images(&ask.id, "ask", &ask.input, &output);
+            let record =
+                crate::tool::ask_output_record(jcode_session_types::ASK_TOOL_NAME, &output);
             let mut blocks = tool_output_to_content_blocks(ask.id.clone(), output);
             if let Some(ContentBlock::ToolResult {
                 is_error: error, ..
@@ -131,6 +135,7 @@ impl Agent {
                 *error = is_error.then_some(true);
             }
             let mut messages = self.session.cloned_messages();
+            messages[result_index].ask = record.clone();
             let content = &mut messages[result_index].content;
             let index = content
                 .iter()
@@ -182,6 +187,7 @@ impl Agent {
             if event_tx
                 .send(ServerEvent::ToolDone {
                     codemode: None,
+                    ask: record,
                     id: ask.id,
                     name: "ask".into(),
                     output: output_text.clone(),

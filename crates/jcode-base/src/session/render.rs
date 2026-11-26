@@ -44,6 +44,7 @@ fn display_replay_rows(
                     role: role.clone(),
                     content: content.clone(),
                     codemode: None,
+                    ask: None,
                     response_stats: None,
                     tool_duration_ms: None,
                     tool_calls: Vec::new(),
@@ -210,7 +211,7 @@ fn stored_user_turn_count(
                 } => {
                     *is_error != Some(true)
                         && ask_ids.contains(tool_use_id.as_str())
-                        && jcode_session_types::stored_ask_answer_text(content).is_some()
+                        && jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), content).is_some()
                 }
                 _ => false,
             })
@@ -228,7 +229,9 @@ fn compacted_history_render_window(
         .iter()
         .flat_map(|msg| msg.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } if name == "ask" && !id.is_empty() => {
+            ContentBlock::ToolUse { id, name, .. }
+                if jcode_session_types::is_ask_tool(name) && !id.is_empty() =>
+            {
                 Some(id.as_str())
             }
             _ => None,
@@ -544,6 +547,7 @@ fn render_messages_and_images_internal(
         }
         rendered.push(RenderedMessage {
             codemode: None,
+            ask: None,
             attachments: Vec::new(),
             response_stats: None,
             tool_duration_ms: None,
@@ -637,6 +641,7 @@ fn render_messages_and_images_internal(
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
                 codemode: None,
+                ask: None,
                 attachments: Vec::new(),
                 response_stats: None,
                 tool_duration_ms: None,
@@ -771,6 +776,7 @@ fn render_messages_and_images_internal(
                             reasoning_len,
                             RenderedMessage {
                                 codemode: None,
+                                ask: None,
                                 attachments: Vec::new(),
                                 response_stats: None,
                                 tool_duration_ms: None,
@@ -799,7 +805,9 @@ fn render_messages_and_images_internal(
                     // original ask is re-presented after reconnect and its
                     // result replaces the marker in the stored conversation.
                     if is_error.unwrap_or(false)
-                        && tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+                        && tool_data
+                            .as_ref()
+                            .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
                         && content.starts_with("[Tool 'ask' interrupted by server reload after ")
                     {
                         continue;
@@ -807,6 +815,7 @@ fn render_messages_and_images_internal(
 
                     rendered.push(RenderedMessage {
                         codemode: msg.codemode.clone(),
+                        ask: msg.ask.clone(),
                         attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: msg.tool_duration_ms,
@@ -885,6 +894,7 @@ fn render_messages_and_images_internal(
                             reasoning_len,
                             RenderedMessage {
                                 codemode: None,
+                                ask: None,
                                 attachments: Vec::new(),
                                 response_stats: None,
                                 tool_duration_ms: None,
@@ -909,6 +919,7 @@ fn render_messages_and_images_internal(
                     });
                     rendered.push(RenderedMessage {
                         codemode: None,
+                        ask: None,
                         attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: None,
@@ -949,6 +960,7 @@ fn render_messages_and_images_internal(
                 reasoning_len,
                 RenderedMessage {
                     codemode: None,
+                    ask: None,
                     attachments: msg
                         .attachment_data
                         .as_ref()
@@ -1017,6 +1029,7 @@ fn push_text_rows(
 fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
     RenderedMessage {
         codemode: None,
+        ask: None,
         attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
@@ -1265,6 +1278,7 @@ fn compaction_divider_row(
 ) -> RenderedMessage {
     RenderedMessage {
         codemode: None,
+        ask: None,
         attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,

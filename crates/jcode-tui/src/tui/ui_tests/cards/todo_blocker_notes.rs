@@ -107,6 +107,7 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }],
         pinned_todos_payload: Some(payload.clone()),
         ..Default::default()
@@ -119,6 +120,7 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     };
     for width in [1, 8, 24, 80, 160] {
         let pinned =

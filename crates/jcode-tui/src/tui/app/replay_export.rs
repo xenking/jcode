@@ -321,6 +321,7 @@ mod tests {
                 .to_string();
         let event = crate::replay::ReplayEvent::Server(crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "recorded_tool".into(),
             name: "todo".into(),
             output,
@@ -339,6 +340,7 @@ mod tests {
         assert_eq!(app.pinned_todos_payload.as_deref(), Some(restored.as_str()));
         let error = crate::replay::ReplayEvent::Server(crate::protocol::ServerEvent::ToolDone {
             codemode: None,
+            ask: None,
             id: "failed_tool".into(),
             name: "todo".into(),
             output: "[]".into(),

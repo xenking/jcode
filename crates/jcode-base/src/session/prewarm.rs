@@ -162,6 +162,7 @@ mod tests {
         let mut session = Session::create_with_id(id.to_string(), None, None);
         session.append_stored_message(StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("{id}_m1"),
             role: Role::User,
@@ -219,6 +220,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         session.append_stored_message(StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "session_prewarm_stale_m2".to_string(),
             role: Role::Assistant,

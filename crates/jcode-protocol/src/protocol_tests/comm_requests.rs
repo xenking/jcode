@@ -699,7 +699,7 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
     };
     assert_eq!(r, response);
     assert_eq!(
-        format_ask_answers(&questions, &r),
+        AskRecord::new(questions.clone(), r.clone()).model_text(),
         "User answers:\n1. Which DB? -> SQLite; Other: libsql\n"
     );
     let legacy: Request = parse_request_json(r#"{"type":"ask_user_response","id":9,"request_id":"ask-1","response":{"answers":[{"selected":["SQLite"]}]}}"#)?;
@@ -714,7 +714,10 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
     let Request::AskUserResponse { response, .. } = declined else {
         return Err(anyhow!("expected AskUserResponse"));
     };
-    assert_eq!(format_ask_answers(&questions, &response), ASK_DECLINED_MESSAGE);
+    assert_eq!(
+        AskRecord::new(questions.clone(), response).model_text(),
+        ASK_DECLINED_MESSAGE
+    );
     assert!(validate_ask_questions(&questions).is_ok());
     assert!(validate_ask_questions(&[]).is_err());
     Ok(())

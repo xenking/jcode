@@ -1049,6 +1049,7 @@ pub(super) fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -1134,6 +1135,7 @@ pub(super) fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -1252,6 +1254,7 @@ pub(super) fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)

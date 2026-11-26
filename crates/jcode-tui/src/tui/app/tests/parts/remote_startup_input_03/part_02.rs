@@ -274,6 +274,7 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 session_id: session_id.to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     attachments: Vec::new(),
                     response_stats: None,

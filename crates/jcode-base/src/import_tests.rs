@@ -129,6 +129,7 @@ fn imported_history_is_bounded_for_fast_initial_render() {
     for index in 0..(IMPORT_HISTORY_MAX_MESSAGES + 80) {
         session.append_stored_message(StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: format!("message-{index}"),
             role: if index % 2 == 0 {
@@ -468,6 +469,7 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
     let mut legacy = Session::create_with_id(imported_id.clone(), None, None);
     legacy.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "assistant-tool".to_string(),
         role: Role::Assistant,
@@ -485,6 +487,7 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
     });
     legacy.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "user-result".to_string(),
         role: Role::User,
@@ -501,6 +504,7 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
     });
     legacy.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "jcode-continuation".to_string(),
         role: Role::Assistant,
@@ -1044,6 +1048,7 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
     let mut session = Session::load(&imported_id).unwrap();
     session.append_stored_message(StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "jcode-continuation".to_string(),
         role: Role::User,

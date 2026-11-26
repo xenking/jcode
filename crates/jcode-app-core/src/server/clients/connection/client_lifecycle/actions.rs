@@ -249,6 +249,7 @@ fn handle_run_subagent(
                 let output_text = output.output.clone();
                 let _ = tx.send(ServerEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     id: tool_call_id.clone(),
                     name: tool_name,
                     output: output_text,
@@ -272,6 +273,7 @@ fn handle_run_subagent(
                 let error_msg = format!("Error: {}", error);
                 let _ = tx.send(ServerEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     id: tool_call_id.clone(),
                     name: tool_name,
                     output: error_msg.clone(),

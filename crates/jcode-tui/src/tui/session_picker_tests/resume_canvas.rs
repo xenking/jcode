@@ -218,6 +218,7 @@ fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
                 title: msg.title.clone(),
                 tool_data: msg.tool_data.clone(),
                 codemode: None,
+                ask: None,
             })
             .collect();
         assert_eq!(cache.messages.len(), messages.len(), "width={width}");

@@ -4,13 +4,26 @@
 //! nearest client up the session's spawn chain and stays pending, with no
 //! timeout and no assumed answer, until a client attaches and a person replies.
 use super::{Tool, ToolContext, ToolOutput};
-use crate::protocol::{AskKind, AskQuestion, format_ask_answers, validate_ask_questions};
+use crate::protocol::{AskKind, AskQuestion, AskRecord, validate_ask_questions};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(super) struct AskTool;
+
+/// Where the typed record rides on the tool output until it is stored.
+const METADATA_KEY: &str = "ask_record";
+
+/// The typed record an `ask` call attached to its output, if `name` is `ask`.
+pub(crate) fn output_record(name: &str, output: &ToolOutput) -> Option<Box<AskRecord>> {
+    if !jcode_session_types::is_ask_tool(name) {
+        return None;
+    }
+    serde_json::from_value(output.metadata.as_ref()?.get(METADATA_KEY)?.clone())
+        .ok()
+        .map(Box::new)
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -20,7 +33,7 @@ struct Input {
 #[async_trait]
 impl Tool for AskTool {
     fn name(&self) -> &str {
-        "ask"
+        jcode_session_types::ASK_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -84,9 +97,10 @@ impl Tool for AskTool {
         })
         .await
         .map_err(|error| anyhow!(error))?;
-        let declined = response.answers.is_none();
-        let text = format_ask_answers(&input.questions, &response);
-        let mut output = ToolOutput::new(text);
+        let record = AskRecord::new(input.questions, response.clone());
+        let declined = record.declined();
+        let mut output =
+            ToolOutput::new(record.model_text()).with_metadata(json!({ METADATA_KEY: record }));
         if let Some(answers) = response.answers {
             for (question_index, answer) in answers.into_iter().enumerate() {
                 for (index, (media_type, data)) in answer.other_images.into_iter().enumerate() {

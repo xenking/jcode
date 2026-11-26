@@ -9,6 +9,7 @@ fn message(role: &str, content: String) -> DisplayMessage {
         title: None,
         tool_data: None,
         codemode: None,
+        ask: None,
     }
 }
 

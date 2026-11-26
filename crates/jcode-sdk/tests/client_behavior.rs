@@ -302,6 +302,7 @@ fn run_collects_one_turn() {
             push(
                 ApiEvent::ToolDone {
                     codemode: None,
+                    ask: None,
                     session_id: s.clone(),
                     call_id: "c1".to_string(),
                     name: "bash".to_string(),

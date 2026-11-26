@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub mod account_icon;
-mod ask;
 pub mod assistant_text;
 mod codemode;
 pub use codemode::*;
@@ -25,7 +24,7 @@ pub mod routing_acct;
 pub mod routing_gate;
 pub use rewind::{RewindAnchor, RewindMessageKey};
 mod title;
-pub use ask::*;
+pub use jcode_message_types::ask::*;
 pub use memory::{memory_injection_content, memory_injection_label};
 mod transcription;
 pub use title::{
@@ -171,6 +170,9 @@ pub struct RenderedMessage {
     pub tool_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codemode: Option<Box<CodemodeSummary>>,
+    /// The typed answer of an `ask` result; the result text is derived from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Box<AskRecord>>,
     /// Present only on the final visible assistant row of a completed stored
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -457,6 +459,9 @@ pub struct StoredMessage {
     pub token_usage: Option<StoredTokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codemode: Option<Box<CodemodeSummary>>,
+    /// The typed answer of an `ask` result; the result text is derived from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Box<AskRecord>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

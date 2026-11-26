@@ -1574,6 +1574,7 @@ impl Agent {
 
                         let codemode =
                             crate::tool::codemode_ledger::output_summary(&tc.name, &output);
+                        let ask = crate::tool::ask_output_record(&tc.name, &output);
                         let mut blocks = tool_output_to_content_blocks(tc.id, output);
                         if self.provider.name().eq_ignore_ascii_case("openai")
                             && self.native_deferred_mcp()
@@ -1583,7 +1584,7 @@ impl Agent {
                                 &tools,
                             );
                         }
-                        self.add_tool_result(blocks, tool_elapsed.as_millis() as u64, codemode);
+                        self.add_tool_result(blocks, tool_elapsed.as_millis() as u64, codemode, ask);
                         tool_results_dirty = true;
                     }
                     Err(e) => {
@@ -1616,6 +1617,7 @@ impl Agent {
                             }],
                             tool_elapsed.as_millis() as u64,
                             crate::tool::codemode_ledger::error_summary(&e),
+                            None,
                         );
                         tool_results_dirty = true;
                     }

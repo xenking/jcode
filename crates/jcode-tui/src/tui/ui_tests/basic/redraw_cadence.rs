@@ -24,6 +24,7 @@ fn static_chrome_state(notice: Option<&str>) -> TestState {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }],
         status_notice: notice.map(str::to_string),
         status: ProcessingStatus::Idle,
@@ -254,6 +255,7 @@ fn just_touched_notice_screen() -> TestState {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         }],
         status: ProcessingStatus::Idle,
         // What `time_since_activity()` actually reports for a non-empty

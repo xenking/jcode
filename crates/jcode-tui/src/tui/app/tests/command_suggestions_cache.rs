@@ -85,6 +85,7 @@ fn advancing_the_epoch_forces_recomputation_for_identical_input() {
         .messages_mut_for_tests()
         .push(crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg-rewind-target".to_string(),
             role: Role::User,

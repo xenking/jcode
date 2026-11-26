@@ -810,6 +810,10 @@ struct StoredMessage {
     content: Vec<ContentBlock>,
     #[serde(default)]
     timestamp: Option<String>,
+    /// The typed answer of an `ask` result; sessions saved before it existed
+    /// only have the result text.
+    #[serde(default)]
+    ask: Option<jcode_session_types::AskRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -946,7 +950,7 @@ fn push_message(
 ) {
     for block in &message.content {
         if let ContentBlock::ToolUse { id, name } = block
-            && name == "ask"
+            && jcode_session_types::is_ask_tool(name)
             && !id.is_empty()
         {
             ask_ids.insert(id.clone());
@@ -975,7 +979,8 @@ fn push_message(
                 && ask_ids.contains(tool_use_id)
                 && *is_error != Some(true) =>
             {
-                jcode_session_types::stored_ask_answer_text(content)
+                jcode_session_types::AskRecord::resolve(message.ask.as_ref(), content)
+                    .and_then(|record| record.human_turn())
             }
             _ => None,
         })

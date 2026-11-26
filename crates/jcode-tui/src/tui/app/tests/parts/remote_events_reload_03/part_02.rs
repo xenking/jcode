@@ -31,6 +31,7 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
         .into_iter()
         .map(|message| crate::protocol::HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             role: message.role,
@@ -88,6 +89,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     });
     session.append_stored_message(crate::session::StoredMessage {
         codemode: None,
+        ask: None,
         attachment_data: None,
         id: "msg-fast-resume".to_string(),
         role: crate::message::Role::Assistant,
@@ -199,6 +201,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 codemode: None,
+                ask: None,
                 tool_duration_ms: None,
                 attachments: Vec::new(),
                 response_stats: None,
@@ -347,6 +350,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             title: None,
             tool_data: msg.tool_data,
             codemode: None,
+            ask: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -411,6 +415,7 @@ fn test_compacted_history_event_applies_expanded_window() {
             messages: vec![
                 crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
@@ -421,6 +426,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                 },
                 crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
@@ -431,6 +437,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                 },
                 crate::protocol::HistoryMessage {
                     codemode: None,
+                    ask: None,
                     tool_duration_ms: None,
                     attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
@@ -819,6 +826,7 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
     });
     let tail = vec![crate::protocol::HistoryMessage {
         codemode: None,
+        ask: None,
         tool_duration_ms: None,
         attachments: Vec::new(),
         response_stats: None,

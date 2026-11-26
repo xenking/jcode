@@ -126,6 +126,7 @@ impl App {
                 title: Some("Connection".to_string()),
                 tool_data: None,
                 codemode: None,
+                ask: None,
             });
         }
         true

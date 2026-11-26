@@ -63,6 +63,7 @@ pub(crate) fn display_messages_from_preview(
             title: msg.title.clone(),
             tool_data: msg.tool_data.clone(),
             codemode: None,
+            ask: None,
         })
         .collect()
 }

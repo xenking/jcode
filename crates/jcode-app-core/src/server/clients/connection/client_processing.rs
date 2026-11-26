@@ -619,6 +619,7 @@ pub(super) async fn start_processing_message(
                 for (id, name) in stopped_tools {
                     let _ = tx.send(ServerEvent::ToolDone {
                         codemode: None,
+                        ask: None,
                         id,
                         name,
                         output: "[Tool stopped by user]".into(),

@@ -564,6 +564,7 @@ mod tests {
                 thought_signature: None,
             }),
             codemode: None,
+            ask: None,
         }
     }
 

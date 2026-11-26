@@ -297,6 +297,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
     let messages = vec![
         HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -308,6 +309,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
         },
         HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
@@ -319,6 +321,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
         },
         HistoryMessage {
             codemode: None,
+            ask: None,
             tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,

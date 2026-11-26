@@ -56,8 +56,8 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
             && message
                 .tool_data
                 .as_ref()
-                .is_some_and(|tool| tool.name == "ask")
-            && jcode_session_types::stored_ask_answer_text(text).is_some())
+                .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
+            && jcode_session_types::AskRecord::resolve(message.ask.as_deref(), text).is_some())
             || (message.role == "user"
                 && !text.is_empty()
                 && !crate::todo::is_auto_poke_message(text)

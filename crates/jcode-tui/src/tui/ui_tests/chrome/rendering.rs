@@ -748,6 +748,7 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
         DisplayMessage {
             role: "assistant".into(),
@@ -757,6 +758,7 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
             title: None,
             tool_data: None,
             codemode: None,
+            ask: None,
         },
     ];
     let state = TestState {
@@ -821,6 +823,7 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             },
             DisplayMessage {
                 role: "assistant".into(),
@@ -830,6 +833,7 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
                 title: None,
                 tool_data: None,
                 codemode: None,
+                ask: None,
             },
         ];
         let state = TestState {

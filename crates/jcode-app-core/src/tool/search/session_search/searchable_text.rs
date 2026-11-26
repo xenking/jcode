@@ -33,7 +33,10 @@ pub(super) fn searchable_message_text<'a>(
                 content,
                 is_error,
             } if ask_ids.contains(tool_use_id.as_str()) => (*is_error != Some(true))
-                .then(|| jcode_session_types::stored_ask_answer_text(content))
+                .then(|| {
+                    jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), content)
+                        .and_then(|record| record.human_turn())
+                })
                 .flatten()
                 .map(Cow::Owned),
             ContentBlock::ToolResult { content, .. } if include_tools => {

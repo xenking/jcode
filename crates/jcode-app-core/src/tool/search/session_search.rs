@@ -1760,7 +1760,9 @@ fn ask_tool_ids<'a>(
         .into_iter()
         .flat_map(|msg| msg.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } if name == "ask" => Some(id.as_str()),
+            ContentBlock::ToolUse { id, name, .. } if jcode_session_types::is_ask_tool(name) => {
+                Some(id.as_str())
+            }
             _ => None,
         })
         .collect()
@@ -1773,7 +1775,7 @@ fn has_ask_answer(msg: &StoredMessage, ask_ids: &std::collections::HashSet<&str>
             content,
             is_error,
         } if *is_error != Some(true) && ask_ids.contains(tool_use_id.as_str()) => {
-            jcode_session_types::stored_ask_answer_text(content).is_some()
+            jcode_session_types::AskRecord::resolve(msg.ask.as_deref(), content).is_some()
         }
         _ => false,
     })

@@ -76,6 +76,7 @@ fn test_patch_headers_preserve_line_counts_and_token_severity() {
                 title: None,
                 tool_data: Some(tool.clone()),
                 codemode: None,
+                ask: None,
             };
             let standalone =
                 messages::render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -153,6 +154,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                                 thought_signature: None,
                             }),
                             codemode: None,
+                            ask: None,
                         }],
                         messages_version: version,
                         centered_mode,
@@ -318,6 +320,7 @@ fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -363,6 +366,7 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
                 }),
                 intent: None, thought_signature: None, }),
             codemode: None,
+            ask: None,
         };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -403,6 +407,7 @@ fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix()
             }),
             intent: None, thought_signature: None, }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -440,6 +445,7 @@ fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailin
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -488,6 +494,7 @@ Completed: 2 succeeded, 1 failed"
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -541,6 +548,7 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
             }),
             intent: None, thought_signature: None, }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -765,6 +773,7 @@ fn test_render_tool_message_batch_includes_start_end_read_details() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1279,6 +1288,7 @@ fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 32, crate::config::DiffDisplayMode::Off);
@@ -1314,6 +1324,7 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 48, crate::config::DiffDisplayMode::Off);
@@ -1346,6 +1357,7 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 60, crate::config::DiffDisplayMode::Off);
@@ -1383,6 +1395,7 @@ fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
             thought_signature: None,
         }),
         codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 18, crate::config::DiffDisplayMode::Off);
@@ -1488,6 +1501,7 @@ fn codemode_row(calls: Vec<jcode_session_types::CodemodeCall>, omitted: usize) -
             calls_omitted: omitted,
             report_body_bytes: None,
         })),
+        ask: None,
     }
 }
 

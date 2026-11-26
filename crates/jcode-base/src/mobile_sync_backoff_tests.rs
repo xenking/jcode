@@ -83,6 +83,7 @@ async fn failed_uploads_skip_unchanged_reloads_but_retry_changes_deadlines_and_g
         .messages_mut_for_tests()
         .push(jcode_session_types::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "backoff-message".into(),
             role: Role::User,

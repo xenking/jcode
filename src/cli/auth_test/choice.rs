@@ -599,6 +599,7 @@ mod auth_tool_smoke_tests {
     ) -> crate::session::StoredMessage {
         crate::session::StoredMessage {
             codemode: None,
+            ask: None,
             attachment_data: None,
             id: "msg_test".to_string(),
             role,
