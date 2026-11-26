@@ -178,6 +178,9 @@ pub struct McpApprovalRequest {
     pub tool: String,
     /// The call's arguments, shown to the user as they will be sent.
     pub arguments: Value,
+    /// Directory the server's project-local config was resolved against; where
+    /// an "always allow" answer finds the file to record itself in.
+    pub project_dir: Option<std::path::PathBuf>,
 }
 
 /// A tool that can be executed by the agent.

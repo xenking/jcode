@@ -875,9 +875,7 @@ impl Registry {
         // never half-runs. Nested `batch`/`codemode` calls land here too.
         if !is_custom
             && let Some(request) = tool.mcp_approval(&input).await
-            && let Err(error) =
-                mcp_approval::require(&ctx, &request.server, &request.tool, &request.arguments)
-                    .await
+            && let Err(error) = mcp_approval::require(&ctx, &request).await
         {
             let mut fields =
                 Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);

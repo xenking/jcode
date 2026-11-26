@@ -5,6 +5,7 @@
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 
+pub mod approvals;
 pub mod budget;
 mod client;
 mod manager;

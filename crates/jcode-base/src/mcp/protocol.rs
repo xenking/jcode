@@ -355,7 +355,8 @@ pub struct McpServerConfig {
     /// `readOnlyHint = true` run freely; every other call needs a human yes.
     #[serde(default, skip_serializing_if = "McpApproval::is_off")]
     pub approval: McpApproval,
-    /// Raw MCP tool names (as listed by the server) exempt from approval.
+    /// Raw MCP tool names (as listed by the server) exempt from approval. The
+    /// entry `"*"` exempts every tool of the server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approve_free: Vec<String>,
 }
@@ -401,7 +402,11 @@ impl McpServerConfig {
         match self.approval {
             McpApproval::Off => false,
             McpApproval::Annotations => {
-                !tool.is_read_only() && !self.approve_free.iter().any(|name| name == &tool.name)
+                !tool.is_read_only()
+                    && !self
+                        .approve_free
+                        .iter()
+                        .any(|name| name == &tool.name || name == super::approvals::ALL_TOOLS)
             }
         }
     }

@@ -1238,6 +1238,7 @@ impl Server {
         if let Some(binary) = self::util::running_server_binary() {
             crate::logging::info(&format!("Server binary: {}", binary.display()));
         }
+        crate::mcp::approvals::warn_inert_config_toml_once();
         // Ensure socket directory exists (for named sockets like /run/user/1000/jcode/)
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;

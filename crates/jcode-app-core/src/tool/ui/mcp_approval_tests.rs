@@ -75,6 +75,14 @@ for line in sys.stdin:
 "#;
 
 struct Fixture {
+    /// Server name; tools dispatch as `mcp__<server>__<tool>`.
+    server: &'static str,
+    /// The `JCODE_HOME` holding `mcp.json` for fixtures built with
+    /// [`Fixture::on_disk`]; keeps other tests' env access serialized.
+    disk: Option<(
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+    )>,
     registry: Registry,
     manager: Arc<RwLock<McpManager>>,
     log: PathBuf,
@@ -85,6 +93,25 @@ impl Fixture {
     /// Connect the real server so tools, schemas and annotations come from its
     /// `tools/list` reply, then register the proxies next to `codemode`.
     async fn new(approval: serde_json::Value, approve_free: &[&str]) -> Option<Self> {
+        Self::build("fake", approval, approve_free, false).await
+    }
+
+    /// Like [`Fixture::new`], but the server is defined in `<home>/mcp.json`, the
+    /// file an "always allow" answer is recorded in. Uses its own server name
+    /// so concurrent fixtures never see this file's policy.
+    async fn on_disk(approval: serde_json::Value, approve_free: &[&str]) -> Option<Self> {
+        Self::build("live", approval, approve_free, true).await
+    }
+
+    async fn build(
+        name: &'static str,
+        approval: serde_json::Value,
+        approve_free: &[&str],
+        on_disk: bool,
+    ) -> Option<Self> {
+        // Tests without a user must be refused at once, not after the real wait.
+        static NO_WAIT: std::sync::Once = std::sync::Once::new();
+        NO_WAIT.call_once(|| crate::env::set_var(ATTACH_WAIT_ENV, "0"));
         if !std::process::Command::new("python3")
             .arg("--version")
             .output()
@@ -107,9 +134,28 @@ impl Fixture {
             server["approval"] = approval;
         }
         let mut config = McpConfig::default();
-        config
-            .servers
-            .insert("fake".into(), serde_json::from_value(server).unwrap());
+        let mut disk = None;
+        if on_disk {
+            let lock = crate::storage::lock_test_env();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", home.path());
+            std::fs::write(
+                home.path().join("mcp.json"),
+                serde_json::to_string_pretty(&json!({
+                    "keep": "me",
+                    "servers": {name: server, "bystander": {"command": "true", "enabled": false}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            config = McpConfig::load_for_dir(None);
+            assert!(config.servers.contains_key(name));
+            disk = Some((lock, previous));
+        } else {
+            config
+                .servers
+                .insert(name.into(), serde_json::from_value(server).unwrap());
+        }
         let manager = Arc::new(RwLock::new(McpManager::with_config(config)));
         let (connected, failures) = manager.read().await.connect_all().await.unwrap();
         assert_eq!((connected, failures.len()), (1, 0), "{failures:?}");
@@ -133,6 +179,8 @@ impl Fixture {
             .reconcile_mcp_tools(crate::mcp::create_mcp_tools(Arc::clone(&manager)).await)
             .await;
         Some(Self {
+            server: name,
+            disk,
             registry,
             manager,
             log,
@@ -151,7 +199,7 @@ impl Fixture {
     async fn call(&self, session: &str, tool: &str, args: serde_json::Value) -> Result<String> {
         self.registry
             .execute(
-                &format!("mcp__fake__{}", tool.replace('-', "_")),
+                &format!("mcp__{}__{}", self.server, tool.replace('-', "_")),
                 args,
                 ctx(session),
             )
@@ -170,7 +218,13 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // The server dies with its stdin; nothing else to clean up.
+        // The server dies with its stdin; only the home override needs undoing.
+        if let Some((_lock, previous)) = self.disk.take() {
+            match previous {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
     }
 }
 
@@ -365,8 +419,13 @@ async fn headless_run_or_worker_is_refused_with_a_clear_error() {
         .await
         .unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("no interactive user"), "{message}");
-    assert!(message.contains("approve_free"), "{message}");
+    assert!(message.contains("no attached client"), "{message}");
+    assert!(message.contains("headless"), "{message}");
+    assert!(
+        message.contains("jcode mcp approvals allow fake write-item"),
+        "{message}"
+    );
+    assert!(message.contains("Always allow this tool"), "{message}");
     assert!(f.writes().is_empty());
 }
 
@@ -433,7 +492,7 @@ async fn codemode_calls_meet_the_same_gate() {
         )
         .await;
     assert!(out.contains("\"read\": \"v1\""), "{out}");
-    assert!(out.contains("no interactive user"), "{out}");
+    assert!(out.contains("no attached client"), "{out}");
     assert!(f.writes().is_empty(), "{out}");
 
     // With a person attached each nested write asks on its own.
@@ -634,4 +693,194 @@ async fn a_live_refresh_replaces_a_cached_proxy_that_lacks_the_new_metadata() {
         )
         .await;
     assert_eq!(registry.output_schemas().await.len(), 1);
+}
+
+// ---- always allow --------------------------------------------------------
+
+fn on_disk_config(f: &Fixture) -> serde_json::Value {
+    let home = f
+        .disk
+        .as_ref()
+        .map(|_| crate::storage::jcode_dir().unwrap());
+    serde_json::from_str(&std::fs::read_to_string(home.unwrap().join("mcp.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn the_card_offers_four_one_line_options_and_nothing_else_counts() {
+    let labels = [DENY, ALLOW, ALWAYS_TOOL, ALWAYS_SERVER];
+    assert!(labels.iter().all(|label| !label.contains('\n')));
+    let answer = |selected: &[&str], other: Option<&str>| AskResponse {
+        answers: Some(vec![AskAnswer {
+            selected: selected.iter().map(|s| s.to_string()).collect(),
+            other: other.map(str::to_string),
+            ..AskAnswer::default()
+        }]),
+    };
+    assert!(matches!(
+        Decision::from_response(answer(&[ALLOW], None)),
+        Decision::Once
+    ));
+    assert!(matches!(
+        Decision::from_response(answer(&[ALWAYS_TOOL], None)),
+        Decision::AlwaysTool
+    ));
+    assert!(matches!(
+        Decision::from_response(answer(&[ALWAYS_SERVER], None)),
+        Decision::AlwaysServer
+    ));
+    for refused in [
+        answer(&[DENY], None),
+        answer(&[ALLOW, ALWAYS_SERVER], None),
+        answer(&[ALWAYS_TOOL], Some("and also rm -rf")),
+        answer(&["always allow this tool"], None),
+        AskResponse { answers: None },
+    ] {
+        assert!(matches!(Decision::from_response(refused), Decision::Deny));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_allow_tool_is_saved_and_the_next_call_is_not_asked() {
+    let Some(f) = Fixture::on_disk(json!("annotations"), &[]).await else {
+        return;
+    };
+    let ui = attach_ui("always-tool", ALWAYS_TOOL);
+    f.call("always-tool", "write-item", json!({"n": 1}))
+        .await
+        .unwrap();
+    // Same daemon run, no reload: the second call and another session run free.
+    f.call("always-tool", "write-item", json!({"n": 2}))
+        .await
+        .unwrap();
+    f.call("headless-other", "write-item", json!({"n": 3}))
+        .await
+        .unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 1);
+    assert_eq!(f.writes().len(), 3);
+
+    let saved = on_disk_config(&f);
+    assert_eq!(
+        saved["servers"]["live"]["approve_free"],
+        json!(["write-item"])
+    );
+    assert_eq!(saved["servers"]["live"]["approval"], "annotations");
+    assert_eq!(saved["keep"], "me");
+    assert_eq!(saved["servers"]["bystander"]["enabled"], false);
+
+    // An un-approved destructive tool of the same server still asks.
+    f.call("always-tool", "bare", json!({})).await.unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 2);
+    // This UI says "always" to everything, so the new tool is recorded next to the first.
+    assert_eq!(
+        on_disk_config(&f)["servers"]["live"]["approve_free"],
+        json!(["write-item", "bare"])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn always_allow_server_covers_every_tool_and_revoke_restores_the_gate() {
+    let Some(f) = Fixture::on_disk(json!("annotations"), &[]).await else {
+        return;
+    };
+    let ui = attach_ui("always-server", ALWAYS_SERVER);
+    f.call("always-server", "write-item", json!({}))
+        .await
+        .unwrap();
+    f.call("headless-other", "bare", json!({})).await.unwrap();
+    f.call("headless-other", "free-write", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 1);
+    assert_eq!(
+        on_disk_config(&f)["servers"]["live"]["approve_free"],
+        json!(["*"])
+    );
+
+    crate::mcp::approvals::revoke(None, "live", None).unwrap();
+    // The very next call, in the same run, asks again (and is refused headless).
+    assert!(f.call("headless-other", "bare", json!({})).await.is_err());
+    f.call("always-server", "bare", json!({})).await.unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_once_saves_nothing() {
+    let Some(f) = Fixture::on_disk(json!("annotations"), &[]).await else {
+        return;
+    };
+    let before = on_disk_config(&f);
+    let ui = attach_ui("once", ALLOW);
+    f.call("once", "write-item", json!({})).await.unwrap();
+    f.call("once", "write-item", json!({})).await.unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 2);
+    assert_eq!(on_disk_config(&f), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_always_answer_that_cannot_be_saved_does_not_run_the_call_or_touch_the_file() {
+    let Some(f) = Fixture::on_disk(json!("annotations"), &[]).await else {
+        return;
+    };
+    let path = crate::storage::jcode_dir().unwrap().join("mcp.json");
+    let garbage = "{ not json";
+    std::fs::write(&path, garbage).unwrap();
+    let _ui = attach_ui("unsaved", ALWAYS_TOOL);
+    let error = f
+        .call("unsaved", "write-item", json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("could not be saved"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+    assert!(f.writes().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_attaches_while_the_call_waits_gets_the_card() {
+    let Some(f) = Fixture::new(json!("annotations"), &[]).await else {
+        return;
+    };
+    let request = jcode_tool_core::McpApprovalRequest {
+        server: "fake".into(),
+        tool: "write-item".into(),
+        arguments: json!({"n": 5}),
+        project_dir: None,
+    };
+    drop(f);
+    let session = "late-attach";
+    let waiting = tokio::spawn(async move {
+        require_within(&ctx(session), &request, Duration::from_secs(20)).await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "must wait for a client");
+    let ui = attach_ui(session, ALLOW);
+    waiting.await.unwrap().unwrap();
+    assert_eq!(ui.prompts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nobody_attaching_the_wait_ends_with_an_actionable_refusal() {
+    let request = jcode_tool_core::McpApprovalRequest {
+        server: "xdev".into(),
+        tool: "review_plan".into(),
+        arguments: json!({}),
+        project_dir: None,
+    };
+    let started = Instant::now();
+    let error = require_within(&ctx("nobody"), &request, Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    let message = format!("{error:#}");
+    assert!(message.contains("session nobody"), "{message}");
+    assert!(
+        message.contains("jcode mcp approvals allow xdev review_plan"),
+        "{message}"
+    );
+    assert_eq!(
+        log_line("refused_no_client", &ctx("nobody"), &request),
+        "MCP_APPROVAL outcome=refused_no_client session=nobody server=xdev tool=review_plan"
+    );
 }

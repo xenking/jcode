@@ -43,16 +43,15 @@ impl Tool for McpTool {
     }
 
     async fn mcp_approval(&self, input: &Value) -> Option<McpApprovalRequest> {
-        // Read live config, not a copy taken at registration, so `mcp reload`
-        // and config edits take effect on the next call.
         let manager = self.manager.read().await;
-        let config = manager.config().servers.get(&self.server_name)?;
+        let config = manager.live_server_config(&self.server_name)?;
         config
             .requires_approval(&self.tool_def)
             .then(|| McpApprovalRequest {
                 server: self.server_name.clone(),
                 tool: self.tool_def.name.clone(),
                 arguments: input.clone(),
+                project_dir: manager.project_dir().map(std::path::Path::to_path_buf),
             })
     }
 

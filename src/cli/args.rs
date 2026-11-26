@@ -17,7 +17,7 @@ pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
-pub(crate) use mcp::McpCommand;
+pub(crate) use mcp::{ApprovalsCommand, McpCommand};
 #[cfg(unix)]
 pub(crate) use rollout::RolloutArgs;
 

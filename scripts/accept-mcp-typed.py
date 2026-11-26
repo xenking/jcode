@@ -24,6 +24,9 @@ Daemon cases drive the real protocol as a client would:
   * Allow once runs that one call, Deny and a free-text reply do not
   * the finished codemode row carries one receipt per call, including the
     denied one
+  * "Always allow this tool" is saved to mcp.json, the next call in the same
+    daemon run is not asked, `jcode mcp approvals` lists it, and revoking it
+    makes the daemon ask again
 
 `--tui` adds the terminal path: a real TUI in a private tmux server answers the
 same prompts with the keyboard and must show one row per nested call.
@@ -270,6 +273,7 @@ class Run:
             "JCODE_HOME": str(self.root / "jcode"), "JCODE_RUNTIME_DIR": str(self.root / "run"),
             "JCODE_SOCKET": self.sock, "JCODE_TEST_SESSION": "1", "JCODE_NO_MENUBAR": "1",
             "JCODE_DISABLE_CLAUDE_MCP": "1", "WRITE_LOG": str(self.writes),
+            "JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS": "0",
             "JCODE_OPENAI_COMPAT_API_BASE": f"http://127.0.0.1:{self.provider.server_port}/v1",
             "OPENAI_COMPAT_API_KEY": "fixture-only", "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model",
             "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off", "JCODE_NO_AUTO_UPDATE": "1",
@@ -359,8 +363,8 @@ def case_stdio_typed_and_gated(binary, root):
         result, _ = run.run_prompt()
         check(result["declaresOutput"], "outputSchema is declared as Promise<McpFixtureReadItemOutput>", result)
         check(result["via"] == "structured" and result["value"] == "v7", "script receives structuredContent", result)
-        check("no interactive user" in result["write"], "annotated write is refused with no one to ask", result)
-        check("no interactive user" in result["bare"], "unannotated tool counts as a write", result)
+        check("no attached client" in result["write"], "annotated write is refused with no one to ask", result)
+        check("no attached client" in result["bare"], "unannotated tool counts as a write", result)
         check(run.write_lines() == [], "no write reached the server", run.write_lines())
     finally:
         run.stop()
@@ -373,7 +377,7 @@ def case_approve_free(binary, root):
     try:
         result, _ = run.run_prompt()
         check(result["write"] == "ran", "the listed write runs unattended", result)
-        check("no interactive user" in result["bare"], "an unlisted write is still refused", result)
+        check("no attached client" in result["bare"], "an unlisted write is still refused", result)
         check(run.write_lines() == ['write-item:{"n": 1}'], "exactly one write reached the server", run.write_lines())
     finally:
         run.stop()
@@ -390,7 +394,7 @@ def case_http_typed(binary, root):
     try:
         result, _ = run.run_prompt()
         check(result["declaresOutput"] and result["via"] == "structured", "http result is typed and structured", result)
-        check("no interactive user" in result["write"], "http write is refused headless", result)
+        check("no attached client" in result["write"], "http write is refused headless", result)
         check(not log.exists(), "no http write reached the server")
     finally:
         run.stop()
@@ -475,6 +479,57 @@ def case_daemon_approval(binary, root):
         run.stop()
 
 
+def case_daemon_always_allow(binary, root):
+    print("daemon: always allow saves to mcp.json, applies at once, shows in `mcp approvals`, revoke asks again")
+    run = Run(binary, root, "always", approval_servers(root, "always"), SCRIPT_APPROVAL)
+    try:
+        client, _ = daemon_session(run)
+        client.send(type="message", id=2, content="call the mcp tools")
+        request = client.until(lambda e: e.get("type") == "ask_user_request", "first prompt")
+        labels = [o["label"] for o in request["questions"][0]["options"]]
+        check(labels == ["Deny", "Allow once", "Always allow this tool", "Always allow every tool on this server"],
+              "the card offers the four options, one line each", labels)
+        client.send(type="ask_user_response", id=101, request_id=request["request_id"],
+                    response={"answers": [{"selected": ["Always allow this tool"]}]})
+        done = client.until(lambda e: e.get("type") == "tool_done" and e.get("name") == "codemode", "codemode result")
+        asked = [e for e in client.seen if e.get("type") == "ask_user_request"]
+        check(len(asked) == 1, "writes 2 and 3 of the same run were not asked", len(asked))
+        check(run.write_lines() == ['write-item:{"n": 1}', 'write-item:{"n": 2}', 'write-item:{"n": 3}'],
+              "all three writes reached the server", run.write_lines())
+        saved = json.loads((run.root / "jcode" / "mcp.json").read_text())
+        check(saved["servers"]["fixture"]["approve_free"] == ["write-item"], "approve_free saved in mcp.json", saved)
+        listing = run.cli("mcp", "approvals", "--json")
+        rows = {row["name"]: row for row in json.loads(listing.stdout)}
+        check(rows["fixture"]["approve_free"] == ["write-item"] and rows["fixture"]["approval"] == "annotations",
+              "`jcode mcp approvals --json` lists it", listing.stdout)
+        text = run.cli("mcp", "approvals").stdout
+        check("always allowed: write-item" in text, "`jcode mcp approvals` lists it", text)
+        revoked = run.cli("mcp", "approvals", "revoke", "fixture", "write-item")
+        check(revoked.returncode == 0 and "mcp.json" in revoked.stdout, "revoke succeeds", (revoked.stdout, revoked.stderr))
+        client.send(type="message", id=3, content="call the mcp tools again")
+        request = client.until(lambda e: e.get("type") == "ask_user_request" and e is not asked[0], "prompt after revoke")
+        check('"write-item"' in request["questions"][0]["question"], "revoke makes the same daemon ask again")
+        denied = 0
+        while True:
+            client.send(type="ask_user_response", id=102 + denied, request_id=request["request_id"],
+                        response={"answers": [{"selected": ["Deny"]}]})
+            denied += 1
+            event = client.until(lambda e: e is not done and (e.get("type") == "ask_user_request" or (
+                e.get("type") == "tool_done" and e.get("name") == "codemode")), "next prompt or result")
+            if event.get("type") == "tool_done":
+                break
+            request = event
+        check(denied == 3, "each of the three writes asked again after the revoke", denied)
+        check(len(run.write_lines()) == 3, "no write ran after the revoke", run.write_lines())
+        logs = "".join(path.read_text(errors="replace") for path in (run.root / "jcode" / "logs").glob("*.log"))
+        for outcome in ("asked", "allowed_always_tool", "denied"):
+            check(f"MCP_APPROVAL outcome={outcome} session=" in logs and "server=fixture tool=write-item" in logs,
+                  f"daemon log names session, server and tool ({outcome})")
+        client.close()
+    finally:
+        run.stop()
+
+
 def tmux(run, *args):
     return subprocess.run(["tmux", "-S", str(run.root / "tmux.sock"), *args], capture_output=True, text=True).stdout
 
@@ -542,7 +597,8 @@ def main():
         root = pathlib.Path(temp).resolve()
         evidence = pathlib.Path(args.keep).resolve() if args.keep else root / "evidence"
         evidence.mkdir(parents=True, exist_ok=True)
-        cases = [case_stdio_typed_and_gated, case_approve_free, case_http_typed, case_deferred_catalog, case_daemon_approval]
+        cases = [case_stdio_typed_and_gated, case_approve_free, case_http_typed, case_deferred_catalog, case_daemon_approval,
+                 case_daemon_always_allow]
         for case in cases:
             case(args.binary, root)
         if args.tui:

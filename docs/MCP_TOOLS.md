@@ -50,10 +50,23 @@ would otherwise treat them as read-only.
 | --- | --- |
 | `approval` off (default) | Runs, as before. |
 | `readOnlyHint = true` | Runs. |
-| Anything else, a person is attached | One prompt per call with the server, tool name and arguments. Choices are Allow once and Deny. There is no "remember". |
-| Anything else, no person (`jcode run`, swarm worker) | Refused with an error naming `approve_free` and `approval = "off"`. The tool does not run. |
-| Listed in `approve_free` | Runs. |
+| Anything else, a person is attached | One prompt per call with the server, tool name and arguments. Choices: Deny, Allow once, Always allow this tool, Always allow every tool on this server. |
+| Anything else, no person (`jcode run`, swarm worker) | Waits up to 30 s (`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS`, `0` = refuse at once) for a client to attach, then refuses with an error naming `jcode mcp approvals allow`. The tool does not run. The refusal and every prompt are logged as `MCP_APPROVAL`. |
+| Listed in `approve_free` (`"*"` = every tool) | Runs. |
 | Malformed annotations (for example `"readOnlyHint": "yes"`) | Treated as a write. |
+
+"Always allow" answers are saved as `approve_free` entries in the config file the
+server is read from (`~/.jcode/mcp.json`, or a project `.jcode/mcp.json` /
+`.mcp.json`; never `~/.claude.json`, which Claude Code owns). The policy is read
+from those files on every call, so a grant or a revoke applies to every running
+session at once. Manage them with `jcode mcp approvals` (list, `--json`),
+`jcode mcp approvals allow <server> [<tool>]` and
+`jcode mcp approvals revoke <server> [<tool>]` (no tool: every grant of the
+server). Writes use the file's JSON keys; other keys are kept, key order and
+indentation are normalised. A file that does not parse is never rewritten.
+
+`[mcp.servers.*]` in `config.toml` is not read; jcode warns at daemon start and in
+`jcode mcp list` / `approvals`. Define servers in `mcp.json` under `servers`.
 
 The gate sits in the tool registry, so direct calls, `batch`, `codemode`
 programs, and the unified `mcp` tool (`action=call`) all meet it.

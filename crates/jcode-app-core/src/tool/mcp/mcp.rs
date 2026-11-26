@@ -367,7 +367,7 @@ impl Tool for McpCallTool {
     async fn mcp_approval(&self, input: &Value) -> Option<jcode_tool_core::McpApprovalRequest> {
         let params: McpCallInput = serde_json::from_value(input.clone()).ok()?;
         let manager = self.manager.read().await;
-        let config = manager.config().servers.get(&params.server)?;
+        let config = manager.live_server_config(&params.server)?;
         if config.approval.is_off() {
             return None;
         }
@@ -388,6 +388,7 @@ impl Tool for McpCallTool {
                 server: params.server,
                 tool: params.tool,
                 arguments: params.arguments,
+                project_dir: manager.project_dir().map(std::path::Path::to_path_buf),
             })
     }
 

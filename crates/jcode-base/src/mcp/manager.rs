@@ -597,6 +597,20 @@ impl McpManager {
         &self.config
     }
 
+    /// A server's definition with its approval policy as it is on disk now, not
+    /// as it was when this manager loaded. An "always allow" answer or a revoke
+    /// from any process applies to the next call.
+    pub fn live_server_config(&self, name: &str) -> Option<McpServerConfig> {
+        let mut config = self.config.servers.get(name)?.clone();
+        super::approvals::refresh_policy(&mut config, self.project_dir(), name);
+        Some(config)
+    }
+
+    /// Project directory project-local MCP config is resolved against.
+    pub fn project_dir(&self) -> Option<&std::path::Path> {
+        self.project_dir.as_deref()
+    }
+
     /// Load a fresh copy of the config from disk, resolved against this
     /// manager's project directory (or the process cwd when unset).
     pub fn load_fresh_config(&self) -> McpConfig {
