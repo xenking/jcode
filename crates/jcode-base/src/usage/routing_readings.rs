@@ -13,7 +13,7 @@
 
 use jcode_routing_meters::{model_class, parse_rfc3339_unix, percent_reading, window_from_label};
 use jcode_routing_policy::config::Unit;
-use jcode_routing_policy::{Reading, Window};
+use jcode_routing_policy::{Balance, Reading, Window};
 use jcode_usage_types::{CreditUnit, CreditsState};
 
 use super::cache::anthropic_window_ratio_at;
@@ -115,10 +115,9 @@ pub(crate) fn anthropic_readings(usage: &UsageData, now: i64) -> Vec<Reading> {
 /// interval still speaks for a spent cap and for nothing else. An unreadable
 /// or absent amount is no reading.
 fn monthly_spend_reading(usage: &UsageData, aged: bool) -> Option<Reading> {
-    let credits = usage
-        .credits
-        .as_ref()
-        .filter(|credits| credits.state == CreditsState::Known && credits.unit == CreditUnit::Usd)?;
+    let credits = usage.credits.as_ref().filter(|credits| {
+        credits.state == CreditsState::Known && credits.unit == CreditUnit::Usd
+    })?;
     let used = credits.used?;
     if aged && !credits.limit.is_some_and(|limit| used >= limit) {
         return None;
@@ -138,8 +137,8 @@ fn monthly_spend_reading(usage: &UsageData, aged: bool) -> Option<Reading> {
 /// Spark window and `Name (5h)` extras are model-scoped.
 ///
 /// A workspace seat's monthly credits are a calendar-month credits reading
-/// (`codex-month` budgets read it). The payload's remaining credit balance
-/// names no grant it came from, so it produces no reading.
+/// (`codex-month` budgets read it). The remaining credit balance is not a
+/// window: [`openai_balances`] carries it.
 pub(crate) fn openai_readings(usage: &OpenAIUsageData, now: i64) -> Vec<Reading> {
     if usage.last_error.is_some() {
         return Vec::new();
@@ -202,6 +201,37 @@ fn seat_monthly_reading(usage: &OpenAIUsageData, aged: bool, now: i64) -> Option
         resets_at,
         model_class: None,
     })
+}
+
+/// The prepaid credit balance a ChatGPT login holds. `/wham/usage` states no
+/// date for it, so it never resets: it is spent after every pool that does.
+/// A balance the response does not state (credits on, no figure), an
+/// unlimited one and an empty one are no pool. A balance only shrinks or is
+/// topped up, so a sample older than the polling interval no longer says how
+/// much is left. `pays_past_limits` is the provider's own statement, taken at
+/// fetch time, that credits fund requests once the plan window is spent.
+pub(crate) fn openai_balances(usage: &OpenAIUsageData) -> Vec<Balance> {
+    if usage.last_error.is_some()
+        || usage
+            .fetched_at
+            .is_none_or(|at| at.elapsed() > CACHE_DURATION)
+    {
+        return Vec::new();
+    }
+    usage
+        .credits
+        .as_ref()
+        .filter(|credits| credits.state == CreditsState::Known && !credits.unlimited)
+        .and_then(|credits| credits.balance)
+        .filter(|remaining| *remaining > 0.0)
+        .map(|remaining| Balance {
+            unit: Unit::Credits,
+            remaining,
+            resets_at: None,
+            pays_past_limits: usage.credit_overage,
+        })
+        .into_iter()
+        .collect()
 }
 
 /// OpenCode (Zen/Go) quota windows.
@@ -279,13 +309,23 @@ pub(crate) fn account_grants(
         .collect()
 }
 
-/// Last cached OpenAI readings for a saved login, without waiting for the cache.
-pub(crate) fn openai_account_readings(label: &str, now: i64) -> Option<Vec<Reading>> {
-    let usage = super::cache::openai_usage_cache()
+/// The cached OpenAI sample for a saved login, without waiting for the cache.
+fn cached_openai_usage(label: &str) -> Option<OpenAIUsageData> {
+    super::cache::openai_usage_cache()
         .try_lock()
         .ok()?
-        .get(&format!("label:{}", label.trim()))?
-        .clone();
+        .get(&format!("label:{}", label.trim()))
+        .cloned()
+}
+
+/// Last cached OpenAI credit balances for a saved login.
+pub(crate) fn openai_account_balances(label: &str) -> Vec<Balance> {
+    cached_openai_usage(label).map_or_else(Vec::new, |usage| openai_balances(&usage))
+}
+
+/// Last cached OpenAI readings for a saved login, without waiting for the cache.
+pub(crate) fn openai_account_readings(label: &str, now: i64) -> Option<Vec<Reading>> {
+    let usage = cached_openai_usage(label)?;
     let readings = openai_readings(&usage, now);
     (!readings.is_empty()).then_some(readings)
 }

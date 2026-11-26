@@ -56,6 +56,8 @@ mod routing_readings;
 #[cfg(test)]
 mod routing_readings_tests;
 #[cfg(test)]
+mod credit_pool_tests;
+#[cfg(test)]
 pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
 pub use accessors::*;
@@ -93,8 +95,8 @@ pub use remote_accounts::{
     remote_account_usage_received, set_remote_account_usage,
 };
 pub(crate) use routing_readings::{
-    account_grants, anthropic_account_readings, cursor_readings, openai_account_readings,
-    opencode_readings,
+    account_grants, anthropic_account_readings, cursor_readings, openai_account_balances,
+    openai_account_readings, opencode_readings,
 };
 pub use startup_snapshot::{
     AccountUsageStartupPublisher, hydrate_remote_account_usage,

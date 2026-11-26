@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use chrono::Local;
 use jcode_routing_meters::{Ledger, Meters, Published, SnapshotCache, SpendRow};
-use jcode_routing_policy::{AccountId, Grant, Policy, Reading, Snapshot};
+use jcode_routing_policy::{AccountId, Balance, Grant, Policy, Reading, Snapshot};
 
 use crate::usage::{self, MultiAccountProviderKind, UsageLimit};
 
@@ -76,6 +76,17 @@ impl Meters for CachedMeters {
             return Vec::new();
         };
         usage::account_grants(kind, label, now)
+    }
+
+    fn balances(&self, account: &AccountId, _now: i64) -> Vec<Balance> {
+        match account.provider() {
+            "openai" => account
+                .label()
+                .map(str::to_string)
+                .or_else(crate::auth::codex::active_account_label)
+                .map_or_else(Vec::new, |label| usage::openai_account_balances(&label)),
+            _ => Vec::new(),
+        }
     }
 }
 

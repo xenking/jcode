@@ -124,6 +124,14 @@ from caches (`routing_meters.rs`):
   one family). Windows whose length a label does not state are never given a guessed
   length. **An unreadable meter is never a zero and never disqualifies an
   account**; it shows as unknown.
+- A **balance** is what a provider says is left in credits, with the date it
+  lapses only when the provider states one. A ChatGPT login's prepaid credit
+  balance is one: its response states no date, so it never gets one. A balance
+  with a stated date counts as room lost at that date. A balance without one is
+  spent after every pool that resets and, at equal priority, after accounts with
+  plan room; when ChatGPT keeps serving from it, a spent plan window does not park
+  the account. An unstated, unlimited, empty, lapsed or old balance is no pool.
+  Cursor's dollar pool and Anthropic's organization grants are not read as balances yet.
 - Reset grants (earned weekly or Fable resets) come from cached metadata
   only, and only unexpired, non-imported ones count.
 - Per-account state learned over time (`routing-health.json`): each account's
