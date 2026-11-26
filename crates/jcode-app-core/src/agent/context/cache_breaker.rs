@@ -49,6 +49,17 @@ struct Sample {
 }
 
 impl CacheBreaker {
+    fn status_for_session(&self, id: &str) -> Option<CachePause> {
+        self.paused
+            .as_ref()
+            .filter(|(owner, _)| owner == id)
+            .map(|(_, pause)| pause.clone())
+    }
+
+    fn pause_for_session(&mut self, id: &str, pause: &CachePause) {
+        self.paused = Some((id.to_owned(), pause.clone()));
+    }
+
     fn observe(
         &mut self,
         route: CacheRoute,
@@ -124,10 +135,8 @@ impl Agent {
 
     pub(crate) fn cache_pause_status(&self) -> anyhow::Result<Option<CachePause>> {
         let id = self.session.id();
-        if let Some((owner, pause)) = &self.cache_breaker.paused
-            && owner == id
-        {
-            return Ok(Some(pause.clone()));
+        if let Some(pause) = self.cache_breaker.status_for_session(id) {
+            return Ok(Some(pause));
         }
         if self.session.is_ephemeral() {
             return Ok(None);
@@ -182,7 +191,8 @@ impl Agent {
         let Some(pause) = self.cache_breaker.observe(route, usage, Instant::now()) else {
             return Ok(());
         };
-        self.cache_breaker.paused = Some((self.session.id().to_owned(), pause.clone()));
+        self.cache_breaker
+            .pause_for_session(self.session.id(), &pause);
         let persist_result = if self.session.is_ephemeral() {
             Ok(())
         } else {
