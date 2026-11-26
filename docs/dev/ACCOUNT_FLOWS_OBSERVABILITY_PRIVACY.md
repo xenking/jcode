@@ -1,6 +1,6 @@
 # Account Flows: Observability, Privacy, and Support Diagnostics
 
-> **xenking fork:** telemetry is disabled entirely and the OAuth email upload has been removed (see `TELEMETRY.md`). The telemetry sections below describe upstream behavior only.
+> **xenking fork:** telemetry is disabled entirely and the OAuth email upload has been removed (see `TELEMETRY.md`). Telemetry statements below describe what this fork does; backend sections describe the subscription service, not code in this repo.
 
 Security logging, audit events, metrics, traces, alerting, redaction,
 retention, and support diagnostics for the six subscription account flows:
@@ -12,26 +12,17 @@ surfaces live in this repo; backend surfaces live in `solosystems-backend`.
 
 ## Existing surfaces (grounding)
 
-> This fork removed the client telemetry pipeline: `jcode-telemetry-core` is a
-> no-op facade (see `TELEMETRY.md`), so the `jcode-telemetry-core` references
-> below describe upstream and no longer exist here.
-
-- Client telemetry pipeline: `crates/jcode-telemetry-core/src/lib.rs`
-  (`record_auth_success` @1409, `sanitize_telemetry_label` applied to all
-  auth labels @398-400; `AuthEvent` schema in
-  `crates/jcode-usage-types/src/lib.rs:270-284` has NO account_id/email slot,
-  in the current implementation. The provider OAuth email exception below is
-  policy permission only, not an implemented schema change).
-- Onboarding auth funnel: `auth_provider`, `auth_method`,
-  `auth_failure_reason` on onboarding step events
-  (`crates/jcode-telemetry-core/src/lib.rs:369-400`).
+- Client telemetry: `crates/jcode-telemetry-core/src/lib.rs` is a stateless
+  no-op facade (see `TELEMETRY.md`). It records nothing: no counters, ids or
+  files, and no auth/onboarding event schema (no `AuthEvent`, no account id or
+  email slot).
 - Failure classification labels: `crates/jcode-base/src/auth/status/login_diagnostics.rs`
   (`AuthFailureReason::label`) — the only failure detail that may be reported.
 - Local logs: `~/.jcode/logs/jcode-YYYY-MM-DD.log`.
 - Backend telemetry store: `telemetry-worker/` (D1; subscription analytics
   columns from migration `0016_web_subscription_analytics.sql`).
-- Public privacy contract: `TELEMETRY.md` (minimal usage telemetry, a scoped
-  provider OAuth email exception, no ordinary prompts or code; opt-out env vars).
+- Public privacy contract: `TELEMETRY.md` (this fork disables telemetry
+  entirely; nothing is collected or sent, and there is no opt-in or opt-out).
 
 ## Never-log list (both repos, enforced by tests)
 
@@ -40,22 +31,16 @@ support bundles, at any log level:
 
 - `api_key` (JCODE_API_KEY) — full or truncated beyond `jc_...last4`.
 - `device_code`, magic-link tokens, approval URL query params.
-- Raw email addresses except the scoped provider OAuth telemetry collection
-  permitted by `TELEMETRY.md`. That exception applies only to model-provider
-  accounts actually used through OAuth, with the conditional one-time TUI
-  status-line notice described below and subject to all telemetry opt-outs. It
-  does not cover subscription device-flow emails, unrelated connected-service
-  identities, or unused credential stores.
-  Do not add collected emails to app logs, traces, or support bundles. Backend
-  audit email remains confined to the audit table.
+- Raw email addresses in app logs, traces, telemetry or support bundles. This
+  fork uploads none; backend audit email remains confined to the audit table.
 - Stripe secrets: webhook signing secret, customer payment details, full
   checkout/portal session URLs (they embed session secrets).
 - Env-file contents (`jcode-subscription` env file) and `Authorization`
   headers in any HTTP client debug logging.
 
 Enforcement: SN-03 conformance test greps captured login output; add a
-CI grep over `record_*` call sites asserting only sanitized labels flow into
-telemetry (all auth labels already pass through `sanitize_telemetry_label`).
+CI grep over `record_*` call sites asserting only `AuthFailureReason::label`
+values flow into the facade, should telemetry ever be re-enabled.
 
 ## Audit events (backend, durable)
 
@@ -77,43 +62,29 @@ Correlation requirements: every audit row carries `account_id`,
 `request_id` (per HTTP request), and `flow_id` (one device-login attempt or
 one checkout attempt). `device_code_id` links flows 1-2; `stripe_event_id`
 links 4-6. The client sends no correlation IDs today; if added, use a random
-per-attempt UUID only, never the telemetry install id joined with account_id
-in the same subscription device-flow event. The separate provider OAuth email
-exception does not authorize subscription account-ID correlation.
+per-attempt UUID only, never a persistent client identifier joined with account_id.
 
-## Client telemetry (this repo, minimal usage data)
+## Client telemetry (this repo)
 
-Subscription device-flow events keep the current shape: success events with coarse `auth_provider` +
-`auth_method` ("jcode-subscription", "device_code_magic_link"), failure
-reasons restricted to `AuthFailureReason::label` values. Additions:
+None. `crates/jcode-telemetry-core` is a stateless no-op facade (see
+`TELEMETRY.md`): `is_enabled()` is always `false` and every `record_*` function
+does nothing. The crate has no counters, install id, files, threads or network
+code, so nothing about an account flow is recorded or sent.
 
-- `auth_failure` event mirroring `auth_success` (reason label only).
-- Poll-loop outcome counter: approved/denied/expired/slow_down/error, plus
-  bucketed time-to-approve (e.g. <30s, <2m, <15m) — no timestamps precise
-  enough to correlate with backend logs.
-- Do NOT add `account_id` to `AuthEvent` (the existing TODO at
-  `src/cli/login/jcode_device.rs:370` should be resolved as "backend audit
-  owns subscription account-linked events; device-flow telemetry stays coarse").
+The login code still calls the facade so upstream merges stay clean (for
+example `record_auth_success("jcode-subscription", "device_code_browser")` at the
+end of `src/cli/login/jcode_device.rs`, and `record_auth_failed_reason(...)` with
+`AuthFailureReason::label` values in `src/cli/login.rs`). These calls are inert.
+There is no `AuthEvent` type and no `account_id` slot anywhere in the client;
+backend audit owns subscription account-linked events.
 
-### Provider OAuth email exception
+### Provider OAuth email
 
-Policy updated October 14, 2026: `TELEMETRY.md` permits provider OAuth account
-emails alongside provider and installation ID in default, opt-out telemetry.
-These records are identifiable, not anonymous. No separate opt-in is required,
-and the TUI must show a status-line notice only when the installation is already
-known to the telemetry database, an email upload is imminent, and the provider
-email is not already tracked for that installation. Persist acknowledgment after
-actual display so
-the notice never repeats for the installation. Installations not yet known to
-the database and already tracked emails do not trigger it. Database check failures
-defer upload. Ordinary `AuthEvent` rows do not carry these emails. Private
-`/v1/oauth-account/check` and `/v1/oauth-account` endpoints use the separate
-`oauth_accounts` table, with installation-scoped digest lookups that cannot reveal
-another installation's email membership. Rollout requires migration
-`0030_oauth_accounts.sql` and the matching Worker deployment. Access remains
-restricted to authorized maintainers and pipeline infrastructure providers. Do not
-sell or publish emails or include them in investor summaries. Never transmit
-OAuth tokens or other authentication secrets. Transcript sharing stays opt-in.
+Provider OAuth account emails are never read for upload; the upload code, the
+first-run notice and the opt-in/opt-out switches were deleted in this fork. The
+`/v1/oauth-account/check` and `/v1/oauth-account` endpoints, the `oauth_accounts`
+table and migration `0030_oauth_accounts.sql` exist only in the unused upstream
+`telemetry-worker/`. Never transmit OAuth tokens or other authentication secrets.
 
 ## Metrics and alerting (backend)
 
@@ -134,9 +105,9 @@ Metrics (per flow, labeled by outcome and tier where applicable):
   RV-01/CK-02 conformance bound), any DLQ depth > 0 for 15m.
 - `key_revocations_total{actor}`; alert on system/admin bulk revocations.
 
-Client-side (via existing coarse telemetry, dashboarded in
-telemetry-worker): login success ratio by version, `auth_failure_reason`
-distribution — regression alert when a new release shifts failure mix.
+Client-side: none. This fork emits no client telemetry, so there is no login
+success ratio or `auth_failure_reason` distribution to dashboard; failure mix
+is only visible in local logs and backend audit events.
 
 ## Traces
 
@@ -157,8 +128,7 @@ login flow use the daily log with the flow outcome only.
 | Backend app logs | backend | 30 days |
 | Traces | backend | 7-14 days |
 | Stripe webhook payload archive | backend (encrypted) | 90 days |
-| Client usage telemetry | telemetry-worker D1 | per TELEMETRY.md; provider OAuth email linkage permitted only under its scoped exception |
-| Provider OAuth email telemetry | Private `oauth_accounts` D1 table | 90 days from creation, pruned nightly; deletion by installation ID |
+| Client usage telemetry | none | this fork collects and stores nothing (`TELEMETRY.md`); `telemetry-worker/` is unused upstream code |
 | Local client logs | `~/.jcode/logs/` | user-owned; must satisfy never-log list |
 | Support bundles | created on demand | delete after case close (<= 90 days) |
 
@@ -190,8 +160,5 @@ the audit table. No flow requires the user to paste a key or link.
 
 ## Follow-ups (actionable in this repo)
 
-- Add `record_auth_failure` for the jcode device flow (labels only).
-- Resolve the `account_linked` TODO in `jcode_device.rs` as "won't add to
-  client telemetry" and point to backend audit.
 - Add SN-03-style output-capture test asserting the never-log list for the
   login flow, and a doctor command for account diagnostics.
