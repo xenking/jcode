@@ -24,6 +24,8 @@ fn entry_points_neither_write_files_nor_start_threads() {
     let threads_before = thread_count();
 
     telemetry::record_install_if_first_run();
+    telemetry::record_desktop_active("0.7.0");
+    telemetry::record_desktop_update("0.7.0", "0.7.1", "app", "success", None);
     telemetry::record_upgrade_if_needed();
     telemetry::begin_session_with_parent("openai", "gpt", Some("parent".into()), false);
     telemetry::begin_resumed_session("openai", "gpt");

@@ -194,6 +194,17 @@ pub fn current_provider_model() -> Option<(String, String)> {
 }
 
 pub fn flush_pending(_timeout: std::time::Duration) {}
+/// Called by Jcode Desktop; nothing is recorded.
+pub fn record_desktop_active(_desktop_version: &str) {}
+/// Called by Jcode Desktop; nothing is recorded.
+pub fn record_desktop_update(
+    _from_version: &str,
+    _to_version: &str,
+    _install_kind: &str,
+    _outcome: &str,
+    _failure_stage: Option<&str>,
+) {
+}
 pub fn record_setup_step_once(_step: &'static str) {}
 pub fn record_feedback(_text: &str) {}
 pub fn record_todo_update(_update: TodoTelemetryUpdate) {}
