@@ -24,6 +24,7 @@ pub struct DaemonCapabilities {
     force_stop_turn: bool,
     soft_interrupt_ids: bool,
     queued_prompts: bool,
+    queued_prompt_fifo: bool,
     file_attachments: bool,
     queued_prompt_batch_interrupt: bool,
     queued_prompt_mutations: bool,
@@ -48,6 +49,7 @@ impl DaemonCapabilities {
             force_stop_turn: has("force_stop_turn_v1"),
             soft_interrupt_ids: has("soft_interrupt_ids"),
             queued_prompts: has("queued_prompts"),
+            queued_prompt_fifo: has("queued_prompt_fifo_v1"),
             file_attachments: has(FILE_ATTACHMENTS_CAPABILITY),
             queued_prompt_batch_interrupt: has("queued_prompt_batch_interrupt_v1"),
             queued_prompt_mutations: has("queued_prompt_mutations_v1"),
@@ -91,6 +93,10 @@ impl DaemonCapabilities {
 
     pub fn queued_prompts(&self) -> bool {
         self.queued_prompts
+    }
+
+    pub fn queued_prompt_fifo(&self) -> bool {
+        self.queued_prompt_fifo
     }
 
     pub fn file_attachments(&self) -> bool {
@@ -146,6 +152,7 @@ impl DaemonCapabilities {
             (self.shake_tools, SHAKE_TOOLS_CAPABILITY),
             (self.force_stop_turn, "force_stop_turn_v1"),
             (self.queued_prompts, "queued_prompts"),
+            (self.queued_prompt_fifo, "queued_prompt_fifo_v1"),
             (self.file_attachments, FILE_ATTACHMENTS_CAPABILITY),
             (
                 self.queued_prompt_batch_interrupt,

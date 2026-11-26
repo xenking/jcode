@@ -3,6 +3,17 @@ use super::*;
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupt_queued_batch_delivers_one_turn_promptly() {
+    interrupt_batch("after_yield").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupt_fifo_batch_delivers_one_turn_promptly() {
+    interrupt_batch("queue").await;
+}
+
+#[cfg(unix)]
+async fn interrupt_batch(mode: &str) {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -80,7 +91,7 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
         (3, "a", "first queued", "batch-one"),
         (4, "b", "second queued", "batch-two"),
     ] {
-        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":client_id,"content":content,"mode":"after_yield","active_skill":skill})).await;
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":client_id,"content":content,"mode":mode,"active_skill":skill})).await;
         until(
             &mut reader,
             |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),

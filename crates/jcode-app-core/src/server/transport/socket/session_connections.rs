@@ -235,6 +235,7 @@ pub(super) fn connection_presence_pong(
             "force_stop_turn_v1".into(),
             "soft_interrupt_ids".into(),
             "queued_prompts".into(),
+            "queued_prompt_fifo_v1".into(),
             "queued_prompt_batch_interrupt_v1".into(),
             "queued_prompt_mutations_v1".into(),
             "queued_prompt_editing".into(),

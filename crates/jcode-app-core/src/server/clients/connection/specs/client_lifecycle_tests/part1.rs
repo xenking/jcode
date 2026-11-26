@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn fifo_queue_keeps_the_second_prompt_and_persists_its_mode() {
+    use jcode_agent_runtime::QueuedMessageMode::Queue;
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only("fifo_queue_test", queue, InterruptSignal::new());
+    for (id, image) in [("first", "aW1hZ2Ux"), ("second", "aW1hZ2Uy")] {
+        control.enqueue_user_prompt(id.into(), id.into(), vec![("image/png".into(), image.into())], Queue, None).unwrap();
+    }
+    let batch = control.take_user_prompt_batch(false).unwrap();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].client_id.as_deref(), Some("first"));
+    assert_eq!(batch[0].images[0].1, "aW1hZ2Ux");
+    let remaining = control.queued_user_prompts().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].client_id, "second");
+    let restored = crate::soft_interrupt_store::load("fifo_queue_test").unwrap();
+    assert_eq!(restored[1].mode, Queue);
+    assert_eq!(restored[1].images[0].1, "aW1hZ2Uy");
+}
+
+#[test]
 fn queue_remove_and_reorder_are_atomic_against_claim() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();

@@ -6,8 +6,18 @@ pub enum QueuedMessageMode {
     #[default]
     Steer,
     AfterYield,
+    /// A distinct FIFO turn after the current turn completes.
+    Queue,
     /// Reserved by a turn but still durable until its input is saved.
     InFlight,
+    /// Reserved FIFO entry, retaining its mode across recovery.
+    InFlightQueue,
+}
+
+impl QueuedMessageMode {
+    pub fn is_in_flight(self) -> bool {
+        matches!(self, Self::InFlight | Self::InFlightQueue)
+    }
 }
 
 /// A message queued for delivery at a safe point or after the active turn.

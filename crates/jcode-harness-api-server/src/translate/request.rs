@@ -426,6 +426,16 @@ impl BridgeState {
                         },
                     ))];
                 }
+                if matches!(req, "queue_prompt" | "set_queued_prompt_mode")
+                    && request["mode"] == "queue"
+                    && !self.queued_prompt_fifo_supported
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "daemon does not advertise queued_prompt_fifo_v1",
+                    );
+                }
                 if req == "queue_prompt"
                     && request["active_skill"].is_string()
                     && !self.queued_prompt_active_skill_supported

@@ -348,7 +348,7 @@ impl SessionControlHandle {
                     && existing.active_skill == active_skill
                     && existing.system_reminder == system_reminder
                     && (existing.mode == mode
-                        || existing.mode == jcode_agent_runtime::QueuedMessageMode::InFlight),
+                        || existing.mode.is_in_flight()),
                 "client_id already belongs to another prompt"
             );
             return Ok(false);
@@ -397,7 +397,7 @@ impl SessionControlHandle {
                 if message.source != SoftInterruptSource::User {
                     return None;
                 }
-                if message.mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+                if message.mode.is_in_flight() {
                     return None;
                 }
                 Some(crate::protocol::QueuedPrompt {
@@ -414,7 +414,10 @@ impl SessionControlHandle {
                         jcode_agent_runtime::QueuedMessageMode::AfterYield => {
                             crate::protocol::QueuedPromptMode::AfterYield
                         }
-                        jcode_agent_runtime::QueuedMessageMode::InFlight => unreachable!(),
+                        jcode_agent_runtime::QueuedMessageMode::Queue => {
+                            crate::protocol::QueuedPromptMode::Queue
+                        }
+                        jcode_agent_runtime::QueuedMessageMode::InFlight | jcode_agent_runtime::QueuedMessageMode::InFlightQueue => unreachable!(),
                     },
                 })
             })
@@ -446,7 +449,7 @@ impl SessionControlHandle {
             })
             .ok_or_else(|| anyhow::anyhow!("queued prompt not found"))?;
         anyhow::ensure!(
-            item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight,
+            !item.mode.is_in_flight(),
             "queued prompt was already claimed for delivery"
         );
         if editing {
@@ -495,7 +498,7 @@ impl SessionControlHandle {
                 Outcome::NotFound
             });
         };
-        if queue[index].mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+        if queue[index].mode.is_in_flight() {
             return Ok(Outcome::InFlight);
         }
         let previous_content = std::mem::replace(&mut queue[index].content, content);
@@ -537,7 +540,7 @@ impl SessionControlHandle {
         if let Some(index) = queue.iter().position(|item| {
             item.source == SoftInterruptSource::User && item.client_id.as_deref() == Some(prompt_id)
         }) {
-            if queue[index].mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+            if queue[index].mode.is_in_flight() {
                 return Ok(Outcome::InFlight);
             }
             let removed = queue.remove(index);
@@ -564,7 +567,7 @@ impl SessionControlHandle {
             .enumerate()
             .filter_map(|(index, item)| {
                 if item.source == SoftInterruptSource::User
-                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                    && !item.mode.is_in_flight()
                 {
                     item.client_id.as_ref().map(|id| (index, id.clone()))
                 } else {
@@ -621,7 +624,7 @@ impl SessionControlHandle {
             .position(|message| {
                 message.source == SoftInterruptSource::User
                     && message.client_id.as_deref() == Some(client_id)
-                    && message.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                    && !message.mode.is_in_flight()
             })
             .ok_or_else(|| anyhow::anyhow!("queued prompt not found"))?;
         queue[index].mode = mode;
@@ -658,7 +661,7 @@ impl SessionControlHandle {
             .iter()
             .filter(|item| {
                 item.source == SoftInterruptSource::User
-                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                    && !item.mode.is_in_flight()
                     && item
                         .client_id
                         .as_ref()
@@ -700,14 +703,29 @@ impl SessionControlHandle {
             .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
         let mut batch = Vec::new();
         for item in queue.iter_mut() {
+            if !interrupted_only
+                && item.source == SoftInterruptSource::User
+                && item.mode == jcode_agent_runtime::QueuedMessageMode::Queue
+                && item.editing_by.is_some()
+            {
+                break;
+            }
             if item.source == SoftInterruptSource::User
                 && item.client_id.is_some()
                 && item.editing_by.is_none()
-                && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                && !item.mode.is_in_flight()
                 && (!interrupted_only
                     || (item.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
                         && item.urgent))
             {
+                if item.mode == jcode_agent_runtime::QueuedMessageMode::Queue {
+                    if !batch.is_empty() {
+                        break;
+                    }
+                    batch.push(item.clone());
+                    item.mode = jcode_agent_runtime::QueuedMessageMode::InFlightQueue;
+                    break;
+                }
                 batch.push(item.clone());
                 item.mode = jcode_agent_runtime::QueuedMessageMode::InFlight;
             }
@@ -732,7 +750,7 @@ impl SessionControlHandle {
             message.source == SoftInterruptSource::User
                 && message.client_id.is_some()
                 && message.editing_by.is_none()
-                && message.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                && !message.mode.is_in_flight()
                 && (!interrupted_only
                     || (message.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
                         && message.urgent))
@@ -807,7 +825,7 @@ impl SessionControlHandle {
                     .filter(|id| {
                         !queue.iter().any(|item| {
                             item.client_id.as_ref() == Some(*id)
-                                && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
+                                && item.mode.is_in_flight()
                         })
                     })
                     .cloned()

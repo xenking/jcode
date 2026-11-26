@@ -3,6 +3,17 @@ use super::*;
 #[cfg(unix)]
 #[tokio::test]
 async fn queue_mutations_survive_daemon_restart_over_socket() {
+    queue_restart("after_yield").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fifo_queue_survives_daemon_restart_over_socket() {
+    queue_restart("queue").await;
+}
+
+#[cfg(unix)]
+async fn queue_restart(mode: &str) {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -90,7 +101,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         (4, "b", Some("mutation-b")),
         (5, "c", Some("mutation-c")),
     ] {
-        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":"after_yield","active_skill":skill})).await;
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":mode,"active_skill":skill,"images":[["image/png",format!("image-{prompt}")]]})).await;
         until(
             &mut reader,
             |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),
@@ -128,7 +139,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         )
     })
     .await;
-    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.get(1).is_some_and(|p| p.client_id == "a" && p.content == "a edited" && !p.editing && p.mode == crate::protocol::QueuedPromptMode::AfterYield))).await;
+    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.get(1).is_some_and(|p| p.client_id == "a" && p.content == "a edited" && !p.editing && p.mode == if mode == "queue" { crate::protocol::QueuedPromptMode::Queue } else { crate::protocol::QueuedPromptMode::AfterYield }))).await;
     send(
         &mut writer,
         json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"a"}),
@@ -208,6 +219,9 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
             .collect::<Vec<_>>(),
         vec![Some("mutation-c"), Some("mutation-b")]
     );
+    assert!(prompts.iter().all(|p| p.mode == if mode == "queue" { crate::protocol::QueuedPromptMode::Queue } else { crate::protocol::QueuedPromptMode::AfterYield }));
+    assert_eq!(prompts[0].images[0].1, "image-c");
+    assert_eq!(prompts[1].images[0].1, "image-b");
     drop(writer);
     drop(reader);
     runtime2.shutdown().await;
@@ -426,6 +440,61 @@ async fn after_yield_queue_runs_when_a_server_owned_turn_yields() {
     // The third request repeats history, so the held prompts appear once each.
     assert_eq!(count(&messages[2], "held one"), 1, "{messages:?}");
     assert_eq!(count(&messages[2], "fresh prompt"), 1, "{messages:?}");
+    drop(writer);
+    drop(reader);
+    runtime.shutdown().await;
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn fifo_queue_starts_distinct_turns_over_socket() {
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("fifo.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()), socket.clone(), home._runtime.path().join("fifo-debug.sock"),
+    );
+    let runtime = server.runtime();
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket).await.unwrap().into_split();
+    let mut reader = BufReader::new(reader);
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer.write_all(format!("{value}\n").as_bytes()).await.unwrap();
+    }
+    async fn until(reader: &mut BufReader<crate::transport::ReadHalf>, predicate: impl Fn(&ServerEvent) -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) { break; }
+            }
+        }).await.expect("daemon event timeout");
+    }
+    send(&mut writer, json!({"type":"subscribe","id":1,"working_dir":home._home.path()})).await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    send(&mut writer, json!({"type":"message","id":2,"content":"initial"})).await;
+    tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified()).await.unwrap();
+    for (id, text, image) in [(3, "first fifo", "aW1hZ2Ux"), (4, "second fifo", "aW1hZ2Uy")] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":text,"content":text,"mode":"queue","images":[["image/png",image]]})).await;
+        until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: ack } if *ack == id)).await;
+    }
+    send(&mut writer, json!({"type":"get_queued_prompts","id":5})).await;
+    until(&mut reader, |e| matches!(e, ServerEvent::QueuedPrompts { id:5, prompts } if prompts.len() == 2 && prompts.iter().all(|p| p.mode == crate::protocol::QueuedPromptMode::Queue))).await;
+    provider.finish_first.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 3 { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await.expect("FIFO turns did not complete");
+    let messages = provider.messages.lock().unwrap().clone();
+    assert!(messages[1].iter().any(|text| text.contains("first fifo")));
+    assert!(!messages[1].iter().any(|text| text.contains("second fifo")));
+    assert!(messages[2].iter().any(|text| text.contains("second fifo")));
+    let images = provider.images.lock().unwrap().clone();
+    assert!(images[1].iter().any(|(_, image)| image == "aW1hZ2Ux"));
+    assert!(!images[1].iter().any(|(_, image)| image == "aW1hZ2Uy"));
+    assert!(images[2].iter().any(|(_, image)| image == "aW1hZ2Uy"));
     drop(writer);
     drop(reader);
     runtime.shutdown().await;

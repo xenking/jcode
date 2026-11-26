@@ -39,6 +39,7 @@ pub struct SessionToolConfig {
 pub enum QueuedPromptMode {
     Steer,
     AfterYield,
+    Queue,
 }
 
 /// Result of attempting to remove a prompt at the queue's delivery boundary.
@@ -70,6 +71,7 @@ pub enum QueuedPromptRejection {
 
 /// One user-authored message still owned by the daemon queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "QueuedPromptWire", into = "QueuedPromptWire")]
 pub struct QueuedPrompt {
     pub client_id: String,
     pub content: String,
@@ -85,6 +87,53 @@ pub struct QueuedPrompt {
     /// stay in place (position and mode preserved) but are never delivered.
     #[serde(default, skip_serializing_if = "is_false")]
     pub editing: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QueuedPromptWire {
+    client_id: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<jcode_session_types::Attachment>,
+    mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    fifo_queue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    editing: bool,
+}
+
+impl From<QueuedPrompt> for QueuedPromptWire {
+    fn from(prompt: QueuedPrompt) -> Self {
+        let fifo_queue = prompt.mode == QueuedPromptMode::Queue;
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if fifo_queue { QueuedPromptMode::AfterYield } else { prompt.mode },
+            fifo_queue,
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
+}
+
+impl From<QueuedPromptWire> for QueuedPrompt {
+    fn from(prompt: QueuedPromptWire) -> Self {
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if prompt.fifo_queue { QueuedPromptMode::Queue } else { prompt.mode },
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
 }
 
 /// Client request to server

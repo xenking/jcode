@@ -24,6 +24,25 @@ fn todo_state_pending_swarm_await_is_optional_for_older_bridges() {
 }
 
 #[test]
+fn fifo_snapshot_roundtrips_without_exposing_new_mode_to_legacy_clients() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum LegacyMode { Steer, AfterYield }
+    #[derive(serde::Deserialize)]
+    struct LegacyPrompt { mode: LegacyMode }
+    let prompt = QueuedPrompt {
+        client_id: "p".into(), content: "hello".into(), images: vec![], attachments: vec![],
+        mode: QueuedPromptMode::Queue, active_skill: None, editing: false,
+    };
+    let wire = serde_json::to_value(prompt.clone()).unwrap();
+    assert_eq!(wire["mode"], "after_yield");
+    assert_eq!(wire["fifo_queue"], true);
+    let legacy: LegacyPrompt = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(legacy.mode, LegacyMode::AfterYield));
+    assert_eq!(serde_json::from_value::<QueuedPrompt>(wire).unwrap(), prompt);
+}
+
+#[test]
 fn queued_skill_wire_is_optional_and_round_trips() {
     let legacy = serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"hello", "mode":"after_yield"});
     let parsed: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();

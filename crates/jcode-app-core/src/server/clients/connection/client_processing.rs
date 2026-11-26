@@ -138,9 +138,13 @@ impl Drop for QueuedPromptClaimGuard {
                 item.client_id
                     .as_ref()
                     .is_some_and(|id| self.client_ids.contains(id))
-                    && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
+                    && item.mode.is_in_flight()
             }) {
-                item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+                item.mode = if item.mode == jcode_agent_runtime::QueuedMessageMode::InFlightQueue {
+                    jcode_agent_runtime::QueuedMessageMode::Queue
+                } else {
+                    jcode_agent_runtime::QueuedMessageMode::AfterYield
+                };
             }
         }
     }

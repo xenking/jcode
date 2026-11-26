@@ -32,6 +32,7 @@ pub struct ToolConfiguration {
 pub enum QueuedPromptMode {
     Steer,
     AfterYield,
+    Queue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +56,7 @@ pub enum QueuedPromptEditOutcome {
 
 /// A daemon-owned queued user prompt, including its optional active skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "QueuedPromptWire", into = "QueuedPromptWire")]
 pub struct QueuedPrompt {
     pub client_id: String,
     pub content: String,
@@ -68,6 +70,53 @@ pub struct QueuedPrompt {
     /// True while a client holds this prompt open for editing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub editing: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QueuedPromptWire {
+    client_id: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<jcode_session_types::Attachment>,
+    mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fifo_queue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    editing: bool,
+}
+
+impl From<QueuedPrompt> for QueuedPromptWire {
+    fn from(prompt: QueuedPrompt) -> Self {
+        let fifo_queue = prompt.mode == QueuedPromptMode::Queue;
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if fifo_queue { QueuedPromptMode::AfterYield } else { prompt.mode },
+            fifo_queue,
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
+}
+
+impl From<QueuedPromptWire> for QueuedPrompt {
+    fn from(prompt: QueuedPromptWire) -> Self {
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if prompt.fifo_queue { QueuedPromptMode::Queue } else { prompt.mode },
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
 }
 
 /// Curated request surface. Internally-tagged on `"req"`.

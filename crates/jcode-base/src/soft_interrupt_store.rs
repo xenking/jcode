@@ -14,6 +14,8 @@ struct PersistedSoftInterrupt {
     source: PersistedSoftInterruptSource,
     #[serde(default)]
     after_yield: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fifo_queue: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +67,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
             urgent: value.urgent,
             source: value.source.into(),
             after_yield: value.mode != jcode_agent_runtime::QueuedMessageMode::Steer,
+            fifo_queue: matches!(value.mode, jcode_agent_runtime::QueuedMessageMode::Queue | jcode_agent_runtime::QueuedMessageMode::InFlightQueue),
             client_id: value.client_id,
             system_reminder: value.system_reminder,
             active_skill: value.active_skill,
@@ -80,7 +83,9 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
-            mode: if value.after_yield {
+            mode: if value.fifo_queue {
+                jcode_agent_runtime::QueuedMessageMode::Queue
+            } else if value.after_yield {
                 jcode_agent_runtime::QueuedMessageMode::AfterYield
             } else {
                 jcode_agent_runtime::QueuedMessageMode::Steer

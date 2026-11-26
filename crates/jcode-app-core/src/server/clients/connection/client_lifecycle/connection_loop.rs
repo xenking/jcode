@@ -797,6 +797,9 @@ impl ClientConnection {
                             crate::protocol::QueuedPromptMode::AfterYield => {
                                 jcode_agent_runtime::QueuedMessageMode::AfterYield
                             }
+                            crate::protocol::QueuedPromptMode::Queue => {
+                                jcode_agent_runtime::QueuedMessageMode::Queue
+                            }
                         };
                         dispatch_if_idle = true;
                         let result = self
@@ -828,6 +831,9 @@ impl ClientConnection {
                             }
                             crate::protocol::QueuedPromptMode::AfterYield => {
                                 jcode_agent_runtime::QueuedMessageMode::AfterYield
+                            }
+                            crate::protocol::QueuedPromptMode::Queue => {
+                                jcode_agent_runtime::QueuedMessageMode::Queue
                             }
                         };
                         dispatch_if_idle = true;

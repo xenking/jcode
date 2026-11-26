@@ -161,6 +161,7 @@ pub struct BridgeState {
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub(crate) queued_prompts_supported: bool,
+    pub(crate) queued_prompt_fifo_supported: bool,
     pub(crate) file_attachments_supported: bool,
     pub(crate) queued_prompt_batch_interrupt_supported: bool,
     pub(crate) queued_prompt_mutations_supported: bool,
@@ -291,6 +292,7 @@ impl BridgeState {
             runtime_commands_supported: daemon.runtime_commands(),
             soft_interrupt_ids_supported: daemon.soft_interrupt_ids(),
             queued_prompts_supported: daemon.queued_prompts(),
+            queued_prompt_fifo_supported: daemon.queued_prompt_fifo(),
             file_attachments_supported: daemon.file_attachments(),
             queued_prompt_batch_interrupt_supported: daemon.queued_prompt_batch_interrupt(),
             queued_prompt_mutations_supported: daemon.queued_prompt_mutations(),
