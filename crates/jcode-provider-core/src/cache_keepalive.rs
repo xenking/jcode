@@ -136,20 +136,14 @@ pub enum Decision {
     Ping { reserve_micros: u64 },
 }
 
-/// Rule 6 of the routing economics: whether to keep a warm cache alive while
-/// the session waits on swarm workers until `deadline`.
-///
-/// Pinging continues while the pings needed until the wait ends cost less
-/// than rebuilding the cache. On free room (`outlook.free_room`) pings cost
-/// nothing and always run. When routing has a pending move worth its miss,
-/// pinging stops so the cache goes cold and the move becomes free. Without a
-/// routing outlook the plain ping-versus-rebuild rule applies.
+/// Whether to keep a warm cache alive while the session waits on swarm
+/// workers until `deadline`: pinging continues while the pings needed until
+/// the wait ends cost less than rebuilding the cache.
 pub fn decide(
     config: &Config,
     cache: Cache,
     now: SystemTime,
     deadline: SystemTime,
-    outlook: Option<&jcode_routing_policy::Outlook>,
     daily_micros: u64,
 ) -> Decision {
     if !config.permits_tier(cache.tier) || cache.cached_tokens < config.min_cached_tokens {
@@ -181,11 +175,7 @@ pub fn decide(
     });
     let ping = read.saturating_add(tail) as f64;
     let rebuild = write.saturating_add(tail);
-    let free_room = outlook.is_some_and(|outlook| outlook.free_room);
-    if !free_room && pings * ping >= rebuild as f64 {
-        return Decision::Stop;
-    }
-    if outlook.is_some_and(|outlook| outlook.move_worth_miss(pings)) {
+    if pings * ping >= rebuild as f64 {
         return Decision::Stop;
     }
     // A miss rewrites the whole prefix, so the daily limit reserves a rebuild.

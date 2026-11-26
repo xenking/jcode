@@ -13,11 +13,11 @@ pub mod state;
 mod strategy;
 
 pub use economics::{
-    CacheContext, CacheFactors, Grant, Outlook, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+    CacheContext, CacheFactors, Grant, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
 };
 pub use engine::{
     AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Reading, Request, Role,
-    Snapshot, Timed, decide, outlook, sweep,
+    Snapshot, Timed, decide, sweep,
 };
 pub use policy::{
     Account, AccountId, Budget, Egress, ModelGlob, Policy, PolicyError, Priority, Scope, UNRANKED,

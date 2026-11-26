@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{BudgetAction, MeterSource, OnLimit, PaidMode, Unit};
 use crate::economics::{
-    CacheContext, Grant, Leave, Options, Outlook, Pool, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+    CacheContext, Grant, Leave, Options, Pool, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
     grant_wastes,
 };
 use crate::policy::{Account, AccountId, Budget, Policy, Scope, Window};
@@ -284,7 +284,7 @@ pub fn decide(
                 reason: reasons.join("; "),
             },
             // A human chose this account; spending past its limit is a question, not a switch.
-            Some((_, reasons)) => gate(policy, &standings, Some(standing), reasons, request),
+            Some((_, reasons)) => gate(&standings, Some(standing), reasons, request),
         };
     }
 
@@ -326,23 +326,32 @@ pub fn decide(
                     reason: reasons.join("; "),
                 };
             }
-            OnLimit::Ask => return gate(policy, &standings, Some(current), reasons, request),
+            OnLimit::Ask => return gate(&standings, Some(current), reasons, request),
             OnLimit::Switch => {}
         }
     }
 
-    if ranked.is_empty()
-        && request.cache.seam == Seam::Warm
+    // Rule 4: a warm session leaves an account that can still serve only when
+    // a human asked (pin, switch and hold are handled above). A better account
+    // is taken at the next cold seam.
+    if request.cache.seam == Seam::Warm
         && let Some(current) = current.filter(|current| serves_warm(current))
+        && ranked
+            .first()
+            .is_none_or(|best| best.account.id != current.account.id)
     {
-        return use_account(
-            current,
-            format!(
+        let pending = ranked.first().map(|best| best.account.id.clone());
+        let reason = match &pending {
+            Some(to) => format!(
+                "staying on warm {}: moving to {to} waits for a cold cache",
+                current.account.id
+            ),
+            None => format!(
                 "staying on warm {}: no other account can take the turn",
                 current.account.id
             ),
-            None,
-        );
+        };
+        return use_account(current, reason, pending);
     }
 
     match ranked.first() {
@@ -350,7 +359,7 @@ pub fn decide(
             Some(current)
                 if current.account.id != best.account.id && request.cache.seam == Seam::Warm =>
             {
-                leave_warm(policy, request, current, serves_warm(current), best)
+                leave_warm(request, current, best)
             }
             _ => {
                 let reason = match request.current {
@@ -389,7 +398,7 @@ pub fn decide(
                 };
             }
             let current = request.current.and_then(find);
-            gate(policy, &standings, current, &reasons, request)
+            gate(&standings, current, &reasons, request)
         }
     }
 }
@@ -403,60 +412,27 @@ fn use_account(standing: &Standing<'_>, reason: String, pending: Option<AccountI
     }
 }
 
-/// The option table for a warm session whose preferred account is not the
-/// current one: stay, move, or compact on the warm account and then move.
-fn leave_warm(
-    policy: &Policy,
-    request: Request<'_>,
-    current: &Standing<'_>,
-    current_serves: bool,
-    best: &Standing<'_>,
-) -> Decision {
-    let options = warm_options(policy, request, current, current_serves, best);
+/// A warm session whose account cannot serve moves now, compacting on the
+/// warm account first when that is the cheaper way out.
+fn leave_warm(request: Request<'_>, current: &Standing<'_>, best: &Standing<'_>) -> Decision {
     let to = &best.account.id;
     let from = &current.account.id;
-    let leave = if current_serves {
-        options.leave(policy.move_margin)
-    } else {
-        Some(options.cheapest_move().0)
-    };
-    match leave {
-        Some(Leave::Move) => use_account(
-            best,
-            if current_serves {
-                format!("{from} to {to}: the move pays for its cache miss")
-            } else {
-                format!("{from} cannot serve, moving to {to}")
-            },
-            None,
-        ),
-        Some(Leave::CompactThenMove) => Decision::CompactThenMove {
+    match warm_options(request, current, best).cheapest_move() {
+        (Leave::Move, _) => use_account(best, format!("{from} cannot serve, moving to {to}"), None),
+        (Leave::CompactThenMove, _) => Decision::CompactThenMove {
             account: to.clone(),
             reason: format!(
                 "compacting on warm {from}, then moving to {to}: cheaper than a full move"
             ),
             warnings: best.warnings.clone(),
         },
-        None => use_account(
-            current,
-            format!("staying on warm {from}: moving to {to} does not pay for its cache miss"),
-            Some(to.clone()),
-        ),
     }
 }
 
-fn warm_options(
-    policy: &Policy,
-    request: Request<'_>,
-    current: &Standing<'_>,
-    current_serves: bool,
-    target: &Standing<'_>,
-) -> Options {
+fn warm_options(request: Request<'_>, current: &Standing<'_>, target: &Standing<'_>) -> Options {
     Options::price(
         &request.cache,
-        policy.horizon_turns,
         current.ready.then_some(current.price),
-        current_serves,
         target.price,
     )
 }
@@ -500,7 +476,6 @@ fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
 }
 
 fn gate(
-    policy: &Policy,
     standings: &[Standing<'_>],
     current: Option<&Standing<'_>>,
     reasons: &[String],
@@ -531,10 +506,7 @@ fn gate(
             detail: describe(target),
         });
         let compacts = warm.is_some_and(|current| {
-            warm_options(policy, request, current, false, target)
-                .cheapest_move()
-                .0
-                == Leave::CompactThenMove
+            warm_options(request, current, target).cheapest_move().0 == Leave::CompactThenMove
         });
         if compacts {
             options.push(GateOption::CompactSwitch {
@@ -839,9 +811,8 @@ fn stand<'p>(
         .filter(|(grant, _)| walls.iter().all(|wall| grant.windows.contains(wall)))
         .map(|(grant, wastes)| (grant.expires_at, *wastes))
         .min_by_key(|(expires_at, wastes)| (!wastes, *expires_at));
-    let price = if lost_room.is_some() {
-        0.0
-    } else if let Some(scarcity) = pools.iter().map(|pool| pool.scarcity(now)).reduce(f64::max) {
+    let price = if let Some(scarcity) = pools.iter().map(|pool| pool.scarcity(now)).reduce(f64::max)
+    {
         scarcity
     } else if account.kind.is_paid() {
         account.weight
@@ -895,45 +866,6 @@ pub fn sweep(policy: &Policy, snapshot: &Snapshot, now: i64) -> Vec<Redemption> 
                 })
         })
         .collect()
-}
-
-/// Rule 6 inputs for a session waiting on swarm workers: its current
-/// account's price and the move it would make once the cache is cold.
-/// `None` when the current account is not in the policy.
-pub fn outlook(
-    policy: &Policy,
-    snapshot: &Snapshot,
-    request: Request<'_>,
-    pending: Option<&AccountId>,
-    now: i64,
-) -> Option<Outlook> {
-    let standing = |id: &AccountId| {
-        let (index, account) = policy
-            .accounts
-            .iter()
-            .enumerate()
-            .find(|(_, account)| &account.id == id)?;
-        Some(stand(policy, snapshot, account, index, request, false, now))
-    };
-    let current = standing(request.current?)?;
-    let target = pending.and_then(standing);
-    let cache = &request.cache;
-    let stay = cache.horizon(policy.horizon_turns) * current.price;
-    Some(Outlook {
-        free_room: current.price == 0.0,
-        stay,
-        pending_move: target.map(|target| {
-            Options::price(
-                cache,
-                policy.horizon_turns,
-                Some(current.price),
-                true,
-                target.price,
-            )
-            .moved
-        }),
-        ping: cache.context_tokens * cache.factors.read * current.price,
-    })
 }
 
 fn amount(unit: Unit, value: f64) -> String {

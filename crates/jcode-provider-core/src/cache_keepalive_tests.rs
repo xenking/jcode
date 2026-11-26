@@ -1,5 +1,4 @@
 use super::*;
-use jcode_routing_policy::Outlook;
 
 const NOW_SECS: u64 = 10_000_000;
 
@@ -42,56 +41,9 @@ fn pings_while_they_cost_less_than_a_rebuild() {
     for (case, refreshes, expected) in cases {
         let cache = cache();
         assert_eq!(
-            decide(&config, cache, now(), deadline(cache, refreshes), None, 0),
+            decide(&config, cache, now(), deadline(cache, refreshes), 0),
             expected,
             "{case}"
-        );
-    }
-}
-
-#[test]
-fn free_room_always_pings_and_a_worthwhile_move_stops() {
-    let config = Config::default();
-    let cache = cache();
-    let long_wait = deadline(cache, 40);
-    let free = Outlook {
-        free_room: true,
-        ..Outlook::default()
-    };
-    assert!(matches!(
-        decide(&config, cache, now(), long_wait, Some(&free), 0),
-        Decision::Ping { .. }
-    ));
-
-    // Staying costs 100 after the wait, each ping 5; the move costs 120, so
-    // it pays for its miss once more than four pings are expected.
-    let pending = Outlook {
-        free_room: false,
-        stay: 100.0,
-        pending_move: Some(120.0),
-        ping: 5.0,
-    };
-    let steps = [
-        (5, Decision::Stop),
-        (
-            4,
-            Decision::Ping {
-                reserve_micros: 9_000_000,
-            },
-        ),
-    ];
-    for (refreshes, expected) in steps {
-        assert_eq!(
-            decide(
-                &config,
-                cache,
-                now(),
-                deadline(cache, refreshes),
-                Some(&pending),
-                0
-            ),
-            expected,
-            "{refreshes} refreshes"
         );
     }
 }
@@ -228,7 +180,7 @@ fn guards_and_timing() {
     ];
     for (case, config, cache, deadline, spent, expected) in cases {
         assert_eq!(
-            decide(&config, cache, now(), deadline, None, spent),
+            decide(&config, cache, now(), deadline, spent),
             expected,
             "{case}"
         );

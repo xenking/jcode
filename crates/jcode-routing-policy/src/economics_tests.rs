@@ -1,5 +1,5 @@
-//! Time-stepped tests for the cache, reset and keepalive economics
-//! (docs/ROUTING.md, section 6, "Economics rules 1-7" and the option table).
+//! Time-stepped tests for the cache and reset economics (docs/ROUTING.md,
+//! section 6, "Economics rules 1-7" and the option table).
 
 use std::collections::BTreeMap;
 
@@ -7,7 +7,7 @@ use crate::config::{AccountConfig, AccountKind, OnLimit, PriorityConfig, Routing
 use crate::{
     AccountId, AccountState, Availability, BurnRing, CacheContext, CacheFactors, Decision,
     GateOption, Grant, HealthTracker, Intents, Policy, Reading, Redemption, Request, Role, Seam,
-    Snapshot, Window, decide, outlook, sweep,
+    Snapshot, Window, decide, sweep,
 };
 
 const NOW: i64 = 1_800_000_000;
@@ -84,14 +84,12 @@ fn weekly_grant(expires_at: i64) -> Grant {
     }
 }
 
-/// 1-hour Anthropic cache with `context` tokens and `per_turn` recent tokens
-/// per turn, so `H = per_turn x 10` with the default horizon.
-fn cache(seam: Seam, context: f64, per_turn: f64) -> CacheContext {
+/// 1-hour Anthropic cache with `context` tokens.
+fn cache(seam: Seam, context: f64) -> CacheContext {
     CacheContext {
         seam,
         context_tokens: context,
         factors: CacheFactors::ANTHROPIC_1H,
-        tokens_per_turn: Some(per_turn),
         summary_tokens: Some(20_000.0),
     }
 }
@@ -120,25 +118,6 @@ fn pending_of(decision: &Decision) -> Option<&str> {
     }
 }
 
-// Option table: stay wins on a warm cache even though a better account exists.
-// λb = 1.714, λa = 1.224, C = 100k, H = 200k. Stay 343k, move 245k + 245k =
-// 490k.
-#[test]
-fn stay_wins_on_a_warm_cache_despite_a_better_account() {
-    let policy = policy(OnLimit::Switch);
-    let snap = snapshot(state(30.0, vec![]), state(50.0, vec![]));
-    let b = id("claude:b");
-    let warm = decide(
-        &policy,
-        &snap,
-        &Intents::default(),
-        on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0)),
-        NOW,
-    );
-    assert_eq!(account_of(&warm), "claude:b");
-    assert_eq!(pending_of(&warm), Some("claude:a"));
-}
-
 // Rule 1: the same session moves for free once its cache is cold.
 #[test]
 fn cold_seam_moves_for_free() {
@@ -155,41 +134,11 @@ fn cold_seam_moves_for_free() {
             &policy,
             &snap,
             &Intents::default(),
-            on_b(&b, cache(seam, 100_000.0, 20_000.0)),
+            on_b(&b, cache(seam, 100_000.0)),
             now,
         );
         assert_eq!(account_of(&decision), expected, "{seam:?}");
     }
-}
-
-// Rule 2 and the Move row: staying costs more than the move by the margin.
-// λb = 8.571, λa = 1.071, C = 100k, H = 200k. Stay 1714k, move 214k + 214k
-// = 429k: below 1714k x 0.8, above 1714k x 0.2.
-#[test]
-fn warm_session_moves_when_staying_costs_more_by_the_margin() {
-    let policy = policy(OnLimit::Switch);
-    let b = id("claude:b");
-    let moved = decide(
-        &policy,
-        &snapshot(state(20.0, vec![]), state(90.0, vec![])),
-        &Intents::default(),
-        on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0)),
-        NOW,
-    );
-    assert_eq!(account_of(&moved), "claude:a");
-    assert_eq!(pending_of(&moved), None);
-
-    // Same prices, but a margin wider than the saving keeps the cache.
-    let mut wide = policy.clone();
-    wide.move_margin = 0.8;
-    let stayed = decide(
-        &wide,
-        &snapshot(state(20.0, vec![]), state(90.0, vec![])),
-        &Intents::default(),
-        on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0)),
-        NOW,
-    );
-    assert_eq!(account_of(&stayed), "claude:b");
 }
 
 // Rule 2: a person's switch moves a warm session even when staying is cheaper.
@@ -206,24 +155,47 @@ fn a_switch_moves_a_warm_session_at_once() {
         &policy,
         &snap,
         &intents,
-        on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0)),
+        on_b(&b, cache(Seam::Warm, 100_000.0)),
         NOW,
     );
     assert_eq!(account_of(&decision), "claude:a");
 }
 
-// Option table: compact-then-move wins. λb = 1.714, λa = 1.071, C = 400k,
-// S = 20k, H = 1.5M. Stay 2571k, move 857k + 1607k = 2464k, compaction
-// 1.714 x (40k + 100k) + 43k + 1607k = 1890k, below 2571k x 0.8.
+// Order of choice and rule 4: an account behind its pace line ranks first, but
+// a warm session on an account that still serves keeps its cache and takes the
+// move at its next cold seam.
+#[test]
+fn warm_session_on_a_serving_account_ignores_a_cheaper_target() {
+    let policy = policy(OnLimit::Switch);
+    let snap = snapshot(state(10.0, vec![]), state(50.0, vec![]));
+    let b = id("claude:b");
+    let warm = decide(
+        &policy,
+        &snap,
+        &Intents::default(),
+        on_b(&b, cache(Seam::Warm, 100_000.0)),
+        NOW,
+    );
+    assert_eq!(account_of(&warm), "claude:b");
+    assert_eq!(pending_of(&warm), Some("claude:a"));
+}
+
+// Option table: compact-then-move wins when the account that cannot serve is
+// about to reset, so compacting on it is nearly free. C = 400k, S = 20k:
+// a full move costs 400k x 2 x 1.071 = 857k, compacting on b about 57k.
 #[test]
 fn compact_then_move_wins_with_a_large_context() {
     let policy = policy(OnLimit::Switch);
     let b = id("claude:b");
+    let walled = AccountState {
+        readings: vec![weekly_resetting(99.0, NOW + 600)],
+        ..state(99.0, vec![])
+    };
     let decision = decide(
         &policy,
-        &snapshot(state(20.0, vec![]), state(50.0, vec![])),
+        &snapshot(state(20.0, vec![]), walled),
         &Intents::default(),
-        on_b(&b, cache(Seam::Warm, 400_000.0, 150_000.0)),
+        on_b(&b, cache(Seam::Warm, 400_000.0)),
         NOW,
     );
     assert!(
@@ -238,7 +210,7 @@ fn compact_then_move_wins_with_a_large_context() {
 fn short_limit_stays_and_exhausted_quota_moves_at_once() {
     let policy = policy(OnLimit::Switch);
     let b = id("claude:b");
-    let request = on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0));
+    let request = on_b(&b, cache(Seam::Warm, 100_000.0));
     let run = |availability: Availability| {
         let mut current = state(50.0, vec![]);
         current.availability = availability;
@@ -278,7 +250,7 @@ fn wall_redeems_a_grant_that_would_expire_unused() {
                 &Intents::default(),
                 Request {
                     role,
-                    ..on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0))
+                    ..on_b(&b, cache(Seam::Warm, 100_000.0))
                 },
                 NOW,
             );
@@ -297,7 +269,7 @@ fn wall_redeems_a_grant_that_would_expire_unused() {
 fn wall_offers_redeem_and_compact_switch_in_the_gate() {
     let b = id("claude:b");
     let later = weekly_grant(NOW + 30 * DAY);
-    let request = on_b(&b, cache(Seam::Warm, 400_000.0, 40_000.0));
+    let request = on_b(&b, cache(Seam::Warm, 400_000.0));
     // At the provider's wall an hour before the reset: the room left there is
     // lost anyway, so compacting on it is free.
     let walled = AccountState {
@@ -426,32 +398,6 @@ fn sweep_redeems_ten_minutes_before_expiry() {
     }
 }
 
-// Rule 6: pings are free on free room; a pending move worth its miss stops
-// them. Stay 343k, move 490k, one ping 100k x 0.1 x 1.714 = 17.1k, so the
-// move pays once more than 8.6 pings are expected.
-#[test]
-fn keepalive_stops_when_the_pending_move_is_worth_its_miss() {
-    let policy = policy(OnLimit::Switch);
-    let b = id("claude:b");
-    let request = on_b(&b, cache(Seam::Warm, 100_000.0, 20_000.0));
-    let snap = snapshot(state(30.0, vec![]), state(50.0, vec![]));
-    let pending = pending_of(&decide(&policy, &snap, &Intents::default(), request, NOW)).map(id);
-    let view = outlook(&policy, &snap, request, pending.as_ref(), NOW).expect("current account");
-    assert!(!view.free_room);
-    // Time-stepped wait: expected pings fall as the deadline nears.
-    for (pings, worth) in [(12.0, true), (9.0, true), (8.0, false), (1.0, false)] {
-        assert_eq!(view.move_worth_miss(pings), worth, "{pings} pings");
-    }
-
-    let free = snapshot(
-        state(30.0, vec![]),
-        state(50.0, vec![weekly_grant(NOW + DAY)]),
-    );
-    let view = outlook(&policy, &free, request, None, NOW).expect("current account");
-    assert!(view.free_room);
-    assert_eq!(view.ping, 0.0);
-}
-
 // Rule 7: a child starts on its parent's account when it can serve, and on
 // the best account otherwise.
 #[test]
@@ -487,7 +433,7 @@ fn children_start_on_the_parent_account() {
         &snapshot(state(30.0, vec![]), state(50.0, vec![])),
         &Intents::default(),
         Request {
-            cache: cache(Seam::Cold, 100_000.0, 20_000.0),
+            cache: cache(Seam::Cold, 100_000.0),
             ..child
         },
         NOW,
@@ -587,7 +533,7 @@ fn two_credit_grants_are_each_spent_by_their_own_reset() {
         let request = Request {
             model: "gpt-6.2-sol",
             role: Role::Headless,
-            cache: cache(Seam::Cold, 0.0, 0.0),
+            cache: cache(Seam::Cold, 0.0),
             ..Request::default()
         };
         if let Decision::Use { account, .. } =
@@ -696,7 +642,7 @@ fn lowest_price_wins_within_a_priority() {
         &policy,
         &snapshot(state(20.0, vec![]), state(50.0, vec![])),
         &Intents::default(),
-        on_b(&b, cache(Seam::Cold, 100_000.0, 20_000.0)),
+        on_b(&b, cache(Seam::Cold, 100_000.0)),
         NOW,
     );
     assert_eq!(account_of(&decision), "claude:a");

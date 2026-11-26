@@ -179,8 +179,6 @@ enum Next {
 
 async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
     let phase = Phase::Parked;
-    // Routing's view of the session's account: free room, the pending move.
-    let outlook = || jcode_base::routing_service::global().keepalive_outlook(&hub.session_id);
     let mut changed = hub.changed.subscribe();
     loop {
         if !live.load(Ordering::Acquire)
@@ -196,14 +194,7 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
             if state.phase != phase {
                 Next::Changed
             } else if let Some(armed) = state.replay.as_ref() {
-                match decide(
-                    config,
-                    armed.replay.cache,
-                    now,
-                    deadline,
-                    outlook().as_ref(),
-                    0,
-                ) {
+                match decide(config, armed.replay.cache, now, deadline, 0) {
                     Decision::Stop => Next::Changed,
                     Decision::Sleep(delay) => Next::Sleep(delay),
                     Decision::Ping { reserve_micros } => Next::Ping(
@@ -262,7 +253,6 @@ async fn run_pause(hub: Arc<Hub>, deadline: SystemTime, live: Arc<AtomicBool>) {
                             armed.replay.cache,
                             started,
                             deadline,
-                            outlook().as_ref(),
                             0
                         ),
                         Decision::Ping { .. }

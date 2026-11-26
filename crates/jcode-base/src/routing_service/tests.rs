@@ -682,7 +682,10 @@ async fn intents_are_validated_and_reported() {
         .unwrap();
 
     assert!(text.contains("routing: auto"), "{text}");
-    assert!(text.contains("pin: ") && text.contains(" claude:b"), "{text}");
+    assert!(
+        text.contains("pin: ") && text.contains(" claude:b"),
+        "{text}"
+    );
     assert!(text.contains("paid: allowed for 2h"), "{text}");
     assert!(
         text.contains(&format!("* {}", service.named("claude:a"))),
@@ -846,7 +849,6 @@ async fn a_child_starts_on_its_parent_account() {
         .plan(&input("claude:b", Seam::Warm, Role::Interactive))
         .await;
     assert!(matches!(parent, Plan::Stay(ref outcome) if outcome.account == account("claude:b")));
-    assert!(service.keepalive_outlook("session-1").is_some());
 
     let child = TurnInput {
         session_id: "child-1".into(),

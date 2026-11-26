@@ -539,7 +539,7 @@ fn hold_applies_to_interactive_sessions_until_it_expires() {
 }
 
 #[test]
-fn same_priority_keeps_current_then_prefers_lighter_load() {
+fn same_priority_prefers_lighter_load_and_equal_price_keeps_current() {
     let policy = policy(
         vec![
             account("opencode-go:a", AccountKind::Subscription, 1),
@@ -561,14 +561,19 @@ fn same_priority_keeps_current_then_prefers_lighter_load() {
         )),
         "opencode-go:b"
     );
-    let current = id("opencode-go:a");
+    // Equal load, equal price: the account the session runs on keeps it.
+    let even = snapshot(vec![
+        ("opencode-go:a", vec![pct(Window::hours(5), 40.0)]),
+        ("opencode-go:b", vec![pct(Window::hours(5), 40.0)]),
+    ]);
+    let current = id("opencode-go:b");
     let sticky = Request {
         current: Some(&current),
         ..interactive("m")
     };
     assert_eq!(
-        used(&decide(&policy, &snap, &Intents::default(), sticky, NOW)),
-        "opencode-go:a"
+        used(&decide(&policy, &even, &Intents::default(), sticky, NOW)),
+        "opencode-go:b"
     );
 }
 
@@ -867,10 +872,9 @@ fn credits_behind_their_pace_line_are_preferred() {
 
 #[test]
 fn pacing_slack_keeps_a_current_account_from_flapping() {
-    let mut one = account("openai:one", AccountKind::Credits, 1);
+    let mut one = account("openai:one", AccountKind::Credits, 2);
     one.pacing_slack_pct = 5.0;
-    let mut two = account("openai:two", AccountKind::Credits, 1);
-    two.pacing_slack_pct = 5.0;
+    let two = account("openai:two", AccountKind::Credits, 1);
     let policy = policy(vec![one, two], vec![]);
     let snap = |month: f64| {
         let mut snap = Snapshot::default();
@@ -880,7 +884,7 @@ fn pacing_slack_keeps_a_current_account_from_flapping() {
         );
         snap.accounts.insert(
             id("openai:two"),
-            ready(id("openai:two"), vec![month_credits(400.0, 1_000.0, month)]).1,
+            ready(id("openai:two"), vec![month_credits(600.0, 1_000.0, month)]).1,
         );
         snap
     };
@@ -889,7 +893,8 @@ fn pacing_slack_keeps_a_current_account_from_flapping() {
         current: Some(&current),
         ..interactive("gpt-6.2-sol")
     };
-    // 0.52 is above the 0.5 line but inside the 5% slack, so the current stays.
+    // 0.52 is above the 0.5 line but inside the 5% slack, so the current's
+    // room still counts as lost and ranks ahead of the better priority.
     assert_eq!(
         used(&decide(
             &policy,
@@ -900,10 +905,9 @@ fn pacing_slack_keeps_a_current_account_from_flapping() {
         )),
         "openai:one"
     );
-    // Without slack the same reading is ahead, so the behind account takes over.
+    // Without slack the same reading is ahead, so priority decides.
     let mut strict = policy.clone();
     strict.accounts[0].pacing_slack_pct = 0.0;
-    strict.accounts[1].pacing_slack_pct = 0.0;
     assert_eq!(
         used(&decide(
             &strict,

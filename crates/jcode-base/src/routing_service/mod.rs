@@ -27,7 +27,7 @@ use jcode_routing_policy::config::RoutingMode;
 use jcode_routing_policy::{
     AccountId, Availability, Decision, GateOption, Intents, Policy, Request, Role, Snapshot, decide,
 };
-pub use jcode_routing_policy::{CacheContext, CacheFactors, Outlook, Seam};
+pub use jcode_routing_policy::{CacheContext, CacheFactors, Seam};
 
 use crate::protocol::{RoutingGateChoice, RoutingGateOption, ServerEvent};
 use crate::usage::ResetMode;
@@ -132,14 +132,8 @@ pub struct RoutingService {
     /// Reset grants already claimed once, by account and expiry. A failed or
     /// uncertain claim is never retried into a second grant.
     claimed: Mutex<HashSet<(AccountId, i64)>>,
-    /// The account each session last ran on and its keepalive outlook.
-    sessions: Mutex<HashMap<String, SessionMemo>>,
-}
-
-#[derive(Debug, Clone)]
-struct SessionMemo {
-    account: AccountId,
-    outlook: Option<Outlook>,
+    /// The account each session last ran on.
+    sessions: Mutex<HashMap<String, AccountId>>,
 }
 
 static GLOBAL: OnceLock<RoutingService> = OnceLock::new();
@@ -283,11 +277,10 @@ impl RoutingService {
             now,
         );
         let snapshot = self.snapshot(&active.policy, now).await;
-        let parent = input.parent_session.as_deref().and_then(|parent| {
-            lock(&self.sessions)
-                .get(parent)
-                .map(|memo| memo.account.clone())
-        });
+        let parent = input
+            .parent_session
+            .as_deref()
+            .and_then(|parent| lock(&self.sessions).get(parent).cloned());
         let decision = decide_with(
             &active.policy,
             &snapshot,
@@ -362,54 +355,20 @@ impl RoutingService {
                 reason: reason.clone(),
             },
         };
-        self.remember(&active, input, &evaluation, &plan, now);
+        self.remember(input, &plan);
         self.record(&active, input, &plan, now);
         if auto { plan } else { Plan::Observed }
     }
 
-    /// Keeps the account a session runs on, for its children's first turn, and
-    /// the keepalive outlook of a session that stays on a warm cache.
-    fn remember(
-        &self,
-        active: &Active,
-        input: &TurnInput,
-        evaluation: &Evaluation,
-        plan: &Plan,
-        now: i64,
-    ) {
-        let (account, pending) = match plan {
-            Plan::Stay(outcome) => (&outcome.account, outcome.pending.as_ref()),
-            Plan::Move(outcome) | Plan::CompactThenMove(outcome) => (&outcome.account, None),
+    /// Keeps the account a session runs on, for its children's first turn.
+    fn remember(&self, input: &TurnInput, plan: &Plan) {
+        let account = match plan {
+            Plan::Stay(outcome) | Plan::Move(outcome) | Plan::CompactThenMove(outcome) => {
+                &outcome.account
+            }
             _ => return,
         };
-        let outlook = matches!(plan, Plan::Stay(_))
-            .then(|| {
-                let class = jcode_routing_meters::model_class(&input.model);
-                jcode_routing_policy::outlook(
-                    &active.policy,
-                    &evaluation.snapshot,
-                    request(input, class.as_deref(), evaluation.parent.as_ref()),
-                    pending,
-                    now,
-                )
-            })
-            .flatten();
-        lock(&self.sessions).insert(
-            input.session_id.clone(),
-            SessionMemo {
-                account: account.clone(),
-                outlook,
-            },
-        );
-    }
-
-    /// Rule 6 inputs for a session that waits on swarm workers: what pinging
-    /// costs on its account and whether its pending move pays for a cold cache.
-    /// `None` when routing has not decided for the session.
-    pub fn keepalive_outlook(&self, session: &str) -> Option<Outlook> {
-        lock(&self.sessions)
-            .get(session)
-            .and_then(|memo| memo.outlook)
+        lock(&self.sessions).insert(input.session_id.clone(), account.clone());
     }
 
     /// Whether the policy would pick another account for this turn if

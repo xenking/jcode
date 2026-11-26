@@ -29,11 +29,6 @@ pub struct RoutingConfig {
     /// Moving onto a non-current account needs this many percent points more
     /// room below its limit than staying on the current one.
     pub hysteresis_pct: f64,
-    /// A warm session leaves its cache only when staying costs this many
-    /// percent more than the cheapest move.
-    pub move_margin_pct: f64,
-    /// Turns until the next natural cold seam, for the `H` of the economics.
-    pub horizon_turns: f64,
     /// Consecutive failures that evict an account.
     pub evict_after: u32,
     /// How long an eviction lasts, as a duration like `30m`, `5h` or `7d`.
@@ -52,8 +47,6 @@ impl Default for RoutingConfig {
             reserve_floor_pct: 0.0,
             reserve_horizon_min: 60.0,
             hysteresis_pct: 0.0,
-            move_margin_pct: 20.0,
-            horizon_turns: 10.0,
             evict_after: 3,
             evict_for: "30m".into(),
             accounts: Vec::new(),

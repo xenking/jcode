@@ -243,8 +243,6 @@ fn strategy_fields_report_every_problem_at_once() {
         hysteresis_pct = 100
         evict_after = 0
         evict_for = "calendar-month"
-        move_margin_pct = 100
-        horizon_turns = -1
 
         [[routing.accounts]]
         id = "openai:x"
@@ -273,8 +271,6 @@ fn strategy_fields_report_every_problem_at_once() {
         "hysteresis_pct",
         "evict_after",
         "evict_for",
-        "move_margin_pct",
-        "horizon_turns",
         "pacing_slack_pct",
         "weight must be positive",
         "month@15 (day 1..=28)",

@@ -238,10 +238,6 @@ pub struct Policy {
     pub reserve_floor_pct: f64,
     pub reserve_horizon_min: f64,
     pub hysteresis_pct: f64,
-    /// Share (0..1) by which staying must cost more than the cheapest move
-    /// before a warm session leaves its cache.
-    pub move_margin: f64,
-    pub horizon_turns: f64,
     pub evict_after: u32,
     pub evict_for_secs: u64,
     pub accounts: Vec<Account>,
@@ -307,12 +303,6 @@ impl Policy {
         if !(0.0..100.0).contains(&routing.hysteresis_pct) {
             err("routing.hysteresis_pct must be in 0..100".into());
         }
-        if !(0.0..100.0).contains(&routing.move_margin_pct) {
-            err("routing.move_margin_pct must be in 0..100".into());
-        }
-        if !(routing.horizon_turns >= 0.0 && routing.horizon_turns.is_finite()) {
-            err("routing.horizon_turns must be a non-negative number".into());
-        }
         if routing.evict_after == 0 {
             err("routing.evict_after must be at least 1".into());
         }
@@ -355,8 +345,6 @@ impl Policy {
                 reserve_floor_pct: routing.reserve_floor_pct,
                 reserve_horizon_min: routing.reserve_horizon_min,
                 hysteresis_pct: routing.hysteresis_pct,
-                move_margin: routing.move_margin_pct / 100.0,
-                horizon_turns: routing.horizon_turns,
                 evict_after: routing.evict_after,
                 evict_for_secs,
                 accounts,

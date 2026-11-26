@@ -164,8 +164,9 @@ context. In order:
    a reset grant that would expire unused; then its `on_limit` applies: `block`
    blocks, `ask` opens a gate, `switch` falls through to ranking.
 6. **Use the best candidate.** If it is not the current account and the cache is
-   warm, the option table below decides whether leaving pays; at a cold seam the
-   move is free. With no candidate left the decision is a gate (interactive
+   warm, the session stays while its account can still serve and the better
+   account becomes `pending`; it leaves a warm cache only when the account is
+   hard-blocked (see "Cache seams"). At a cold seam the move is free. With no candidate left the decision is a gate (interactive
    sessions) or a **block** (subagents, headless), with the reached limits as the
    reason; if every account is `block` the decision is a block.
 
@@ -197,26 +198,29 @@ clears `ask`/`switch` limits on an account for a while, never `block`.
 
 A session is at a **seam**: `start` (no history), `cold` (cache TTL expired,
 right after a compaction or a model switch, or after a failed turn) or `warm`.
-A cold seam moves for free. A warm session leaves its cache only if it pays.
-With `C` the cached context tokens, `H = tokens_per_turn * horizon_turns` (recent
-tokens per turn averaged over the last 8 requests; unknown makes `H = 0`, so a
-warm session never moves for a preference it cannot price), `S` the compacted
-size (a quarter of `C` unless measured), `write`/`read` the provider's cache
-factors:
+A cold seam moves for free. A warm session **stays on an account that can still
+serve** and leaves only when that account is hard-blocked, or when a person pins,
+switches or holds. A merely better account (higher priority, behind its pace
+line, past the soft `limit_pct` ceiling) becomes `pending` and is taken at the
+next start or cold seam. Hard-blocked means a percent window at 99% or more, a
+provider cap reached, a `block` budget, an evicted account or a down egress
+proxy.
+
+A forced move costs a cache rewrite on the target, so it takes the cheaper of
+two ways out. With `C` the cached context tokens, `S` the compacted size (a
+quarter of `C` unless measured), `write`/`read` the provider's cache factors and
+`λ` the prices of section 6:
 
 | Option | Cost |
 | --- | --- |
-| Stay | `H * λcur`, infinite when the current account cannot serve |
-| Move | `C*write*λnew + H*λnew` |
-| Compact, then move | `C*read*λcur + S*5*λcur + S*write*λnew + H*λnew` |
+| Move | `C*write*λnew` |
+| Compact, then move | `C*read*λcur + S*5*λcur + S*write*λnew` |
 | Redeem a reset on the current account | free when the grant would otherwise expire unused; the cache survives |
 
-The session moves only when the cheapest move costs less than
-`Stay * (1 - move_margin_pct/100)`. A plain move wins a tie. Otherwise it stays
-and reports the better account as `pending`. Cache factors: Anthropic 5-minute
-writes 1.25x, 1-hour writes 2x, reads 0.1x (the tier follows the session's cache
-TTL, 5m when at most 300 s); other providers write 1x and read at the catalog's
-cached-input ratio, 1x when unknown.
+A plain move wins a tie. Cache factors: Anthropic 5-minute writes 1.25x, 1-hour
+writes 2x, reads 0.1x (the tier follows the session's cache TTL, 5m when at most
+300 s); other providers write 1x and read at the catalog's cached-input ratio,
+1x when unknown.
 
 ## 5. Intents: how a person steers
 
@@ -264,7 +268,7 @@ A pool is **behind pace** (room would be lost) when it still has room and
 `slack = pacing_slack_pct/100` and applies **only to the current account**: it
 keeps the current account behind pace a little longer so the boundary does not
 flap. An account is *behind pace* only when all of its pools are; its soonest
-reset orders such accounts, and it is given price `λ = 0`. The reason shown is
+reset orders such accounts. The reason shown is
 `behind pace, room would be lost at the reset` (or `a reset grant would expire
 unused` when a grant makes the room free). Accounts that are ahead of pace fall
 back to priority.
@@ -273,9 +277,7 @@ back to priority.
 
 λ is what one unit of an account's quota is worth now:
 
-- room that would be lost, and a reset grant that expires before the account
-  could reach its wall again: **0**;
-- an expiring pool ahead of pace: scarcity = projected demand until reset /
+- an expiring pool: scarcity = projected demand until reset /
   room left (demand is `burn * hours_to_reset`, or without a burn
   `capacity * left_share`). Unknown reset: the used share. No room: infinite.
   Multiple pools: the largest;
@@ -289,8 +291,8 @@ The code and its tests refer to these by number (`economics_tests.rs`,
 
 1. A cold seam moves for free: session start, an expired cache TTL, right after a
    compaction, after a model switch, after a failed turn.
-2. A warm session moves only when staying costs more than the cheapest move by
-   `move_margin_pct`, or when a person pins or switches.
+2. A warm session moves only when its account is hard-blocked, or when a person
+   pins or switches.
 3. A short throttle retries on the same account (section 7, item 2). Exhausted
    quota or a broken credential evicts the account and moves at once.
 4. At the wall, in order: redeem a reset that would expire unused (the cache
@@ -300,7 +302,7 @@ The code and its tests refer to these by number (`economics_tests.rs`,
 5. Reset grants are never wasted: the sweep redeems one ten minutes before expiry
    if that restores used quota, and until then routing counts it as free room so
    load drains there first.
-6. Keepalive pings follow the price rule in the Keepalive subsection.
+6. Keepalive pings follow the ping-versus-rebuild rule in the Keepalive subsection.
 7. Children start on their parent's account when it can serve them.
 
 ### Reset grants
@@ -318,9 +320,7 @@ A grant lists the windows it clears and its expiry. Rules:
 
 Prompt-cache pings run only while a session waits on swarm workers. A ping costs
 `C * read * λcur`; pinging continues while the pings expected until the wait ends
-cost less than a rebuild. On an account with free room (λ = 0) pings cost
-nothing and always run. When a pending move is worth its cache miss, pinging
-stops so the cache goes cold and the move is free. See
+cost less than a rebuild. See
 [prompt-cache-keepalive.md](prompt-cache-keepalive.md).
 
 ## 7. Failover
@@ -491,8 +491,6 @@ of the config. Retired keys still load and are named as notes.
 | `reserve_floor_pct` | `0` | minimum headroom the adaptive limit keeps when burn is measurable. 0..=`limit_pct` |
 | `reserve_horizon_min` | `60` | minutes of projected burn the adaptive limit reserves. > 0 |
 | `hysteresis_pct` | `0` | extra room a non-current account needs. 0..100 |
-| `move_margin_pct` | `20` | a warm session leaves its cache only if staying costs this much more. 0..100 |
-| `horizon_turns` | `10` | turns until the next cold seam (`H`). >= 0 |
 | `evict_after` | `3` | consecutive failures that evict an account. >= 1 |
 | `evict_for` | `"30m"` | eviction length (`30m`, `5h`, `7d`, `2w`) |
 | `accounts`, `budgets` | empty | see below |

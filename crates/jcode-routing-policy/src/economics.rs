@@ -1,5 +1,5 @@
-//! Cache, reset and keepalive economics: shadow prices per account and the
-//! cost of each way out of a warm session.
+//! Cache and reset economics: shadow prices per account and the cost of each
+//! way out of a warm session whose account cannot serve.
 //!
 //! Every cost is tokens times a cache factor times the account's shadow price
 //! `λ`, in units of the model's list input price. Both sides of a comparison
@@ -75,21 +75,11 @@ pub struct CacheContext {
     /// `C`: tokens in the cached context.
     pub context_tokens: f64,
     pub factors: CacheFactors,
-    /// Recent tokens per turn. `H` is this times the policy's horizon turns.
-    /// Unknown leaves `H` at zero, so a warm session never moves for a
-    /// preference it cannot price.
-    pub tokens_per_turn: Option<f64>,
     /// `S`: the context after compaction. Unknown estimates a quarter of `C`.
     pub summary_tokens: Option<f64>,
 }
 
 impl CacheContext {
-    pub(crate) fn horizon(&self, turns: f64) -> f64 {
-        self.tokens_per_turn
-            .filter(|tokens| tokens.is_finite() && *tokens > 0.0)
-            .map_or(0.0, |tokens| tokens * turns)
-    }
-
     fn summary(&self) -> f64 {
         self.summary_tokens
             .filter(|tokens| tokens.is_finite() && *tokens >= 0.0)
@@ -109,12 +99,10 @@ pub struct Grant {
     pub model_class: Option<String>,
 }
 
-/// The cost of each option for one warm session and one target account.
+/// The cost of each way out of a warm session whose account cannot serve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Options {
-    /// `H x λcur`, infinite when the current account cannot serve.
-    pub stay: f64,
-    /// `C x write x λnew + H x λnew`.
+    /// `C x write x λnew`.
     pub moved: f64,
     /// Compaction on the warm current account, then a move with `S`.
     /// `None` when the current account cannot run the compaction.
@@ -122,33 +110,15 @@ pub(crate) struct Options {
 }
 
 impl Options {
-    pub(crate) fn price(
-        cache: &CacheContext,
-        horizon_turns: f64,
-        current: Option<f64>,
-        current_serves: bool,
-        target: f64,
-    ) -> Self {
+    pub(crate) fn price(cache: &CacheContext, current: Option<f64>, target: f64) -> Self {
         let c = cache.context_tokens.max(0.0);
-        let h = cache.horizon(horizon_turns);
         let s = cache.summary();
         let factors = cache.factors;
-        let stay = match current {
-            Some(lambda) if current_serves => h * lambda,
-            _ => f64::INFINITY,
-        };
-        let moved = c * factors.write * target + h * target;
+        let moved = c * factors.write * target;
         let compacted = current.map(|lambda| {
-            c * factors.read * lambda
-                + s * OUTPUT_FACTOR * lambda
-                + s * factors.write * target
-                + h * target
+            c * factors.read * lambda + s * OUTPUT_FACTOR * lambda + s * factors.write * target
         });
-        Self {
-            stay,
-            moved,
-            compacted,
-        }
+        Self { moved, compacted }
     }
 
     /// The cheapest way to leave, preferring a plain move on a tie: it keeps
@@ -158,13 +128,6 @@ impl Options {
             Some(compacted) if compacted < self.moved => (Leave::CompactThenMove, compacted),
             _ => (Leave::Move, self.moved),
         }
-    }
-
-    /// Rule 2: leave only when staying costs more than the cheapest move by
-    /// the margin. An account that cannot serve has an infinite stay.
-    pub(crate) fn leave(&self, margin: f64) -> Option<Leave> {
-        let (leave, cost) = self.cheapest_move();
-        (cost < self.stay * (1.0 - margin)).then_some(leave)
     }
 }
 
@@ -283,26 +246,4 @@ pub const SWEEP_BEFORE_EXPIRY_SECS: i64 = 600;
 pub struct Redemption {
     pub account: AccountId,
     pub grant: Grant,
-}
-
-/// The pending move of a warm session, priced for the keepalive gate.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Outlook {
-    /// The current account's quota is free room, so pings cost nothing.
-    pub free_room: bool,
-    /// What staying costs after the wait, without the pings.
-    pub stay: f64,
-    /// What the pending move costs, when there is one.
-    pub pending_move: Option<f64>,
-    /// One keepalive ping: `C x read x λcur`.
-    pub ping: f64,
-}
-
-impl Outlook {
-    /// Rule 6: a pending move is worth its miss when moving cold costs less
-    /// than staying warm with the pings it takes.
-    pub fn move_worth_miss(&self, expected_pings: f64) -> bool {
-        self.pending_move
-            .is_some_and(|moved| moved < self.stay + expected_pings * self.ping)
-    }
 }
