@@ -11,7 +11,7 @@ turn re-sends the full conversation, relying on OpenAI prefix-hash routing which
 frequently lands on a cold machine (zero cache read).
 
 This script quantifies:
-  * connection mix (persistent-reuse vs persistent-fresh)
+  * connection mix of completed provider calls (persistent-reuse vs persistent-fresh)
   * why fresh connections happen (state-reset reasons, idle reconnects)
   * realized cache hit rate per provider
   * OpenAI zero/low-read events
@@ -28,6 +28,7 @@ With no arguments it scans ~/.jcode/logs/jcode-*.log.
 
 from __future__ import annotations
 
+import argparse
 import collections
 import glob
 import os
@@ -42,18 +43,22 @@ def _log_files(argv: list[str]) -> list[str]:
     return sorted(glob.glob(os.path.join(home, ".jcode", "logs", "jcode-*.log")))
 
 
-_KV_FIELD_RE = re.compile(r"(\w+)=([^\s]+)")
+_FIELD_RE = re.compile(r"(\w+)=([^\s]+)")
+_ACCOUNTING = {
+    "openai": ("OpenAI", False),
+    "openai-api": ("OpenAI API", False),
+    "claude": ("Claude", True),
+    "anthropic": ("Claude", True),
+}
 
 
-def analyze(files: list[str]) -> dict:
+def analyze(files: list[str], *, since=None, until=None, session=None) -> dict:
     conn = collections.Counter()           # persistent-reuse / persistent-fresh
     reset_reason = collections.Counter()   # persistent_state_reset reason=...
     reuse_detail = collections.Counter()   # persistent_reuse_unavailable_detail reason=...
     idle_reconnect_secs: list[int] = []     # observed idle durations that triggered reconnect
-    cache = collections.defaultdict(lambda: [0, 0, 0])  # provider -> [new_input, read, n]
-    # OpenAI read_pct distribution, using the harness's own authoritative
-    # read_pct field rather than a token-ratio proxy (the harness computes
-    # read_pct against cache-reportable input, not read+new_input).
+    calls = collections.defaultdict(collections.Counter)
+    cache = collections.defaultdict(lambda: [0, 0, 0, 0, 0])  # prompt, uncached, read, write, n
     oa_readpct = collections.Counter()
     oa_readpct_n = 0
     oa_zero = 0
@@ -68,11 +73,13 @@ def analyze(files: list[str]) -> dict:
             continue
         with fh:
             for line in fh:
-                if "persistent-reuse" in line:
-                    conn["reuse"] += 1
-                elif "persistent-fresh" in line:
-                    conn["fresh"] += 1
-
+                timestamp = line[1:24] if line.startswith("[") else ""
+                if since and (not timestamp or timestamp < since):
+                    continue
+                if until and (not timestamp or timestamp >= until):
+                    continue
+                if session and f"session_id={session} " not in line.rstrip() + " ":
+                    continue
                 if "persistent_state_reset" in line:
                     m = re.search(r"reason=([a-z_]+)", line)
                     if m:
@@ -87,44 +94,54 @@ def analyze(files: list[str]) -> dict:
                 if m:
                     idle_reconnect_secs.append(int(m.group(1)))
 
-                if "KV_CACHE_USAGE" in line:
-                    d = dict(_KV_FIELD_RE.findall(line))
-                    provider = d.get("provider", "?")
-                    try:
-                        new_input = int(d.get("input", "0"))
-                        read = int(d.get("cache_read", "0"))
-                    except ValueError:
-                        continue
-                    bucket = cache[provider]
-                    bucket[0] += new_input
-                    bucket[1] += read
-                    bucket[2] += 1
-                    if provider == "OpenAI":
-                        prompt = new_input + read
-                        if prompt > 1024 and read == 0:
-                            oa_zero += 1
-                            oa_zero_tokens += new_input
-                        read_pct = d.get("read_pct")
-                        if read_pct not in (None, "None"):
-                            try:
-                                v = float(read_pct)
-                            except ValueError:
-                                v = None
-                            if v is not None:
-                                oa_readpct_n += 1
-                                if v >= 90:
-                                    oa_readpct[">=90%"] += 1
-                                elif v >= 70:
-                                    oa_readpct["70-90%"] += 1
-                                elif v >= 50:
-                                    oa_readpct["50-70%"] += 1
-                                elif v > 0:
-                                    oa_readpct["1-50%"] += 1
-                                else:
-                                    oa_readpct["0%"] += 1
+                if "event=AGENT_PROVIDER_STREAM_LIFECYCLE " not in line:
+                    continue
+                d = dict(_FIELD_RE.findall(line))
+                if d.get("phase") != "stream_complete" or d.get("saw_message_end") != "true":
+                    continue
+                provider = d.get("provider", "?")
+                connection = d.get("connection_type", "unknown")
+                calls[provider][connection] += 1
+                if provider.lower() == "openai":
+                    if connection == "websocket/persistent-reuse":
+                        conn["reuse"] += 1
+                    elif connection == "websocket/persistent-fresh":
+                        conn["fresh"] += 1
+                accounting = _ACCOUNTING.get(provider.lower())
+                if accounting is None:
+                    continue
+                label, split = accounting
+                try:
+                    reported, read, write = (int(d[k]) for k in ("input", "cache_read", "cache_write"))
+                except (KeyError, ValueError):
+                    continue
+                prompt = reported + read + write if split else reported
+                uncached = reported if split else reported - read
+                if min(reported, read, write, uncached) < 0 or not prompt:
+                    continue
+                bucket = cache[label]
+                for index, value in enumerate((prompt, uncached, read, write, 1)):
+                    bucket[index] += value
+                if label == "OpenAI":
+                    if prompt > 1024 and read == 0:
+                        oa_zero += 1
+                        oa_zero_tokens += uncached
+                    pct = 100 * read / prompt
+                    oa_readpct_n += 1
+                    if pct >= 90:
+                        oa_readpct[">=90%"] += 1
+                    elif pct >= 70:
+                        oa_readpct["70-90%"] += 1
+                    elif pct >= 50:
+                        oa_readpct["50-70%"] += 1
+                    elif pct > 0:
+                        oa_readpct["1-50%"] += 1
+                    else:
+                        oa_readpct["0%"] += 1
 
     return {
         "conn": conn,
+        "calls": calls,
         "reset_reason": reset_reason,
         "reuse_detail": reuse_detail,
         "idle_reconnect_secs": idle_reconnect_secs,
@@ -137,12 +154,18 @@ def analyze(files: list[str]) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    files = _log_files(argv)
+    parser = argparse.ArgumentParser(description="Report completed provider calls from Jcode logs")
+    parser.add_argument("logs", nargs="*")
+    parser.add_argument("--since", help="inclusive local log time (YYYY-MM-DD HH:MM:SS)")
+    parser.add_argument("--until", help="exclusive local log time (YYYY-MM-DD HH:MM:SS)")
+    parser.add_argument("--session", help="exact session ID; excludes diagnostic lines without that ID")
+    args = parser.parse_args(argv)
+    files = _log_files(args.logs)
     if not files:
         print("no log files found", file=sys.stderr)
         return 1
     print(f"Scanned {len(files)} log file(s)")
-    r = analyze(files)
+    r = analyze(files, since=args.since, until=args.until, session=args.session)
 
     conn = r["conn"]
     total_conn = conn["reuse"] + conn["fresh"]
@@ -151,7 +174,10 @@ def main(argv: list[str]) -> int:
         print(f"  reuse : {conn['reuse']:>6} ({100*conn['reuse']/total_conn:.1f}%)")
         print(f"  fresh : {conn['fresh']:>6} ({100*conn['fresh']/total_conn:.1f}%)")
     else:
-        print("  (no ConnectionType events)")
+        print("  (no completed OpenAI WebSocket calls)")
+    unused = {p: sum(counts.values()) for p, counts in r["calls"].items() if p.lower() not in _ACCOUNTING}
+    if unused:
+        print(f"  provider input semantics not classified: {dict(sorted(unused.items()))}")
 
     print("\n== Fresh-connection causes ==")
     print("  persistent_reuse_unavailable_detail:")
@@ -174,19 +200,19 @@ def main(argv: list[str]) -> int:
     else:
         print("  count=0 (no idle reconnects logged)")
 
-    print("\n== Realized cache hit rate (read / (read + new_input)) ==")
-    for provider, (new_input, read, n) in sorted(r["cache"].items()):
-        total = new_input + read
-        if total:
-            print(f"  {provider:8s} hit={100*read/total:5.1f}%  "
-                  f"read={read:>13,} new_input={new_input:>13,} n={n}")
+    print("\n== Cache read share (provider-reported completed calls) ==")
+    for provider, (prompt, uncached, read, write, n) in sorted(r["cache"].items()):
+        print(f"  {provider:10s} hit={100*read/prompt:5.1f}%  "
+              f"read={read:>13,} written={write:>10,} uncached={uncached:>13,} n={n}")
+    if not r["cache"]:
+        print("  (no supported provider usage events; TUI estimates are not used)")
 
     print("\n== OpenAI cold-prefill cost ==")
     print(f"  zero-read prompts (>1024 tok): {r['oa_zero']}  "
           f"(~{r['oa_zero_tokens']:,} full-price input tokens)")
     n = r["oa_readpct_n"]
     if n:
-        print(f"  read_pct distribution (harness field, n={n}):")
+        print(f"  read share distribution (n={n}):")
         for k in (">=90%", "70-90%", "50-70%", "1-50%", "0%"):
             c = r["oa_readpct"][k]
             print(f"    {k:8s}: {c:>5} ({100*c/n:.1f}%)")
