@@ -149,7 +149,22 @@ default provider) is fixed in this pair: jcode commit \`$rustls_cli\` ("install 
 Harness wss connect") and Jcode Desktop commit \`$rustls_desktop\` ("lock rustls ring for paired Harness provider"),
 both contained in jcode $cli_sha / Desktop $desktop_sha.
 
-## 9. Verification checklist (all must hold)
+## 9. MCP tool approvals
+A tool that an MCP server marks as non-read-only (for example the work server \`xdev\`) asks before it runs:
+the card offers **Allow once**, **Always allow this tool**, **Always allow every tool on this server** and **Deny**.
+The two "Always" answers are written to the MCP file the server is read from (normally \`~/.jcode/mcp.json\`):
+the raw tool name in that server's \`approve_free\` list, or \`"*"\` there for every tool on the server. They apply at
+once to the running daemon and every session (the policy is re-read on every call). List or undo them with
+\`jcode mcp approvals\` (\`jcode mcp approvals revoke <server> [<tool>]\`). A background session that hits a gated
+tool shows the request on the attached client (the daemon log has one \`MCP_APPROVAL outcome=… session=… server=…
+tool=…\` line per request); with no client attached it waits up to 30 s for one (\`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS\`,
+\`0\` refuses at once), then refuses with the \`jcode mcp approvals allow <server> [<tool>]\` hint instead of hanging.
+If the work installer rewrites \`mcp.json\`, re-run \`jcode mcp approvals\` to see which grants survived. Settings written under \`[mcp.servers.*]\` in
+\`config.toml\` are not read: jcode warns at startup and names \`~/.jcode/mcp.json\` as the file that is.
+The work overlay's installer pre-approves only its local-only review tools; anything with an external write
+(posting or approving a merge request, Slack writes, \`orch_approve\`) still asks, once, until you choose "Always".
+
+## 10. Verification checklist (all must hold)
 - [ ] \`jcode --version\` → \`($cli_sha)\`; \`/Applications/Jcode.app/Contents/MacOS/jcode --version\` → \`($cli_sha)\`
 - [ ] \`jcode-desktop --version\` → \`($desktop_sha)\`; \`codesign --verify --deep --strict /Applications/Jcode.app\` exits 0
 - [ ] \`pgrep -fl 'jcode.*serve'\` shows exactly one daemon, from \`versions/$cli_sha\`
@@ -157,7 +172,7 @@ both contained in jcode $cli_sha / Desktop $desktop_sha.
 - [ ] step 7 prints \`install-ok\`; a Desktop session opens and answers
 - [ ] after \`jcode server stop --force && jcode server start\` no session starts a turn by itself
 
-## 10. Rollback
+## 11. Rollback
 \`\`\`sh
 cat ~/.jcode/install-backup/before-$cli_sha.txt        # previous targets + app backup path
 PREV=\$(sed -n 's/^current=//p' ~/.jcode/install-backup/before-$cli_sha.txt)
