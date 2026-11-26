@@ -205,7 +205,7 @@ fn btw_card_asks_for_more_room_than_a_one_shot_notice() {
     for line in 0..20 {
         app.apply_btw_stream_event(StreamEvent::TextDelta(format!("line {line}\n")));
     }
-    let height = crate::tui::ui::inline_ui_height_for_tests(&app);
+    let height = crate::tui::ui::inline_ui_height_for_tests(&app, 120);
     assert!(
         height > 10,
         "the side-question card streams an answer and needs more than the \

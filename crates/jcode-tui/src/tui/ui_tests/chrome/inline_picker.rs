@@ -119,7 +119,7 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
     for preview in [true, false] {
         let mut state = model_picker_state();
         state.inline_interactive_state.as_mut().unwrap().preview = preview;
-        assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state), 0);
+        assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state, 100), 0);
         let lines = render_model_suggestions(&state, 120, 20, 12);
         let text = lines.join("\n");
         assert!(text.contains("GPT-5.4"), "{text}");
@@ -183,7 +183,7 @@ fn model_suggestions_show_empty_filter_and_route_notices() {
 fn non_model_pickers_still_reserve_inline_panel_height() {
     let mut state = model_picker_state();
     state.inline_interactive_state.as_mut().unwrap().kind = crate::tui::PickerKind::Login;
-    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state) > 0);
+    assert!(crate::tui::ui::inline_ui::inline_ui_height(&state, 100) > 0);
     assert!(
         render_model_suggestions(&state, 100, 20, 12)
             .iter()
@@ -250,4 +250,48 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
             .any(|span| span.content.contains("openai")
                 && span.style.add_modifier.contains(Modifier::UNDERLINED))
     );
+}
+
+#[test]
+fn an_approval_question_wraps_so_the_arguments_and_options_stay_visible() {
+    let _lock = viewport_snapshot_test_lock();
+    let args = (0..12)
+        .map(|n| format!("\"field{n}\":\"value-{n}\""))
+        .chain(["\"last\":\"tail-marker\"".to_string()])
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut state = TestState::default();
+    state.display_messages = vec![DisplayMessage::user("hello".to_string())];
+    state.inline_view_state = Some(crate::tui::InlineViewState {
+        title: "Ask · MCP approval".to_string(),
+        status: Some("↑↓ move · Enter choose · Esc decline".to_string()),
+        lines: vec![
+            format!(
+                "Allow MCP tool \"write-item\" on server \"fixture\" with arguments {{{args}}}?"
+            ),
+            "› 1. Deny - Do not run this call".to_string(),
+            "  2. Allow once - Run this one call only".to_string(),
+            "  3. Always allow this tool - Run it now; never ask again".to_string(),
+            "  4. Always allow every tool on this server - Run it now; never ask again".to_string(),
+        ],
+        wrap_head: true,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let text = (0..40)
+        .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The arguments have no spaces, so rows may break inside a token.
+    let flat: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '│')
+        .collect();
+    assert!(flat.contains("\"last\":\"tail-marker\"}?"), "{text}");
+    for needle in ["4. Always allow every tool on this server", "1. Deny"] {
+        assert!(text.contains(needle), "{needle} missing:\n{text}");
+    }
 }

@@ -338,6 +338,7 @@ fn test_inline_ui_gap_height_only_when_inline_ui_visible() {
             title: "USAGE".to_string(),
             status: Some("refreshing".to_string()),
             lines: vec!["Refreshing usage".to_string()],
+            ..Default::default()
         }),
         ..Default::default()
     };

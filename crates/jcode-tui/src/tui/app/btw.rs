@@ -174,6 +174,7 @@ impl App {
             title: "Side-question history".into(),
             status: Some("/btw #N open · /btw #N question follow up · esc close".into()),
             lines,
+            wrap_head: false,
         });
         self.force_full_repaint = true;
     }
@@ -476,6 +477,7 @@ impl App {
             title: "Side question".to_string(),
             status: Some(card.status_line().to_string()),
             lines,
+            wrap_head: false,
         };
         self.inline_view_state = Some(view);
         self.inline_view_is_btw = true;

@@ -1167,6 +1167,8 @@ pub struct InlineViewState {
     pub title: String,
     pub status: Option<String>,
     pub lines: Vec<String>,
+    /// Wrap the first line (an approval's arguments) instead of cutting it.
+    pub wrap_head: bool,
 }
 
 impl InlineViewState {

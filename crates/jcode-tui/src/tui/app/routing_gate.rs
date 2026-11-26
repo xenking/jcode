@@ -46,6 +46,7 @@ impl GateTerminal for RoutingGateModel {
             title: "Routing · limit reached".to_string(),
             status: Some("↑↓ move · Enter choose · Esc cancel".to_string()),
             lines,
+            wrap_head: false,
         }
     }
 }

@@ -6,7 +6,60 @@ fn inline_view_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
+/// Greedy word wrap by display width; a word wider than the row is cut.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width {
+            // Break after the last space of this row when there is one.
+            match row.rfind(' ').filter(|_| ch != ' ') {
+                Some(at) => {
+                    let rest = row.split_off(at + 1);
+                    rows.push(std::mem::take(&mut row));
+                    used = inline_view_display_width(&rest);
+                    row = rest;
+                }
+                None => {
+                    rows.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+            }
+        }
+        row.push(ch);
+        used += w;
+    }
+    rows.push(row);
+    rows
+}
+
+/// The card's content width and its rows: the view's lines, with the first one
+/// wrapped to the card when the view asks for it.
+fn inline_view_rows(view: &crate::tui::InlineViewState, width: usize) -> (usize, Vec<String>) {
+    let mut content_width = inline_view_display_width(view.title.as_str());
+    if let Some(status) = view.status.as_ref() {
+        // The header row carries the title and the status side by side.
+        content_width += inline_view_display_width(status.as_str()) + 2;
+    }
+    for line in &view.lines {
+        content_width = content_width.max(inline_view_display_width(line.as_str()));
+    }
+    let content_width = content_width.min(width.saturating_sub(2)).max(1);
+    let mut rows = Vec::with_capacity(view.lines.len());
+    for (index, line) in view.lines.iter().enumerate() {
+        if index == 0 && view.wrap_head {
+            rows.extend(wrap_to_width(line, content_width));
+        } else {
+            rows.push(line.clone());
+        }
+    }
+    (content_width, rows)
+}
+
+pub(crate) fn inline_ui_height(app: &dyn TuiState, width: u16) -> u16 {
     match app.inline_ui_state() {
         Some(crate::tui::InlineUiStateRef::Interactive(picker)) => {
             // Model choices replace the command suggestions, without reflowing chat.
@@ -18,7 +71,7 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
             rows_needed.min(20)
         }
         Some(crate::tui::InlineUiStateRef::View(view)) => {
-            let visible_rows = view.lines.len().max(1) as u16;
+            let visible_rows = inline_view_rows(view, usize::from(width)).1.len().max(1) as u16;
             let rows_needed = visible_rows + 1 + 2; // header + rounded border
             // The `/btw` side-question card streams an answer and pays for its
             // rows; every other inline view stays a compact notice.
@@ -26,6 +79,10 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
                 // A streamed answer wraps, so a card with few logical lines
                 // still needs room; cap it so it never eats the transcript.
                 rows_needed.clamp(10, 18)
+            } else if view.wrap_head {
+                // An approval's arguments can run to several rows; the options
+                // under them must stay visible.
+                rows_needed.min(18)
             } else {
                 rows_needed.min(10)
             }
@@ -58,15 +115,7 @@ fn draw_inline_view(
         return;
     }
 
-    let mut content_width = inline_view_display_width(view.title.as_str());
-    if let Some(status) = view.status.as_ref() {
-        // The header row carries the title and the status side by side.
-        content_width += inline_view_display_width(status.as_str()) + 2;
-    }
-    for line in &view.lines {
-        content_width = content_width.max(inline_view_display_width(line.as_str()));
-    }
-    let content_width = content_width.min(width.saturating_sub(2)).max(1);
+    let (content_width, rows) = inline_view_rows(view, width);
     let outer_width = content_width.saturating_add(2).min(width);
     let horizontal_offset = if app.centered_mode() {
         area.width.saturating_sub(outer_width as u16) / 2
@@ -115,9 +164,9 @@ fn draw_inline_view(
     }
     lines.push(fit(Line::from(header_spans)));
 
-    for line in &view.lines {
+    for line in rows {
         lines.push(fit(Line::from(Span::styled(
-            line.clone(),
+            line,
             Style::default().fg(rgb(200, 200, 220)),
         ))));
     }

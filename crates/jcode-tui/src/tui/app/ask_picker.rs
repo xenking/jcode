@@ -217,6 +217,7 @@ impl AskPickerState {
             title,
             status: Some(keys.to_string()),
             lines,
+            wrap_head: true,
         }
     }
 }
