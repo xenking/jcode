@@ -481,9 +481,11 @@ Sources:
 
 | Metric | Budget | Why |
 |---|---:|---|
-| `render_cache_entries` | `<= 64` | Explicit render-cache cap (`RENDER_CACHE_MAX`) |
-| `image_state_entries` | `<= 12` | Explicit protocol-state cap (`IMAGE_STATE_MAX`) |
-| `source_cache_entries` | `<= 8` | Explicit decoded-source cap (`SOURCE_CACHE_MAX`) |
+| `render_cache_entries` | `<= 512` | Explicit render-cache cap (`RENDER_CACHE_MAX`) |
+| `image_state_entries` | `<= 24` | Explicit protocol-state cap (`IMAGE_STATE_MAX`) |
+| `image_state_source_bytes` | `<= 48 MiB` | Decoded-source budget for protocol state (`IMAGE_STATE_MAX_SOURCE_BYTES`) |
+| `source_cache_entries` | `<= 16` | Explicit decoded-source cap (`SOURCE_CACHE_MAX`) |
+| `source_cache_bytes` | `<= 48 MiB` | Decoded-byte budget for source images (`SOURCE_CACHE_MAX_BYTES`) |
 | `active_diagrams` | `<= 128` | Explicit active-diagram cap (`ACTIVE_DIAGRAMS_MAX`) |
 | `cache_disk_png_bytes` | `<= 50 MiB` | Explicit on-disk cache cap (`CACHE_MAX_SIZE_BYTES`) |
 | `cache_disk_max_age_secs` | `<= 259200` | 3-day expiry (`CACHE_MAX_AGE_SECS`) |
@@ -557,9 +559,9 @@ When changing memory-heavy code, capture and include:
 These are the concrete enforced limits today:
 
 - Markdown highlight cache entries: 256
-- Mermaid render cache entries: 64
-- Mermaid protocol image-state entries: 12
-- Mermaid decoded source-cache entries: 8
+- Mermaid render cache entries: 512
+- Mermaid protocol image-state entries: 24 (decoded sources <= 48 MiB)
+- Mermaid decoded source-cache entries: 16 (<= 48 MiB)
 - Mermaid active diagrams: 128
 - Mermaid on-disk PNG cache: 50 MiB, max age 3 days
 
