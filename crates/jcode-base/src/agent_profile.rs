@@ -9,7 +9,6 @@
 use crate::config::{AgentProfileConfig, AgentsConfig};
 use crate::prompt::ProfilePrompt;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 /// Tools a read-only profile keeps: reading, searching, read-only shell, and
 /// the coordination tools every lane worker needs to report.
