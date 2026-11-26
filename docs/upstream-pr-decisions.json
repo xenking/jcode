@@ -22,7 +22,7 @@
     "jcode#1392": {"decision": "skipped", "head": "cdf58202d12ba9f409d5ac3247f0f119acfdda39", "reason": "stale/conflicting: More reliable install channel metadata"},
     "jcode#1423": {"decision": "skipped", "head": "df5bad113e4c0114152277e35b9452609c5e2b37", "reason": "stale/conflicting: Cosmetic preference"},
     "jcode#1429": {"decision": "skipped", "head": "69d842a787e4e4076e7658f6b6479f7ff1574835", "reason": "stale/conflicting: Correct TUI navigation after resize"},
-    "jcode#1430": {"decision": "skipped", "head": "9d945f8bea98e840db9a614f1b88a9a86a9e1a8d", "reason": "superseded: inference stopped impersonating Claude Code in d84831699; the account usage, profile and saved-reset endpoints send omp's Claude Code identity (cf0f1bfb2 and the omp-parity change after it), see docs/ROUTING.md"},
+    "jcode#1430": {"decision": "skipped", "head": "9d945f8bea98e840db9a614f1b88a9a86a9e1a8d", "reason": "superseded: inference stopped impersonating Claude Code in d84831699; the account usage, profile and saved-reset endpoints send the reference CLI's Claude Code identity (cf0f1bfb2 and the request-identity parity change after it), see docs/ROUTING.md"},
     "jcode#1433": {"decision": "skipped", "head": "f4b62ec5d008311656be5ec81d0767411a9ac9f0", "reason": "stale/conflicting: Avoids persistent silent model downgrade"},
     "jcode#1436": {"decision": "skipped", "head": "f60666c7d14d7534d2d84a96808efea07d0941fa", "reason": "stale/conflicting: Ambient use not established"},
     "jcode#1438": {"decision": "skipped", "head": "248c5585f8be20d55845b3e7790febbc7029129e", "reason": "stale/conflicting: Prevents profile cache cross-contamination"},

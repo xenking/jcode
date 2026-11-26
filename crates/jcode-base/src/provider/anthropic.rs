@@ -54,12 +54,11 @@ pub fn is_cache_ttl_1h() -> bool {
 pub const CLAUDE_CLI_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
 
 /// Claude Code release whose identity the account endpoints (`/api/oauth/usage`,
-/// `/profile` and saved resets) are called with. Same as omp's
-/// `DEFAULT_CLAUDE_CODE_VERSION` (pi-ai `claude-code-fingerprint.ts`): the
-/// usage endpoint evaluates saved resets per caller and hides them from a
+/// `/profile` and saved resets) are called with: the release the reference
+/// CLI presents. The usage endpoint evaluates saved resets per caller and hides them from a
 /// caller that is not Claude Code (`ineligible_reason: "surface"` /
 /// `"cli_version"`). Inference requests keep the honest [`CLAUDE_CLI_USER_AGENT`].
-/// Raise it with omp; `JCODE_CLAUDE_CODE_VERSION` overrides it at runtime.
+/// Raise it with the reference CLI; `JCODE_CLAUDE_CODE_VERSION` overrides it at runtime.
 const USAGE_ENDPOINT_CLAUDE_CODE_VERSION: &str = "2.1.326";
 
 /// `User-Agent` for the account usage, profile and saved-reset endpoints.
@@ -72,9 +71,9 @@ pub fn usage_endpoint_user_agent() -> String {
     format!("claude-cli/{version} (external, cli)")
 }
 
-/// The headers omp sends to Claude's account endpoints (pi-ai
-/// `buildClaudeOAuthHeaders`): accept, content type, the oauth beta, the
-/// Claude Code user agent and the bearer token, and nothing else.
+/// The request identity of the reference CLI on Claude's account endpoints:
+/// accept, content type, the oauth beta, the Claude Code user agent and the
+/// bearer token, and nothing else.
 pub fn apply_claude_account_headers(
     req: reqwest::RequestBuilder,
     access_token: &str,

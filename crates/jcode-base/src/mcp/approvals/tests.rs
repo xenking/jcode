@@ -62,7 +62,7 @@ fn two_servers() -> Value {
     json!({
         "theme": "keep me",
         "servers": {
-            "xdev": {"command": "bun", "approval": "annotations", "env": {"K": "V"}},
+            "gated": {"command": "bun", "approval": "annotations", "env": {"K": "V"}},
             "other": {"command": "x", "approve_free": ["keep"]}
         }
     })
@@ -73,20 +73,20 @@ fn tool_grant_lands_in_the_file_the_server_comes_from_and_touches_nothing_else()
     let env = Env::new();
     env.write(&env.global(), two_servers());
 
-    let path = grant(env.dir(), "xdev", Grant::Tool("review_plan")).unwrap();
+    let path = grant(env.dir(), "gated", Grant::Tool("plan_item")).unwrap();
 
     assert_eq!(path, env.global());
     let mut expected = two_servers();
-    expected["servers"]["xdev"]["approve_free"] = json!(["review_plan"]);
+    expected["servers"]["gated"]["approve_free"] = json!(["plan_item"]);
     assert_eq!(env.read(&env.global()), expected);
 
-    let mut live = McpConfig::load_for_dir(env.dir()).servers["xdev"].clone();
+    let mut live = McpConfig::load_for_dir(env.dir()).servers["gated"].clone();
     // The in-memory copy of a long-running session predates the grant.
     live.approve_free.clear();
-    assert!(live.requires_approval(&tool("review_plan")));
-    refresh_policy(&mut live, env.dir(), "xdev");
+    assert!(live.requires_approval(&tool("plan_item")));
+    refresh_policy(&mut live, env.dir(), "gated");
     assert_eq!(live.approval, McpApproval::Annotations);
-    assert!(!live.requires_approval(&tool("review_plan")));
+    assert!(!live.requires_approval(&tool("plan_item")));
     assert!(live.requires_approval(&tool("gitlab_mr_post_review")));
 }
 
@@ -95,15 +95,15 @@ fn server_grant_exempts_every_tool_but_keeps_the_gate_configured() {
     let env = Env::new();
     env.write(&env.global(), two_servers());
 
-    grant(env.dir(), "xdev", Grant::Server).unwrap();
+    grant(env.dir(), "gated", Grant::Server).unwrap();
     // Granting twice does not duplicate.
-    grant(env.dir(), "xdev", Grant::Server).unwrap();
+    grant(env.dir(), "gated", Grant::Server).unwrap();
 
     let doc = env.read(&env.global());
-    assert_eq!(doc["servers"]["xdev"]["approve_free"], json!(["*"]));
-    assert_eq!(doc["servers"]["xdev"]["approval"], "annotations");
+    assert_eq!(doc["servers"]["gated"]["approve_free"], json!(["*"]));
+    assert_eq!(doc["servers"]["gated"]["approval"], "annotations");
     assert_eq!(doc["servers"]["other"], two_servers()["servers"]["other"]);
-    let live = &McpConfig::load_for_dir(env.dir()).servers["xdev"];
+    let live = &McpConfig::load_for_dir(env.dir()).servers["gated"];
     assert!(!live.requires_approval(&tool("anything_destructive")));
 }
 
@@ -114,19 +114,19 @@ fn project_local_definition_is_written_in_the_project_file() {
     let local = env.project.path().join(".mcp.json");
     env.write(
         &local,
-        json!({"mcpServers": {"xdev": {"command": "bun-local", "approval": "annotations"}}}),
+        json!({"mcpServers": {"gated": {"command": "bun-local", "approval": "annotations"}}}),
     );
 
-    let found = locate(env.dir(), "xdev").unwrap();
+    let found = locate(env.dir(), "gated").unwrap();
     assert_eq!(found.path, local);
     assert_eq!(
         found.config.command,
-        McpConfig::load_for_dir(env.dir()).servers["xdev"].command
+        McpConfig::load_for_dir(env.dir()).servers["gated"].command
     );
 
-    grant(env.dir(), "xdev", Grant::Tool("t")).unwrap();
+    grant(env.dir(), "gated", Grant::Tool("t")).unwrap();
     assert_eq!(
-        env.read(&local)["mcpServers"]["xdev"]["approve_free"],
+        env.read(&local)["mcpServers"]["gated"]["approve_free"],
         json!(["t"])
     );
     assert_eq!(env.read(&env.global()), two_servers());
@@ -135,17 +135,17 @@ fn project_local_definition_is_written_in_the_project_file() {
 #[test]
 fn malformed_or_unexpected_files_are_never_rewritten() {
     let env = Env::new();
-    let broken = "{\"servers\": {\"xdev\": {\"command\": \"bun\"},, }";
+    let broken = "{\"servers\": {\"gated\": {\"command\": \"bun\"},, }";
     std::fs::write(env.global(), broken).unwrap();
-    let error = grant(env.dir(), "xdev", Grant::Server).unwrap_err();
+    let error = grant(env.dir(), "gated", Grant::Server).unwrap_err();
     assert!(error.to_string().contains("not configured"), "{error:#}");
     assert_eq!(std::fs::read_to_string(env.global()).unwrap(), broken);
 
-    let odd = json!({"servers": {"xdev": {"command": "bun", "approve_free": "review_plan"}}});
+    let odd = json!({"servers": {"gated": {"command": "bun", "approve_free": "plan_item"}}});
     env.write(&env.global(), odd.clone());
     let before = std::fs::read_to_string(env.global()).unwrap();
     // `approve_free` is a string: serde refuses it, so the server is not even located.
-    assert!(grant(env.dir(), "xdev", Grant::Server).is_err());
+    assert!(grant(env.dir(), "gated", Grant::Server).is_err());
     assert_eq!(std::fs::read_to_string(env.global()).unwrap(), before);
 }
 
@@ -168,29 +168,29 @@ fn revoke_removes_one_tool_or_every_grant_and_reports_nothing_to_do() {
     let env = Env::new();
     env.write(&env.global(), two_servers());
     for name in ["a", "b"] {
-        grant(env.dir(), "xdev", Grant::Tool(name)).unwrap();
+        grant(env.dir(), "gated", Grant::Tool(name)).unwrap();
     }
-    grant(env.dir(), "xdev", Grant::Server).unwrap();
+    grant(env.dir(), "gated", Grant::Server).unwrap();
 
-    let (_, removed) = revoke(env.dir(), "xdev", Some("a")).unwrap();
+    let (_, removed) = revoke(env.dir(), "gated", Some("a")).unwrap();
     assert_eq!(removed, 1);
     assert_eq!(
-        env.read(&env.global())["servers"]["xdev"]["approve_free"],
+        env.read(&env.global())["servers"]["gated"]["approve_free"],
         json!(["b", "*"])
     );
-    assert!(revoke(env.dir(), "xdev", Some("a")).is_err());
+    assert!(revoke(env.dir(), "gated", Some("a")).is_err());
 
-    let (_, removed) = revoke(env.dir(), "xdev", None).unwrap();
+    let (_, removed) = revoke(env.dir(), "gated", None).unwrap();
     assert_eq!(removed, 2);
     assert_eq!(env.read(&env.global()), {
         let mut expected = two_servers();
-        expected["servers"]["xdev"]
+        expected["servers"]["gated"]
             .as_object_mut()
             .unwrap()
             .remove("approve_free");
         expected
     });
-    assert!(revoke(env.dir(), "xdev", None).is_err());
+    assert!(revoke(env.dir(), "gated", None).is_err());
     assert!(revoke(env.dir(), "missing", None).is_err());
 }
 
@@ -200,18 +200,18 @@ fn locate_picks_the_same_definition_the_loader_runs() {
     env.write(&env.global(), two_servers());
     env.write(
         &env.project.path().join(".jcode/mcp.json"),
-        json!({"servers": {"xdev": {"command": "bun-project"}}}),
+        json!({"servers": {"gated": {"command": "bun-project"}}}),
     );
     // A remote twin in a later file never displaces the stdio definition.
     env.write(
         &env.project.path().join(".mcp.json"),
-        json!({"mcpServers": {"xdev": {"type": "http", "url": "https://example.test/mcp"}}}),
+        json!({"mcpServers": {"gated": {"type": "http", "url": "https://example.test/mcp"}}}),
     );
 
     let loaded = McpConfig::load_for_dir(env.dir());
-    let found = locate(env.dir(), "xdev").unwrap();
+    let found = locate(env.dir(), "gated").unwrap();
     assert_eq!(found.config.command, "bun-project");
-    assert_eq!(found.config.command, loaded.servers["xdev"].command);
+    assert_eq!(found.config.command, loaded.servers["gated"].command);
     assert_eq!(found.path, env.project.path().join(".jcode/mcp.json"));
 }
 
@@ -229,12 +229,12 @@ fn config_toml_mcp_servers_are_reported_as_inert() {
 
     std::fs::write(
         env.home.path().join("config.toml"),
-        "[mcp.servers.xdev]\napproval = \"annotations\"\n[mcp.servers.zed]\ncommand = \"z\"\n",
+        "[mcp.servers.gated]\napproval = \"annotations\"\n[mcp.servers.zed]\ncommand = \"z\"\n",
     )
     .unwrap();
     let warning = inert_config_toml_warning().unwrap();
     assert!(warning.contains("config.toml"), "{warning}");
-    assert!(warning.contains("[mcp.servers.xdev]"), "{warning}");
+    assert!(warning.contains("[mcp.servers.gated]"), "{warning}");
     assert!(warning.contains("[mcp.servers.zed]"), "{warning}");
     assert!(warning.contains("mcp.json"), "{warning}");
 }

@@ -164,7 +164,7 @@ async fn preparation_is_read_only_and_pins_the_organization() {
             .find_map(|line| line.strip_prefix("user-agent: "))
             .unwrap();
         assert!(agent.starts_with("claude-cli/") && agent.ends_with(" (external, cli)"));
-        // omp's account-endpoint headers and nothing else (no request id).
+        // The reference CLI's account-endpoint headers and nothing else (no request id).
         assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
         assert!(request.contains("accept: application/json, text/plain, */*"));
         assert!(!request.contains("x-client-request-id"));

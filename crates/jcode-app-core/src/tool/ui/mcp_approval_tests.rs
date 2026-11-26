@@ -863,8 +863,8 @@ async fn a_client_that_attaches_while_the_call_waits_gets_the_card() {
 #[tokio::test(flavor = "multi_thread")]
 async fn with_nobody_attaching_the_wait_ends_with_an_actionable_refusal() {
     let request = jcode_tool_core::McpApprovalRequest {
-        server: "xdev".into(),
-        tool: "review_plan".into(),
+        server: "gated".into(),
+        tool: "plan_item".into(),
         arguments: json!({}),
         project_dir: None,
     };
@@ -876,11 +876,11 @@ async fn with_nobody_attaching_the_wait_ends_with_an_actionable_refusal() {
     let message = format!("{error:#}");
     assert!(message.contains("session nobody"), "{message}");
     assert!(
-        message.contains("jcode mcp approvals allow xdev review_plan"),
+        message.contains("jcode mcp approvals allow gated plan_item"),
         "{message}"
     );
     assert_eq!(
         log_line("refused_no_client", &ctx("nobody"), &request),
-        "MCP_APPROVAL outcome=refused_no_client session=nobody server=xdev tool=review_plan"
+        "MCP_APPROVAL outcome=refused_no_client session=nobody server=gated tool=plan_item"
     );
 }

@@ -104,12 +104,12 @@ mod tests {
         assert!(matches!(parse(&["--json"]), (true, None)));
         assert!(matches!(parse(&[]), (false, None)));
         assert!(matches!(
-            parse(&["revoke", "xdev", "review_plan"]),
-            (false, Some(ApprovalsCommand::Revoke { server, tool: Some(tool) })) if server == "xdev" && tool == "review_plan"
+            parse(&["revoke", "gated", "plan_item"]),
+            (false, Some(ApprovalsCommand::Revoke { server, tool: Some(tool) })) if server == "gated" && tool == "plan_item"
         ));
         assert!(matches!(
-            parse(&["allow", "xdev"]),
-            (false, Some(ApprovalsCommand::Allow { server, tool: None })) if server == "xdev"
+            parse(&["allow", "gated"]),
+            (false, Some(ApprovalsCommand::Allow { server, tool: None })) if server == "gated"
         ));
     }
 

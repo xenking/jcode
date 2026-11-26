@@ -150,7 +150,7 @@ Harness wss connect") and Jcode Desktop commit \`$rustls_desktop\` ("lock rustls
 both contained in jcode $cli_sha / Desktop $desktop_sha.
 
 ## 9. MCP tool approvals
-A tool that an MCP server marks as non-read-only (for example the work server \`xdev\`) asks before it runs:
+A tool that an MCP server marks as non-read-only (for example a review server) asks before it runs:
 the card offers **Allow once**, **Always allow this tool**, **Always allow every tool on this server** and **Deny**.
 The two "Always" answers are written to the MCP file the server is read from (normally \`~/.jcode/mcp.json\`):
 the raw tool name in that server's \`approve_free\` list, or \`"*"\` there for every tool on the server. They apply at
