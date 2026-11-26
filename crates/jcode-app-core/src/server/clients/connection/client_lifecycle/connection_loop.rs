@@ -265,24 +265,37 @@ impl ClientConnection {
                         },
                         "client_lifecycle: Error",
                     );
-                } else if !crate::turn_cancel_registry::force_stop(session_id)
-                    && crate::turn_cancel_registry::has_active_turn(session_id)
-                {
-                    send_client_event_best_effort(
-                        &self.client_event_tx,
-                        ServerEvent::Error {
-                            id: *id,
-                            message: "This active turn does not support force stop".into(),
-                            retry_after_secs: None,
-                        },
-                        "client_lifecycle: Error",
-                    );
                 } else {
-                    send_client_event_best_effort(
-                        &self.client_event_tx,
-                        ServerEvent::Ack { id: *id },
-                        "client_lifecycle: Ack",
-                    );
+                    // Scope before the abort releases the turn's identity.
+                    let scoped = turn_scope(Some(&self.env.sessions), session_id);
+                    if !crate::turn_cancel_registry::force_stop(session_id)
+                        && crate::turn_cancel_registry::has_active_turn(session_id)
+                    {
+                        send_client_event_best_effort(
+                            &self.client_event_tx,
+                            ServerEvent::Error {
+                                id: *id,
+                                message: "This active turn does not support force stop".into(),
+                                retry_after_secs: None,
+                            },
+                            "client_lifecycle: Error",
+                        );
+                    } else {
+                        send_client_event_best_effort(
+                            &self.client_event_tx,
+                            ServerEvent::Ack { id: *id },
+                            "client_lifecycle: Ack",
+                        );
+                        // A turn owned by this connection confirms itself; any
+                        // other owner may be a dead pre-reconnect connection.
+                        if self.processing_task.is_none() {
+                            confirm_detached_stop(
+                                session_id,
+                                &self.client_event_tx,
+                                scoped(ServerEvent::Interrupted),
+                            );
+                        }
+                    }
                 }
                 continue;
             }

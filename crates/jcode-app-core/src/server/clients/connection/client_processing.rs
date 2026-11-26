@@ -748,6 +748,53 @@ pub(super) async fn start_processing_message(
     });
 }
 
+/// Wraps a terminal event in the identity of the session's current (or latest)
+/// turn, so a stale confirmation cannot be mistaken for a newer turn's.
+pub(super) fn turn_scope(
+    sessions: Option<&SessionAgents>,
+    session_id: &str,
+) -> impl Fn(ServerEvent) -> ServerEvent + Send + 'static {
+    let identity = sessions
+        .and_then(|sessions| sessions.turn_observer(session_id))
+        .and_then(|observer| {
+            let (latest, active) = observer.snapshot();
+            active.or_else(|| {
+                (latest > 0).then(|| crate::protocol::TurnIdentity {
+                    runtime_generation: observer.runtime_generation().to_owned(),
+                    turn_id: latest,
+                })
+            })
+        });
+    move |event| match &identity {
+        Some(identity) => ServerEvent::TurnEvent {
+            identity: identity.clone(),
+            text_frames: None,
+            event: Box::new(event),
+        },
+        None => event,
+    }
+}
+
+/// A turn owned by another (possibly dead) connection publishes its terminal
+/// events there, so the requester of the stop would never see one. Send the
+/// requester `event` once the session has no running turn. Never earlier:
+/// a detached stop is only confirmed when the turn has actually exited.
+pub(super) fn confirm_detached_stop(
+    session_id: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+) {
+    let session_id = session_id.to_owned();
+    let tx = client_event_tx.clone();
+    tokio::spawn(async move {
+        let idle = crate::turn_activity::global().wait_until_idle(&session_id);
+        tokio::select! {
+            () = idle => send_client_event_best_effort(&tx, event, "detached stop: Interrupted"),
+            () = tx.closed() => {}
+        }
+    });
+}
+
 pub(super) async fn cancel_processing_message(
     state: &mut ProcessingState<'_>,
     session_control: &SessionControlHandle,
@@ -765,25 +812,7 @@ pub(super) async fn cancel_processing_message(
     }
     // Capture before cancellation releases the reservation. Modern clients
     // reject unscoped terminal events to protect newer turns from stale ones.
-    let identity = sessions
-        .and_then(|sessions| sessions.turn_observer(&session_control.session_id))
-        .and_then(|observer| {
-            let (latest, active) = observer.snapshot();
-            active.or_else(|| {
-                (latest > 0).then(|| crate::protocol::TurnIdentity {
-                    runtime_generation: observer.runtime_generation().to_owned(),
-                    turn_id: latest,
-                })
-            })
-        });
-    let scoped = |event| match &identity {
-        Some(identity) => ServerEvent::TurnEvent {
-            identity: identity.clone(),
-            text_frames: None,
-            event: Box::new(event),
-        },
-        None => event,
-    };
+    let scoped = turn_scope(sessions, &session_control.session_id);
     let cancel_start = Instant::now();
     let session_label = state
         .session_id
@@ -952,8 +981,13 @@ pub(super) async fn cancel_processing_message(
                 reset_control.reset_cancel_if_epoch(cancel_epoch);
             }
         });
-        // The owning connection publishes terminal events when the turn
-        // actually exits. Do not report a detached cancellation as confirmed.
+        // The owning connection may be gone (reconnect), so confirm to the
+        // requester once the turn has actually exited, never earlier.
+        confirm_detached_stop(
+            &session_control.session_id,
+            client_event_tx,
+            scoped(ServerEvent::Interrupted),
+        );
     }
 }
 

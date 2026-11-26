@@ -611,6 +611,18 @@ async fn sdk_socket_cancel_workflow(
                 )
                 .await;
             } else {
+                // The turn belongs to another connection, which may be gone
+                // after a reconnect: the requester must still be told it ended.
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    until(&mut legacy_reader, |event| {
+                        matches!(event, ServerEvent::Interrupted)
+                            || matches!(event, ServerEvent::TurnEvent { event, .. }
+                                if matches!(event.as_ref(), ServerEvent::Interrupted))
+                    }),
+                )
+                .await
+                .expect("force stop must be confirmed to the requesting connection");
                 send(
                     &mut legacy_writer,
                     json!({"type":"message","id":78,"content":"next message"}),

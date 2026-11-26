@@ -680,6 +680,95 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
     Ok(())
 }
 
+/// The connection that owned a turn can be gone (Desktop reconnect). The
+/// requester of a cancel is a different connection and must still be told the
+/// detached turn has stopped, or its UI waits for confirmation forever.
+#[test]
+fn detached_cancel_is_confirmed_to_the_requesting_connection() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_detached_cancel_confirmation";
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(NeverEndingStreamProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.apply_route(crate::session::Route {
+            model: Some("never-ending-stream".to_string()),
+            ..session.route()
+        });
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let turn_agent = Arc::clone(&agent);
+        let turn = tokio::spawn(async move {
+            process_message_streaming_mpsc(turn_agent, "stream forever", Vec::new(), None, event_tx)
+                .await
+        });
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), event_rx.recv()).await {
+                Ok(Some(ServerEvent::TextDelta { .. })) => break,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("event channel closed before streaming started"),
+                Err(_) => panic!("turn never started streaming"),
+            }
+        }
+
+        let control = SessionControlHandle::cancel_only(
+            session_id,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            InterruptSignal::new(),
+        );
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let mut client_is_processing = false;
+        let mut message_id = None;
+        let mut cancel_session_id = None;
+        let mut task = None;
+        cancel_processing_message(
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut cancel_session_id,
+                task: &mut task,
+            },
+            &control,
+            &client_event_tx,
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+            Some(1),
+            None,
+            None,
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(2), turn)
+            .await
+            .expect("turn must stop")
+            .expect("turn task join")
+            .expect("cancelled turn should checkpoint cleanly");
+        match tokio::time::timeout(Duration::from_secs(2), client_event_rx.recv()).await {
+            Ok(Some(ServerEvent::Interrupted)) => {}
+            other => {
+                panic!("requester must receive Interrupted once the turn exits, got {other:?}")
+            }
+        }
+    });
+    Ok(())
+}
+
 /// A cancel that arrives while the session is idle must not arm the cancel
 /// signal at all.
 ///
