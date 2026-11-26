@@ -169,11 +169,11 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-first-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-second-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -217,11 +217,11 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-stale-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-real-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -266,11 +266,11 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-original-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-late-")
-        .tempdir()
+        .tempdir_in(std::env::temp_dir().canonicalize()?)
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;

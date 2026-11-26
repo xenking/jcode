@@ -668,6 +668,10 @@ pub fn replacement_guidance(host: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // checked_path rejects symlinks; macOS TMPDIR is under the /var symlink.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
     fn root() -> PathBuf {
         let p = std::env::temp_dir().join(format!("jcode-env-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&p).unwrap();
@@ -693,9 +697,9 @@ mod tests {
     #[test]
     fn environment_root_subdirectory_and_invalid_values() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let subdirectory = project.path().join("src/nested");
         std::fs::create_dir_all(&subdirectory).unwrap();
@@ -724,11 +728,11 @@ mod tests {
     #[cfg(unix)]
     fn a_symlinked_jcode_home_still_loads_and_saves_the_environment() {
         let _guard = crate::storage::lock_test_env();
-        let real = tempfile::tempdir().unwrap();
+        let real = tempdir();
         let link = real.path().with_extension("link");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
         let _home = HomeGuard::set(&link);
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         assert!(load_environment(project.path()).unwrap().is_empty());
         assert!(save_environment(project.path(), "TEST_TOKEN", "opaque-test-value").unwrap());
@@ -742,9 +746,9 @@ mod tests {
     #[test]
     fn concurrent_manifest_and_environment_updates_are_not_lost() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(12);
         std::thread::scope(|scope| {
@@ -788,9 +792,9 @@ mod tests {
     fn workspace_hydration_lock_is_shared_and_released() {
         use std::os::fd::AsRawFd;
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let nested = project.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
