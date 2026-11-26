@@ -298,11 +298,11 @@ fn wall_offers_redeem_and_compact_switch_in_the_gate() {
     let b = id("claude:b");
     let later = weekly_grant(NOW + 30 * DAY);
     let request = on_b(&b, cache(Seam::Warm, 400_000.0, 40_000.0));
-    // At its wall an hour before the reset: the room left there is lost
-    // anyway, so compacting on it is free.
+    // At the provider's wall an hour before the reset: the room left there is
+    // lost anyway, so compacting on it is free.
     let walled = AccountState {
-        readings: vec![weekly_resetting(96.0, NOW + HOUR)],
-        ..state(96.0, vec![later])
+        readings: vec![weekly_resetting(99.0, NOW + HOUR)],
+        ..state(99.0, vec![later])
     };
     let snap = snapshot(state(30.0, vec![]), walled);
 

@@ -11,6 +11,10 @@ use crate::economics::{
 use crate::policy::{Account, AccountId, Budget, Policy, Scope, Window};
 use crate::strategy::BurnRing;
 
+/// A percent window this full is a wall the provider enforces: the account
+/// can no longer serve. The soft ceiling (`limit_pct`) only steers choices.
+const HARD_LIMIT_PCT: f64 = 99.0;
+
 /// One usage window an account reports right now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
@@ -174,6 +178,10 @@ struct Standing<'p> {
     account: &'p Account,
     index: usize,
     ready: bool,
+    /// Cannot serve at all: a percent window at [`HARD_LIMIT_PCT`], a provider
+    /// cap or a `block` budget reached, or the account is evicted or its
+    /// proxy is down. A merely `spent` account (the soft ceiling) still serves.
+    hard: bool,
     /// The strictest action among the limits it reached, with their reasons.
     spent: Option<(OnLimit, Vec<String>)>,
     warnings: Vec<String>,
@@ -287,6 +295,9 @@ pub fn decide(
         PaidIntent::Default => policy.paid == PaidMode::Auto,
     };
     let allowed = |s: &Standing<'_>| s.usable() && (paid_allowed || !s.account.kind.is_paid());
+    // A warm session keeps an account that can still serve, past its soft ceiling.
+    let serves_warm =
+        |s: &Standing<'_>| s.ready && !s.hard && (paid_allowed || !s.account.kind.is_paid());
     let mut ranked: Vec<&Standing<'_>> = standings.iter().filter(|s| allowed(s)).collect();
     ranked.sort_by(|a, b| rank(a, b, request));
 
@@ -320,12 +331,26 @@ pub fn decide(
         }
     }
 
+    if ranked.is_empty()
+        && request.cache.seam == Seam::Warm
+        && let Some(current) = current.filter(|current| serves_warm(current))
+    {
+        return use_account(
+            current,
+            format!(
+                "staying on warm {}: no other account can take the turn",
+                current.account.id
+            ),
+            None,
+        );
+    }
+
     match ranked.first() {
         Some(best) => match current {
             Some(current)
                 if current.account.id != best.account.id && request.cache.seam == Seam::Warm =>
             {
-                leave_warm(policy, request, current, allowed(current), best)
+                leave_warm(policy, request, current, serves_warm(current), best)
             }
             _ => {
                 let reason = match request.current {
@@ -785,6 +810,14 @@ fn stand<'p>(
                 .map(|(_, line)| format!("{line} (acknowledged)")),
         );
     }
+    // An acknowledged limit is spent on purpose, so it is not a wall. A budget `block` still is.
+    let hard = !ready
+        || hits.iter().any(|(action, _)| *action == OnLimit::Block)
+        || (!acked
+            && readings.iter().any(|r| match r.unit {
+                Unit::Percent => r.used >= HARD_LIMIT_PCT,
+                _ => r.limit.is_some_and(|limit| r.used >= limit),
+            }));
     let spent = hits.iter().map(|(action, _)| *action).max().map(|action| {
         (
             action,
@@ -821,6 +854,7 @@ fn stand<'p>(
         account,
         index,
         ready,
+        hard,
         spent,
         warnings,
         load,

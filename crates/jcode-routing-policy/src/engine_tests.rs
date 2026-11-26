@@ -5,8 +5,8 @@ use crate::config::{
     PriorityConfig, RoutingConfig, Unit,
 };
 use crate::{
-    AccountId, AccountState, Availability, BurnRing, Decision, GateOption, Intents, PaidIntent,
-    Policy, Reading, Request, Role, Snapshot, Timed, Window, decide,
+    AccountId, AccountState, Availability, BurnRing, CacheContext, Decision, GateOption, Intents,
+    PaidIntent, Policy, Reading, Request, Role, Seam, Snapshot, Timed, Window, decide,
 };
 
 const NOW: i64 = 1_800_000_000;
@@ -950,4 +950,107 @@ fn hysteresis_blocks_a_flip_to_a_nearly_full_account() {
         decide(&with, &snap, &Intents::default(), request, NOW),
         Decision::Gate { .. }
     ));
+}
+
+// The incident: a 38k-token warm session on an account that still serves.
+fn warm_pair(a: AccountState) -> (Policy, Snapshot, AccountId) {
+    let policy = policy(
+        vec![
+            account("claude:a", AccountKind::Subscription, 1),
+            account("claude:b", AccountKind::Subscription, 2),
+        ],
+        vec![],
+    );
+    let mut snap = Snapshot::default();
+    snap.accounts.insert(id("claude:a"), a);
+    snap.accounts.insert(
+        id("claude:b"),
+        ready(id("claude:b"), vec![pct(Window::hours(5), 10.0)]).1,
+    );
+    (policy, snap, id("claude:a"))
+}
+
+fn warm_request(current: &AccountId, seam: Seam) -> Request<'_> {
+    Request {
+        current: Some(current),
+        cache: CacheContext {
+            seam,
+            context_tokens: 38_000.0,
+            ..CacheContext::default()
+        },
+        ..interactive("m")
+    }
+}
+
+fn state_at(used: f64, availability: Availability, burn: BurnRing) -> AccountState {
+    AccountState {
+        readings: vec![pct(Window::hours(5), used)],
+        availability,
+        burn,
+        grants: Vec::new(),
+    }
+}
+
+fn moved_to(decision: &Decision) -> Option<&str> {
+    match decision {
+        Decision::Use {
+            account,
+            pending: None,
+            ..
+        }
+        | Decision::CompactThenMove { account, .. } => Some(account.as_str()),
+        _ => None,
+    }
+}
+
+#[test]
+fn warm_session_stays_on_an_account_past_the_soft_ceiling() {
+    // 40 pct/h over the horizon lowers a's ceiling to 55: 70% is "spent", yet
+    // the provider still serves it. 96% is over the 95 ceiling with no burn.
+    for (used_pct, history) in [
+        (70.0, burn(&[(NOW - 3_600, 30.0), (NOW, 70.0)])),
+        (96.0, BurnRing::default()),
+    ] {
+        let (policy, snap, current) = warm_pair(state_at(used_pct, Availability::Ready, history));
+        let request = warm_request(&current, Seam::Warm);
+        let decision = decide(&policy, &snap, &Intents::default(), request, NOW);
+        let Decision::Use {
+            account, pending, ..
+        } = &decision
+        else {
+            panic!("a warm session on a serving account must stay, got {decision:?}");
+        };
+        assert_eq!(account.as_str(), "claude:a", "at {used_pct}%: {decision:?}");
+        assert_eq!(pending.as_ref().map(AccountId::as_str), Some("claude:b"));
+    }
+}
+
+#[test]
+fn warm_session_moves_when_its_account_is_hard_blocked() {
+    for blocked in [
+        state_at(99.0, Availability::Ready, BurnRing::default()),
+        state_at(
+            10.0,
+            Availability::Evicted { until: NOW + 600 },
+            BurnRing::default(),
+        ),
+        state_at(10.0, Availability::EgressDown, BurnRing::default()),
+    ] {
+        let (policy, snap, current) = warm_pair(blocked);
+        let request = warm_request(&current, Seam::Warm);
+        let decision = decide(&policy, &snap, &Intents::default(), request, NOW);
+        assert_eq!(moved_to(&decision), Some("claude:b"), "{decision:?}");
+    }
+}
+
+#[test]
+fn cold_session_moves_off_the_soft_ceiling() {
+    let (policy, snap, current) = warm_pair(state_at(
+        70.0,
+        Availability::Ready,
+        burn(&[(NOW - 3_600, 30.0), (NOW, 70.0)]),
+    ));
+    let request = warm_request(&current, Seam::Cold);
+    let decision = decide(&policy, &snap, &Intents::default(), request, NOW);
+    assert_eq!(moved_to(&decision), Some("claude:b"), "{decision:?}");
 }

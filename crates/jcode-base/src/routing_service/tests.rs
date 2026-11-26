@@ -335,6 +335,47 @@ async fn warm_session_still_moves_when_the_current_account_is_spent() {
     assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
 }
 
+/// What the daemon passes for a resumed session: warm, 38k tokens, no measured
+/// summary, no per-turn estimate.
+fn production_cache() -> CacheContext {
+    CacheContext {
+        seam: Seam::Warm,
+        context_tokens: 38_000.0,
+        summary_tokens: None,
+        ..CacheContext::default()
+    }
+}
+
+#[tokio::test]
+async fn warm_session_stays_on_a_serving_account_and_moves_only_when_blocked() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let turn = TurnInput {
+        cache: production_cache(),
+        ..input("claude:a", Seam::Warm, Role::Interactive)
+    };
+    env.set_used("claude:b", 10.0);
+    // A steep climb on a: 30% to 70% in an hour. Staying costs nothing the
+    // provider will refuse, so the session keeps its cache.
+    env.set_used("claude:a", 30.0);
+    service.plan(&turn).await;
+    env.now.store(NOW + 3_600, Ordering::SeqCst);
+    env.set_used("claude:a", 70.0);
+    let plan = service.plan(&turn).await;
+    let Plan::Stay(outcome) = plan else {
+        panic!("a warm session on a serving account must stay, got {plan:?}");
+    };
+    assert_eq!(outcome.account, account("claude:a"));
+
+    env.set_used("claude:a", 99.0);
+    let plan = service.plan(&turn).await;
+    assert!(
+        matches!(plan, Plan::Move(ref outcome) | Plan::CompactThenMove(ref outcome)
+            if outcome.account == account("claude:b")),
+        "a hard-blocked account is left at once: {plan:?}"
+    );
+}
+
 #[tokio::test]
 async fn an_explicit_switch_moves_a_warm_session_immediately() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
