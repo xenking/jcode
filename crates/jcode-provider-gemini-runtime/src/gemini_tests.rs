@@ -1,6 +1,8 @@
 use super::*;
 use jcode_base::message::{ContentBlock, Message, Role};
 
+/// Env changes reach `config()` only after its (500ms outside jcode-base's own
+/// tests) check throttle, so every set/restore forces the next read to reload.
 pub(super) struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -10,18 +12,21 @@ impl EnvVarGuard {
     pub(super) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let previous = std::env::var_os(key);
         jcode_base::env::set_var(key, value);
+        jcode_base::config::invalidate_config_cache();
         Self { key, previous }
     }
 
     pub(super) fn set_value(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
         jcode_base::env::set_var(key, value);
+        jcode_base::config::invalidate_config_cache();
         Self { key, previous }
     }
 
     pub(super) fn unset(key: &'static str) -> Self {
         let previous = std::env::var_os(key);
         jcode_base::env::remove_var(key);
+        jcode_base::config::invalidate_config_cache();
         Self { key, previous }
     }
 }
@@ -33,6 +38,7 @@ impl Drop for EnvVarGuard {
         } else {
             jcode_base::env::remove_var(self.key);
         }
+        jcode_base::config::invalidate_config_cache();
     }
 }
 
