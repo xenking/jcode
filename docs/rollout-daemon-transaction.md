@@ -354,5 +354,12 @@ The runner writes `$JCODE_HOME/rollout-acceptance/<cli-sha>-<desktop-sha>.json`
 with the schema version, exact pair, per-flow outcomes, overall outcome, and UTC
 finish time. A failure is `ISSUES`; a flow that could not run is `BLOCKED`.
 Neither authorizes rollout. The receipt points to retained evidence for the run.
+
+The rollout reads only the receipt JSON; the `smoke-*` evidence directories
+(logs, JSON, screenshots, about 5 MB each) are for people. The runner builds
+into the same shared Cargo target as the rollout (`CARGO_TARGET_DIR`, default
+`$JCODE_HOME/shared-build/target`), which the disk GC manages. It never keeps
+build output under the receipt directory. A run whose evidence directory holds
+more than 50 MiB is recorded as `BLOCKED` with a message naming the directory.
 Use `--skip-acceptance-smoke` only in an emergency. A real invocation logs
 the override and both target SHAs. A dry run does not write an override log.

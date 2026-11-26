@@ -121,6 +121,46 @@ class ReceiptReuseTests(unittest.TestCase):
         self.assertTrue(Path(receipt["evidence"]).is_dir())
 
 
+class EvidenceSizeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name).resolve()
+
+    def write_sparse(self, path, size):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as stream:
+            stream.truncate(size)  # sparse: counts its apparent size without using disk
+
+    def test_small_evidence_passes_and_build_output_fails(self):
+        self.write_sparse(self.directory / "send/screenshot.png", 4 * 1024 * 1024)
+        self.assertIsNone(SMOKE.evidence_oversize(self.directory))
+        self.write_sparse(self.directory / "target/release/jcode", SMOKE.MAX_EVIDENCE_BYTES + 1)
+        self.assertIn("over the 50 MiB limit", SMOKE.evidence_oversize(self.directory))
+
+    def test_oversize_evidence_blocks_the_receipt(self):
+        def build_copy_leaks_into_evidence(_args, run, results):
+            self.write_sparse(run / "target/jcode", SMOKE.MAX_EVIDENCE_BYTES + 1)
+            results.update(PASS_FLOWS)
+
+        argv = ["accept-smoke.py", "--jcode-sha", CLI, "--desktop-sha", DESKTOP,
+                "--receipt-dir", str(self.directory)]
+        stdout = io.StringIO()
+        with (patch.object(sys, "argv", argv),
+              patch.object(sys, "dont_write_bytecode"),
+              patch.object(SMOKE, "smoke", side_effect=build_copy_leaks_into_evidence),
+              redirect_stdout(stdout)):
+            self.assertEqual(SMOKE.main(), 2)
+        receipt = json.loads((self.directory / f"{CLI}-{DESKTOP}.json").read_text())
+        self.assertEqual(receipt["result"], "BLOCKED")
+        self.assertIn("over the 50 MiB limit", stdout.getvalue())
+
+    def test_builds_go_to_the_shared_target_not_the_receipt_dir(self):
+        home = {"JCODE_HOME": "/home/j"}
+        self.assertEqual(SMOKE.shared_target_dir(home), Path("/home/j/shared-build/target"))
+        self.assertEqual(SMOKE.shared_target_dir(dict(home, CARGO_TARGET_DIR="/cache/t")), Path("/cache/t"))
+
+
 class ToolchainTests(unittest.TestCase):
     def test_explicit_developer_dir_wins(self):
         self.assertEqual(SMOKE.developer_dir({"DEVELOPER_DIR": "/custom"}, xcode="/"), "/custom")

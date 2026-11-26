@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build and smoke a Jcode + Desktop commit pair without touching the installation."""
+"""Build and smoke a Jcode + Desktop commit pair without touching the installation.
+
+Builds go to the shared Cargo target (see shared_target_dir); the receipt directory
+holds only receipts and per-run evidence (logs, json, screenshots), capped by
+MAX_EVIDENCE_BYTES per run.
+"""
 
 import argparse
 import base64
@@ -23,6 +28,8 @@ from http.server import ThreadingHTTPServer
 
 
 RECEIPT_SCHEMA = 1
+# A run keeps receipts, logs and screenshots only; build output belongs in the shared target.
+MAX_EVIDENCE_BYTES = 50 * 1024 * 1024
 CORE_FLOWS = (
     "send", "queue_while_busy", "btw", "ask_answer", "image_paste",
     "transcript_scroll", "restart_restore",
@@ -31,6 +38,25 @@ CORE_FLOWS = (
 
 class Blocked(RuntimeError):
     """A prerequisite was unavailable, so the flow did not run."""
+
+
+def shared_target_dir(environ=os.environ):
+    """The Cargo target rollout builds use and the disk GC manages; never a per-receipt copy."""
+    explicit = environ.get("CARGO_TARGET_DIR")
+    jcode_home = Path(environ.get("JCODE_HOME") or Path.home() / ".jcode")
+    return Path(explicit).expanduser().resolve() if explicit else jcode_home / "shared-build/target"
+
+
+def evidence_oversize(directory, limit=MAX_EVIDENCE_BYTES):
+    """A message naming `directory` when its files exceed `limit` bytes, else None."""
+    total = sum(
+        (Path(root) / name).lstat().st_size
+        for root, _dirs, names in os.walk(directory) for name in names
+    )
+    if total > limit:
+        return (f"evidence {directory} holds {total / 2**20:.0f} MiB, over the {limit // 2**20} MiB limit; "
+                "receipts keep logs, json and screenshots only, so build into the shared target "
+                "(CARGO_TARGET_DIR, default $JCODE_HOME/shared-build/target)")
 
 
 def output(*command, env=None):
@@ -374,10 +400,10 @@ def smoke(args, run, results):
         build_env["DEVELOPER_DIR"] = developer_dir()
         # Without Xcode's Metal compiler, Desktop compiles its shaders at start.
         desktop_features = () if has_metal(build_env["DEVELOPER_DIR"]) else (RUNTIME_SHADERS,)
-        target = args.receipt_dir / "target"
-        cli = build(cli_repo, target / "cli", "jcode", "selfdev" if args.dev_build else "release",
+        target = shared_target_dir()
+        cli = build(cli_repo, target, "jcode", "selfdev" if args.dev_build else "release",
                     dict(build_env, JCODE_BUILD_GIT_HASH=args.jcode_sha), run / "cli-build.log")
-        desktop = build(desktop_repo, target / "desktop", "jcode-desktop", "dev" if args.dev_build else "release",
+        desktop = build(desktop_repo, target, "jcode-desktop", "dev" if args.dev_build else "release",
                         build_env, run / "desktop-build.log", desktop_features)
         with tempfile.TemporaryDirectory(prefix="j-smoke-version-", dir="/tmp") as directory:
             env = verify.environment(Path(directory), Path(directory) / "control")
@@ -477,6 +503,10 @@ def main():
             for flow, status in results.items():
                 if status == "BLOCKED":
                     print(f"BLOCKED {flow}: run did not reach this flow", flush=True)
+        oversize = evidence_oversize(run)
+        if oversize:
+            blocked = True
+            print(f"BLOCKED: {oversize}", flush=True)
         result = "ISSUES" if "ISSUES" in results.values() else "BLOCKED" if blocked or "BLOCKED" in results.values() else "PASS"
         receipt = dict(schema=RECEIPT_SCHEMA, pair=pair, flows=results,
                        result=result, finished_at=datetime.now(timezone.utc).isoformat(), evidence=str(run))
