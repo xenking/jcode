@@ -1,9 +1,8 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::super::{
-    SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState, VersionedPlan,
-    broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
-    queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
+    SwarmEvent, SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status,
+    fanout_session_event, persist_swarm_state_for, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
 use super::*;
