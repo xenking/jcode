@@ -1351,6 +1351,21 @@ async fn force_stop_pending_ask_over_socket_releases_session() {
 }
 
 #[tokio::test]
+async fn cancel_after_owner_reconnect_is_confirmed_to_the_new_connection() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("cancel_reconnect"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn force_stop_never_returning_tool_over_socket_releases_session() {
     sdk_socket_cancel_workflow(
         false,

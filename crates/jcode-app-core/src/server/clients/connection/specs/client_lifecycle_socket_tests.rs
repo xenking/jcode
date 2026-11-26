@@ -278,7 +278,7 @@ async fn sdk_socket_cancel_workflow(
     let home = IsolatedReloadRecoveryEnv::new();
     let terminal_provider = TerminalSocketProvider::default();
     terminal_provider.ask_after_reattach.store(
-        ask_reattach || queued_test == Some("force_stop"),
+        ask_reattach || matches!(queued_test, Some("force_stop" | "cancel_reconnect")),
         Ordering::SeqCst,
     );
     terminal_provider
@@ -359,7 +359,7 @@ async fn sdk_socket_cancel_workflow(
     use serde_json::json;
     send(
         &mut client_writer,
-        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach || queued_test == Some("reload")}),
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach || matches!(queued_test, Some("reload" | "cancel_reconnect"))}),
     )
     .await;
     until(&mut client_reader, |e| {
@@ -548,6 +548,38 @@ async fn sdk_socket_cancel_workflow(
             assert!(matches!(event, ServerEvent::AvailableModelsUpdated { .. }));
             drop(client_writer);
             drop(client_reader);
+            drop(legacy_writer);
+            drop(legacy_reader);
+            server_task.abort();
+            legacy_task.abort();
+            return;
+        }
+        if queued_test == Some("cancel_reconnect") {
+            // The connection that owned the turn is gone, as after a Desktop
+            // reconnect. The new connection's cancel must still be confirmed.
+            terminal_provider.finish_first.notify_one();
+            until(&mut legacy_reader, |event| {
+                matches!(event, ServerEvent::AskUserRequest { .. })
+            })
+            .await;
+            drop(client_writer);
+            drop(client_reader);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client_connections.read().await.len() > 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("owner must detach while the turn continues");
+            send(&mut legacy_writer, json!({"type":"cancel","id":55})).await;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                until(&mut legacy_reader, |event| {
+                    matches!(event, ServerEvent::Interrupted)
+                }),
+            )
+            .await
+            .expect("the requester of a cancel must be told the detached turn stopped");
             drop(legacy_writer);
             drop(legacy_reader);
             server_task.abort();
