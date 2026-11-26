@@ -1,6 +1,6 @@
-use super::{filter_inline_swarm_subtree, has_inline_swarm_descendants};
 use crate::protocol::SwarmMemberStatus;
 use crate::tui::TuiState as _;
+use crate::tui::app::swarm_subtree::{filter_inline_swarm_subtree, has_inline_swarm_descendants};
 
 #[test]
 fn boolean_matches_filter_exhaustive_small_graphs() {

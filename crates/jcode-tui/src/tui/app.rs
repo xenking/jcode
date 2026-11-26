@@ -146,6 +146,7 @@ mod state_ui_storage;
 mod subscribe_nudge;
 mod support;
 mod swarm_hint;
+mod swarm_subtree;
 mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;

@@ -1871,6 +1871,7 @@ impl App {}
 
 #[path = "tui_state/swarm_launch.rs"]
 mod swarm_launch;
+use super::swarm_subtree::has_inline_swarm_descendants;
 #[allow(unused_imports)]
 pub(crate) use swarm_launch::*;
 

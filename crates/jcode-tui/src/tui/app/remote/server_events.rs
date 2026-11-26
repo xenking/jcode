@@ -1141,11 +1141,12 @@ fn handle_server_event_inner(
                     Some(app.session.id().to_owned())
                 };
                 if let Some(self_id) = self_id.as_deref() {
-                    let prev = app_mod::tui_state::filter_inline_swarm_subtree(
+                    let prev = app_mod::swarm_subtree::filter_inline_swarm_subtree(
                         &app.remote_swarm_members,
                         self_id,
                     );
-                    let next = app_mod::tui_state::filter_inline_swarm_subtree(&members, self_id);
+                    let next =
+                        app_mod::swarm_subtree::filter_inline_swarm_subtree(&members, self_id);
                     if let Some(notice) = swarm_status_transition_notice(&prev, &next) {
                         app.set_status_notice(notice);
                     }

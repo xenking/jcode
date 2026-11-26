@@ -19,7 +19,10 @@ impl App {
             Some(self.session.id())
         };
         match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
+            Some(self_id) => crate::tui::app::swarm_subtree::filter_inline_swarm_subtree(
+                &self.remote_swarm_members,
+                self_id,
+            ),
             // Session identity is not known yet (e.g. right after connect,
             // before the History event sets `remote_session_id`). Showing all
             // swarm members here caused the inline strip to flash on startup
