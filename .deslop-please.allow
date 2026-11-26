@@ -277,7 +277,6 @@ shallow-module jcode_task_types
 shallow-module jcode_todo_policy
 shallow-module jcode_tool_core
 shallow-module jcode_tui::tui::app::auth
-shallow-module jcode_tui::tui::app::auth_remote
 shallow-module jcode_tui::tui::app::debug
 shallow-module jcode_tui::tui::app::inline_interactive
 shallow-module jcode_tui::tui::app::input

@@ -70,6 +70,7 @@ mod cache_diagnostics;
 mod catchup;
 pub(super) mod commands;
 mod commit_log;
+mod ssh_login_rows;
 pub(crate) use crate::tui::commit_log::CommitLogOverlay;
 mod cloud_environment;
 mod cloud_recovery;
