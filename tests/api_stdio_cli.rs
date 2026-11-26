@@ -23,7 +23,29 @@ fn exercise_stdio(close_daemon_first: bool) {
     std::fs::create_dir_all(&runtime).unwrap();
     let socket = runtime.join("daemon.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
+    // The bridge dials the daemon for a readiness probe, a capability ping and
+    // the session itself, before it greets the client. The fake answers every
+    // ping like a daemon that advertises no optional capability.
+    let connections = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let accepted = connections.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().map_while(Result::ok) {
+            let reader = stream.try_clone().unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            std::thread::spawn(move || {
+                for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["type"] == "ping" {
+                        let pong = serde_json::json!({"type":"pong","id":request["id"]});
+                        if writeln!(writer, "{pong}").is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            accepted.lock().unwrap().push(stream);
+        }
+    });
     let mut child = ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_jcode"))
             .current_dir(root.path())
@@ -88,26 +110,19 @@ fn exercise_stdio(close_daemon_first: bool) {
     let hello: ServerFrame =
         serde_json::from_str(&hello).expect("stdout must contain only API JSON");
     assert!(matches!(hello.event, ApiEvent::HelloOk { .. }));
-    // The first connection is the daemon-readiness probe, the second is the
-    // actual API bridge. Neither needs a real provider or a real session.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut connections = Vec::new();
-    while connections.len() < 2 {
-        match listener.accept() {
-            Ok((stream, _)) => connections.push(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "daemon dial deadline");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("accept: {error}"),
-        }
+    while connections.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "daemon dial deadline");
+        std::thread::sleep(Duration::from_millis(5));
     }
     send(&mut input, 2, ApiRequest::Ping);
     let pong: ServerFrame =
         serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
     assert!(matches!(pong.event, ApiEvent::Pong));
     if close_daemon_first {
-        drop(connections);
+        for connection in connections.lock().unwrap().iter() {
+            let _ = connection.shutdown(std::net::Shutdown::Both); // the bridge may have closed it already
+        }
     } else {
         drop(input);
     }
