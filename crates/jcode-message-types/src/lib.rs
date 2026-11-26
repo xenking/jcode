@@ -70,29 +70,9 @@ impl ToolDefinition {
         defs.iter().filter(|d| !d.defer_loading).cloned().collect()
     }
 
-    /// Serialized size of the full tool definition payload sent to providers.
-    pub fn prompt_chars(&self) -> usize {
-        tool_prompt_size::prompt_chars(self)
-    }
-
     /// Approximate prompt-token cost of this tool's top-level description.
     pub fn description_token_estimate(&self, family: TokenFamily) -> usize {
         estimate_text(family, &self.description)
-    }
-
-    /// Approximate prompt-token cost of the full tool definition payload.
-    pub fn prompt_token_estimate(&self, family: TokenFamily) -> usize {
-        tool_prompt_size::prompt_tokens(self, family)
-    }
-
-    pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
-        defs.iter().map(Self::prompt_chars).sum()
-    }
-
-    pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition], family: TokenFamily) -> usize {
-        defs.iter()
-            .map(|def| def.prompt_token_estimate(family))
-            .sum()
     }
 }
 

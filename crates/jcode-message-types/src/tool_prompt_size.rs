@@ -3,23 +3,37 @@ use crate::{Estimator, TokenFamily, ToolDefinition};
 use serde_json::Value;
 use std::fmt::Write as _;
 
-/// Stream the compact tool JSON through the estimator, without building it.
-pub(super) fn prompt_tokens(tool: &ToolDefinition, family: TokenFamily) -> usize {
-    let mut estimator = Estimator::new(family);
-    estimator
-        .text(r#"{"name":"","description":"","input_schema":}"#)
-        .text(&tool.name)
-        .text(&tool.description);
-    // Writing to the estimator cannot fail.
-    let _ = write!(estimator, "{}", tool.input_schema);
-    estimator.tokens()
-}
+impl ToolDefinition {
+    /// Serialized size of the full tool definition payload sent to providers.
+    pub fn prompt_chars(&self) -> usize {
+        b"{\"name\":,\"description\":,\"input_schema\":}".len()
+            + string_chars(&self.name)
+            + string_chars(&self.description)
+            + value_chars(&self.input_schema)
+    }
 
-pub(super) fn prompt_chars(tool: &ToolDefinition) -> usize {
-    b"{\"name\":,\"description\":,\"input_schema\":}".len()
-        + string_chars(&tool.name)
-        + string_chars(&tool.description)
-        + value_chars(&tool.input_schema)
+    /// Approximate prompt-token cost of the full tool definition payload, with
+    /// the compact tool JSON streamed through the estimator without building it.
+    pub fn prompt_token_estimate(&self, family: TokenFamily) -> usize {
+        let mut estimator = Estimator::new(family);
+        estimator
+            .text(r#"{"name":"","description":"","input_schema":}"#)
+            .text(&self.name)
+            .text(&self.description);
+        // Writing to the estimator cannot fail.
+        let _ = write!(estimator, "{}", self.input_schema);
+        estimator.tokens()
+    }
+
+    pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
+        defs.iter().map(Self::prompt_chars).sum()
+    }
+
+    pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition], family: TokenFamily) -> usize {
+        defs.iter()
+            .map(|def| def.prompt_token_estimate(family))
+            .sum()
+    }
 }
 
 // Count string escaping directly. Schema counting below reuses Value's Display,
