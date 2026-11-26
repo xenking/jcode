@@ -21,8 +21,10 @@ mod client_state;
 mod cold_agent_wake;
 mod model_refresh;
 mod premium_spawn;
+#[path = "server/transport/socket/session_connections.rs"]
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
+#[path = "server/transport/socket/client_writer.rs"]
 mod client_writer;
 mod comm_await;
 mod comm_control;
@@ -34,16 +36,27 @@ mod configured_name;
 mod context_breakdown;
 mod shake_tools;
 use configured_name::normalize_configured_server_name;
+#[path = "server/diagnostics/commands/debug.rs"]
 mod debug;
+#[path = "server/diagnostics/commands/debug_ambient.rs"]
 mod debug_ambient;
+#[path = "server/diagnostics/commands/debug_command_exec.rs"]
 mod debug_command_exec;
+#[path = "server/diagnostics/commands/debug_events.rs"]
 mod debug_events;
+#[path = "server/diagnostics/commands/debug_help.rs"]
 mod debug_help;
+#[path = "server/diagnostics/commands/debug_jobs.rs"]
 mod debug_jobs;
+#[path = "server/diagnostics/inspection/debug_server_state.rs"]
 mod debug_server_state;
+#[path = "server/diagnostics/commands/debug_session_admin.rs"]
 mod debug_session_admin;
+#[path = "server/diagnostics/inspection/debug_swarm_read.rs"]
 mod debug_swarm_read;
+#[path = "server/diagnostics/inspection/debug_swarm_write.rs"]
 mod debug_swarm_write;
+#[path = "server/diagnostics/inspection/debug_testers.rs"]
 mod debug_testers;
 use crate::durable_state;
 mod group_transfer;
@@ -59,12 +72,16 @@ mod live_status;
 mod live_turn;
 mod mobile_local;
 mod provider_control;
+#[path = "server/runtime_support/recovery/reload.rs"]
 mod reload;
 mod routing_requests;
 mod routing_turn;
 pub use routing_turn::route_unattached_turn;
+#[path = "server/runtime_support/recovery/recovery_owner.rs"]
 mod recovery_owner;
+#[path = "server/runtime_support/recovery/reload_recovery.rs"]
 pub(crate) mod reload_recovery;
+#[path = "server/runtime_support/recovery/reload_transcript.rs"]
 mod reload_transcript;
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
@@ -77,15 +94,24 @@ pub mod rollout;
 mod rollout_desktop;
 #[path = "server/deployment/rollout_fs.rs"]
 pub mod rollout_fs;
+#[path = "server/runtime_support/control/runtime.rs"]
 mod runtime;
+#[path = "server/runtime_support/control/runtime_commands.rs"]
 mod runtime_commands;
+#[path = "server/runtime_support/control/runtime_special_commands.rs"]
 mod runtime_special_commands;
+#[path = "server/runtime_support/remote/runtime_ssh_accounts.rs"]
 mod runtime_ssh_accounts;
+#[path = "server/runtime_support/remote/runtime_ssh_host.rs"]
 mod runtime_ssh_host;
+#[path = "server/runtime_support/remote/runtime_ssh_loops.rs"]
 mod runtime_ssh_loops;
+#[path = "server/runtime_support/remote/runtime_ssh_sessions.rs"]
 mod runtime_ssh_sessions;
+#[path = "server/runtime_support/control/runtime_upgrade.rs"]
 mod runtime_upgrade;
 mod session_notifications;
+#[path = "server/transport/socket/socket.rs"]
 mod socket;
 mod spawn_model_selection;
 mod spawn_policy;
@@ -583,7 +609,7 @@ fn configured_server_name_from_env() -> Option<String> {
         })
 }
 
-#[path = "server/runtime_memory_sampling.rs"]
+#[path = "server/runtime_support/control/runtime_memory_sampling.rs"]
 mod runtime_memory_sampling;
 use runtime_memory_sampling::{
     capture_runtime_memory_attribution_sample, capture_runtime_memory_process_sample,
@@ -659,9 +685,11 @@ mod file_touch_service;
 pub(crate) use self::file_touch_service::FileTouchService;
 
 #[cfg(test)]
+#[path = "server/transport/socket/socket_tests.rs"]
 mod socket_tests;
 
 #[cfg(test)]
+#[path = "server/runtime_support/recovery/startup_tests.rs"]
 mod startup_tests;
 
 #[cfg(test)]
@@ -679,7 +707,7 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
-#[path = "server/reload_marker_scope_tests.rs"]
+#[path = "server/runtime_support/recovery/reload_marker_scope_tests.rs"]
 mod reload_marker_scope_tests;
 
 #[cfg(test)]

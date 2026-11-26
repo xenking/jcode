@@ -341,37 +341,37 @@
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/debug_ambient.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/commands/debug_ambient.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/debug_command_exec.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/commands/debug_command_exec.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/debug_events.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/commands/debug_events.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/server/debug_server_state.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/inspection/debug_server_state.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/debug_swarm_read.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/inspection/debug_swarm_read.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/debug_swarm_write.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/inspection/debug_swarm_write.rs": {
       "dot_ok": 0,
       "let_underscore": 3,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/debug_testers.rs": {
+    "crates/jcode-app-core/src/server/diagnostics/inspection/debug_testers.rs": {
       "dot_ok": 1,
       "let_underscore": 8,
       "unwrap_or_default": 0
@@ -421,12 +421,12 @@
       "let_underscore": 33,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/reload.rs": {
+    "crates/jcode-app-core/src/server/runtime_support/recovery/reload.rs": {
       "dot_ok": 5,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/reload_recovery.rs": {
+    "crates/jcode-app-core/src/server/runtime_support/recovery/reload_recovery.rs": {
       "dot_ok": 3,
       "let_underscore": 4,
       "unwrap_or_default": 0
@@ -446,17 +446,17 @@
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/runtime_ssh_loops.rs": {
+    "crates/jcode-app-core/src/server/runtime_support/remote/runtime_ssh_loops.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/runtime_upgrade.rs": {
+    "crates/jcode-app-core/src/server/runtime_support/control/runtime_upgrade.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/session_connections.rs": {
+    "crates/jcode-app-core/src/server/transport/socket/session_connections.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
@@ -466,7 +466,7 @@
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/socket.rs": {
+    "crates/jcode-app-core/src/server/transport/socket/socket.rs": {
       "dot_ok": 1,
       "let_underscore": 10,
       "unwrap_or_default": 1
