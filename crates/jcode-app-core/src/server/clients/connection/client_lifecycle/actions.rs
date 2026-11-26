@@ -7,11 +7,11 @@ use super::super::{
 };
 use super::*;
 use crate::agent::Agent;
-use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
+use crate::protocol::{FeatureToggle, ServerEvent};
 use crate::server::turn_execution::process_reserved_message_streaming_mpsc;
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::{SoftInterruptSource, StreamError};
+use jcode_agent_runtime::StreamError;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
