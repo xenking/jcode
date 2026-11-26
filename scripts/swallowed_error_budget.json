@@ -436,12 +436,12 @@
       "let_underscore": 13,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/rollout.rs": {
+    "crates/jcode-app-core/src/server/deployment/rollout.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/rollout_desktop.rs": {
+    "crates/jcode-app-core/src/server/deployment/rollout_desktop.rs": {
       "dot_ok": 10,
       "let_underscore": 3,
       "unwrap_or_default": 0

@@ -71,8 +71,11 @@ pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_reco
 pub(crate) mod ask_escalation;
 use crate::reload_state;
 use crate::reload_trace;
+#[path = "server/deployment/rollout.rs"]
 pub mod rollout;
+#[path = "server/deployment/rollout_desktop.rs"]
 mod rollout_desktop;
+#[path = "server/deployment/rollout_fs.rs"]
 pub mod rollout_fs;
 mod runtime;
 mod runtime_commands;

@@ -384,6 +384,7 @@ fn clear_runtime_pin(command: &mut Command) {
         .env_remove(jcode_build_support::runtime_generation::GENERATION_ENV);
 }
 
+#[path = "rollout_desktop/verification.rs"]
 mod verification;
 pub(super) use verification::{validate_bundle_replacement, verify};
 
