@@ -16,9 +16,10 @@ const KEEP_FOR: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Where kept recordings live: `<jcode dir>/voice-recovery`.
 pub(crate) fn default_dir() -> Option<PathBuf> {
-    jcode_base::storage::jcode_dir()
-        .ok()
-        .map(|dir| dir.join("voice-recovery"))
+    match jcode_base::storage::jcode_dir() {
+        Ok(dir) => Some(dir.join("voice-recovery")),
+        Err(_) => None,
+    }
 }
 
 type Pcm = tokio::sync::mpsc::Receiver<Vec<i16>>;
@@ -86,27 +87,47 @@ impl Spill {
     pub(crate) async fn finish(mut self, keep: bool) {
         if let Some(writer) = self.writer.take() {
             // The microphone is already stopped, so this ends within a chunk.
-            let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+            if tokio::time::timeout(Duration::from_secs(2), writer)
+                .await
+                .is_err()
+            {
+                jcode_base::logging::warn("dictation recovery writer did not stop in time");
+            }
         }
         if !keep || self.audio_bytes.load(Ordering::Relaxed) == 0 {
-            let _ = std::fs::remove_file(&self.path);
+            remove_recording(&self.path);
         }
     }
 }
 
+/// Best effort: a recording that cannot be removed is pruned after [`KEEP_FOR`].
+fn remove_recording(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        jcode_base::logging::warn(&format!("could not remove {}: {error}", path.display()));
+    }
+}
+
 fn create(dir: &Path) -> Option<(PathBuf, std::fs::File)> {
-    std::fs::create_dir_all(dir).ok()?;
+    if std::fs::create_dir_all(dir).is_err() {
+        return None;
+    }
     prune(dir);
     let stamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let path = dir.join(format!("dictation-{stamp}.wav"));
-    let mut file = std::fs::OpenOptions::new()
+    let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
-        .ok()?;
-    patch_header(&mut file, 0).ok()?;
+    else {
+        return None;
+    };
+    if patch_header(&mut file, 0).is_err() {
+        return None;
+    }
     Some((path, file))
 }
 
@@ -116,14 +137,12 @@ fn prune(dir: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > KEEP_FOR);
+        let old = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(modified) => matches!(modified.elapsed(), Ok(age) if age > KEEP_FOR),
+            Err(_) => false,
+        };
         if old && entry.path().extension().is_some_and(|e| e == "wav") {
-            let _ = std::fs::remove_file(entry.path());
+            remove_recording(&entry.path());
         }
     }
 }

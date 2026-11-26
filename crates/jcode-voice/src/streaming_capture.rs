@@ -870,7 +870,11 @@ impl NariRecording {
                             Ok(Err(error)) | Err(error) => {
                                 // Dropping `mic` on failure cancels the unfinished capture.
                                 mic.stop();
-                                let _ = mic.finish();
+                                if let Err(error) = mic.finish() {
+                                    jcode_base::logging::warn(&format!(
+                                        "dictation capture did not finish cleanly: {error}"
+                                    ));
+                                }
                                 let error = named(error);
                                 if let Some(spill) = spill {
                                     spill.finish(!matches!(error, VoiceError::Cancelled)).await;
