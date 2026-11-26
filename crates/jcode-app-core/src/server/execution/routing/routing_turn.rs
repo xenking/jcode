@@ -193,10 +193,19 @@ pub(super) async fn before_turn(
     Ok(())
 }
 
+/// Makes the routing service the one account decider of every provider in this
+/// process (the daemon, and `jcode run`, which has no daemon session).
+pub fn install_routing_decider() {
+    crate::provider::set_routing_decider(|provider, model| {
+        jcode_base::routing_service::global().applies(provider, model)
+    });
+}
+
 /// The routing decision for a turn that runs in this process with no daemon
 /// session, such as `jcode run`. Nobody can answer a gate there, so a reached
 /// limit blocks the turn with its reason.
 pub async fn route_unattached_turn(agent: &mut Agent) -> anyhow::Result<()> {
+    install_routing_decider();
     let (tx, _events) = mpsc::unbounded_channel();
     let routed = before_turn(agent, &tx).await;
     // Nothing here re-routes after a failure, so the provider keeps its own
