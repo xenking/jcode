@@ -148,6 +148,7 @@ mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
 mod todo_completion;
+mod todos_remote_cache;
 mod todos_view;
 mod wake_stats;
 
@@ -1466,7 +1467,7 @@ pub struct App {
     /// Remote todo snapshot paired with its owning session. Never read SSH
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
-    remote_todos_cache: std::cell::RefCell<Option<todos_view::remote_cache::RemoteTodoCache>>,
+    remote_todos_cache: todos_remote_cache::RemoteTodoCache,
     remote_todos_requested_at: Option<Instant>,
     /// The connected server sends a todo snapshot on every change, so no
     /// periodic poll is needed. Learned from the snapshots themselves and

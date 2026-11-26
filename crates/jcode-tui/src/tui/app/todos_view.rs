@@ -17,9 +17,6 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 /// Display-message role used by the inline chat todo card.
 const TODO_CARD_ROLE: &str = "todos";
 
-#[path = "todos_remote_cache.rs"]
-pub(super) mod remote_cache;
-
 impl App {
     fn current_todo_state(
         &self,
@@ -39,7 +36,7 @@ impl App {
                 .as_ref()
                 .filter(|(id, _)| Some(id.as_str()) == session_id)
                 .map(|(_, payload)| payload.as_str());
-            return remote_cache::load(&self.remote_todos_cache, payload);
+            return self.remote_todos_cache.load(payload);
         }
         std::sync::Arc::new((
             load_current_session_todos(session_id),
