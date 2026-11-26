@@ -1,7 +1,7 @@
 // Runs the real applet tool and action receiver without inference or a shared daemon.
 // bun scripts/accept-express-applet.mjs /absolute/path/to/jcode
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -10,9 +10,7 @@ const bin = resolve(process.argv[2] ?? 'target/debug/jcode');
 const dir = await mkdtemp(join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'jcx-'));
 const runtime = join(dir,'r'), home = join(dir,'home'), store = join(dir,'store');
 for (const p of [runtime,home,store]) await mkdir(p, {mode:0o700});
-// Express authoring is the optional `native-ui` mode; the daemon finds it in the working dir's project skills.
-await mkdir(join(home,'.jcode/skills/native-ui'), {recursive:true});
-await writeFile(join(home,'.jcode/skills/native-ui/SKILL.md'), await readFile(resolve(import.meta.dir,'../.jcode/skills/native-ui/SKILL.md')));
+// Express authoring is the optional built-in `native-ui` mode; no skill file is installed.
 const sock = join(runtime,'daemon.sock'), debug = join(runtime,'daemon-debug.sock');
 const env = {PATH:process.env.PATH, HOME:home, JCODE_HOME:store, JCODE_TEST_SESSION:'1', JCODE_NO_TELEMETRY:'1', JCODE_RUNTIME_DIR:runtime, JCODE_SOCKET:sock, JCODE_DEBUG_CONTROL:'1', JCODE_TEMP_SERVER:'1', JCODE_SERVER_OWNER_PID:String(process.pid), JCODE_API_SOCKET:join(runtime,'api.sock'), ANTHROPIC_API_KEY:'test-only-no-inference', LANG:'en_US.UTF-8'};
 function request(path, message, retain=false) {

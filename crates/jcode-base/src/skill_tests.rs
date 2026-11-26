@@ -489,6 +489,62 @@ fn reload_global_excludes_project_local_skills() {
 }
 
 #[test]
+fn native_ui_mode_is_built_in_and_any_same_named_skill_file_replaces_it() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // Fresh home: no skills dir at all, and the project has no `.jcode`.
+    let mut registry = SkillRegistry::load_global().unwrap();
+    let builtin = registry.get("native-ui").expect("built-in mode is missing");
+    assert!(builtin.is_mode());
+    assert!(
+        !builtin.is_model_invocable(),
+        "the model must not self-enable it"
+    );
+    assert!(builtin.content.contains("applet"));
+    assert_eq!(registry.reload("native-ui").unwrap(), true);
+    assert!(
+        registry.get("native-ui").is_some(),
+        "reload dropped the built-in"
+    );
+    registry.reload_global().unwrap();
+    assert!(registry.get("native-ui").is_some());
+
+    // A user's global file replaces it whole, on load and on reload.
+    write_skill_file(
+        &temp.path().join("skills"),
+        "native-ui",
+        "---\nname: native-ui\ndescription: mine\nmode: true\n---\nUSER\n",
+    );
+    let mut loaded = SkillRegistry::load_global().unwrap();
+    for reload in [false, true] {
+        if reload {
+            loaded.reload_global().unwrap();
+        }
+        assert_eq!(loaded.get("native-ui").unwrap().content, "USER");
+    }
+    assert_eq!(loaded.reload("native-ui").unwrap(), true);
+    assert_eq!(loaded.get("native-ui").unwrap().content, "USER");
+
+    // A project skill beats both.
+    let project = tempfile::tempdir().unwrap();
+    write_skill_file(
+        &project.path().join(".jcode/skills"),
+        "native-ui",
+        "---\nname: native-ui\ndescription: project\nmode: true\n---\nPROJECT\n",
+    );
+    let effective = SkillRegistry::effective_for_working_dir(&loaded, Some(project.path()));
+    assert_eq!(effective.get("native-ui").unwrap().content, "PROJECT");
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+#[test]
 fn endorsed_skills_have_unique_nonempty_metadata() {
     let endorsed = endorsed_skills();
     assert!(!endorsed.is_empty(), "expected at least one endorsed skill");

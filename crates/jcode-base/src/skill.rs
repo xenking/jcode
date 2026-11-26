@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 mod arguments;
+mod builtin;
 mod invocation;
 pub use invocation::SkillInvocation;
 
@@ -317,6 +318,7 @@ impl SkillRegistry {
         Self::import_from_external();
 
         let mut registry = Self::default();
+        registry.insert_builtin_skills();
 
         // Load skills provided by Claude Code plugins/marketplace installs
         // first, so explicit jcode/agents skills with the same name win below.
@@ -594,10 +596,12 @@ impl SkillRegistry {
     }
 
     fn parse_skill_inner(path: &Path) -> Result<Skill> {
-        let content = std::fs::read_to_string(path)?;
+        Self::parse_skill_content(&std::fs::read_to_string(path)?, path.to_path_buf())
+    }
 
+    fn parse_skill_content(content: &str, path: PathBuf) -> Result<Skill> {
         // Parse YAML frontmatter
-        let (frontmatter, body) = Self::parse_frontmatter(&content)?;
+        let (frontmatter, body) = Self::parse_frontmatter(content)?;
 
         let SkillFrontmatter {
             name,
@@ -630,7 +634,7 @@ impl SkillRegistry {
                 .filter(|value| !value.is_empty()),
             arguments: arguments::names(arguments),
             content: body,
-            path: path.to_path_buf(),
+            path,
             search_text: std::sync::OnceLock::new(),
         })
     }
@@ -798,7 +802,10 @@ impl SkillRegistry {
         let path = self.skills.get(name).map(|s| s.path.clone());
 
         if let Some(path) = path {
-            if path.exists() {
+            if builtin::is_builtin_path(&path) {
+                // Embedded in the binary: nothing on disk to re-read or lose.
+                Ok(true)
+            } else if path.exists() {
                 let skill = Self::parse_skill(&path)?;
                 self.skills.insert(skill.name.clone(), Arc::new(skill));
                 Ok(true)
@@ -835,6 +842,7 @@ impl SkillRegistry {
         );
         self.skills.clear();
         self.load_errors.clear();
+        self.insert_builtin_skills();
 
         let mut count = 0;
 
@@ -891,6 +899,7 @@ impl SkillRegistry {
     fn insert_shared_skill(&mut self, skill: Arc<Skill>) {
         if let Some(shadowed) = self.skills.get(&skill.name)
             && shadowed.path != skill.path
+            && !builtin::is_builtin_path(&shadowed.path)
             && shadow_warning_is_new(&skill.name, &skill.path, &shadowed.path)
         {
             crate::logging::warn(&format!(

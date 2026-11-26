@@ -4,7 +4,7 @@ Use text for explanations, progress updates, and answers. Use `applet` when the 
 
 ## Optional mode
 
-Express authoring is off by default. The `applet` tool, with its Express hint, is advertised only while the `native-ui` session mode is pinned (`/mode native-ui`, or the Desktop mode picker). Without the mode neither the tool definition nor any prompt text appears in a request. Cards already mounted in a transcript render regardless. Pinning or clearing the mode changes the tool list, so the next request is a prompt-cache miss. The skill ships in `.jcode/skills/native-ui`; copy it to `~/.jcode/skills/` to get the mode in other projects.
+Express authoring is off by default. The `applet` tool, with its Express hint, is advertised only while the `native-ui` session mode is pinned (`/mode native-ui`, or the Desktop mode picker). Without the mode neither the tool definition nor any prompt text appears in a request. Cards already mounted in a transcript render regardless. Pinning or clearing the mode changes the tool list, so the next request is a prompt-cache miss. The mode is built into jcode, so it is listed on every install; a same-named skill in `~/.jcode/skills/` (or a project's `.jcode/skills/`) replaces it. The model cannot enable it by itself.
 
 The model can call `applet` with `{"express":"root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\")"}`. Add `wait: true` only when the next step actually depends on the answer. For a single named action use `GreetingButton(label,event,recipient)`. For other layouts request `{"action":"catalog"}` once, then send a `view`. The catalog request does not create an applet. Desktop renders the expanded applet nodes with GPUI. No JS process runs in the client.
 

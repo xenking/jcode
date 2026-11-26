@@ -58,13 +58,6 @@ struct Fixture {
 impl Fixture {
     async fn new(deferred: bool) -> Self {
         let project = tempfile::tempdir().unwrap();
-        let dir = project.path().join(".jcode/skills/native-ui");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: native-ui\ndescription: Native cards\nmode: true\n---\nNATIVE_UI_BODY\n",
-        )
-        .unwrap();
         let capture = Capture {
             deferred,
             sent: Arc::default(),
@@ -117,6 +110,10 @@ async fn applet_costs_nothing_until_the_mode_is_on_and_follows_it_both_ways() {
     let off = fx.last_request();
     assert!(applet(&off).is_none(), "applet is advertised by default");
     assert!(!mentions_hint(&off));
+    assert!(
+        !off.text.contains("native-ui"),
+        "the built-in mode must not be listed to the model by default"
+    );
     assert!(off.tools.len() > 3, "the rest of the tool surface stays");
 
     fx.agent.mode_command("native-ui").unwrap();
@@ -184,4 +181,26 @@ async fn resumed_sessions_and_workers_inherit_the_mode_not_a_default() {
         applet(&fx.last_request()).is_some(),
         "worker did not inherit the mode"
     );
+}
+
+#[tokio::test]
+async fn a_fresh_install_lists_the_mode_and_pinning_it_is_the_only_step() {
+    // Empty JCODE_HOME (no skills dir) and a cwd without `.jcode`.
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let fx = Fixture::new(false).await;
+    let snapshot = fx.agent.runtime_skills_snapshot();
+    let mode = snapshot["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skill| skill["name"] == "native-ui")
+        .expect("native-ui is not in the skills snapshot");
+    assert_eq!(mode["mode"], true);
+    assert!(
+        mode["description"]
+            .as_str()
+            .unwrap()
+            .contains("interactive cards")
+    );
+    assert!(snapshot["pinned_skills"].as_array().unwrap().is_empty());
 }

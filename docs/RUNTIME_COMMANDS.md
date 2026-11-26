@@ -30,7 +30,7 @@ session's runtime host, including SSH and managed remote runtimes.
   skill, and shared endorsed recommendations. Refreshes the global registry.
 - `mode`: pinned session skills; `toggle <skill>` adds or removes one, `off`
   clears them. A mode is a skill with `mode: true`. The one mode that also
-  changes the tool surface is `native-ui`: the `applet` tool (Express/applet
+  changes the tool surface is `native-ui`, built into jcode and listed by `skills` on every install (a same-named user or project skill replaces it): the `applet` tool (Express/applet
   authoring) is absent from the tool list, codemode listings and deferred-tool
   listings until it is pinned, so it costs no tokens by default. Resumed
   sessions and swarm workers follow their pinned set. Switching it re-locks the

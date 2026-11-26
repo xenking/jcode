@@ -60,7 +60,7 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
 const TASK_EXCLUDED_TOOLS: &[&str] = &["macos_computer_use", "desktop", "applet", "rollout_wait"];
 
 /// Tools a session sees only while the named session mode (a pinned skill) is
-/// on. The `native-ui` skill is that mode for `applet`: Express/applet authoring
+/// on. The built-in `native-ui` skill is that mode for `applet`: Express/applet authoring
 /// costs no tokens, in the tool list or the prompt, until a user selects it.
 const MODE_GATED_TOOLS: &[(&str, &str)] = &[("applet", "native-ui")];
 

@@ -261,13 +261,6 @@ async fn desktop_attach_after_restart_preserves_provider_tool_hash() {
         _home.1.path().to_str(),
     );
     // The applet tool is only advertised while the `native-ui` mode is pinned.
-    let skill = _home.1.path().join(".jcode/skills/native-ui");
-    std::fs::create_dir_all(&skill).unwrap();
-    std::fs::write(
-        skill.join("SKILL.md"),
-        "---\nname: native-ui\ndescription: Native cards\nmode: true\n---\nbody\n",
-    )
-    .unwrap();
     agent.mode_command("native-ui").unwrap();
     append_text(&mut agent, Role::User, "Before reload.");
     let before = request(&mut agent, dialect).await;
