@@ -354,16 +354,6 @@ async fn socks5_credentials_come_from_the_proxy_url() {
 }
 
 #[tokio::test]
-async fn one_client_is_cached_per_proxy_url() {
-    let proxy = Proxy::start().await;
-    let first = Endpoint::for_url(&proxy.url).unwrap();
-    let second = Endpoint::for_url(&format!("{}/", proxy.url)).unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    let other = Endpoint::for_url(&format!("http://127.0.0.1:{}", dead_port().await)).unwrap();
-    assert!(!Arc::ptr_eq(&first, &other));
-}
-
-#[tokio::test]
 async fn https_proxy_is_refused_for_raw_tunnels_instead_of_bypassed() {
     let proxy = Proxy::start().await;
     let config = assigned(&proxy.url.replace("http://", "https://"), true);

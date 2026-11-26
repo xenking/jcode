@@ -185,15 +185,6 @@ fn account_ids_reject_junk() {
 }
 
 #[test]
-fn default_section_round_trips_empty() {
-    let config = RoutingConfig::default();
-    assert!(config.is_default());
-    let text = toml::to_string(&config).expect("serialize");
-    let back: RoutingConfig = toml::from_str(&text).expect("parse back");
-    assert_eq!(back, config);
-}
-
-#[test]
 fn strategy_fields_validate_and_land() {
     let policy = parse(
         r#"

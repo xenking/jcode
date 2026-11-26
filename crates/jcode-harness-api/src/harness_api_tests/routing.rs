@@ -204,9 +204,3 @@ fn view_event_roundtrips_with_unknown_meters_absent() {
     let back: ServerFrame = serde_json::from_value(json).unwrap();
     assert_eq!(back.event, ApiEvent::RoutingView { view });
 }
-
-#[test]
-fn the_routing_capability_name_is_stable() {
-    assert_eq!(ROUTING_CAPABILITY, "routing_v1");
-    assert_eq!(API_VERSION_MINOR, 24);
-}

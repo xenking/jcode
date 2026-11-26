@@ -665,7 +665,8 @@ JUSTRUST_TEST_PARALLEL=0 justrust test -p jcode-base --lib -- routing_service ro
 # live view of the policy you configured
 jcode routing status --json
 jcode auth keys list --json
-# isolated daemon (own socket and home, fixture provider): shadow, auto, gate, block, 429 re-decision
-python3 scripts/accept-routing-daemon.py <built-jcode>
+# isolated daemons (own socket and home, fixture provider; run in CI): off, shadow, auto, gate,
+# block, 429 re-decision, restart and resume, warm sessions at 70% and 99%
+JUSTRUST_TEST_PARALLEL=0 justrust test --test routing_acceptance
 python3 scripts/check_tui_chrome.py
 ```
