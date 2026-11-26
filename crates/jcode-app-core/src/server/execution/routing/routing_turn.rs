@@ -182,7 +182,14 @@ pub(super) async fn before_turn(
         .route(&input, &EventSink(event_tx))
         .await
         .map_err(|reason| anyhow::anyhow!("Routing blocked this turn: {reason}"))?;
+    let owns_the_account = matches!(
+        plan,
+        Plan::Stay(_) | Plan::Move(_) | Plan::CompactThenMove(_)
+    );
     apply(agent, plan, event_tx).await;
+    if owns_the_account && let Some(account) = current_account(agent) {
+        agent.record_routed_account(&account);
+    }
     Ok(())
 }
 

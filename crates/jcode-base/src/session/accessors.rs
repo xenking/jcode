@@ -126,6 +126,16 @@ impl Session {
         self.subagent_model.as_deref()
     }
 
+    /// The labelled API-key account routing served this session with, so a
+    /// resume binds it again instead of the process-wide active key.
+    pub fn routed_key_account(&self) -> Option<&str> {
+        self.routed_key_account.as_deref()
+    }
+
+    pub fn set_routed_key_account(&mut self, account: Option<String>) {
+        self.routed_key_account = account;
+    }
+
     pub fn agent_model_overrides(&self) -> AgentModelOverrides {
         self.agent_model_overrides.clone()
     }

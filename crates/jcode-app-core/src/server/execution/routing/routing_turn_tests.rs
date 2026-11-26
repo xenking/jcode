@@ -99,6 +99,7 @@ impl Drop for Home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+        crate::config::Config::invalidate_cache();
     }
 }
 
@@ -236,5 +237,210 @@ async fn a_forced_move_warns_when_its_compaction_fails_unexpectedly() {
             .iter()
             .any(|warning| warning.contains("moved without compacting")),
         "{warnings:?}"
+    );
+}
+
+/// Turns `[routing] mode = "auto"` on for these accounts (lower priority
+/// number first).
+fn route_auto(accounts: &[(&str, u32)]) {
+    let mut config = String::from("[routing]\nmode = \"auto\"\n");
+    for (id, priority) in accounts {
+        config += &format!("[[routing.accounts]]\nid = \"{id}\"\npriority = {priority}\n");
+    }
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    crate::config::Config::invalidate_cache();
+}
+
+fn with_history(mut agent: Agent) -> Agent {
+    for _ in 0..4 {
+        agent.add_message(
+            MessageRole::User,
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+                cache_control: None,
+            }],
+        );
+    }
+    agent
+}
+
+/// A routed turn's decision, with every event routing sent.
+async fn routed_turn(agent: &mut Agent) -> Vec<ServerEvent> {
+    let (tx, mut events) = mpsc::unbounded_channel();
+    before_turn(agent, &tx).await.unwrap();
+    std::iter::from_fn(|| events.try_recv().ok()).collect()
+}
+
+/// An OAuth provider whose process-wide active login is `global`; a session
+/// bound to a saved account (`set_model("claude-oauth@a:..")`) serves that one.
+struct Logins {
+    global: Arc<Mutex<String>>,
+    bound: Mutex<Option<String>>,
+}
+
+impl Logins {
+    fn new(global: &Arc<Mutex<String>>) -> Arc<Self> {
+        Arc::new(Self {
+            global: global.clone(),
+            bound: Mutex::new(None),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for Logins {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("a routing decision sends no model request")
+    }
+
+    fn name(&self) -> &str {
+        "Claude"
+    }
+
+    fn model(&self) -> String {
+        "probe-model".into()
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let method = model.rsplit_once(':').map_or(model, |(method, _)| method);
+        if let Some(label) = jcode_provider_core::oauth_account_label(method) {
+            *self.bound.lock().unwrap() = Some(label.to_string());
+        }
+        Ok(())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.bound.lock().unwrap().clone()
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> anyhow::Result<()> {
+        *self.bound.lock().unwrap() = label.map(str::to_string);
+        Ok(())
+    }
+
+    fn serving_oauth_account_label(&self) -> Option<String> {
+        self.oauth_account_label()
+            .or_else(|| Some(self.global.lock().unwrap().clone()))
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Logins::new(&self.global)
+    }
+}
+
+// R5: a session that never carried an account route is served by whichever
+// login is globally active. Resuming it after that login changed must not move
+// it: the account it was served by is part of its route.
+#[tokio::test]
+async fn a_resumed_session_stays_on_the_login_that_served_it() {
+    let _home = Home::new();
+    route_auto(&[("claude:a", 2), ("claude:b", 1)]);
+    let global = Arc::new(Mutex::new("a".to_string()));
+    let mut agent = with_history(Agent::new(Logins::new(&global), Registry::empty()));
+    routed_turn(&mut agent).await;
+    assert_eq!(current_account(&agent), Some(account("claude:a")));
+    agent
+        .ensure_session_lease()
+        .expect("the recorded route is runnable");
+    agent.persist_session_now().unwrap();
+
+    *global.lock().unwrap() = "b".into();
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    let mut resumed =
+        Agent::new_with_session(Logins::new(&global), Registry::empty(), session, None);
+    routed_turn(&mut resumed).await;
+
+    assert_eq!(current_account(&resumed), Some(account("claude:a")));
+    resumed
+        .ensure_session_lease()
+        .expect("the resumed route is runnable");
+}
+
+/// A provider with two labelled API keys; the first is the global active one.
+struct Keyed {
+    bound: Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Keyed {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("a routing decision sends no model request")
+    }
+
+    fn name(&self) -> &str {
+        "OpenCode Go"
+    }
+
+    fn model(&self) -> String {
+        "probe-model".into()
+    }
+
+    fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
+        Some((
+            "opencode-go".into(),
+            "openai-compatible:opencode-go".into(),
+            String::new(),
+        ))
+    }
+
+    fn set_api_key_account(&self, label: Option<&str>) -> anyhow::Result<()> {
+        *self.bound.lock().unwrap() = label.map(str::to_string);
+        Ok(())
+    }
+
+    fn serving_api_key_account(&self) -> Option<String> {
+        match self.bound.lock().unwrap().clone() {
+            Some(label) => Some(format!("opencode-go:{label}")),
+            None => crate::provider_catalog::active_api_key_account("opencode-go")
+                .map(|account| account.to_string()),
+        }
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Keyed {
+            bound: Mutex::new(None),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_session_stays_on_the_labelled_key_that_served_it() {
+    let _home = Home::new();
+    crate::provider_catalog::save_labelled_api_key("opencode-go", "first", "sk-first").unwrap();
+    crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "sk-second").unwrap();
+    route_auto(&[("opencode-go:first", 2), ("opencode-go:second", 1)]);
+    let keyed = || {
+        Arc::new(Keyed {
+            bound: Mutex::new(None),
+        })
+    };
+    let mut agent = with_history(Agent::new(keyed(), Registry::empty()));
+    // The session was moved onto the second key, which is not the global one.
+    let (tx, _events) = mpsc::unbounded_channel();
+    bind(&mut agent, &account("opencode-go:second"), &tx).unwrap();
+    routed_turn(&mut agent).await;
+    assert_eq!(current_account(&agent), Some(account("opencode-go:second")));
+    agent.persist_session_now().unwrap();
+
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    let mut resumed = Agent::new_with_session(keyed(), Registry::empty(), session, None);
+    routed_turn(&mut resumed).await;
+
+    assert_eq!(
+        current_account(&resumed),
+        Some(account("opencode-go:second"))
     );
 }

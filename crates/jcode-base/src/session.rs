@@ -189,6 +189,8 @@ pub struct Session {
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routed_key_account: Option<String>,
     /// Session worker routing. Missing keys follow saved global defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     agent_model_overrides: AgentModelOverrides,
@@ -339,6 +341,7 @@ struct SessionStartupStub {
     context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
+    routed_key_account: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
@@ -466,6 +469,7 @@ impl Session {
         session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
+        session.routed_key_account = stub.routed_key_account;
         session.agent_model_overrides = stub.agent_model_overrides;
         session.agent_profile = stub.agent_profile;
         session.improve_mode = stub.improve_mode;
@@ -518,6 +522,7 @@ impl Session {
         session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
+        session.routed_key_account = snapshot.routed_key_account;
         session.agent_model_overrides = snapshot.agent_model_overrides;
         session.agent_profile = snapshot.agent_profile;
         session.improve_mode = snapshot.improve_mode;
@@ -770,6 +775,7 @@ impl Session {
             worker_model_approval: self.worker_model_approval.clone(),
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
+            routed_key_account: self.routed_key_account.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
             agent_profile: self.agent_profile.clone(),
             improve_mode: self.improve_mode,
@@ -991,6 +997,7 @@ impl Session {
         self.worker_model_approval = meta.worker_model_approval;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
+        self.routed_key_account = meta.routed_key_account;
         self.agent_model_overrides = meta.agent_model_overrides;
         self.agent_profile = meta.agent_profile;
         self.improve_mode = meta.improve_mode;
@@ -1056,6 +1063,7 @@ impl Session {
             worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
+            routed_key_account: None,
             agent_model_overrides: AgentModelOverrides::new(),
             agent_profile: None,
             improve_mode: None,
@@ -1131,6 +1139,7 @@ impl Session {
             worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
+            routed_key_account: None,
             agent_model_overrides: AgentModelOverrides::new(),
             agent_profile: None,
             improve_mode: None,
@@ -2143,6 +2152,7 @@ struct RemoteStartupSessionSnapshot {
     context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
+    routed_key_account: Option<String>,
     #[serde(default)]
     agent_model_overrides: AgentModelOverrides,
     #[serde(default)]

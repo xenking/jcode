@@ -3,7 +3,9 @@
 use super::Agent;
 use crate::compaction::{MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP};
 use crate::kv_cache_monitor::MissReason;
+use crate::logging;
 use jcode_base::routing_service::{CacheContext, CacheFactors, Seam};
+use jcode_routing_policy::AccountId;
 
 impl Agent {
     /// The prompt cache a move would leave behind: its size and the provider's
@@ -69,6 +71,73 @@ impl Agent {
                 })
                 .unwrap_or(CacheFactors::NONE)
             }
+        }
+    }
+
+    /// Remembers the account routing serves this session with. A resume or
+    /// daemon restart restores it from here, never from the process-wide
+    /// active login, which may have changed since.
+    pub(crate) fn record_routed_account(&mut self, account: &AccountId) {
+        let Some(label) = account.label() else {
+            return;
+        };
+        let method = match account.provider() {
+            "claude" | "anthropic" => "claude-oauth",
+            "openai" => "openai-oauth",
+            _ => {
+                if self.session.routed_key_account() != Some(account.as_str()) {
+                    self.session
+                        .set_routed_key_account(Some(account.as_str().to_owned()));
+                    self.persist_session_best_effort("routed key account");
+                }
+                return;
+            }
+        };
+        let route = format!("{method}@{label}");
+        if self.session.route_api_method() == Some(route.as_str()) {
+            return;
+        }
+        // A saved-account route is only runnable while the provider has that
+        // login selected, so serving it from the global login pins the session.
+        if self.provider.oauth_account_label().as_deref() != Some(label)
+            && let Err(error) = self.provider.set_oauth_account(Some(label))
+        {
+            logging::warn(&format!(
+                "routing: could not pin {} to {account}: {error}",
+                self.session.id()
+            ));
+            return;
+        }
+        self.session.apply_route(crate::session::Route {
+            model: Some(self.provider_model()),
+            provider_key: Some(method.to_string()),
+            route_api_method: Some(route),
+            ..self.session.route()
+        });
+        self.persist_session_best_effort("routed account route");
+    }
+
+    /// Binds the labelled API key routing last served this session with, if
+    /// the session still runs on that key's provider.
+    pub(crate) fn restore_routed_key_account(&mut self) {
+        let Some(account) = self.session.routed_key_account().and_then(AccountId::parse) else {
+            return;
+        };
+        let Some(label) = account.label() else {
+            return;
+        };
+        let serving = self
+            .provider
+            .serving_api_key_account()
+            .and_then(|serving| AccountId::parse(&serving));
+        if serving.is_none_or(|serving| serving.provider() != account.provider()) {
+            return;
+        }
+        if let Err(error) = self.provider.set_api_key_account(Some(label)) {
+            logging::warn(&format!(
+                "routing: could not restore {account} for {}: {error}",
+                self.session.id()
+            ));
         }
     }
 

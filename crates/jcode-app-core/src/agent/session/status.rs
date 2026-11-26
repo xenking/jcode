@@ -313,6 +313,7 @@ impl Agent {
                 ));
             }
         }
+        self.restore_routed_key_account();
     }
 
     pub(super) fn reconcile_explicit_provider_pin_route(&mut self) {

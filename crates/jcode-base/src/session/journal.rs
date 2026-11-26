@@ -56,6 +56,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) context_cap: Option<usize>,
     pub(super) subagent_model: Option<String>,
     #[serde(default)]
+    pub(super) routed_key_account: Option<String>,
+    #[serde(default)]
     pub(super) agent_model_overrides: super::AgentModelOverrides,
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,
@@ -153,6 +155,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.worker_model_approval != current.worker_model_approval
         || prev.context_cap != current.context_cap
         || prev.subagent_model != current.subagent_model
+        || prev.routed_key_account != current.routed_key_account
         || prev.agent_model_overrides != current.agent_model_overrides
         || prev.improve_mode != current.improve_mode
         || prev.autoreview_enabled != current.autoreview_enabled
