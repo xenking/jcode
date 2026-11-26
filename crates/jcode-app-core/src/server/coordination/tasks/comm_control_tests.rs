@@ -169,5 +169,6 @@ include!("comm_control_tests/await_checkin.rs");
 include!("comm_control_tests/await_recovery_spam.rs");
 include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");
+include!("comm_control_tests/await_cache_keepalive.rs");
 include!("comm_control_tests/auto_worker_filter.rs");
 include!("comm_control_tests/client_attached_dispatch.rs");

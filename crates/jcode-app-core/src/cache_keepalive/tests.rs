@@ -5,7 +5,7 @@ use super::*;
 use jcode_provider_core::cache_keepalive::{Cache, Rates, Tier, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct Fixture {
+pub(crate) struct Fixture {
     session: crate::session::Session,
     clock: CompactionClock,
     pings: Arc<AtomicUsize>,
@@ -15,7 +15,7 @@ struct Fixture {
 
 impl Fixture {
     /// The cache is due for a ping right away.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::touched(Duration::from_secs(3400))
     }
 
@@ -35,12 +35,12 @@ impl Fixture {
         }
     }
 
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         self.session.id()
     }
 
     /// A turn whose last request completed with a cache the replay can ping.
-    fn turn(&self) -> Turn {
+    pub(crate) fn turn(&self) -> Turn {
         let turn = Turn::begin(&self.session, Arc::clone(&self.clock)).expect("keepalive enabled");
         let capture = turn.request();
         let pings = Arc::clone(&self.pings);
@@ -93,12 +93,12 @@ impl Fixture {
         self.roster.write().await.insert(id.into(), member);
     }
 
-    fn end_turn(turn: Turn) {
+    pub(crate) fn end_turn(turn: Turn) {
         let mut turn = turn;
         turn.park_on_drop();
     }
 
-    async fn pinged(&self) -> bool {
+    pub(crate) async fn pinged(&self) -> bool {
         for _ in 0..200 {
             if self.pings.load(Ordering::Relaxed) > 0 {
                 return true;
@@ -109,7 +109,7 @@ impl Fixture {
     }
 
     /// Long enough for the runner to have pinged had it been allowed to.
-    async fn never_pings(&self) -> bool {
+    pub(crate) async fn never_pings(&self) -> bool {
         tokio::time::sleep(Duration::from_millis(400)).await;
         self.pings.load(Ordering::Relaxed) == 0
     }

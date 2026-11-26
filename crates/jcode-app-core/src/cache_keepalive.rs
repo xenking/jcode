@@ -433,4 +433,4 @@ async fn run_pause(hub: Arc<Hub>) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
