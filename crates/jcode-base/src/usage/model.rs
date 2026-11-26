@@ -1,4 +1,4 @@
-use super::display::{format_reset_time, usage_reset_passed};
+use super::display::{format_reset_time, usage_reading, usage_reset_passed};
 use super::{
     ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF,
     TRANSPORT_ERROR_BACKOFF, TRANSPORT_ERROR_PREFIX,
@@ -468,32 +468,34 @@ pub struct AccountUsageSnapshot {
 }
 
 impl AccountUsageSnapshot {
+    /// One-line reading of every window, worded like the info widget.
     pub fn summary(&self) -> String {
+        self.summary_with(crate::config::config().display.usage_display_used())
+    }
+
+    pub fn summary_with(&self, display_used: bool) -> String {
         if let Some(error) = &self.error {
             return error.clone();
         }
 
+        let reading = |ratio: f32| usage_reading(ratio * 100.0, display_used);
         let mut parts = Vec::new();
         if let Some(ratio) = self.five_hour_ratio {
             parts.push(format!(
-                "{} {:.0}%",
+                "{} {}",
                 self.primary_label.as_deref().unwrap_or("primary"),
-                ratio * 100.0
+                reading(ratio)
             ));
         }
         if let Some(ratio) = self.seven_day_ratio {
             parts.push(format!(
-                "{} {:.0}%",
+                "{} {}",
                 self.secondary_label.as_deref().unwrap_or("secondary"),
-                ratio * 100.0
+                reading(ratio)
             ));
         }
         for window in &self.additional_windows {
-            parts.push(format!(
-                "{} {:.0}%",
-                window.label,
-                window.usage_ratio * 100.0
-            ));
+            parts.push(format!("{} {}", window.label, reading(window.usage_ratio)));
         }
         if let Some(reset) = &self.resets_at {
             parts.push(format!("resets {}", format_reset_time(reset)));

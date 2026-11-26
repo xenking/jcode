@@ -589,6 +589,7 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         return Ok(());
     }
 
+    let display_used = crate::config::config().display.usage_display_used();
     // One width for every provider section so bars align across them.
     let name_width = report
         .providers
@@ -636,14 +637,14 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
                 Some(reset_in) => println!(
                     "{:<width$}: {} (resets in {})",
                     limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    crate::usage::format_usage_bar(limit.usage_percent, 15, display_used),
                     reset_in,
                     width = name_width
                 ),
                 None => println!(
                     "{:<width$}: {}",
                     limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    crate::usage::format_usage_bar(limit.usage_percent, 15, display_used),
                     width = name_width
                 ),
             }

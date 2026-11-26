@@ -586,8 +586,9 @@ fn save_load_clear_roundtrip_with_owner_only_file() {
 
     let summary = usage_summary().expect("summary");
     assert!(summary.contains("snapshot"), "{summary}");
-    assert!(summary.contains("12%"), "{summary}");
     assert!(!summary.contains("LLM_ROUNDTRIP_KEY"), "{summary}");
+    assert!(usage_summary_for(&loaded, true).contains("12% used"));
+    assert!(usage_summary_for(&loaded, false).contains("88% left"));
 
     clear_credentials().expect("clear");
     assert!(!has_cached_auth());

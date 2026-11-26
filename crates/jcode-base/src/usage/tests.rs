@@ -266,18 +266,36 @@ fn test_mask_email_censors_local_part() {
 }
 
 #[test]
-fn test_format_usage_bar() {
-    let bar = format_usage_bar(50.0, 10);
-    assert!(bar.contains("█████░░░░░"));
-    assert!(bar.contains("50%"));
+fn usage_bars_fill_with_what_is_used_and_say_which_way_the_number_reads() {
+    // Info-widget convention: the bar always fills with usage; the word follows
+    // `display.usage_display`, `left` by default.
+    let bar = format_usage_bar(10.0, 10, false);
+    assert!(bar.starts_with("█░░░░░░░░░ "), "{bar}");
+    assert!(bar.ends_with("90% left"), "{bar}");
+    let bar = format_usage_bar(10.0, 10, true);
+    assert!(bar.starts_with("█░░░░░░░░░ "), "{bar}");
+    assert!(bar.ends_with("10% used"), "{bar}");
+    assert_eq!(usage_reading(100.0, false), "0% left");
+    assert_eq!(usage_reading(89.6, false), "10% left", "rounded on the used side");
+    assert_eq!(usage_reading(150.0, true), "100% used");
+}
 
-    let bar = format_usage_bar(0.0, 10);
-    assert!(bar.contains("░░░░░░░░░░"));
-    assert!(bar.contains("0%"));
-
-    let bar = format_usage_bar(100.0, 10);
-    assert!(bar.contains("██████████"));
-    assert!(bar.contains("100%"));
+#[test]
+fn account_summary_words_each_window_in_the_configured_direction() {
+    let snapshot = AccountUsageSnapshot {
+        additional_windows: Vec::new(),
+        label: "primary".into(),
+        email: None,
+        exhausted: false,
+        primary_label: Some("5h".into()),
+        five_hour_ratio: Some(0.10),
+        secondary_label: None,
+        seven_day_ratio: None,
+        resets_at: None,
+        error: None,
+    };
+    assert_eq!(snapshot.summary_with(false), "5h 90% left");
+    assert_eq!(snapshot.summary_with(true), "5h 10% used");
 }
 
 #[test]

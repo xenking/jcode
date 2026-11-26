@@ -273,12 +273,24 @@ mod reset_line_tests {
     }
 }
 
-pub fn format_usage_bar(percent: f32, width: usize) -> String {
+/// A quota reading the way the info widget words it: `N% used` or `M% left`
+/// (`display.usage_display`), rounded on the used side so both agree.
+pub fn usage_reading(used_percent: f32, display_used: bool) -> String {
+    let used = used_percent.clamp(0.0, 100.0).round() as u8;
+    if display_used {
+        format!("{used}% used")
+    } else {
+        format!("{}% left", 100 - used)
+    }
+}
+
+pub fn format_usage_bar(percent: f32, width: usize, display_used: bool) -> String {
     let filled = ((percent / 100.0) * width as f32).round() as usize;
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
     // Right-align the number so the `%` (and any "· resets" suffix) lines up
     // across rows with different percentages.
-    format!("{} {:>3.0}%", bar, percent)
+    let reading = usage_reading(percent, display_used);
+    format!("{bar} {reading:>9}")
 }

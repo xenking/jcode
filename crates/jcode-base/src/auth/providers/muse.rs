@@ -930,6 +930,14 @@ pub async fn refresh_if_needed(client: &reqwest::Client) -> Result<MuseCredentia
 /// nothing about remaining quota.
 pub fn usage_summary() -> Option<String> {
     let credentials = load_credentials().ok()?;
+    let display_used = crate::config::config().display.usage_display_used();
+    Some(usage_summary_for(&credentials, display_used))
+}
+
+/// [`usage_summary`] for given credentials, worded like the info widget:
+/// `N% used` or `M% left` per `display.usage_display`.
+pub fn usage_summary_for(credentials: &MuseCredentials, display_used: bool) -> String {
+    let reading = |percent: f64| crate::usage::usage_reading(percent as f32, display_used);
     let mut parts = Vec::new();
     if let Some(usage) = credentials.subs_usage.as_ref() {
         if let Some(percent) = valid_percent(usage.window_used_percent) {
@@ -938,10 +946,10 @@ pub fn usage_summary() -> Option<String> {
                 .filter(|mins| (1..=10_080).contains(mins))
                 .map(|mins| format!("{mins}-minute"))
                 .unwrap_or_else(|| "current".to_string());
-            parts.push(format!("{window} window {percent:.0}% used"));
+            parts.push(format!("{window} window {}", reading(percent)));
         }
         if let Some(percent) = valid_percent(usage.weekly_used_percent) {
-            parts.push(format!("weekly {percent:.0}% used"));
+            parts.push(format!("weekly {}", reading(percent)));
         }
         if !parts.is_empty()
             && let Some(tier) = usage
@@ -958,9 +966,7 @@ pub fn usage_summary() -> Option<String> {
     } else {
         parts.join("; ")
     };
-    Some(format!(
-        "Muse subscription usage (last account snapshot, not live): {detail}"
-    ))
+    format!("Muse subscription usage (last account snapshot, not live): {detail}")
 }
 
 /// Accept only finite 0..=100 percentages; reject NaN, infinities, and

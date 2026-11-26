@@ -104,7 +104,9 @@ pub use startup_snapshot::{
 };
 
 use anyhow::{Context, Result};
-pub use display::{format_reset_compact, format_reset_time, format_usage_bar, resets_summary};
+pub use display::{
+    format_reset_compact, format_reset_time, format_usage_bar, resets_summary, usage_reading,
+};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
 use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;

@@ -12,6 +12,11 @@ pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
     ((used.max(0.0) / limit) * 100.0) as f32
 }
 
+/// The balance first, worded as what is left, like the credits line.
+fn key_limit_line(remaining: f64, limit: f64) -> String {
+    format!("${remaining:.2} left of ${limit:.2}")
+}
+
 pub(super) fn usage_percent_from_remaining_limit(remaining: f64, limit: f64) -> f32 {
     if !remaining.is_finite() || !limit.is_finite() || limit <= 0.0 {
         return 0.0;
@@ -538,7 +543,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
             });
             extra_info.push((
                 "Key limit".to_string(),
-                format!("${:.2} / ${:.2}", remaining, limit),
+                key_limit_line(remaining, limit),
             ));
         }
     }
@@ -1107,5 +1112,15 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
         extra_info,
         hard_limit_reached,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod key_limit_tests {
+    use super::key_limit_line;
+
+    #[test]
+    fn a_key_limit_says_what_is_left() {
+        assert_eq!(key_limit_line(4.2, 10.0), "$4.20 left of $10.00");
     }
 }
