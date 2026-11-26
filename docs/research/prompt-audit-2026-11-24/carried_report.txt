@@ -1,6 +1,0 @@
-fast/root: carried tool output ~0M tok = 4% of 1M prompt tok; by tool: batch 36%, read 28%, swarm 15%, agentgrep 12%, bash 7%, todo 2%
-fast/worker: carried tool output ~269M tok = 50% of 535M prompt tok; by tool: bash 60%, read 22%, apply_patch 6%, write 3%, batch 2%, bg 2%
-frontier/root: carried tool output ~1818M tok = 26% of 6969M prompt tok; by tool: bash 35%, todo 32%, bg 7%, read 6%, batch 6%, codemode 4%
-frontier/worker: carried tool output ~2906M tok = 55% of 5312M prompt tok; by tool: codemode 41%, bash 18%, batch 12%, read 9%, apply_patch 7%, bg 4%
-general/root: carried tool output ~0M tok = 19% of 2M prompt tok; by tool: read 57%, bash 16%, skill_manage 11%, write 8%, bg 8%, user_response 0%
-general/worker: carried tool output ~1162M tok = 55% of 2113M prompt tok; by tool: bash 40%, batch 17%, read 12%, bg 11%, apply_patch 5%, edit 5%
