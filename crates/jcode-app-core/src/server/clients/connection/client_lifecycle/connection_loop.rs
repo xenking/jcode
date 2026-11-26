@@ -1170,6 +1170,11 @@ impl ClientConnection {
                 }
                 if newly_attached {
                     super::super::reload_recovery::ask_owner_available(&self.client_session_id);
+                    // Messages parked behind an update outlive the daemon that took them.
+                    // Other queued prompts stay queued until the user acts.
+                    if !self.client_is_processing {
+                        dispatch_queued_prompt!(self, true);
+                    }
                 }
             }
             if let Some(name) = self.connection_client_name.as_deref() {

@@ -359,7 +359,7 @@ async fn sdk_socket_cancel_workflow(
     use serde_json::json;
     send(
         &mut client_writer,
-        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach || matches!(queued_test, Some("reload" | "cancel_reconnect"))}),
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach || matches!(queued_test, Some("reload" | "cancel_reconnect" | "hold_reattach"))}),
     )
     .await;
     until(&mut client_reader, |e| {
@@ -508,10 +508,10 @@ async fn sdk_socket_cancel_workflow(
             matches!(event, ServerEvent::Done { id: 1 })
         })
         .await;
-        if matches!(queued_test, Some("hold_complete" | "hold_rollback")) {
+        if matches!(queued_test, Some("hold_complete" | "hold_rollback" | "hold_reattach")) {
             // A runtime update is draining: new turns for this session wait.
             let activity = crate::turn_activity::global();
-            let hold = activity.hold_new_turns_for(&[&session_id]).unwrap();
+            let mut hold = Some(activity.hold_new_turns_for(&[&session_id]).unwrap());
             let is_held_notice = |event: &ServerEvent| {
                 matches!(event, ServerEvent::Notification { notification_type, .. }
                     if matches!(notification_type, crate::protocol::NotificationType::Message { scope: Some(scope), .. } if scope == "update"))
@@ -550,12 +550,35 @@ async fn sdk_socket_cancel_workflow(
 
             // Completion lifts the hold when the replacement takes the fence;
             // rollback drops it with the executor. Either releases the queue.
-            if queued_test == Some("hold_complete") {
-                activity.release_new_turn_hold();
-                drop(hold);
+            let (mut client_writer, mut client_reader, server_task) = if queued_test
+                == Some("hold_reattach")
+            {
+                // The daemon was replaced: its connections are gone, so nobody
+                // sees the release. The prompts start when a client reattaches.
+                drop(client_writer);
+                drop(client_reader);
+                server_task.abort();
+                legacy_task.abort();
+                drop(hold.take());
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                assert_eq!(
+                    terminal_provider.calls.load(Ordering::SeqCst),
+                    0,
+                    "nothing attached, so nothing may start"
+                );
+                let (task, stream) = connect();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                send(&mut writer, json!({"type":"subscribe","id":80,"target_session_id":session_id,"continue_on_disconnect":true})).await;
+                until(&mut reader, |event| matches!(event, ServerEvent::Done { id: 80 })).await;
+                (writer, reader, task)
             } else {
-                drop(hold);
-            }
+                if queued_test == Some("hold_complete") {
+                    activity.release_new_turn_hold();
+                }
+                drop(hold.take());
+                (client_writer, client_reader, server_task)
+            };
             tokio::time::timeout(
                 Duration::from_secs(5),
                 terminal_provider.first_started.notified(),
@@ -575,18 +598,26 @@ async fn sdk_socket_cancel_workflow(
             .await
             .expect("released turn must finish");
             tokio::time::sleep(Duration::from_millis(300)).await;
+            // A reattach starts the parked message; the queued prompt follows it.
+            let turns = if queued_test == Some("hold_reattach") { 2 } else { 1 };
             assert_eq!(
                 terminal_provider.calls.load(Ordering::SeqCst),
-                1,
-                "parked prompts are delivered in exactly one turn"
+                turns,
+                "parked prompts are delivered in exactly {turns} turn(s)"
             );
-            let delivered = terminal_provider.messages.lock().unwrap().concat();
-            for text in ["plain during update", "queued during update"] {
-                assert_eq!(
-                    delivered.iter().filter(|part| part.contains(text)).count(),
-                    1,
-                    "{text} must be delivered exactly once: {delivered:?}"
-                );
+            let per_turn = terminal_provider.messages.lock().unwrap().clone();
+            let count = |turn: usize, text: &str| {
+                per_turn[turn].iter().filter(|part| part.contains(text)).count()
+            };
+            if turns == 2 {
+                // The second request replays the first turn as history.
+                assert_eq!(count(0, "plain during update"), 1, "{per_turn:?}");
+                assert_eq!(count(0, "queued during update"), 0, "{per_turn:?}");
+                assert_eq!(count(1, "queued during update"), 1, "{per_turn:?}");
+            } else {
+                for text in ["plain during update", "queued during update"] {
+                    assert_eq!(count(0, text), 1, "{text} once: {per_turn:?}");
+                }
             }
             send(&mut client_writer, json!({"type":"get_queued_prompts","id":70})).await;
             let snapshot = until(&mut client_reader, |event| matches!(event, ServerEvent::QueuedPrompts { id: 70, .. })).await;

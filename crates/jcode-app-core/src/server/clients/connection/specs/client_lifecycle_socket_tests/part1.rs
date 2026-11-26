@@ -1381,6 +1381,21 @@ async fn messages_sent_during_a_drain_wait_and_run_once_after_rollback() {
 }
 
 #[tokio::test]
+async fn prompts_parked_during_a_drain_start_when_a_client_reattaches_to_the_new_daemon() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("hold_reattach"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn cancel_after_owner_reconnect_is_confirmed_to_the_new_connection() {
     sdk_socket_cancel_workflow(
         false,
