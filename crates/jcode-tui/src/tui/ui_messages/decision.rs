@@ -18,11 +18,15 @@ fn failure_status(content: &str) -> &'static str {
 /// The questions as asked: the tool call's input when it is there (it has the
 /// option labels), else what the record kept.
 fn questions(msg: &DisplayMessage, from_record: &[AskQuestion]) -> Vec<AskQuestion> {
-    msg.tool_data
+    let from_input = msg
+        .tool_data
         .as_ref()
         .and_then(|tool| tool.input.get("questions"))
-        .and_then(|questions| serde_json::from_value(questions.clone()).ok())
-        .unwrap_or_else(|| from_record.to_vec())
+        .map(|questions| serde_json::from_value::<Vec<AskQuestion>>(questions.clone()));
+    match from_input {
+        Some(Ok(questions)) => questions,
+        _ => from_record.to_vec(),
+    }
 }
 
 fn answer_lines(answer: &AskAnswer) -> Vec<String> {
