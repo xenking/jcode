@@ -185,7 +185,9 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
     long_saved.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
-            text: "private-fixture-sentinel ".repeat(45_000),
+            // Sized so its estimate clearly exceeds the 224,142 tokens the provider
+            // reported below (~5 tokens per repeat), whatever the family weights are.
+            text: "private-fixture-sentinel ".repeat(100_000),
             cache_control: None,
         }],
     );
