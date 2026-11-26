@@ -141,6 +141,7 @@ struct TestState {
     streaming_tools: Vec<ToolCall>,
     batch_progress: Option<crate::bus::BatchProgress>,
     queued_messages: Vec<String>,
+    server_queued_prompts: Vec<crate::protocol::QueuedPrompt>,
     pending_soft_interrupts: Vec<String>,
     interleave_message: Option<String>,
     status: ProcessingStatus,
@@ -182,6 +183,9 @@ struct TestState {
 }
 
 impl crate::tui::TuiState for TestState {
+    fn server_queued_prompts(&self) -> &[crate::protocol::QueuedPrompt] {
+        &self.server_queued_prompts
+    }
     fn client_focused(&self) -> bool {
         !self.unfocused
     }

@@ -408,6 +408,7 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             match prompt.mode {
                 crate::protocol::QueuedPromptMode::Steer => "steer",
                 crate::protocol::QueuedPromptMode::AfterYield => "after",
+                crate::protocol::QueuedPromptMode::Queue => "queue",
             }
         };
         let normalized = normalize_repaint_sensitive_notice_text(&prompt.content);
@@ -524,6 +525,12 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
                 }
                 QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false, _) => {
                     ("  after", queued_color(), queued_color(), true)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Queue, true, _) => {
+                    ("> queue", queued_color(), queued_color(), false)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Queue, false, _) => {
+                    ("  queue", queued_color(), queued_color(), true)
                 }
                 QueuedMsgType::Pending => ("queued ⏎", pending_color(), pending_color(), true),
                 QueuedMsgType::Interleave => ("⚡", asap_color(), asap_color(), false),

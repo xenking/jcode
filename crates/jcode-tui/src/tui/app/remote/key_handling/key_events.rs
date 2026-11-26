@@ -235,6 +235,9 @@ pub(super) async fn handle_remote_key_internal(
                         crate::protocol::QueuedPromptMode::AfterYield => {
                             crate::protocol::QueuedPromptMode::Steer
                         }
+                        crate::protocol::QueuedPromptMode::Queue => {
+                            crate::protocol::QueuedPromptMode::Steer
+                        }
                     };
                     match remote
                         .set_queued_prompt_mode(prompt.client_id.clone(), mode)

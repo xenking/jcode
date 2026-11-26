@@ -105,6 +105,7 @@ async fn send_queued_prompt_with_attachments(
             app.set_status_notice(match mode {
                 crate::protocol::QueuedPromptMode::Steer => "Queued: steer",
                 crate::protocol::QueuedPromptMode::AfterYield => "Queued: after yield",
+                crate::protocol::QueuedPromptMode::Queue => "Queued: queue",
             });
             app.restore_stash_after_send();
         }
