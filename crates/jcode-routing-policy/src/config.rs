@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 /// `[routing]`.
@@ -20,21 +21,24 @@ pub struct RoutingConfig {
     pub limit_pct: f64,
     /// Subagents leave an account this many percent points earlier.
     pub subagent_reserve_pct: f64,
-    /// Minimum headroom in percent the adaptive limit keeps when the burn rate
-    /// is measurable. `limit_pct` stays the ceiling.
-    pub reserve_floor_pct: f64,
-    /// Projection horizon in minutes over which the burn rate must stay under
-    /// the remaining room before the account is left.
-    pub reserve_horizon_min: f64,
-    /// Moving onto a non-current account needs this many percent points more
-    /// room below its limit than staying on the current one.
-    pub hysteresis_pct: f64,
     /// Consecutive failures that evict an account.
     pub evict_after: u32,
     /// How long an eviction lasts, as a duration like `30m`, `5h` or `7d`.
     pub evict_for: String,
     pub accounts: Vec<AccountConfig>,
     pub budgets: Vec<BudgetConfig>,
+    /// Retired keys: still accepted, whatever their value, so older configs
+    /// load; [`RoutingConfig::retired_keys`] names the ones set.
+    #[serde(default, skip_serializing)]
+    pub reserve_floor_pct: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    pub reserve_horizon_min: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    pub hysteresis_pct: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    pub move_margin_pct: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    pub horizon_turns: Option<IgnoredAny>,
 }
 
 impl Default for RoutingConfig {
@@ -44,13 +48,15 @@ impl Default for RoutingConfig {
             paid: PaidMode::Auto,
             limit_pct: 95.0,
             subagent_reserve_pct: 5.0,
-            reserve_floor_pct: 0.0,
-            reserve_horizon_min: 60.0,
-            hysteresis_pct: 0.0,
             evict_after: 3,
             evict_for: "30m".into(),
             accounts: Vec::new(),
             budgets: Vec::new(),
+            reserve_floor_pct: None,
+            reserve_horizon_min: None,
+            hysteresis_pct: None,
+            move_margin_pct: None,
+            horizon_turns: None,
         }
     }
 }
@@ -60,26 +66,46 @@ impl RoutingConfig {
         self == &Self::default()
     }
 
-    /// One line per retired key the config still sets. They are ignored, never
-    /// a load error, and each line names what replaced the key.
+    /// One line naming every retired key the config still sets, or none. They
+    /// are ignored, never a load error.
     pub fn retired_keys(&self) -> Vec<String> {
-        let mut lines = Vec::new();
+        let top = [
+            ("reserve_floor_pct", self.reserve_floor_pct.is_some()),
+            ("reserve_horizon_min", self.reserve_horizon_min.is_some()),
+            ("hysteresis_pct", self.hysteresis_pct.is_some()),
+            ("move_margin_pct", self.move_margin_pct.is_some()),
+            ("horizon_turns", self.horizon_turns.is_some()),
+        ];
+        let mut keys: Vec<String> = top
+            .into_iter()
+            .filter(|(_, set)| *set)
+            .map(|(key, _)| format!("routing.{key}"))
+            .collect();
         for account in &self.accounts {
-            let id = &account.id;
-            if account.drain_before_reset_h.is_some() || account.drain_limit_pct.is_some() {
-                lines.push(format!(
-                    "routing.accounts `{id}`: drain_before_reset_h and drain_limit_pct are ignored. \
-                     Room that would be lost at a reset now drains first on its own"
-                ));
-            }
-            if account.pacing.is_some() {
-                lines.push(format!(
-                    "routing.accounts `{id}`: pacing is ignored. Every pool lost at a reset is \
-                     paced to its own reset (pacing_slack_pct still applies)"
-                ));
-            }
+            let per_account = [
+                (
+                    "drain_before_reset_h",
+                    account.drain_before_reset_h.is_some(),
+                ),
+                ("drain_limit_pct", account.drain_limit_pct.is_some()),
+                ("pacing", account.pacing.is_some()),
+                ("pacing_slack_pct", account.pacing_slack_pct.is_some()),
+            ];
+            keys.extend(
+                per_account
+                    .into_iter()
+                    .filter(|(_, set)| *set)
+                    .map(|(key, _)| format!("routing.accounts `{}`: {key}", account.id)),
+            );
         }
-        lines
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        vec![format!(
+            "retired keys are ignored: {}. A warm session stays on an account until it is \
+             blocked, and room that would be lost at a reset drains first on its own",
+            keys.join(", ")
+        )]
     }
 }
 
@@ -124,9 +150,6 @@ pub struct AccountConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress: Option<String>,
     pub on_limit: OnLimit,
-    /// Slack in percent of capacity above the pace line before the current
-    /// account's expiring room stops counting as room that would be lost.
-    pub pacing_slack_pct: f64,
     /// Multiplies the money price of a credits or metered account.
     pub weight: f64,
     /// Retired: pools behind their pace line drain first on their own.
@@ -134,6 +157,9 @@ pub struct AccountConfig {
     /// names it.
     #[serde(default, skip_serializing)]
     pub drain_before_reset_h: Option<f64>,
+    /// Retired: the pace line has no slack.
+    #[serde(default, skip_serializing)]
+    pub pacing_slack_pct: Option<IgnoredAny>,
     /// Retired with `drain_before_reset_h`.
     #[serde(default, skip_serializing)]
     pub drain_limit_pct: Option<f64>,
@@ -152,9 +178,9 @@ impl Default for AccountConfig {
             models: Vec::new(),
             egress: None,
             on_limit: OnLimit::Switch,
-            pacing_slack_pct: 0.0,
             weight: 1.0,
             drain_before_reset_h: None,
+            pacing_slack_pct: None,
             drain_limit_pct: None,
             pacing: None,
         }

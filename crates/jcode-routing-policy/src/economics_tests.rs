@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use crate::config::{AccountConfig, AccountKind, OnLimit, PriorityConfig, RoutingConfig, Unit};
 use crate::{
-    AccountId, AccountState, Availability, BurnRing, CacheContext, CacheFactors, Decision,
-    GateOption, Grant, HealthTracker, Intents, Policy, Reading, Redemption, Request, Role, Seam,
-    Snapshot, Window, decide, sweep,
+    AccountId, AccountState, Availability, CacheContext, CacheFactors, Decision, GateOption, Grant,
+    HealthTracker, Intents, Policy, Reading, Redemption, Request, Role, Seam, Snapshot, Window,
+    decide, sweep,
 };
 
 const NOW: i64 = 1_800_000_000;
@@ -41,7 +41,7 @@ fn policy(on_limit: OnLimit) -> Policy {
     Policy::from_config(&routing, &BTreeMap::new()).expect("valid policy")
 }
 
-/// A weekly window with unknown burn that resets in six days. With one
+/// A weekly window that resets in six days. With one
 /// seventh of the week gone, any use above 14.3% is ahead of pace and
 /// `λ = (100 x 6/7) / (100 - used)`: 1.071 at 20%, 1.224 at 30%, 1.714 at
 /// 50%, 8.571 at 90%.
@@ -64,7 +64,6 @@ fn state(used: f64, grants: Vec<Grant>) -> AccountState {
     AccountState {
         readings: vec![weekly(used)],
         availability: Availability::Ready,
-        burn: BurnRing::default(),
         grants,
     }
 }

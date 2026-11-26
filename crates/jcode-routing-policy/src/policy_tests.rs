@@ -198,9 +198,6 @@ fn strategy_fields_validate_and_land() {
     let policy = parse(
         r#"
         [routing]
-        reserve_floor_pct = 10
-        reserve_horizon_min = 90
-        hysteresis_pct = 3
         evict_after = 5
         evict_for = "45m"
 
@@ -210,7 +207,6 @@ fn strategy_fields_validate_and_land() {
         [[routing.accounts]]
         id = "openai:codex"
         kind = "credits"
-        pacing_slack_pct = 2
         weight = 1.5
 
         [[routing.budgets]]
@@ -223,12 +219,8 @@ fn strategy_fields_validate_and_land() {
         "#,
     )
     .expect("valid");
-    assert_eq!(policy.reserve_floor_pct, 10.0);
-    assert_eq!(policy.reserve_horizon_min, 90.0);
-    assert_eq!(policy.hysteresis_pct, 3.0);
     assert_eq!(policy.evict_after, 5);
     assert_eq!(policy.evict_for_secs, 45 * 60);
-    assert_eq!(policy.accounts[1].pacing_slack_pct, 2.0);
     assert_eq!(policy.accounts[1].weight, 1.5);
     assert_eq!(policy.budgets[0].window, Window::Month { day: 15 });
 }
@@ -238,16 +230,12 @@ fn strategy_fields_report_every_problem_at_once() {
     let errors = parse(
         r#"
         [routing]
-        reserve_floor_pct = 200
-        reserve_horizon_min = 0
-        hysteresis_pct = 100
         evict_after = 0
         evict_for = "calendar-month"
 
         [[routing.accounts]]
         id = "openai:x"
         kind = "credits"
-        pacing_slack_pct = 100
 
         [[routing.accounts]]
         id = "openai:y"
@@ -266,15 +254,55 @@ fn strategy_fields_report_every_problem_at_once() {
     .expect_err("invalid");
     let joined = errors.join("\n");
     for needle in [
-        "reserve_floor_pct",
-        "reserve_horizon_min",
-        "hysteresis_pct",
         "evict_after",
         "evict_for",
-        "pacing_slack_pct",
         "weight must be positive",
         "month@15 (day 1..=28)",
     ] {
         assert!(joined.contains(needle), "missing `{needle}` in:\n{joined}");
     }
+}
+
+// Retired keys never fail a load, whatever their value: one note names them all.
+#[test]
+fn retired_keys_load_and_are_named_in_one_note() {
+    #[derive(serde::Deserialize)]
+    struct Root {
+        routing: RoutingConfig,
+    }
+    let Root { routing } = toml::from_str(
+        r#"
+        [routing]
+        reserve_floor_pct = 200
+        reserve_horizon_min = 0
+        hysteresis_pct = 100
+        move_margin_pct = "wide"
+        horizon_turns = -1
+
+        [[routing.accounts]]
+        id = "claude:a"
+        pacing_slack_pct = 100
+
+        [[routing.accounts]]
+        id = "claude:b"
+        drain_before_reset_h = 4
+        "#,
+    )
+    .expect("retired keys parse whatever their value");
+
+    Policy::from_config(&routing, &BTreeMap::new()).expect("retired keys are not validated");
+    let notes = routing.retired_keys();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    for key in [
+        "routing.reserve_floor_pct",
+        "routing.reserve_horizon_min",
+        "routing.hysteresis_pct",
+        "routing.move_margin_pct",
+        "routing.horizon_turns",
+        "`claude:a`: pacing_slack_pct",
+        "`claude:b`: drain_before_reset_h",
+    ] {
+        assert!(notes[0].contains(key), "`{key}` missing from: {}", notes[0]);
+    }
+    assert!(RoutingConfig::default().retired_keys().is_empty());
 }

@@ -561,28 +561,39 @@ async fn ordinary_failures_evict_only_after_the_configured_streak() {
 }
 
 #[tokio::test]
-async fn eviction_and_burn_history_survive_a_daemon_reload() {
+async fn eviction_survives_a_daemon_reload() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
-    env.set_used("claude:a", 40.0);
     let service = RoutingService::new(env.clone());
-    let turn = input("claude:a", Seam::Cold, Role::Interactive);
-    service.plan(&turn).await;
-    env.now.store(NOW + 3_600, Ordering::SeqCst);
-    env.set_used("claude:a", 60.0);
-    service.plan(&turn).await;
     service.record_failure(&account("claude:a"), true);
 
     let reloaded = RoutingService::new(env.clone());
     let learned = reloaded.learned();
-    assert_eq!(
-        learned.ring(&account("claude:a")).burn_rate(NOW + 3_600),
-        Some(20.0),
-        "20 points over the hour survive the reload"
-    );
     assert!(matches!(
-        learned.availability(&account("claude:a"), NOW + 3_600),
+        learned.availability(&account("claude:a"), NOW),
         Availability::Evicted { .. }
     ));
+}
+
+// A steep climb (30% to 70% in an hour) used to lower the account's ceiling to
+// 55% and move the next session off it. Only `limit_pct` is a ceiling now.
+#[tokio::test]
+async fn a_steep_climb_does_not_lower_the_ceiling() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let turn = input("claude:a", Seam::Start, Role::Interactive);
+    env.set_used("claude:b", 10.0);
+    env.set_used("claude:a", 30.0);
+    service.plan(&turn).await;
+    env.now.store(NOW + 3_600, Ordering::SeqCst);
+    env.set_used("claude:a", 70.0);
+    env.set_used("claude:b", 10.0);
+
+    let plan = service.plan(&turn).await;
+
+    assert!(
+        matches!(plan, Plan::Stay(ref outcome) if outcome.account == account("claude:a")),
+        "{plan:?}"
+    );
 }
 
 #[tokio::test]

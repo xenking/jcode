@@ -148,22 +148,13 @@ pub(crate) struct Pool {
     pub used: f64,
     /// What the pool holds per period (100 for a percent window).
     pub capacity: f64,
-    /// Where routing stops spending it (the percent ceiling for a window).
-    pub wall: f64,
     pub resets_at: Option<i64>,
     pub window: Window,
-    /// Measured burn in pool units per hour, when known.
-    pub burn: Option<f64>,
 }
 
 impl Pool {
     fn left(&self) -> f64 {
         (self.capacity - self.used).max(0.0)
-    }
-
-    fn hours_to_reset(&self, now: i64) -> Option<f64> {
-        self.resets_at
-            .map(|at| ((at - now) as f64 / 3_600.0).max(0.0))
     }
 
     /// Share of the period still to run, from the reset and the window length.
@@ -172,58 +163,37 @@ impl Pool {
             .map(|at| ((at - now) as f64 / self.window.approx_secs() as f64).clamp(0.0, 1.0))
     }
 
-    fn rate(&self) -> Option<f64> {
-        self.burn.filter(|rate| rate.is_finite() && *rate >= 0.0)
-    }
-
-    /// Room that would be lost at the reset: the measured burn will not use
-    /// it, or without a burn the pool is behind its pace line. `slack`, a share
-    /// of capacity, keeps the current account behind a little longer.
-    pub(crate) fn behind_pace(&self, now: i64, slack: f64) -> bool {
-        let (Some(hours), Some(left_share)) = (self.hours_to_reset(now), self.left_share(now))
-        else {
+    /// Room that would be lost at the reset: the pool is behind its pace line,
+    /// a linear climb from 0 at the window start to `capacity` at the reset.
+    pub(crate) fn behind_pace(&self, now: i64) -> bool {
+        let Some(left_share) = self.left_share(now) else {
             return false;
         };
         if self.left() <= 0.0 || self.capacity <= 0.0 {
             return false;
         }
-        match self.rate() {
-            Some(rate) => self.used + rate * hours < self.capacity * (1.0 + slack),
-            None => self.used / self.capacity < 1.0 - left_share + slack,
-        }
+        self.used / self.capacity < 1.0 - left_share
     }
 
-    /// `λ` of a pool ahead of pace: projected demand until the reset over the
-    /// room left. Without a burn, demand is the steady pace to the reset.
+    /// `λ` of a pool ahead of pace: the steady pace to the reset over the room
+    /// left.
     pub(crate) fn scarcity(&self, now: i64) -> f64 {
         let left = self.left();
         if left <= 0.0 {
             return f64::INFINITY;
         }
-        let demand = match (self.rate(), self.hours_to_reset(now), self.left_share(now)) {
-            (Some(rate), Some(hours), _) => rate * hours,
-            (None, _, Some(share)) => self.capacity * share,
+        match self.left_share(now) {
+            Some(share) => self.capacity * share / left,
             // No reset known: the used share still rises as the pool runs out.
-            _ => return (self.used / self.capacity).clamp(0.0, 1.0),
-        };
-        demand / left
+            None => (self.used / self.capacity).clamp(0.0, 1.0),
+        }
     }
 
-    /// When the account reaches this pool's wall again, in unix seconds. An
-    /// unknown burn assumes it fills over one full window after the reset.
-    fn next_wall(&self, now: i64) -> Option<i64> {
+    /// When the account reaches this pool's wall again, in unix seconds: it
+    /// fills over one full window after the reset.
+    fn next_wall(&self) -> Option<i64> {
         let resets_at = self.resets_at?;
-        let burn = self.rate().filter(|rate| *rate > 0.0);
-        let secs = |points: f64| burn.map(|rate| (points / rate * 3_600.0) as i64);
-        let room = (self.wall - self.used).max(0.0);
-        if room > 0.0
-            && let Some(secs) = secs(room)
-            && now + secs <= resets_at
-        {
-            return Some(now + secs);
-        }
-        let refill = secs(self.wall).unwrap_or_else(|| self.window.approx_secs() as i64);
-        Some(resets_at.saturating_add(refill))
+        Some(resets_at.saturating_add(self.window.approx_secs() as i64))
     }
 }
 
@@ -236,7 +206,7 @@ pub(crate) fn grant_wastes(grant: &Grant, pools: &[Pool], now: i64) -> bool {
     pools
         .iter()
         .filter(|pool| grant.windows.contains(&pool.window))
-        .filter_map(|pool| pool.next_wall(now))
+        .filter_map(Pool::next_wall)
         .min()
         .is_some_and(|wall| grant.expires_at < wall)
 }

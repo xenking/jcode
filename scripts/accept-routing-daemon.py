@@ -238,8 +238,6 @@ def check_auto_move(binary, port):
         lines = daemon.decisions()
         assert lines[-1]["applied"] is True and lines[-1]["decision"] == "move", lines
         print("ok auto: fresh session moved off the spent account and was served by key-second")
-        health = daemon.jcode / "routing-health.json"
-        assert health.exists(), "burn samples are persisted"
         status = Client(daemon.sock)
         status.send(type="subscribe", id=1, working_dir=str(daemon.root), continue_on_disconnect=True)
         status.until(lambda e: e.get("type") == "done" and e.get("id") == 1)

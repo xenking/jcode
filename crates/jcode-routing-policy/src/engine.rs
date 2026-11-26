@@ -9,7 +9,6 @@ use crate::economics::{
     grant_wastes,
 };
 use crate::policy::{Account, AccountId, Budget, Policy, Scope, Window};
-use crate::strategy::BurnRing;
 
 /// A percent window this full is a wall the provider enforces: the account
 /// can no longer serve. The soft ceiling (`limit_pct`) only steers choices.
@@ -44,8 +43,6 @@ pub enum Availability {
 pub struct AccountState {
     pub readings: Vec<Reading>,
     pub availability: Availability,
-    /// Recent meter samples the daemon feeds and persists for burn-rate limits.
-    pub burn: BurnRing,
     /// Reset grants not yet redeemed.
     pub grants: Vec<Grant>,
 }
@@ -555,22 +552,6 @@ fn describe(standing: &Standing<'_>) -> String {
     }
 }
 
-/// The percent ceiling after reserving for the measured burn rate over the
-/// projection horizon. Unknown or absent rate falls back to the ceiling, so a
-/// fresh or quiet account is never penalized for what we cannot measure.
-fn adaptive_limit(policy: &Policy, burn: Option<f64>) -> f64 {
-    match burn {
-        Some(rate) if rate.is_finite() && rate >= 0.0 => {
-            let horizon_h = policy.reserve_horizon_min / 60.0;
-            let reserve = (rate * horizon_h)
-                .max(policy.reserve_floor_pct)
-                .min(policy.limit_pct);
-            (policy.limit_pct - reserve).max(0.0)
-        }
-        _ => policy.limit_pct,
-    }
-}
-
 fn stand<'p>(
     policy: &Policy,
     snapshot: &Snapshot,
@@ -597,7 +578,6 @@ fn stand<'p>(
                 .collect()
         })
         .unwrap_or_default();
-    let is_current = request.current == Some(&account.id);
     let subagent_reserve = if request.role == Role::Subagent {
         policy.subagent_reserve_pct
     } else {
@@ -608,8 +588,7 @@ fn stand<'p>(
         .iter()
         .filter(|b| b.scope.covers(&account.id, request.model))
         .collect();
-    let burn_rate = state.and_then(|state| state.burn.burn_rate(now));
-    let ceiling = (adaptive_limit(policy, burn_rate) - subagent_reserve).max(0.0);
+    let ceiling = (policy.limit_pct - subagent_reserve).max(0.0);
     let provider_budget = |reading: &Reading| {
         budgets.iter().copied().find(|b| {
             b.meter == MeterSource::Provider && b.window == reading.window && b.unit == reading.unit
@@ -622,20 +601,15 @@ fn stand<'p>(
         .iter()
         .filter_map(|r| {
             let budget = provider_budget(r).map(|b| b.limit);
-            let (capacity, wall, burn) = match r.unit {
-                Unit::Percent => (100.0, budget.unwrap_or(ceiling), burn_rate),
-                _ => {
-                    let capacity = budget.or(r.limit)?;
-                    (capacity, capacity, None)
-                }
+            let capacity = match r.unit {
+                Unit::Percent => 100.0,
+                _ => budget.or(r.limit)?,
             };
             Some(Pool {
                 used: r.used,
                 capacity,
-                wall,
                 resets_at: r.resets_at,
                 window: r.window,
-                burn,
             })
         })
         .collect();
@@ -649,10 +623,8 @@ fn stand<'p>(
                 Some(Pool {
                     used: *snapshot.ledger.get(&b.name)?,
                     capacity: b.limit,
-                    wall: b.limit,
                     resets_at: snapshot.resets.get(&b.name).copied(),
                     window: b.window,
-                    burn: None,
                 })
             }),
     );
@@ -673,14 +645,7 @@ fn stand<'p>(
         .filter(|(_, wastes)| *wastes)
         .map(|(grant, _)| grant.expires_at)
         .min();
-    // The current account stays behind pace a little longer, so the boundary
-    // does not flap.
-    let slack = if is_current {
-        account.pacing_slack_pct / 100.0
-    } else {
-        0.0
-    };
-    let behind = !pools.is_empty() && pools.iter().all(|pool| pool.behind_pace(now, slack));
+    let behind = !pools.is_empty() && pools.iter().all(|pool| pool.behind_pace(now));
     let lost_room = if behind {
         pools.iter().filter_map(|pool| pool.resets_at).min()
     } else {
@@ -709,17 +674,7 @@ fn stand<'p>(
             continue;
         }
         let (spent, limit) = match reading.unit {
-            Unit::Percent => {
-                // Hysteresis only shapes the default ceiling: a non-current
-                // account needs more room than the current one needs to stay.
-                let hysteresis = if is_current {
-                    0.0
-                } else {
-                    policy.hysteresis_pct
-                };
-                let limit = (ceiling - hysteresis).max(0.0);
-                (reading.used >= limit, format!("{limit:.0}%"))
-            }
+            Unit::Percent => (reading.used >= ceiling, format!("{ceiling:.0}%")),
             _ => match reading.limit {
                 Some(limit) => (reading.used >= limit, format!("{limit:.0}")),
                 None => (false, String::new()),

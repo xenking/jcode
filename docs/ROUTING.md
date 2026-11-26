@@ -124,11 +124,8 @@ from caches (`routing_meters.rs`):
   account**; it shows as unknown.
 - Reset grants (earned weekly or Fable resets) come from cached metadata
   only, and only unexpired, non-imported ones count.
-- Per-account state learned over time (`routing-health.json`): a ring of meter
-  samples per account (one sample per minute at most, kept six hours, history
-  restarts when a window resets) from which the burn rate in points per hour is
-  measured, and each account's consecutive-failure count and eviction deadline.
-  It survives daemon reloads.
+- Per-account state learned over time (`routing-health.json`): each account's
+  consecutive-failure count and eviction deadline. It survives daemon reloads.
 - Egress availability (`EgressDown` when a `required` proxy is unreachable) is
   layered on top, see section 8.
 
@@ -179,15 +176,11 @@ eviction, a down proxy or a `block` budget.
 
 ### Limits (when an account counts as spent)
 
-For each percent window the account is spent when
-`used >= ceiling - hysteresis`, where
-
-- `ceiling = adaptive_limit - subagent_reserve_pct` (subagents only; interactive: 0);
-- `adaptive_limit = limit_pct`, or when the burn rate is measurable
-  `limit_pct - clamp(burn_pts_per_hour * reserve_horizon_min/60, reserve_floor_pct, limit_pct)`.
-  An unmeasured burn never penalizes an account;
-- `hysteresis_pct` applies only to accounts other than the current one: moving
-  onto an account needs that much more room than staying needs.
+For each percent window the account is spent when `used >= ceiling`, where
+`ceiling = limit_pct - subagent_reserve_pct` (subagents only; interactive: no
+reserve). The ceiling is soft: it only steers where a session starts or goes
+at a cold seam. No burn-rate history lowers it. A warm session is never moved
+by it (see "Cache seams").
 
 Non-percent readings are spent at the provider's own cap. A matching
 `[[routing.budgets]]` replaces the default ceiling of a window with the same
@@ -267,15 +260,9 @@ fully spent by its own reset, like a linear line from 0 % at the window start to
 
 A pool is **behind pace** (room would be lost) when it still has room and
 
-- with a measured burn: `used + burn * hours_to_reset < capacity * (1 + slack)`
-  (the measured burn will not use the room before the reset);
-- without a burn: `used/capacity < 1 - left_share + slack`, where
-  `left_share = (resets_at - now) / window_length` (clamped to 0..1; a month
-  counts as 30 days).
-
-`slack = pacing_slack_pct/100` and applies **only to the current account**: it
-keeps the current account behind pace a little longer so the boundary does not
-flap. An account is *behind pace* only when all of its pools are; its soonest
+`used/capacity < 1 - left_share`, where
+`left_share = (resets_at - now) / window_length` (clamped to 0..1; a month
+counts as 30 days). An account is *behind pace* only when all of its pools are; its soonest
 reset orders such accounts. The reason shown is
 `behind pace, room would be lost at the reset` (or `a reset grant would expire
 unused` when a grant makes the room free). Accounts that are ahead of pace fall
@@ -285,9 +272,8 @@ back to priority.
 
 λ is what one unit of an account's quota is worth now:
 
-- an expiring pool: scarcity = projected demand until reset /
-  room left (demand is `burn * hours_to_reset`, or without a burn
-  `capacity * left_share`). Unknown reset: the used share. No room: infinite.
+- an expiring pool: scarcity = the steady pace to the reset (`capacity *
+  left_share`) / room left. Unknown reset: the used share. No room: infinite.
   Multiple pools: the largest;
 - `credits`/`metered` with no pool reading: the account `weight`;
 - an unmeasured subscription: 1.
@@ -474,7 +460,7 @@ catalog price. They drive the cost shown in the TUI and the spend ledger.
 | Decisions log | `JCODE_HOME/routing-decisions.jsonl` (rotated to `.1` at 8 MiB): `at, time, mode, session, model, role, seam, current, decision, account, reason, warnings, pending, applied` | one line per decision in `shadow` and `auto`; `decision` is `stay`, `move`, `pending`, `compact`, `redeem`, `gate` or `block`; `applied` is true only for an applied `move` |
 | Daemon log | `routing[auto\|shadow]: session=.. model=.. current=.. <decision> <account> (<reason>)`; `routing: ...` warnings for invalid config, failed binds, failed or unconfirmed reset claims | same moments |
 | `routing-state.json` | intents | on change |
-| `routing-health.json` | burn rings, failure counts, evictions | throttled (30 s) or at once on a failure |
+| `routing-health.json` | failure counts, evictions | throttled (30 s) or at once on a failure |
 | `spend-ledger-v1.sqlite3` | one row per billed API-key call | per call |
 
 The routing table (`status` text) is for **on-demand inspection only** and is not
@@ -486,7 +472,8 @@ Everything below is read from `config.toml`; defaults are from the `Default`
 impls (`crates/jcode-routing-policy/src/config.rs`,
 `crates/jcode-config-types/src/runtime/provider.rs`). An invalid `[routing]`
 disables routing for the turn and is reported, it never breaks loading the rest
-of the config. Retired keys still load and are named as notes.
+of the config. Retired keys still load and are ignored; one warning (also in
+`jcode routing status`) names every one the config sets.
 
 ### `[routing]`
 
@@ -496,12 +483,12 @@ of the config. Retired keys still load and are named as notes.
 | `paid` | `"auto"` | `auto`, `off`: may the automatic path use credits/metered accounts |
 | `limit_pct` | `95` | percent at which a window counts as spent (ceiling). > 0 and <= 100 |
 | `subagent_reserve_pct` | `5` | subagents leave an account this many points earlier. 0..100 |
-| `reserve_floor_pct` | `0` | minimum headroom the adaptive limit keeps when burn is measurable. 0..=`limit_pct` |
-| `reserve_horizon_min` | `60` | minutes of projected burn the adaptive limit reserves. > 0 |
-| `hysteresis_pct` | `0` | extra room a non-current account needs. 0..100 |
 | `evict_after` | `3` | consecutive failures that evict an account. >= 1 |
 | `evict_for` | `"30m"` | eviction length (`30m`, `5h`, `7d`, `2w`) |
 | `accounts`, `budgets` | empty | see below |
+
+Retired and ignored (a config that sets them still loads): `reserve_floor_pct`,
+`reserve_horizon_min`, `hysteresis_pct`, `move_margin_pct`, `horizon_turns`.
 
 ### `[[routing.accounts]]`
 
@@ -514,9 +501,8 @@ of the config. Retired keys still load and are named as notes.
 | `models` | `[]` (all) | `*`-globs of model ids this account serves |
 | `egress` | unset | name of an `[egress.*]` entry that must exist |
 | `on_limit` | `"switch"` | `switch`, `ask`, `block` |
-| `pacing_slack_pct` | `0` | slack above the pace line for the current account. 0..100 |
 | `weight` | `1.0` | multiplies the price of credits/metered accounts. > 0 |
-| `drain_before_reset_h`, `drain_limit_pct`, `pacing` | retired | ignored: pools behind pace drain first on their own |
+| `drain_before_reset_h`, `drain_limit_pct`, `pacing`, `pacing_slack_pct` | retired | ignored: pools behind pace drain first on their own |
 
 ### `[[routing.budgets]]`
 

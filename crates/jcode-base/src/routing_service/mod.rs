@@ -242,18 +242,14 @@ impl RoutingService {
             egress.push((account.id.clone(), self.env.availability(&account.id).await));
         }
         {
-            let mut learned = self.learned();
-            learned.feed(&snapshot, now);
+            let learned = self.learned();
             for (id, egress) in egress {
                 let availability = if egress == Availability::Ready {
                     learned.availability(&id, now)
                 } else {
                     egress
                 };
-                let ring = learned.ring(&id);
-                let state = snapshot.accounts.entry(id).or_default();
-                state.availability = availability;
-                state.burn = ring;
+                snapshot.accounts.entry(id).or_default().availability = availability;
             }
         }
         {
@@ -496,7 +492,14 @@ impl RoutingService {
     /// The first call of a daemon's life fetches the meters once, so the first
     /// turn does not decide on an empty snapshot.
     async fn warm(&self) {
-        self.warmed.get_or_init(|| self.env.warm()).await;
+        self.warmed
+            .get_or_init(|| async {
+                for note in self.env.routing().0.retired_keys() {
+                    crate::logging::warn(&format!("routing: {note}"));
+                }
+                self.env.warm().await;
+            })
+            .await;
     }
 
     fn record(&self, active: &Active, input: &TurnInput, plan: &Plan, now: i64) {

@@ -1859,6 +1859,7 @@ fn retired_routing_and_cache_keys_still_load() {
 
         [routing]
         mode = "auto"
+        reserve_floor_pct = 10
 
         [[routing.accounts]]
         id = "claude:team"
@@ -1883,15 +1884,13 @@ fn retired_routing_and_cache_keys_still_load() {
     .expect("a config with retired keys loads");
     let policy = jcode_routing_policy::Policy::from_config(&config.routing, &config.egress)
         .expect("the routing section stays valid");
-    assert_eq!(policy.accounts[1].pacing_slack_pct, 2.0);
     assert_eq!(
         policy.budgets[0].window,
         jcode_routing_policy::Window::CALENDAR_MONTH
     );
     let notes = config.routing.retired_keys();
-    assert_eq!(notes.len(), 2, "{notes:?}");
-    assert!(notes[0].contains("drain_before_reset_h") && notes[0].contains("drains first"));
-    assert!(notes[1].contains("pacing is ignored") && notes[1].contains("paced to its own reset"));
+    assert_eq!(notes.len(), 1, "one warning names every key: {notes:?}");
+    assert!(notes[0].contains("reserve_floor_pct") && notes[0].contains("pacing_slack_pct"));
     let cache = config.cache.retired_keys();
     assert_eq!(cache.len(), 2, "{cache:?}");
     assert!(

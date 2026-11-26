@@ -23,7 +23,7 @@ pub use policy::{
     Account, AccountId, Budget, Egress, ModelGlob, Policy, PolicyError, Priority, Scope, UNRANKED,
     Window,
 };
-pub use strategy::{BurnRing, BurnSample, HealthTracker};
+pub use strategy::HealthTracker;
 
 #[cfg(test)]
 mod economics_tests;

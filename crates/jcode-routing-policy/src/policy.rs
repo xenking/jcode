@@ -181,9 +181,6 @@ pub struct Account {
     pub models: Vec<ModelGlob>,
     pub egress: Option<String>,
     pub on_limit: OnLimit,
-    /// Slack above the pace line before the current account's expiring room
-    /// stops counting as room that would be lost.
-    pub pacing_slack_pct: f64,
     /// Multiplies the money price of a credits or metered account.
     pub weight: f64,
 }
@@ -235,9 +232,6 @@ pub struct Policy {
     pub paid: PaidMode,
     pub limit_pct: f64,
     pub subagent_reserve_pct: f64,
-    pub reserve_floor_pct: f64,
-    pub reserve_horizon_min: f64,
-    pub hysteresis_pct: f64,
     pub evict_after: u32,
     pub evict_for_secs: u64,
     pub accounts: Vec<Account>,
@@ -291,18 +285,6 @@ impl Policy {
         if !(0.0..100.0).contains(&routing.subagent_reserve_pct) {
             err("routing.subagent_reserve_pct must be in 0..100".into());
         }
-        if !(0.0..=routing.limit_pct).contains(&routing.reserve_floor_pct) {
-            err(format!(
-                "routing.reserve_floor_pct must be in 0..=limit_pct ({})",
-                routing.limit_pct
-            ));
-        }
-        if !(routing.reserve_horizon_min > 0.0 && routing.reserve_horizon_min.is_finite()) {
-            err("routing.reserve_horizon_min must be positive".into());
-        }
-        if !(0.0..100.0).contains(&routing.hysteresis_pct) {
-            err("routing.hysteresis_pct must be in 0..100".into());
-        }
         if routing.evict_after == 0 {
             err("routing.evict_after must be at least 1".into());
         }
@@ -342,9 +324,6 @@ impl Policy {
                 paid: routing.paid,
                 limit_pct: routing.limit_pct,
                 subagent_reserve_pct: routing.subagent_reserve_pct,
-                reserve_floor_pct: routing.reserve_floor_pct,
-                reserve_horizon_min: routing.reserve_horizon_min,
-                hysteresis_pct: routing.hysteresis_pct,
                 evict_after: routing.evict_after,
                 evict_for_secs,
                 accounts,
@@ -393,11 +372,6 @@ fn account_from_config(
             "routing.accounts `{id}`: egress `{name}` is not defined in [egress.{name}]"
         ));
     }
-    if !(0.0..100.0).contains(&raw.pacing_slack_pct) {
-        return Err(format!(
-            "routing.accounts `{id}`: pacing_slack_pct must be in 0..100"
-        ));
-    }
     if !(raw.weight > 0.0 && raw.weight.is_finite()) {
         return Err(format!("routing.accounts `{id}`: weight must be positive"));
     }
@@ -408,7 +382,6 @@ fn account_from_config(
         models,
         egress: raw.egress.clone(),
         on_limit: raw.on_limit,
-        pacing_slack_pct: raw.pacing_slack_pct,
         weight: raw.weight,
     })
 }
