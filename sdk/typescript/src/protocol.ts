@@ -792,6 +792,8 @@ export type ApiEvent =
       codemode_calls?: CodemodeCall[];
       codemode_calls_omitted?: number;
       report_body_bytes?: number;
+      /** The typed answer when this is a completed `ask`. */
+      ask?: AskRecord;
     }
   | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
   | { ev: "applet_state"; session_id: string; snapshot: AgentApplets }
@@ -1232,4 +1234,10 @@ export interface AskAnswer {
 /** `answers` absent means the user declined. */
 export interface AskResponse {
   answers?: AskAnswer[];
+}
+
+/** One answered `ask` call: the questions as asked and the reply. Image payloads are not kept. */
+export interface AskRecord {
+  questions: AskQuestion[];
+  response: AskResponse;
 }
