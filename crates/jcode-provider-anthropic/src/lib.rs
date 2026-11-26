@@ -768,12 +768,19 @@ fn append_request_message(messages: &mut Vec<ApiMessage>, message: ApiMessage) {
 /// explicit even when a large tool round puts it outside the API's lookback.
 /// Tools and system reserve one slot each and share the same TTL with messages.
 pub fn add_message_cache_breakpoint(messages: &mut [ApiMessage], cache_ttl_1h: bool) {
-    let provisional_start = messages.iter().enumerate().find_map(|(i, message)| {
-        message
-            .content
-            .iter()
-            .position(ApiContentBlock::is_provisional_tool_result)
-            .map(|j| (i, j))
+    // A placeholder in the live tail may still be replaced by a real result.
+    // Once another assistant turn follows it, it is part of historical request
+    // content and must not permanently pin both cache markers to that point.
+    let provisional_start = messages.last().and_then(|message| {
+        (message.role == "user")
+            .then(|| {
+                message
+                    .content
+                    .iter()
+                    .position(ApiContentBlock::is_provisional_tool_result)
+                    .map(|j| (messages.len() - 1, j))
+            })
+            .flatten()
     });
     let stable_len = provisional_start.map_or(messages.len(), |(i, _)| i + 1);
 
@@ -996,6 +1003,86 @@ mod cache_prefix_invariant_tests {
 
     use super::*;
     use jcode_message_types::{ContentBlock, Message, Role};
+
+    #[test]
+    fn live_tail_placeholder_keeps_boundary_after_historical_placeholder() {
+        let assistant_call = |id: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "read".into(),
+                input: json!({}),
+                thought_signature: None,
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let history = vec![
+            Message::user("start"),
+            assistant_call("old"),
+            Message::user("continue"),
+            assistant_call("live"),
+        ];
+        let wire = serde_json::to_value(format_messages_for_request(
+            &history,
+            false,
+            &[],
+            false,
+            "",
+            false,
+        ))
+        .unwrap();
+        let messages = wire.as_array().unwrap();
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "old");
+        assert_eq!(messages[4]["content"][0]["tool_use_id"], "live");
+        assert!(messages[4]["content"][0].get("cache_control").is_none());
+        assert!(messages[3]["content"][0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn historical_displaced_placeholder_does_not_pin_cache() {
+        let mut displaced = Message::user("");
+        displaced.content = vec![ContentBlock::ToolResult {
+            tool_use_id: "old".into(),
+            content: history_repair::DISPLACED_TOOL_RESULT_TEXT.into(),
+            is_error: Some(true),
+        }]
+        .into();
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "old".into(),
+                name: "read".into(),
+                input: json!({}),
+                thought_signature: None,
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let history = vec![
+            Message::user("start"),
+            call,
+            displaced,
+            Message::assistant_text("done"),
+            Message::user("next"),
+        ];
+        let wire = serde_json::to_value(format_messages_for_request(
+            &history,
+            false,
+            &[],
+            false,
+            "",
+            false,
+        ))
+        .unwrap();
+        assert!(wire[4]["content"][0].get("cache_control").is_some());
+        assert_eq!(
+            wire[2]["content"][0]["content"],
+            history_repair::DISPLACED_TOOL_RESULT_TEXT
+        );
+    }
 
     fn text_msg(role: Role, text: &str) -> Message {
         Message {

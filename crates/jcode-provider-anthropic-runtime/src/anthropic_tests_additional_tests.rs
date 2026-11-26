@@ -2,6 +2,121 @@ use super::*;
 
 type CapturedRequest = (String, serde_json::Value);
 
+#[tokio::test]
+async fn cache_breakpoints_advance_past_historical_repaired_tool_results_on_wire() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude-api");
+    let (endpoint, server) = capture_anthropic_requests::<2>();
+    let _endpoint = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", endpoint);
+    let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
+    let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "JCODE_TEST_ANTHROPIC_KEY");
+    let _key = EnvVarGuard::set("JCODE_TEST_ANTHROPIC_KEY", "fake-key");
+    let mut provider = AnthropicProvider::new();
+    provider.client = Client::builder().no_proxy().build().unwrap();
+    let tools = [ToolDefinition {
+        name: "read".into(),
+        description: "Read".into(),
+        input_schema: serde_json::json!({"type":"object"}),
+        defer_loading: false,
+    }];
+    let call = |id: &str| Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: id.into(),
+            name: "read".into(),
+            input: serde_json::json!({}),
+            thought_signature: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let result = |id: &str| {
+        let mut message = Message::user("");
+        message.content = vec![ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: format!("output {id}"),
+            is_error: None,
+        }]
+        .into();
+        message
+    };
+    // The interrupted call is never answered in durable history. The second
+    // result is persisted after an interleaved turn and must be hoisted.
+    let mut history = vec![
+        Message::user("start"),
+        call("interrupted"),
+        Message::user("continue"),
+        call("displaced"),
+        Message::user("interjection"),
+        Message::assistant_text("continuing"),
+        result("displaced"),
+        call("round1"),
+        result("round1"),
+    ];
+    for round in 0..2 {
+        let before = serde_json::to_value(&history).unwrap();
+        let mut request = history.clone();
+        request.push(Message::user("request-only reminder").into_request_only());
+        let mut stream = provider
+            .complete_split(&request, &tools, "instructions", "dynamic", None)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        assert_eq!(serde_json::to_value(&history).unwrap(), before);
+        if round == 0 {
+            history.extend([call("round2"), result("round2")]);
+        }
+    }
+    let requests = server.join().unwrap();
+    let mut positions = Vec::new();
+    for (_, request) in &requests {
+        let messages = request["messages"].as_array().unwrap();
+        let mut marked = Vec::new();
+        for (i, message) in messages.iter().enumerate() {
+            let blocks = message["content"].as_array().unwrap();
+            for block in blocks {
+                if block.get("cache_control").is_some() {
+                    marked.push(i);
+                }
+                if block["type"] == "tool_use" {
+                    let id = &block["id"];
+                    assert!(
+                        messages[i + 1]["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|b| b["type"] == "tool_result" && b["tool_use_id"] == *id)
+                    );
+                }
+                if block["text"] == "request-only reminder"
+                    || block["text"] == "<system-reminder>\ndynamic\n</system-reminder>"
+                {
+                    assert!(block.get("cache_control").is_none());
+                }
+            }
+        }
+        assert!(
+            request
+                .to_string()
+                .contains("Session interrupted before tool execution completed")
+        );
+        assert!(request.to_string().contains("output displaced"));
+        assert_eq!(marked.len(), 2);
+        positions.push(marked);
+    }
+    eprintln!("wire cache breakpoint positions: {positions:?}");
+    assert!(positions[0][1] > 2, "stale breakpoints: {positions:?}");
+    assert!(
+        positions[1][0] > positions[0][0] && positions[1][1] > positions[0][1],
+        "breakpoints did not advance: {positions:?}"
+    );
+}
+
 fn capture_anthropic_requests<const N: usize>()
 -> (String, std::thread::JoinHandle<[CapturedRequest; N]>) {
     use std::io::{BufRead, BufReader, Read, Write};
