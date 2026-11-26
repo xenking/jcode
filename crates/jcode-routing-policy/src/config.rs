@@ -131,7 +131,9 @@ pub enum PaidMode {
     Off,
 }
 
-/// `[[routing.accounts]]`.
+/// `[[routing.accounts]]`: the settings of one saved login that differ from
+/// what its saved plan and the account pool give it. Every saved login is
+/// routed without an entry; `kind` and `priority` left unset keep the default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccountConfig {
@@ -141,8 +143,10 @@ pub struct AccountConfig {
     /// for the account's label (see `jcode_session_types::account_icon`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    pub kind: AccountKind,
-    pub priority: PriorityConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AccountKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<PriorityConfig>,
     /// Model-id globs (`*` wildcard) this account serves. Empty serves every model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
@@ -173,8 +177,8 @@ impl Default for AccountConfig {
         Self {
             id: String::new(),
             icon: None,
-            kind: AccountKind::Subscription,
-            priority: PriorityConfig::Flat(1),
+            kind: None,
+            priority: None,
             models: Vec::new(),
             egress: None,
             on_limit: OnLimit::Switch,

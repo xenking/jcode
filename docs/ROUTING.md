@@ -25,13 +25,13 @@ each role (workers, review, titles, compaction) uses, not which account.
 | Layer | Switch | What it is |
 | --- | --- | --- |
 | Account pool (legacy) | always present | `account-pool.json`: membership, order and priority of logins. Used for session start, same-provider failover and cross-provider failover when the routing policy is not in charge. |
-| Routing policy | `[routing] mode` | `[[routing.accounts]]`: kinds, priorities, limits, pacing, egress, budgets. A pure engine decides per turn; a daemon service applies it. |
+| Routing policy | `[routing] mode` | Every saved login is a routing account, ranked by the pool's priority and order; `[[routing.accounts]]` only overrides one account's kind, priority, limits, egress, models or icon. `[[routing.budgets]]` adds budgets. A pure engine decides per turn; a daemon service applies it. |
 
 `[routing] mode` (default **`off`**):
 
 - `off`: the policy is ignored and costs nothing. The account pool behaves as before.
 - `shadow`: every decision is computed and logged (decisions log, daemon log) but nothing is applied. The pool still rotates accounts.
-- `auto`: decisions are applied. For a provider that has a `[[routing.accounts]]` entry serving the session's model the policy owns account choice and the pool rotation stays out of the way. A provider the policy does not describe stays on the pool.
+- `auto`: decisions are applied. For a provider that has a saved login serving the session's model the policy owns account choice and the pool rotation stays out of the way. A provider with no saved login stays on the pool.
 
 Routing is **inactive for a turn** (the pool behaviour applies) when the mode is
 `off`, when `[routing]` fails validation (a warning is logged; `jcode routing
@@ -80,8 +80,9 @@ decision is a block ("no routing account serves ...").
 
 ### Priority in the legacy pool
 
-Without routing accounts, priority comes from `account-pool.json` (`priorities`
-map keyed `provider:label`, zero-based, lower first). When a key has no override
+Priority comes from `account-pool.json` (`priorities`
+map keyed `provider:label`, zero-based, lower first); the routing policy reads it
+too. When a key has no override
 it is derived from locally stored plan metadata, never from the network:
 
 | Account | Default priority |
@@ -99,9 +100,10 @@ ranks a fresh healthy usage report ahead of unknown quota inside a tier.
 Missing Claude plan metadata is backfilled at startup through the profile
 endpoint, at most two requests at a time and at most once per account per
 fifteen minutes per process. The TUI cycles saved OAuth accounts with
-`Ctrl+Alt+J` / `Ctrl+Alt+K`. `jcode routing import-pool` seeds
-`[[routing.accounts]]` from this file (priority, and `metered` for API keys)
-without changing the mode or the pool.
+`Ctrl+Alt+J` / `Ctrl+Alt+K`. The routing policy takes its account list from the
+saved logins and this file: members set the order, `priorities` the priority,
+and an `excluded` login is not routed (unless `[[routing.accounts]]` names it).
+Nothing needs to be imported.
 
 ## 3. What is measured
 
@@ -226,7 +228,7 @@ writes 2x, reads 0.1x (the tier follows the session's cache TTL, 5m when at most
 ## 5. Intents: how a person steers
 
 Intents live in `JCODE_HOME/routing-state.json` (atomic writes, expired entries
-pruned). They may only name accounts listed in `[[routing.accounts]]`. They take
+pruned). They may only name routed accounts (saved logins the pool does not exclude). They take
 effect on the session's next turn decision, and only when routing is not `off`.
 
 | Intent | Scope | Default span | Effect |
@@ -413,10 +415,9 @@ other credential files (mode 0600) and are never printed. The first labelled key
 of a provider with no unlabelled key becomes active on its own; a labelled key
 never replaces the unlabelled one.
 
-**In routing and usage.** A key account takes part in routing only when listed in
-`[[routing.accounts]]` (typically `kind = "metered"`, or `subscription` for a
-plan such as OpenCode Go); a saved key not listed is shown as "not routed" by
-`jcode routing status`. `/usage` shows every key as its own entry with its own
+**In routing and usage.** A saved key takes part in routing like any saved
+login, as a `metered` account unless `[[routing.accounts]]` sets `kind`
+(`subscription` for a plan such as OpenCode Go). `/usage` shows every key as its own entry with its own
 windows, for example `OpenCode Go (API key) [second]`. OpenCode and Cursor windows
 reach routing as pushed readings (section 3). Metered spend is recorded in the
 local ledger under the exact account id of the key in use (`opencode-go:second`
@@ -492,12 +493,16 @@ Retired and ignored (a config that sets them still loads): `reserve_floor_pct`,
 
 ### `[[routing.accounts]]`
 
+Optional. Every saved login is routed without an entry; an entry only overrides
+the keys it sets for the account with that `id`. An entry for an id that is not a
+saved login is kept as written.
+
 | Key | Default | Meaning / validation |
 | --- | --- | --- |
 | `id` | required | `provider:label` or `provider`; unique |
 | `icon` | unset | emoji shown first wherever the account is named; unset uses the animal of the label, else a stable hash pick (`jcode_session_types::account_icon`) |
-| `kind` | `"subscription"` | `subscription`, `credits`, `metered` |
-| `priority` | `1` | integer, or a map by model class with optional `default`; empty map is an error |
+| `kind` | the saved plan's (subscription for OAuth plans, metered for API keys) | `subscription`, `credits`, `metered` |
+| `priority` | the pool's priority | integer, or a map by model class with optional `default`; empty map is an error |
 | `models` | `[]` (all) | `*`-globs of model ids this account serves |
 | `egress` | unset | name of an `[egress.*]` entry that must exist |
 | `on_limit` | `"switch"` | `switch`, `ask`, `block` |
@@ -565,17 +570,17 @@ action = "ask"
 ### CLI
 
 - `jcode routing status [--json]`: mode, config problems and retired-key notes,
-  paid state, hold, acks, every routed account (kind, priority, on-limit, models,
-  egress) and saved logins that are not routed. This is the place to read the table.
+  paid state, hold, acks and every routed account (kind, priority, on-limit,
+  models, egress). This is the place to read the table.
 - `jcode routing paid auto|off|<dur>`, `hold <id> [dur]|off`, `ack <id> [dur]`,
-  `unstick`, `import-pool [--dry-run]`.
+  `unstick`.
 - No `pin`/`switch`: those are per session.
 
 ### `/acct` in a session (TUI and Desktop)
 
 `/acct [status]`, `pin <id>|off`, `switch <id>|off`, `hold <id> [dur]|off`,
 `ack <id> [dur]`, `paid auto|off|<dur>`, `unstick`. The daemon validates ids and
-durations against `[[routing.accounts]]` and answers with text
+durations against the routed accounts and answers with text
 (`RoutingStatus`). Parsing and completion are shared in
 `jcode-session-types/src/routing_acct.rs`.
 

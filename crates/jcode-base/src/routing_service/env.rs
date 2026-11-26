@@ -54,8 +54,10 @@ impl RoutingEnv for DaemonEnv {
     }
 
     fn routing(&self) -> (RoutingConfig, BTreeMap<String, EgressConfig>) {
-        let config = crate::config::config();
-        (config.routing.clone(), config.egress.clone())
+        (
+            crate::routing_accounts::routing(),
+            crate::config::config().egress.clone(),
+        )
     }
 
     fn snapshot(&self, policy: &Policy, now: i64) -> Snapshot {

@@ -22,8 +22,8 @@ fn id(raw: &str) -> AccountId {
 fn subscription(raw: &str, priority: u32, on_limit: OnLimit) -> AccountConfig {
     AccountConfig {
         id: raw.into(),
-        kind: AccountKind::Subscription,
-        priority: PriorityConfig::Flat(priority),
+        kind: Some(AccountKind::Subscription),
+        priority: Some(PriorityConfig::Flat(priority)),
         on_limit,
         ..AccountConfig::default()
     }
@@ -486,7 +486,7 @@ fn two_credit_grants_are_each_spent_by_their_own_reset() {
             .into_iter()
             .map(|raw| AccountConfig {
                 id: raw.into(),
-                kind: AccountKind::Credits,
+                kind: Some(AccountKind::Credits),
                 ..AccountConfig::default()
             })
             .collect(),
@@ -605,8 +605,8 @@ fn credits_policy(priorities: [u32; 2]) -> Policy {
             .zip(priorities)
             .map(|(raw, priority)| AccountConfig {
                 id: raw.into(),
-                kind: AccountKind::Credits,
-                priority: PriorityConfig::Flat(priority),
+                kind: Some(AccountKind::Credits),
+                priority: Some(PriorityConfig::Flat(priority)),
                 ..AccountConfig::default()
             })
             .collect(),

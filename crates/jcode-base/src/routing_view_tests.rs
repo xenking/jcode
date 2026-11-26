@@ -32,17 +32,17 @@ fn config() -> RoutingConfig {
         accounts: vec![
             AccountConfig {
                 id: "claude:team".into(),
-                priority: PriorityConfig::ByClass(
+                priority: Some(PriorityConfig::ByClass(
                     [("fable".to_string(), 1), ("default".to_string(), 2)].into(),
-                ),
+                )),
                 egress: Some("corp".into()),
                 on_limit: OnLimit::Ask,
                 ..AccountConfig::default()
             },
             AccountConfig {
                 id: "huggingface".into(),
-                kind: AccountKind::Metered,
-                priority: PriorityConfig::Flat(5),
+                kind: Some(AccountKind::Metered),
+                priority: Some(PriorityConfig::Flat(5)),
                 models: vec!["org/*".into()],
                 ..AccountConfig::default()
             },

@@ -18,8 +18,8 @@ fn id(raw: &str) -> AccountId {
 fn account(raw: &str, kind: AccountKind, priority: u32) -> AccountConfig {
     AccountConfig {
         id: raw.into(),
-        kind,
-        priority: PriorityConfig::Flat(priority),
+        kind: Some(kind),
+        priority: Some(PriorityConfig::Flat(priority)),
         ..AccountConfig::default()
     }
 }
@@ -83,9 +83,13 @@ fn used(decision: &Decision) -> &str {
 #[test]
 fn class_priority_routes_families_to_different_accounts() {
     let mut team = account("claude:team", AccountKind::Subscription, 0);
-    team.priority = PriorityConfig::ByClass([("fable".into(), 1), ("default".into(), 2)].into());
+    team.priority = Some(PriorityConfig::ByClass(
+        [("fable".into(), 1), ("default".into(), 2)].into(),
+    ));
     let mut max = account("claude:max", AccountKind::Subscription, 0);
-    max.priority = PriorityConfig::ByClass([("fable".into(), 2), ("default".into(), 1)].into());
+    max.priority = Some(PriorityConfig::ByClass(
+        [("fable".into(), 2), ("default".into(), 1)].into(),
+    ));
     let policy = policy(vec![team, max], vec![]);
     let snap = Snapshot::default();
 

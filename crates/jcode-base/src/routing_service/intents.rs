@@ -120,8 +120,8 @@ impl RoutingService {
 
     /// Keeps `session` on an account the person picked by hand: the next
     /// routing decision would otherwise move it straight back by pace. Only an
-    /// auto pool applies decisions, and only configured accounts can be named,
-    /// so anything else is left alone.
+    /// auto pool applies decisions, and only routed accounts can be named, so
+    /// anything else is left alone.
     pub fn keep_manual_account(&self, session: &str, account: &str) {
         let (routing, _) = self.env.routing();
         if routing.mode != jcode_routing_policy::config::RoutingMode::Auto {
@@ -145,7 +145,7 @@ impl RoutingService {
             .map_err(|error| format!("could not store the routing intent: {error}"))
     }
 
-    /// Intents may only name accounts the policy knows, so a typo cannot hold nothing.
+    /// Intents may only name routed accounts, so a typo cannot hold nothing.
     fn known_account(&self, raw: &str) -> Result<AccountId, String> {
         let id = AccountId::parse(raw).ok_or_else(|| format!("`{raw}` is not an account id"))?;
         let (routing, _) = self.env.routing();
@@ -154,7 +154,9 @@ impl RoutingService {
             .iter()
             .any(|account| account.id.trim() == id.as_str())
             .then_some(id)
-            .ok_or_else(|| format!("`{raw}` is not in [[routing.accounts]]"))
+            .ok_or_else(|| {
+                format!("`{raw}` is not a routed account (saved logins the pool excludes are not)")
+            })
     }
 
     fn known_account_opt(&self, raw: Option<&str>) -> Result<Option<AccountId>, String> {

@@ -57,7 +57,8 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
 pub use crate::config::resolved_account_icon;
 
 fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView {
-    let (priority, class_priority) = match &raw.priority {
+    let (priority, class_priority) = match raw.priority.as_ref().unwrap_or(&PriorityConfig::Flat(1))
+    {
         PriorityConfig::Flat(priority) => (Some(*priority), BTreeMap::new()),
         PriorityConfig::ByClass(classes) => {
             let mut classes = classes.clone();
@@ -70,7 +71,7 @@ fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView
             raw.id.trim(),
             raw.icon.as_deref(),
         )),
-        kind: match raw.kind {
+        kind: match raw.kind.unwrap_or_default() {
             AccountKind::Subscription => "subscription",
             AccountKind::Credits => "credits",
             AccountKind::Metered => "metered",
@@ -256,7 +257,7 @@ pub fn build(
 
 /// Every API-key provider that holds a credential, in catalog order then
 /// `[providers.*]` order.
-fn provider_keys() -> Vec<ProviderKeys> {
+pub(crate) fn provider_keys() -> Vec<ProviderKeys> {
     let config = crate::config::config();
     let builtin = jcode_provider_metadata::openai_compatible_profiles()
         .iter()
@@ -293,8 +294,6 @@ pub struct SavedAccount {
     /// Subscription for OAuth plans, metered for API keys, credits for
     /// credit-funded plans, until `[[routing.accounts]]` says otherwise.
     pub kind: AccountKind,
-    /// Whether `[[routing.accounts]]` already lists it.
-    pub routed: bool,
 }
 
 fn credential_kind(kind: jcode_usage_types::CredentialKind) -> AccountKind {
@@ -306,14 +305,8 @@ fn credential_kind(kind: jcode_usage_types::CredentialKind) -> AccountKind {
 }
 
 /// Every saved OAuth login and labelled API key, with the kind it gets when
-/// `[[routing.accounts]]` does not say. A listed account keeps its configured
-/// kind, so this is only the default for the ones that are not listed.
-pub fn saved_accounts(routing: &RoutingConfig, keys: &[ProviderKeys]) -> Vec<SavedAccount> {
-    let configured: BTreeMap<AccountId, AccountKind> = routing
-        .accounts
-        .iter()
-        .filter_map(|account| Some((AccountId::parse(&account.id)?, account.kind)))
-        .collect();
+/// `[[routing.accounts]]` does not say.
+pub fn saved_accounts(keys: &[ProviderKeys]) -> Vec<SavedAccount> {
     let mut saved = Vec::new();
     for identity in crate::auth::account_identity::oauth_identities() {
         let Some(id) = AccountId::parse(&format!("{}:{}", identity.provider, identity.label))
@@ -322,11 +315,7 @@ pub fn saved_accounts(routing: &RoutingConfig, keys: &[ProviderKeys]) -> Vec<Sav
         };
         saved.push(SavedAccount {
             display_name: identity.display_name,
-            kind: configured
-                .get(&id)
-                .copied()
-                .unwrap_or_else(|| credential_kind(identity.kind)),
-            routed: configured.contains_key(&id),
+            kind: credential_kind(identity.kind),
             id: id.to_string(),
         });
     }
@@ -338,11 +327,7 @@ pub fn saved_accounts(routing: &RoutingConfig, keys: &[ProviderKeys]) -> Vec<Sav
                     || provider.provider.clone(),
                     |label| format!("{} · {label} · API key", provider.provider),
                 ),
-                kind: configured
-                    .get(&account.id)
-                    .copied()
-                    .unwrap_or_else(|| credential_kind(kind)),
-                routed: configured.contains_key(&account.id),
+                kind: credential_kind(kind),
                 id: account.id.to_string(),
             });
         }
@@ -350,16 +335,16 @@ pub fn saved_accounts(routing: &RoutingConfig, keys: &[ProviderKeys]) -> Vec<Sav
     saved
 }
 
-/// [`saved_accounts`] for the loaded config.
+/// [`saved_accounts`] for the credentials on this machine.
 pub fn current_saved_accounts() -> Vec<SavedAccount> {
-    saved_accounts(&crate::config::config().routing, &provider_keys())
+    saved_accounts(&provider_keys())
 }
 
 /// The view of the loaded config and the cached meters at `now` (unix seconds).
 pub fn current(now: i64) -> RoutingView {
     let config = crate::config::config();
     build(
-        &config.routing,
+        &crate::routing_accounts::routing(),
         &config.egress,
         |policy| crate::routing_meters::snapshot(policy, now),
         &CachedMeasure(now),

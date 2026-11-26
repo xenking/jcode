@@ -96,7 +96,7 @@ pub mod provider_activity;
 pub mod provider_catalog;
 pub mod recent_session_index;
 pub mod registry;
-pub mod routing_import;
+pub mod routing_accounts;
 pub mod routing_meters;
 pub mod routing_service;
 pub mod routing_state;

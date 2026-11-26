@@ -346,7 +346,7 @@ fn account_from_config(
 ) -> Result<Account, String> {
     let id = AccountId::parse(&raw.id)
         .ok_or_else(|| format!("routing.accounts: invalid id `{}`", raw.id))?;
-    let priority = match &raw.priority {
+    let priority = match raw.priority.as_ref().unwrap_or(&PriorityConfig::Flat(1)) {
         PriorityConfig::Flat(priority) => Priority::Flat(*priority),
         PriorityConfig::ByClass(map) if map.is_empty() => {
             return Err(format!("routing.accounts `{id}`: priority map is empty"));
@@ -377,7 +377,7 @@ fn account_from_config(
     }
     Ok(Account {
         id,
-        kind: raw.kind,
+        kind: raw.kind.unwrap_or_default(),
         priority,
         models,
         egress: raw.egress.clone(),

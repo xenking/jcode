@@ -42,8 +42,8 @@ impl FakeEnv {
                 .iter()
                 .map(|(id, priority)| AccountConfig {
                     id: (*id).into(),
-                    kind: AccountKind::Subscription,
-                    priority: PriorityConfig::Flat(*priority),
+                    kind: Some(AccountKind::Subscription),
+                    priority: Some(PriorityConfig::Flat(*priority)),
                     ..Default::default()
                 })
                 .collect(),
@@ -670,7 +670,7 @@ async fn intents_are_validated_and_reported() {
                 }
             )
             .unwrap_err()
-            .contains("not in [[routing.accounts]]")
+            .contains("not a routed account")
     );
     service
         .apply_intent(
