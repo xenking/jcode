@@ -277,7 +277,7 @@ async fn wait_for_dictation_exit(
                 }
             }
 
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + jcode_voice::dictation::INTERRUPT_GRACE;
             loop {
                 let poll = {
                     let mut guard = child.lock().await;
@@ -524,7 +524,31 @@ fn shell_command(command: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dictation_command, transcript_from_command_output};
+    use super::{
+        Arc, Mutex, Stdio, read_stream_into_buffer, run_dictation_command, shell_command,
+        transcript_from_command_output, wait_for_dictation_exit,
+    };
+
+    /// At the limit the command is interrupted, not killed: one that transcribes
+    /// after the stop (the SuperWhisper bridge) still gets to print its words.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_lets_a_slow_transcript_finish_after_the_interrupt() {
+        let mut child =
+            shell_command("trap 'sleep 4; echo words after the stop; exit 0' INT; sleep 30 & wait");
+        child.stdout(Stdio::piped());
+        let mut child = child.spawn().expect("spawn");
+        let stdout = child.stdout.take().expect("stdout");
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let reader = tokio::spawn(read_stream_into_buffer(stdout, Arc::clone(&buffer)));
+        let child = Arc::new(Mutex::new(Some(child)));
+        wait_for_dictation_exit(child, 1).await;
+        reader.await.expect("reader");
+        assert_eq!(
+            String::from_utf8_lossy(&buffer.lock().await).trim(),
+            "words after the stop"
+        );
+    }
 
     #[tokio::test]
     async fn dictation_command_trims_trailing_newlines() {

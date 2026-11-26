@@ -126,6 +126,33 @@ async fn run_command_timeout_lets_the_command_print_on_interrupt() {
     assert_eq!(text, "words from the stop");
 }
 
+/// A bridge that stops its recorder on interrupt and then waits for the
+/// transcription (SuperWhisper takes seconds) is not cut short by the stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_waits_for_a_transcript_that_takes_seconds() {
+    let text = run_command(
+        "trap 'sleep 4; echo transcribed after the stop; exit 0' INT; sleep 30 & wait",
+        1,
+    )
+    .await
+    .expect("a slow transcript after the interrupt is still the transcript");
+    assert_eq!(text, "transcribed after the stop");
+}
+
+/// What a stopped command said on stderr (where its recording was kept) must
+/// reach the user, not be replaced by a generic timeout message.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_error_carries_what_the_command_said() {
+    let error = run_command("echo recording kept at /tmp/x >&2; sleep 30", 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("stopped after 1s"), "{error}");
+    assert!(error.contains("recording kept at /tmp/x"), "{error}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn run_command_timeout_without_output_is_a_named_error() {

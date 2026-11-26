@@ -37,8 +37,10 @@ pub async fn run_configured() -> Result<DictationRun> {
     })
 }
 
-/// How long an interrupted command gets to print what it already has.
-const INTERRUPT_GRACE: Duration = Duration::from_secs(3);
+/// How long an interrupted command gets to print its transcript. A bridge to
+/// an app that transcribes after the recording stops (SuperWhisper) needs the
+/// time that transcription takes, not just a moment to flush its output.
+pub const INTERRUPT_GRACE: Duration = Duration::from_secs(60);
 
 /// Run a dictation command and return its transcript.
 ///
@@ -96,8 +98,15 @@ pub async fn run_command(command: &str, timeout_secs: u64) -> Result<String> {
         return Ok(stdout);
     }
     if timed_out {
+        // What the command said while stopping (for example where its recording
+        // was kept) is the part the user can act on.
+        let said = if stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr}")
+        };
         anyhow::bail!(
-            "dictation command was stopped after {timeout_secs}s and had printed no transcript"
+            "dictation command was stopped after {timeout_secs}s and had printed no transcript{said}"
         );
     }
     if !status.success() {
