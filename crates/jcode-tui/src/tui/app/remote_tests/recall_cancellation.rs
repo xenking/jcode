@@ -9,6 +9,7 @@ fn remote_ctrl_up_preserves_recalled_draft_when_server_writer_is_broken() {
     rt.block_on(async {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         drop(remote.take_dummy_peer().unwrap());
+        remote.fail_dummy_writes();
         let result = app.handle_remote_key(
             crossterm::event::KeyCode::Up,
             crossterm::event::KeyModifiers::CONTROL,
@@ -32,6 +33,7 @@ fn remote_ctrl_up_does_not_cancel_server_interrupts_for_local_only_queue() {
     rt.block_on(async {
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         drop(remote.take_dummy_peer().unwrap());
+        remote.fail_dummy_writes();
         let request_id = remote.next_request_id_for_test();
         app.handle_remote_key(
             crossterm::event::KeyCode::Up,

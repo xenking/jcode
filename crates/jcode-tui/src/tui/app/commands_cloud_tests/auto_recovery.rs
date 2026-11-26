@@ -31,6 +31,7 @@ fn cloud_auto_recovery_survives_offline_send_and_dispatches_after_reconnect() {
     let mut offline = crate::tui::backend::RemoteConnection::dummy();
     offline.mark_history_loaded();
     drop(offline.take_dummy_peer());
+    offline.fail_dummy_writes();
     rt.block_on(super::super::super::remote::process_remote_followups(
         &mut app,
         &mut offline,

@@ -412,6 +412,7 @@ fn reload_recovery_keyboard_send_failure_keeps_client_and_draft_alive() {
     let mut connection = crate::tui::backend::RemoteConnection::dummy();
     connection.mark_history_loaded();
     drop(connection.take_dummy_peer());
+    connection.fail_dummy_writes();
     let result =
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut connection));
     assert!(result.is_ok());
@@ -454,6 +455,7 @@ fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
         connection.mark_history_loaded();
         app.remote_model_switch_in_flight = false;
         drop(connection.take_dummy_peer());
+        connection.fail_dummy_writes();
         rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
         assert_eq!(app.input, "Newer unsent draft [image 1] [image 2]");
         assert_eq!(app.pending_images, vec![new_image, held_image]);

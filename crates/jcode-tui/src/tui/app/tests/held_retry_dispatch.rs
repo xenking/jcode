@@ -103,6 +103,7 @@ fn held_retry_failed_write_rearms_bounded_retry_and_retains_payload() {
         let mut connection = crate::tui::backend::RemoteConnection::dummy();
         connection.mark_history_loaded();
         drop(connection.take_dummy_peer());
+        connection.fail_dummy_writes();
         let original = held_retry_message(1, auto_retry);
         app.rate_limit_pending_message = Some(original.clone());
         app.rate_limit_reset = Some(Instant::now() - Duration::from_secs(1));
@@ -130,6 +131,7 @@ fn held_retry_failed_write_at_limit_restores_draft_and_images() {
     let mut connection = crate::tui::backend::RemoteConnection::dummy();
     connection.mark_history_loaded();
     drop(connection.take_dummy_peer());
+    connection.fail_dummy_writes();
     let original = held_retry_message(App::AUTO_RETRY_MAX_ATTEMPTS, true);
     app.last_submitted_input = Some(original.content.clone());
     app.rate_limit_pending_message = Some(original.clone());
