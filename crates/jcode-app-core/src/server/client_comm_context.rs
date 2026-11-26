@@ -1,4 +1,4 @@
-use super::debug::ClientConnectionInfo;
+use super::session_connections::ClientConnectionInfo;
 use super::{
     FileTouchService, SharedContext, SwarmEvent, SwarmEventType, SwarmMember, fanout_session_event,
     record_swarm_event,

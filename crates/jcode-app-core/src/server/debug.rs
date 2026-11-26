@@ -18,18 +18,22 @@ use super::debug_session_admin::maybe_handle_session_admin_command;
 use super::debug_swarm_read::maybe_handle_swarm_read_command;
 use super::debug_swarm_write::{DebugSwarmWriteContext, maybe_handle_swarm_write_command};
 use super::debug_testers::execute_tester_command;
+use super::session_connections::{
+    ClientConnectionInfo, ClientDebugState, forward_voice_activity, inject_transcript,
+};
 use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmEvent, SwarmMember, VersionedPlan,
-    debug_control_allowed, fanout_session_event,
+    debug_control_allowed,
 };
 use crate::ambient_runner::AmbientRunnerHandle;
-use crate::protocol::{Request, ServerEvent, TranscriptMode, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
 use crate::provider::Provider;
 use crate::transport::Stream;
 use anyhow::Result;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -40,66 +44,6 @@ fn debug_command_authorized(command: &str, general_debug_control: bool) -> bool 
     let (namespace, command) = parse_namespaced_command(command);
     general_debug_control
         || (namespace == "server" && super::group_transfer::is_production_command(command))
-}
-
-#[derive(Default)]
-pub(super) struct ClientDebugState {
-    pub(super) active_id: Option<String>,
-    pub(super) clients: HashMap<String, mpsc::UnboundedSender<(u64, String)>>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct ClientConnectionInfo {
-    pub(super) client_id: String,
-    pub(super) session_id: String,
-    pub(super) client_instance_id: Option<String>,
-    pub(super) debug_client_id: Option<String>,
-    pub(super) connected_at: Instant,
-    pub(super) last_seen: Instant,
-    pub(super) is_processing: bool,
-    pub(super) current_tool_name: Option<String>,
-    /// Terminal-identifying env vars captured from this client (tmux/zellij/
-    /// kitty/DISPLAY/...). Used to route spawn/focus hooks to the client's
-    /// terminal instead of the long-lived server's stale startup env (#405).
-    pub(super) terminal_env: Vec<(String, String)>,
-    pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
-}
-
-impl ClientDebugState {
-    pub(super) fn register(&mut self, client_id: String, tx: mpsc::UnboundedSender<(u64, String)>) {
-        self.active_id = Some(client_id.clone());
-        self.clients.insert(client_id, tx);
-    }
-
-    pub(super) fn unregister(&mut self, client_id: &str) {
-        self.clients.remove(client_id);
-        if self.active_id.as_deref() == Some(client_id) {
-            self.active_id = self.clients.keys().next().cloned();
-        }
-    }
-
-    pub(super) fn active_sender(
-        &mut self,
-    ) -> Option<(String, mpsc::UnboundedSender<(u64, String)>)> {
-        if let Some(active_id) = self.active_id.clone()
-            && let Some(tx) = self.clients.get(&active_id)
-        {
-            return Some((active_id, tx.clone()));
-        }
-        if let Some((id, tx)) = self.clients.iter().next() {
-            let id = id.clone();
-            self.active_id = Some(id.clone());
-            return Some((id, tx.clone()));
-        }
-        None
-    }
-
-    pub(super) fn sender_for_id(
-        &self,
-        client_id: &str,
-    ) -> Option<mpsc::UnboundedSender<(u64, String)>> {
-        self.clients.get(client_id).cloned()
-    }
 }
 
 async fn resolve_client_debug_sender(
@@ -154,132 +98,6 @@ async fn resolve_client_debug_sender(
             .ok_or_else(|| anyhow::anyhow!("No TUI client connected"))?
     };
     Ok((client_id, sender))
-}
-
-async fn resolve_transcript_target_session(
-    requested_session: Option<String>,
-    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-    client_debug_state: &Arc<RwLock<ClientDebugState>>,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Result<String> {
-    let live_sessions: std::collections::HashSet<String> = swarm_members
-        .read()
-        .await
-        .iter()
-        .filter(|(_, member)| !member.is_headless && !member.event_txs.is_empty())
-        .map(|(session_id, _)| session_id.clone())
-        .collect();
-
-    if let Some(session_id) = requested_session.filter(|value| !value.trim().is_empty()) {
-        if !live_sessions.contains(&session_id) {
-            anyhow::bail!(
-                "Session '{}' does not have a connected TUI client for transcript injection",
-                session_id
-            );
-        }
-        return Ok(session_id);
-    }
-
-    // Focused-window lookup (compositor IPC) happens client-side: `jcode
-    // transcript` resolves it in the user's session and sends `session_id`.
-    // The server only knows which session a client last reported focus for.
-    if let Ok(Some(session_id)) = crate::client_focus::last_focused_session()
-        && live_sessions.contains(&session_id)
-    {
-        return Ok(session_id);
-    }
-
-    let active_debug_id = client_debug_state.read().await.active_id.clone();
-    let connections = client_connections.read().await;
-
-    connections
-        .values()
-        .filter(|info| live_sessions.contains(&info.session_id))
-        .max_by(|left, right| {
-            left.last_seen
-                .cmp(&right.last_seen)
-                .then_with(|| {
-                    let left_is_active =
-                        active_debug_id.as_deref() == left.debug_client_id.as_deref();
-                    let right_is_active =
-                        active_debug_id.as_deref() == right.debug_client_id.as_deref();
-                    left_is_active.cmp(&right_is_active)
-                })
-        })
-        .map(|info| info.session_id.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Transcript target could not be resolved from focused window, last-focused session, or any live TUI client"
-            )
-        })
-}
-
-pub(super) async fn inject_transcript(
-    id: u64,
-    text: String,
-    mode: TranscriptMode,
-    requested_session: Option<String>,
-    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-    client_debug_state: &Arc<RwLock<ClientDebugState>>,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Result<ServerEvent> {
-    let session_id = resolve_transcript_target_session(
-        requested_session,
-        client_connections,
-        client_debug_state,
-        swarm_members,
-    )
-    .await?;
-
-    // Every attached client submits a transcript it receives, so a session
-    // open in two windows would send it twice. Deliver to the most recently
-    // active attachment only, falling back to fanout when none is known.
-    let event = ServerEvent::Transcript { text, mode };
-    let newest_connection = client_connections
-        .read()
-        .await
-        .values()
-        .filter(|info| info.session_id == session_id)
-        .max_by_key(|info| info.last_seen)
-        .map(|info| info.client_id.clone());
-    let single_target = match newest_connection {
-        Some(connection_id) => {
-            let members = swarm_members.read().await;
-            members
-                .get(&session_id)
-                .and_then(|member| member.event_txs.get(&connection_id))
-                .filter(|tx| !tx.is_closed())
-                .cloned()
-        }
-        None => None,
-    };
-    let delivered = match single_target {
-        Some(tx) if tx.send(event.clone()).is_ok() => true,
-        _ => fanout_session_event(swarm_members, &session_id, event).await > 0,
-    };
-
-    if !delivered {
-        anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);
-    }
-
-    Ok(ServerEvent::Done { id })
-}
-
-/// Forward live push-to-talk state to one session's clients. Best effort:
-/// a session without a live client simply has nothing to show.
-pub(super) async fn forward_voice_activity(
-    id: u64,
-    session_id: &str,
-    activity: crate::protocol::VoiceActivity,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> ServerEvent {
-    fanout_session_event(
-        swarm_members,
-        session_id,
-        ServerEvent::VoiceActivity { activity },
-    )
-    .await;
-    ServerEvent::Done { id }
 }
 
 /// Passive, read-only event streams. Matches the commands accepted by

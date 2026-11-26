@@ -1573,7 +1573,7 @@ impl<'a> ActionCx<'a> {
                 mode,
                 session_id,
             } => {
-                match super::super::debug::inject_transcript(
+                match super::super::session_connections::inject_transcript(
                     id,
                     text,
                     mode,
@@ -1609,7 +1609,7 @@ impl<'a> ActionCx<'a> {
                 session_id,
                 activity,
             } => {
-                let event = super::super::debug::forward_voice_activity(
+                let event = super::super::session_connections::forward_voice_activity(
                     id,
                     &session_id,
                     activity,

@@ -284,12 +284,10 @@ mod tests {
 }
 
 mod transcript_routing_tests {
-    use super::super::{
-        ClientConnectionInfo, ClientDebugState, resolve_client_debug_sender,
-        resolve_transcript_target_session,
-    };
+    use super::super::{ClientConnectionInfo, ClientDebugState, resolve_client_debug_sender};
     use crate::protocol::ServerEvent;
     use crate::server::SwarmMember;
+    use crate::server::session_connections::resolve_transcript_target_session;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
