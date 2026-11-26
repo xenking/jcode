@@ -134,6 +134,8 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
         for model in self.models {
@@ -151,6 +153,8 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
             if self.include_generic_profile_duplicate {
                 routes.push(crate::provider::ModelRoute {
@@ -167,6 +171,8 @@ impl AuthUxStateSpaceProvider {
                     },
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
         }
@@ -187,6 +193,8 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -198,6 +206,8 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -209,6 +219,8 @@ impl MixedModelRoutesProvider {
                 detail: "https://llm.chutes.ai/v1".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -220,6 +232,8 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }
@@ -477,6 +491,8 @@ impl Provider for CountingModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }
@@ -1609,6 +1625,8 @@ impl Provider for AzureLoginMockProvider {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }]
     }
 

@@ -238,6 +238,8 @@ async fn account_switch_cross_provider_uses_target_oauth_catalog() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }]);
     let agent = Agent::new(provider, Registry::empty());
     let selection = account_switch_selection(&agent, "anthropic", "personal").unwrap();
@@ -366,6 +368,8 @@ impl Provider for AuthChangeMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }
@@ -1073,6 +1077,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         ModelRoute {
             speed_options: Vec::new(),
@@ -1084,6 +1090,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         ModelRoute {
             speed_options: Vec::new(),
@@ -1095,6 +1103,8 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
     ]);
     let provider: Arc<dyn Provider> = provider;

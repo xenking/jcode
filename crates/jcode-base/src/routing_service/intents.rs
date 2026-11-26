@@ -29,7 +29,10 @@ impl RoutingService {
                 let account = self.known_account_opt(account.as_deref())?;
                 self.update(now, |state| state.set_pin(session, account.as_ref(), now))?;
                 Ok(match account {
-                    Some(account) => format!("pinned this session and its children to {account}"),
+                    Some(account) => format!(
+                        "pinned this session and its children to {}",
+                        self.named(&account)
+                    ),
                     None => "pin cleared".into(),
                 })
             }
@@ -39,7 +42,7 @@ impl RoutingService {
                     state.set_switch(session, account.as_ref(), now)
                 })?;
                 Ok(match account {
-                    Some(account) => format!("this session moves to {account}"),
+                    Some(account) => format!("this session moves to {}", self.named(&account)),
                     None => "switch cleared".into(),
                 })
             }
@@ -52,7 +55,8 @@ impl RoutingService {
                 let until = now + i64::from(minutes) * 60;
                 self.update(now, |state| state.set_hold(Some((&account, until))))?;
                 Ok(format!(
-                    "holding interactive sessions on {account} for {}",
+                    "holding interactive sessions on {} for {}",
+                    self.named(&account),
                     span(minutes)
                 ))
             }
@@ -62,7 +66,8 @@ impl RoutingService {
                 let until = now + i64::from(minutes) * 60;
                 self.update(now, |state| state.ack(&account, until))?;
                 Ok(format!(
-                    "spending past ask limits on {account} for {}",
+                    "spending past ask limits on {} for {}",
+                    self.named(&account),
                     span(minutes)
                 ))
             }
@@ -95,6 +100,38 @@ impl RoutingService {
                 self.flush(now);
                 Ok("cleared this session's switch, the hold and every eviction".into())
             }
+        }
+    }
+
+    /// An account as people read it: its icon first, then the id.
+    pub fn named(&self, account: impl std::fmt::Display) -> String {
+        let id = account.to_string();
+        let (routing, _) = self.env.routing();
+        let configured = routing
+            .accounts
+            .iter()
+            .find(|raw| raw.id.trim() == id)
+            .and_then(|raw| raw.icon.as_deref());
+        format!(
+            "{} {id}",
+            jcode_session_types::account_icon::account_icon(&id, configured)
+        )
+    }
+
+    /// Keeps `session` on an account the person picked by hand: the next
+    /// routing decision would otherwise move it straight back by pace. Only an
+    /// auto pool applies decisions, and only configured accounts can be named,
+    /// so anything else is left alone.
+    pub fn keep_manual_account(&self, session: &str, account: &str) {
+        let (routing, _) = self.env.routing();
+        if routing.mode != jcode_routing_policy::config::RoutingMode::Auto {
+            return;
+        }
+        let action = RoutingIntentAction::Switch {
+            account: Some(account.to_string()),
+        };
+        if let Err(error) = self.apply_intent(session, None, action) {
+            crate::logging::debug(&format!("routing: manual account not kept: {error}"));
         }
     }
 
@@ -151,7 +188,7 @@ impl RoutingService {
         let mut state = self.env.state();
         state.prune(now);
         if let Some(current) = current {
-            let _ = writeln!(out, "this session: {current}");
+            let _ = writeln!(out, "this session: {}", self.named(current));
         }
         let default_paid = if policy.paid == PaidMode::Auto {
             "auto"
@@ -172,7 +209,7 @@ impl RoutingService {
             let _ = writeln!(
                 out,
                 "hold: {} for {}",
-                hold.account,
+                self.named(&hold.account),
                 span(minutes_left(hold.until, now))
             );
         }
@@ -180,16 +217,16 @@ impl RoutingService {
             let _ = writeln!(
                 out,
                 "ack: {} for {}",
-                ack.account,
+                self.named(&ack.account),
                 span(minutes_left(ack.until, now))
             );
         }
         if let Some(entry) = state.sessions.get(session) {
             if let Some(pin) = &entry.pin {
-                let _ = writeln!(out, "pin: {pin}");
+                let _ = writeln!(out, "pin: {}", self.named(pin));
             }
             if let Some(switch) = &entry.switch {
-                let _ = writeln!(out, "switch: {switch}");
+                let _ = writeln!(out, "switch: {}", self.named(switch));
             }
         }
         let ids: Vec<AccountId> = policy
@@ -206,7 +243,7 @@ impl RoutingService {
             };
             let mut line = format!(
                 "{marker} {}  {}  priority {}",
-                account.id,
+                self.named(&account.id),
                 format!("{:?}", account.kind).to_lowercase(),
                 priority_text(&account.priority),
             );

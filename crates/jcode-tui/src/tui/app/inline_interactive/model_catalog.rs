@@ -184,6 +184,8 @@ impl App {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }

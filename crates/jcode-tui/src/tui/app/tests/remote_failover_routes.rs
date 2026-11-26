@@ -9,6 +9,8 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 
@@ -28,6 +30,8 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 
@@ -1422,6 +1426,8 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
                 crate::provider::ModelRoute {
                     reasoning_efforts: None,
@@ -1433,6 +1439,8 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
             ];
             app.is_processing = true;

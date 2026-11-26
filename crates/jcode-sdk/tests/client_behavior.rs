@@ -513,6 +513,8 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                     api_method: "responses".into(),
                     available: true,
                     detail: "ready".into(),
+                    account: None,
+                    icon: None,
                 }],
             },
             writer,

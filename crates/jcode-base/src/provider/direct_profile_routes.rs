@@ -95,6 +95,8 @@ pub(super) fn direct_openai_compatible_profile_routes(
             detail: detail.clone(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 

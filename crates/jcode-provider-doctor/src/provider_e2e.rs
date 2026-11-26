@@ -2030,6 +2030,8 @@ fn run_wiring_checks_for_contract(
             detail: "live-catalog route".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
 

@@ -320,6 +320,8 @@ pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Optio
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
     let route_refs: Vec<&ModelRoute> = routes.iter().collect();
@@ -374,6 +376,8 @@ pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, St
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
         })
         .collect();

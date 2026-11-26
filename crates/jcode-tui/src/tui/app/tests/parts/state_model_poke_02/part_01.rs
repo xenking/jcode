@@ -1339,6 +1339,8 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
     app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1351,6 +1353,8 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
         speed_options: Vec::new(),
@@ -1362,6 +1366,8 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
     for api_method in ["claude-oauth", "claude-api"] {
         app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1374,6 +1380,8 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 }
@@ -1394,6 +1402,8 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: "→ Fireworks".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
@@ -1405,6 +1415,8 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
@@ -1416,6 +1428,8 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
     ];
 }

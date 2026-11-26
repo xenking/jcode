@@ -54,6 +54,18 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
         .collect()
 }
 
+/// The icon of a routing account: its `[[routing.accounts]] icon` override,
+/// else the stable default for its label.
+pub fn resolved_account_icon(account: &str) -> String {
+    let configured = crate::config::config()
+        .routing
+        .accounts
+        .iter()
+        .find(|raw| raw.id.trim() == account)
+        .and_then(|raw| raw.icon.as_deref());
+    jcode_session_types::account_icon::account_icon(account, configured)
+}
+
 fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView {
     let (priority, class_priority) = match &raw.priority {
         PriorityConfig::Flat(priority) => (Some(*priority), BTreeMap::new()),
@@ -64,6 +76,10 @@ fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView
     };
     RoutingAccountView {
         id: raw.id.trim().to_string(),
+        icon: Some(jcode_session_types::account_icon::account_icon(
+            raw.id.trim(),
+            raw.icon.as_deref(),
+        )),
         kind: match raw.kind {
             AccountKind::Subscription => "subscription",
             AccountKind::Credits => "credits",

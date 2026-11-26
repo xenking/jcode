@@ -17,6 +17,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
         detail: "old".to_string(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }];
 
     let needs_redraw = app.handle_server_event(
@@ -34,6 +36,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             }],
         },
         &mut remote,
@@ -140,6 +144,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
             detail: "old detail".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }],
     ));
 
@@ -159,6 +165,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
                     detail: "new detail".to_string(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
                 crate::provider::ModelRoute {
                     speed_options: Vec::new(),
@@ -170,6 +178,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
             ],
         },

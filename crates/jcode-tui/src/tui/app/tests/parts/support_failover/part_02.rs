@@ -464,6 +464,8 @@ impl Provider for AuthRefreshingMockProvider {
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
                 crate::provider::ModelRoute {
                     speed_options: Vec::new(),
@@ -475,6 +477,8 @@ impl Provider for AuthRefreshingMockProvider {
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
             ]
         } else {
@@ -488,6 +492,8 @@ impl Provider for AuthRefreshingMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             }]
         }
     }
@@ -597,6 +603,8 @@ impl Provider for AntigravityMockProvider {
                 detail: "cached catalog".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -608,6 +616,8 @@ impl Provider for AntigravityMockProvider {
                 detail: "cached catalog".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }
@@ -675,6 +685,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -686,6 +698,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -697,6 +711,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -708,6 +724,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: "recently added · https://llm.comtegra.cloud/v1".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -719,6 +737,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -730,6 +750,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -741,6 +763,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -752,6 +776,8 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }
@@ -809,6 +835,8 @@ impl Provider for FailingModelSwitchProvider {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }]
     }
 
@@ -944,6 +972,8 @@ impl Provider for DualMethodMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -955,6 +985,8 @@ impl Provider for DualMethodMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }
@@ -1088,6 +1120,8 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect();
 

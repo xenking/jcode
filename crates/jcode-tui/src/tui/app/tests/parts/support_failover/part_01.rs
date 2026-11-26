@@ -145,6 +145,8 @@ impl Provider for OpenRouterSpecCaptureProvider {
             detail: "cached route".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }]
     }
 

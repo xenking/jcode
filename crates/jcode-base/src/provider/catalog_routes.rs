@@ -52,6 +52,8 @@ pub fn simplified_model_routes_for_picker(
                     },
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
                 continue;
             }
@@ -66,6 +68,8 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             if auth.openai_has_api_key {
@@ -79,6 +83,8 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             if auth.openai == AuthState::NotConfigured {
@@ -92,6 +98,8 @@ pub fn simplified_model_routes_for_picker(
                     detail: "no credentials".to_string(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             continue;
@@ -161,6 +169,8 @@ pub fn simplified_model_routes_for_picker(
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -175,6 +185,8 @@ pub fn simplified_model_routes_for_picker(
             detail: "simplified catalog".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -404,6 +416,12 @@ fn qualify_saved_account_route(
     display_name: Option<&str>,
     email: Option<&str>,
 ) {
+    if let Some(account) =
+        jcode_provider_core::route_pool_key(&format!("{}@{label}", route.api_method))
+    {
+        route.icon = Some(crate::routing_view::resolved_account_icon(&account));
+        route.account = Some(account);
+    }
     route.api_method = format!("{}@{label}", route.api_method);
     // Carry the name a person knows the login by, so a picker can tell three
     // Anthropic accounts apart without showing internal ids.
@@ -455,6 +473,8 @@ pub fn append_simplified_anthropic_model_routes(
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 }
@@ -515,6 +535,8 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             detail: "OPENROUTER_API_KEY not set".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -619,6 +641,8 @@ pub(super) fn append_anthropic_routes(
                     detail,
                     usage: None,
                     cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
+                    account: None,
+                    icon: None,
                 });
             }
         }
@@ -831,6 +855,8 @@ fn named_provider_profile_routes(
             detail: detail.clone(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
     routes
@@ -871,6 +897,8 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }
@@ -895,6 +923,8 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }
@@ -999,6 +1029,8 @@ fn append_openrouter_routes(
                 detail,
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
         // Add per-provider routes from endpoints cache

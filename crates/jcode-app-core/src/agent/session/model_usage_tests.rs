@@ -23,6 +23,8 @@ impl UsageProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }

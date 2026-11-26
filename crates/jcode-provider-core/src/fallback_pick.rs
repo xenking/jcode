@@ -201,6 +201,8 @@ mod tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -407,6 +409,8 @@ mod generation_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -537,6 +541,8 @@ mod unified_rank_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -579,6 +585,8 @@ mod unified_rank_account_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
         let ranked = rank_fallback_routes(
             &routes,
@@ -628,6 +636,8 @@ mod unified_rank_account_tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -639,6 +649,8 @@ mod unified_rank_account_tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
         // Failing on Antigravity quota excludes sibling Antigravity models and picks next pool member.

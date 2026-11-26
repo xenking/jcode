@@ -183,6 +183,8 @@ pub(super) fn picker_route_selection(
         detail: route.detail.clone(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     })
 }
 

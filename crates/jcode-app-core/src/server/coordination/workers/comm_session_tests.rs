@@ -606,6 +606,8 @@ fn route(model: &str, available: bool) -> crate::provider::ModelRoute {
         detail: String::new(),
         cheapness: None,
         usage: None,
+        account: None,
+        icon: None,
     }
 }
 

@@ -561,6 +561,48 @@ async fn an_account_behind_a_down_required_proxy_is_skipped() {
 }
 
 #[tokio::test]
+async fn a_manually_picked_account_survives_the_next_cold_decision() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    let service = RoutingService::new(env.clone());
+    let cold = input("claude:b", Seam::Cold, Role::Interactive);
+    let drifted = service.plan(&cold).await;
+    assert!(matches!(drifted, Plan::Move(ref outcome) if outcome.account == account("claude:a")));
+
+    service.keep_manual_account("session-1", "claude:b");
+    let kept = service.plan(&cold).await;
+    assert!(!matches!(kept, Plan::Move(ref outcome) if outcome.account == account("claude:a")));
+
+    // Unknown accounts and non-auto modes leave the intents alone.
+    service.keep_manual_account("session-2", "claude:nope");
+    assert!(!service.env.state().sessions.contains_key("session-2"));
+    env.routing.lock().unwrap().mode = RoutingMode::Shadow;
+    service.keep_manual_account("session-3", "claude:b");
+    assert!(!service.env.state().sessions.contains_key("session-3"));
+}
+
+#[tokio::test]
+async fn status_names_every_account_with_its_icon_first() {
+    let env = FakeEnv::new(
+        RoutingMode::Auto,
+        &[("claude:claude-fox", 1), ("claude:team", 2)],
+    );
+    env.routing.lock().unwrap().accounts[1].icon = Some("🚀".into());
+    let service = RoutingService::new(env.clone());
+    let current = account("claude:claude-fox");
+
+    let text = service
+        .apply_intent("s", Some(&current), RoutingIntentAction::Status)
+        .unwrap();
+
+    assert!(
+        text.contains("this session: 🦊 claude:claude-fox"),
+        "{text}"
+    );
+    assert!(text.contains("* 🦊 claude:claude-fox"), "{text}");
+    assert!(text.contains("  🚀 claude:team"), "{text}");
+}
+
+#[tokio::test]
 async fn intents_are_validated_and_reported() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
     let service = RoutingService::new(env.clone());
@@ -599,10 +641,10 @@ async fn intents_are_validated_and_reported() {
         .unwrap();
 
     assert!(text.contains("routing: auto"), "{text}");
-    assert!(text.contains("pin: claude:b"), "{text}");
+    assert!(text.contains("pin: ") && text.contains(" claude:b"), "{text}");
     assert!(text.contains("paid: allowed for 2h"), "{text}");
     assert!(
-        text.contains("* claude:a"),
+        text.contains(&format!("* {}", service.named("claude:a"))),
         "current account is marked: {text}"
     );
 

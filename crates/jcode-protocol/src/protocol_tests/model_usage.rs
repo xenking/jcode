@@ -36,3 +36,20 @@ fn model_usage_route_metadata_defaults_absent_and_round_trips() {
     let parsed: ServerEvent = serde_json::from_value(event.clone()).unwrap();
     assert_eq!(serde_json::to_value(parsed).unwrap(), event);
 }
+
+#[test]
+fn route_account_and_icon_default_absent_and_round_trip() {
+    let old = serde_json::json!({"model":"m","provider":"Anthropic","api_method":"claude-oauth@fox",
+        "available":true,"detail":"ready"});
+    let route: jcode_provider_core::ModelRoute = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(
+        (route.account.as_deref(), route.icon.as_deref()),
+        (None, None)
+    );
+    assert_eq!(serde_json::to_value(route).unwrap(), old);
+    let new = serde_json::json!({"model":"m","provider":"Anthropic","api_method":"claude-oauth@fox",
+        "available":true,"detail":"ready","account":"claude:fox","icon":"🦊"});
+    let route: jcode_provider_core::ModelRoute = serde_json::from_value(new.clone()).unwrap();
+    assert_eq!(route.account.as_deref(), Some("claude:fox"));
+    assert_eq!(serde_json::to_value(route).unwrap(), new);
+}

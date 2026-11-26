@@ -412,6 +412,13 @@ fn apply_set_route(
         };
         if result.is_ok() {
             agent.reset_provider_session();
+            if !automatic_failover
+                && selection.account_label().is_some()
+                && let Some(account) = jcode_provider_core::route_pool_key(&selection.api_method)
+            {
+                jcode_base::routing_service::global()
+                    .keep_manual_account(agent.session_id(), &account);
+            }
         }
         result.map(|_| {
             (

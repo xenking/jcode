@@ -515,6 +515,8 @@ fn test_model_picker_preview_enter_selects_model() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
 

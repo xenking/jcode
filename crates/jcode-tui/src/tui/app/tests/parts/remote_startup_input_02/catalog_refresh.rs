@@ -17,6 +17,8 @@ fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_fav
             detail: "refreshing route details…".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.cycle_model_favorite_hotkey();
@@ -48,6 +50,8 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             detail: "refreshing route details…".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -63,6 +67,8 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
         app.invalidate_model_picker_cache();
         app.refresh_open_model_picker_after_catalog_update();

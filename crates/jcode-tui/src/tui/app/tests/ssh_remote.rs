@@ -355,6 +355,8 @@ fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
             detail: String::new(),
             cheapness: None,
             usage: None,
+            account: None,
+            icon: None,
         };
         app.remote_model_options = vec![
             route("gemini-4-neon-low"),

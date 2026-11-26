@@ -171,6 +171,7 @@ fn view_event_roundtrips_with_unknown_meters_absent() {
         problems: Vec::new(),
         accounts: vec![RoutingAccountView {
             id: "claude:team".into(),
+            icon: None,
             kind: "subscription".into(),
             priority: Some(1),
             class_priority: Default::default(),

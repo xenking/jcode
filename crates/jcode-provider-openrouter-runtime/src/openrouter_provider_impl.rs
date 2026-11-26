@@ -690,6 +690,8 @@ impl Provider for OpenRouterProvider {
                     detail: route_detail,
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 }
             })
             .collect()

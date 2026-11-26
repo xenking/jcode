@@ -99,6 +99,8 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             api_method: "messages".to_string(),
             available: true,
             detail: "ready".to_string(),
+            account: None,
+            icon: None,
         },
         ModelRouteInfo {
             speed_options: Vec::new(),
@@ -109,6 +111,8 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             api_method: "generate_content".to_string(),
             available: true,
             detail: "ready".to_string(),
+            account: None,
+            icon: None,
         },
     ];
     let reply_routes = routes.clone();

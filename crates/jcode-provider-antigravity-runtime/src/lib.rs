@@ -1127,6 +1127,8 @@ impl Provider for AntigravityProvider {
                     detail: catalog_model_detail(&model),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 })
                 .collect();
         }
@@ -1143,6 +1145,8 @@ impl Provider for AntigravityProvider {
                 detail: "fallback catalog".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }

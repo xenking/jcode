@@ -783,6 +783,8 @@ impl BridgeState {
                         )
                         .unwrap_or_default(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
+                        account: route["account"].as_str().map(str::to_string),
+                        icon: route["icon"].as_str().map(str::to_string),
                     })
                 })
                 .collect();

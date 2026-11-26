@@ -906,6 +906,8 @@ impl Provider for StubExternalRuntime {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }

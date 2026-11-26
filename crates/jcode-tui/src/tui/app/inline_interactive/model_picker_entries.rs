@@ -65,6 +65,8 @@ impl App {
                 detail: "catalog still loading".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             }]
         } else {
             routes

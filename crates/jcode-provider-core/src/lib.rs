@@ -1054,6 +1054,13 @@ pub struct ModelRoute {
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<jcode_usage_types::ModelUsage>,
+    /// The account this route runs on (`provider:label`), for providers with
+    /// several saved logins. Absent for routes that name no account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The account's resolved icon (configured override or the stable default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// Exact runtime identity for a selected model route.

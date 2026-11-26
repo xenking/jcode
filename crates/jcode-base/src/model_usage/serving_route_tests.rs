@@ -111,6 +111,8 @@ fn row(model: &str, provider: &str, method: &str) -> ModelRoute {
         detail: "preserve row metadata".into(),
         cheapness: None,
         usage: None,
+        account: None,
+        icon: None,
     }
 }
 fn probe() -> Probe {

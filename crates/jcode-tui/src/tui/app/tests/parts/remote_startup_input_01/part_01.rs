@@ -734,6 +734,8 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
 }
@@ -808,6 +810,8 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
                 crate::provider::ModelRoute {
                     speed_options: Vec::new(),
@@ -819,6 +823,8 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
             ],
         },
@@ -903,6 +909,8 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             }],
         };
 
@@ -946,6 +954,8 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }];
     app.auth_catalog_refresh_pending = true;
     app.open_model_picker();
@@ -972,6 +982,8 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             }],
         },
         &mut remote,

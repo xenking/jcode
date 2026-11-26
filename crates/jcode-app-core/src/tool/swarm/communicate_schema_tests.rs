@@ -418,6 +418,8 @@ fn format_swarm_model_list_renders_routes_and_default() {
             detail: "API key".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         jcode_provider_core::ModelRoute {
             speed_options: Vec::new(),
@@ -429,6 +431,8 @@ fn format_swarm_model_list_renders_routes_and_default() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
     ];
     let output =

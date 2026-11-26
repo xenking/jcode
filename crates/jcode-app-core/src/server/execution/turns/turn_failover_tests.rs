@@ -60,6 +60,8 @@ impl Provider for OpusOnlyProvider {
             detail: String::new(),
             cheapness: None,
             usage: None,
+            account: None,
+            icon: None,
         }]
     }
 }
@@ -229,6 +231,8 @@ impl Provider for TwoAccountProvider {
             detail: String::new(),
             cheapness: None,
             usage: None,
+            account: None,
+            icon: None,
         }]
     }
 

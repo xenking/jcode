@@ -1482,6 +1482,8 @@ impl Provider for BedrockProvider {
                     },
                     usage: None,
                     cheapness: Self::route_pricing(&model),
+                    account: None,
+                    icon: None,
                 }
             })
             .collect()

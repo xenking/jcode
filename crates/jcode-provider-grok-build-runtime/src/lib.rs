@@ -236,6 +236,8 @@ impl Provider for GrokBuildProvider {
                 detail: "Grok Build subscription via the Grok CLI chat proxy (HTTPS)".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }

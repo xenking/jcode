@@ -224,6 +224,8 @@ impl Provider for TerminalSocketProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }

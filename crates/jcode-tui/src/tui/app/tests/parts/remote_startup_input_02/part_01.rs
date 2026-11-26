@@ -77,6 +77,8 @@ fn test_model_picker_bedrock_selection_prefixes_model() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }];
 
     app.open_model_picker();
@@ -123,6 +125,8 @@ fn test_model_picker_bedrock_arn_selection_prefixes_model() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }];
 
     app.open_model_picker();
@@ -197,6 +201,8 @@ fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
             detail: "refreshing route details…".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -238,6 +244,8 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
             detail: "compacted route snapshot".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -363,6 +371,8 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -416,6 +426,8 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
             detail: "stale cached route".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -492,6 +504,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -503,6 +517,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 detail: "managed subscription route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -514,6 +530,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 detail: "managed subscription route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -525,6 +543,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 detail: "managed subscription route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -536,6 +556,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -610,6 +632,8 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -621,6 +645,8 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -632,6 +658,8 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -643,6 +671,8 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -728,6 +758,8 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                 detail: "poisoned version 1 cache".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect();
 
@@ -788,6 +820,8 @@ fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();
@@ -2181,6 +2215,8 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
 
     for (api_method, expected, forbidden) in [
@@ -2238,6 +2274,8 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
 
     app.open_model_picker();
@@ -2309,6 +2347,8 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
             detail: "refreshing route details…".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
 
         app.open_model_picker();

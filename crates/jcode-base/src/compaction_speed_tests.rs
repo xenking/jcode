@@ -50,6 +50,8 @@ impl Provider for SlowDecisionsProvider {
             detail: String::new(),
             cheapness: None,
             usage: None,
+            account: None,
+            icon: None,
         }]
     }
     async fn complete_simple_with_usage(

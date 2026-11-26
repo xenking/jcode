@@ -104,6 +104,8 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect();
 
@@ -248,6 +250,8 @@ fn test_model_picker_picks_model_then_reasoning_effort() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect();
 

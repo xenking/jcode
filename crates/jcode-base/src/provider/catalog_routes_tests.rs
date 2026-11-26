@@ -61,9 +61,15 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
     ]);
-    assert!(routes.iter().any(|r| r.api_method == "claude-api"));
+    assert!(
+        routes
+            .iter()
+            .any(|r| r.api_method == "claude-api" && r.account.is_none())
+    );
     assert!(!routes.iter().any(|r| r.api_method == "claude-oauth"));
     for label in ["work", "personal", "research"] {
         let route = routes
@@ -73,16 +79,17 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
             })
             .unwrap();
         assert!(route.detail.contains(&format!("account {label}")));
+        assert_eq!(route.account.as_deref(), Some(&*format!("claude:{label}")));
+        assert!(route.icon.as_deref().is_some_and(|icon| !icon.is_empty()));
         assert_eq!(
             super::super::RouteSelection::from_model_route(route).account_label(),
             Some(label)
         );
     }
     for label in ["work", "personal", "research"] {
-        assert!(
-            routes.iter().any(|route| route.model == "gpt-5.5"
-                && route.api_method == format!("openai-oauth@{label}"))
-        );
+        assert!(routes.iter().any(|route| route.model == "gpt-5.5"
+            && route.api_method == format!("openai-oauth@{label}")
+            && route.account.as_deref() == Some(&*format!("openai:{label}"))));
         assert!(
             !routes
                 .iter()

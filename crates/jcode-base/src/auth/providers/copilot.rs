@@ -996,6 +996,8 @@ pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         })
         .collect();
     let activation = crate::auth::lifecycle::AuthActivationResult {

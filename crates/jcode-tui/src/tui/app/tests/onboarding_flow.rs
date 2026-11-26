@@ -39,6 +39,8 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -50,6 +52,8 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
@@ -61,6 +65,8 @@ impl Provider for QualityFirstOpenAiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }

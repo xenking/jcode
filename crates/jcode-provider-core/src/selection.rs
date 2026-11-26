@@ -577,6 +577,8 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -588,6 +590,8 @@ mod tests {
                 detail: "duplicate".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -599,6 +603,8 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -620,6 +626,8 @@ mod tests {
                 detail: "generic transport".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -631,6 +639,8 @@ mod tests {
                 detail: "profile transport".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -642,6 +652,8 @@ mod tests {
                 detail: "different provider".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -653,6 +665,8 @@ mod tests {
                 detail: "distinct profile route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -707,6 +721,8 @@ mod tests {
                 detail: format!("route-{i}"),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
 

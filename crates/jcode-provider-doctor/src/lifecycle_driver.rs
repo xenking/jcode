@@ -277,6 +277,8 @@ impl AuthLifecycleDriver {
                 detail: "fixture live-catalog route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }
@@ -570,6 +572,8 @@ mod tests {
             detail: "stale route".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -941,6 +945,8 @@ mod tests {
                 detail: "wrong namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -952,6 +958,8 @@ mod tests {
                 detail: "correct namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
                 speed_options: Vec::new(),
@@ -963,6 +971,8 @@ mod tests {
                 detail: "correct namespace".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -1038,6 +1048,8 @@ mod tests {
             detail: "https://api.cerebras.ai/v1".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
         result.catalog_report = validate_catalog_invariants(
             &result.activation,
