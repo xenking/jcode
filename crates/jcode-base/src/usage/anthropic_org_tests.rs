@@ -23,7 +23,10 @@ fn spend_object_gives_the_cap_the_balance_and_no_invented_windows() {
     assert!((credits.used.unwrap() - 105.87).abs() < 1e-9);
     assert!((credits.limit.unwrap() - 300.0).abs() < 1e-9);
     assert!((credits.balance.unwrap() - 194.13).abs() < 1e-9);
-    assert!(data.five_hour < 0.0 && data.seven_day < 0.0, "unknown, not 0%");
+    assert!(
+        data.five_hour < 0.0 && data.seven_day < 0.0,
+        "unknown, not 0%"
+    );
 }
 
 #[test]
@@ -57,7 +60,9 @@ fn spend_that_states_no_readable_figure_is_unknown_never_zero() {
 fn disabled_or_absent_spend_leaves_the_legacy_extra_usage_in_charge() {
     assert!(data(r#"{"spend": {"enabled": false}}"#).credits.is_none());
     assert!(data(r#"{"spend": null}"#).credits.is_none());
-    let legacy = data(include_str!("fixtures/claude_usage_extra_usage_credits.json"));
+    let legacy = data(include_str!(
+        "fixtures/claude_usage_extra_usage_credits.json"
+    ));
     assert!((legacy.credits.unwrap().used.unwrap() - 105.87).abs() < 1e-9);
     let both = data(
         r#"{"spend": {"enabled": true, "limit": null,
@@ -82,8 +87,14 @@ fn structured_session_and_weekly_limits_stand_in_for_absent_windows() {
     let data = data(include_str!("fixtures/claude_usage_limits_array.json"));
     assert!((data.five_hour - 0.41).abs() < 1e-6, "{}", data.five_hour);
     assert!((data.seven_day - 0.59).abs() < 1e-6, "{}", data.seven_day);
-    assert_eq!(data.five_hour_resets_at.as_deref(), Some("2999-01-01T00:00:00Z"));
-    assert_eq!(data.seven_day_resets_at.as_deref(), Some("2999-01-02T00:00:00Z"));
+    assert_eq!(
+        data.five_hour_resets_at.as_deref(),
+        Some("2999-01-01T00:00:00Z")
+    );
+    assert_eq!(
+        data.seven_day_resets_at.as_deref(),
+        Some("2999-01-02T00:00:00Z")
+    );
 }
 
 #[test]
@@ -93,7 +104,10 @@ fn an_explicit_window_wins_over_the_structured_limit() {
             "limits": [{"kind": "session", "percent": 99.0, "resets_at": "2999-01-09T00:00:00Z"}]}"#,
     );
     assert!((data.five_hour - 0.12).abs() < 1e-6);
-    assert_eq!(data.five_hour_resets_at.as_deref(), Some("2999-01-01T00:00:00Z"));
+    assert_eq!(
+        data.five_hour_resets_at.as_deref(),
+        Some("2999-01-01T00:00:00Z")
+    );
 }
 
 #[test]
@@ -108,7 +122,10 @@ fn the_sonnet_weekly_window_is_shown_once() {
     let alone = data_alone();
     assert_eq!(alone.model_scoped.len(), 1);
     assert!((alone.model_scoped[0].utilization - 0.12).abs() < 1e-6);
-    assert_eq!(alone.model_scoped[0].resets_at.as_deref(), Some("2999-01-03T00:00:00Z"));
+    assert_eq!(
+        alone.model_scoped[0].resets_at.as_deref(),
+        Some("2999-01-03T00:00:00Z")
+    );
 }
 
 fn data_alone() -> UsageData {
@@ -137,4 +154,23 @@ fn a_credits_account_gets_a_monthly_dollar_reading_for_routing() {
     assert_eq!(readings[0].limit, Some(300.0));
     let unknown = data(r#"{"spend": {"enabled": true}}"#);
     assert!(routing_readings::anthropic_readings(&unknown, 1_800_000_000).is_empty());
+}
+
+/// Bodies recorded on 2026-11-26 from a real Max 20x login (`GET
+/// /api/oauth/usage`, `?cedar_ember=1&skip_spend=1` with the jcode identity, and
+/// `/api/oauth/profile`), with account and organization ids replaced.
+const REAL_MAX_USAGE: &str = include_str!("fixtures/claude_usage_real_max_20x.json");
+
+#[test]
+fn recorded_max_response_reads_the_weekly_windows_and_no_credits() {
+    let data = data(REAL_MAX_USAGE);
+    // The plan has no five-hour window: unknown, never 0% used.
+    assert_eq!(data.five_hour, -1.0);
+    assert!((data.seven_day - 0.04).abs() < 1e-6, "{}", data.seven_day);
+    assert_eq!(data.model_scoped.len(), 1);
+    assert_eq!(data.model_scoped[0].model_name, "Fable");
+    assert!((data.model_scoped[0].utilization - 0.01).abs() < 1e-6);
+    assert!(!data.extra_usage_enabled);
+    // Spend is off on this plan, so there is no credit line to invent.
+    assert!(data.credits.is_none());
 }

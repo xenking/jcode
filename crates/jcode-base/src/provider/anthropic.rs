@@ -53,6 +53,25 @@ pub fn is_cache_ttl_1h() -> bool {
 /// The name is kept so existing call sites don't churn.
 pub const CLAUDE_CLI_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
 
+/// Claude Code release the account endpoints (`/api/oauth/usage` and saved
+/// resets) are evaluated for. Those endpoints decide per caller whether to
+/// evaluate a program: a caller that is not Claude Code gets
+/// `ineligible_reason: "surface"`, an older release `"cli_version"`, and both
+/// hide the owner's saved resets. Inference requests keep the honest
+/// [`CLAUDE_CLI_USER_AGENT`]. Raise this when the usage endpoint starts
+/// answering `cli_version`; `JCODE_CLAUDE_CODE_VERSION` overrides it at runtime.
+const USAGE_ENDPOINT_CLAUDE_CODE_VERSION: &str = "2.1.325";
+
+/// `User-Agent` for the account usage and saved-reset endpoints.
+pub fn usage_endpoint_user_agent() -> String {
+    let version = std::env::var("JCODE_CLAUDE_CODE_VERSION")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| USAGE_ENDPOINT_CLAUDE_CODE_VERSION.to_owned());
+    format!("claude-cli/{version} (external, cli)")
+}
+
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 
 /// Whether a model id effectively runs with the 1M-token context beta.

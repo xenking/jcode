@@ -404,6 +404,15 @@ mod tests {
         );
     }
     #[test]
+    fn recorded_profile_carries_both_identities() {
+        let profile: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/claude_oauth_profile_real_max_20x.json"
+        ))
+        .unwrap();
+        let (account, organization) = profile_identity(&profile).unwrap();
+        assert_ne!(account, organization);
+    }
+    #[test]
     fn fable_automatic_reset_is_independently_opt_in() {
         assert!(!crate::config::ProviderConfig::default().anthropic_auto_fable_reset);
     }

@@ -45,6 +45,23 @@ pub(super) fn not_evaluated(block: &serde_json::Value) -> bool {
     )
 }
 
+/// Why the endpoint declined to evaluate saved resets for this caller, when the
+/// last cached usage response says so (`surface` or `cli_version`).
+pub(super) fn not_evaluated_reason(
+    access_token: &str,
+    account_label: Option<&str>,
+) -> Option<String> {
+    let key = super::anthropic_usage_cache_key(access_token, account_label);
+    let status = super::disk_cache::reset_status(&key)?;
+    let block = status
+        .get("cedar_ember")
+        .filter(|block| not_evaluated(block))?;
+    block
+        .get("ineligible_reason")
+        .and_then(|reason| reason.as_str())
+        .map(str::to_owned)
+}
+
 /// Parse the `cedar_ember` block of a usage response. `None` means unknown.
 pub(super) fn banked_from_status(
     value: &serde_json::Value,
@@ -281,12 +298,23 @@ mod tests {
         let banked = banked_from_status(&during, None, now()).unwrap();
         assert_eq!((banked.available_count, banked.usable_count), (5, 0));
         assert_eq!(banked.reason.as_deref(), Some("cooldown"));
-        assert_eq!(banked.cooldown_until.as_deref(), Some("2026-11-20T00:00:00Z"));
-        assert!(banked.grants.iter().all(|g| g.status != BankedGrantStatus::Available));
+        assert_eq!(
+            banked.cooldown_until.as_deref(),
+            Some("2026-11-20T00:00:00Z")
+        );
+        assert!(
+            banked
+                .grants
+                .iter()
+                .all(|g| g.status != BankedGrantStatus::Available)
+        );
         let over = matrix(serde_json::json!({"cooldown_until": "2026-11-10T00:00:00Z"}));
         let banked = banked_from_status(&over, None, now()).unwrap();
         assert_eq!(banked.usable_count, 2);
-        assert_eq!(banked.cooldown_until, None, "a finished cooldown is not shown");
+        assert_eq!(
+            banked.cooldown_until, None,
+            "a finished cooldown is not shown"
+        );
     }
 
     #[test]
@@ -302,7 +330,10 @@ mod tests {
         for reason in ["surface", "cli_version"] {
             let value = serde_json::json!({"cedar_ember": {
                 "eligible": false, "ineligible_reason": reason, "grants": []}});
-            assert!(banked_from_status(&value, None, now()).is_none(), "{reason}");
+            assert!(
+                banked_from_status(&value, None, now()).is_none(),
+                "{reason}"
+            );
         }
     }
 }

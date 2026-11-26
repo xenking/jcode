@@ -95,6 +95,16 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     super::imported_banked::import_for_account(&access_token, &key, label).await;
                     banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
                 }
+                if banked.is_none()
+                    && let Some(reason) =
+                        super::anthropic_banked::not_evaluated_reason(&access_token, label)
+                {
+                    // Unknown, not zero: say why instead of showing nothing.
+                    report.extra_info.push((
+                        "Saved resets".into(),
+                        format!("not evaluated for this client ({reason})"),
+                    ));
+                }
                 report.anthropic_limit_reset = offer;
                 set_anthropic_banked_status(&mut report, banked);
                 if ineligible {

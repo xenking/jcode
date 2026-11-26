@@ -181,7 +181,7 @@ fn usage_request(
             .header("Content-Type", "application/json")
             .header(
                 "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                crate::provider::anthropic::usage_endpoint_user_agent(),
             )
             .header("Authorization", format!("Bearer {access_token}"))
             .header("anthropic-beta", "oauth-2025-04-20"),

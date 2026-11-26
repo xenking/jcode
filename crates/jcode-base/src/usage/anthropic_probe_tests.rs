@@ -32,13 +32,8 @@ fn with_home(f: impl FnOnce(tokio::runtime::Runtime)) {
 }
 
 async fn read(base: &str, key: &str, label: &str) -> Result<UsageData> {
-    fetch_anthropic_usage_data_uncached(
-        "fixture-only".into(),
-        key.into(),
-        base,
-        Some(label.into()),
-    )
-    .await
+    fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), base, Some(label.into()))
+        .await
 }
 
 #[test]
@@ -70,7 +65,10 @@ fn saved_resets_are_read_with_the_reset_program_identity_in_one_request() {
                 "GET /api/oauth/usage?cedar_ember=1&skip_spend=1"
             );
             let agent = header(&raw[0], "user-agent").unwrap();
-            assert!(agent.starts_with("jcode/"), "unexpected identity: {agent}");
+            assert!(
+                agent.starts_with("claude-cli/") && agent.ends_with(" (external, cli)"),
+                "the saved-reset probe must present the identity the endpoint evaluates: {agent}"
+            );
             let banked =
                 anthropic_banked::cached_banked_resets("fixture-only", Some("probe-one")).unwrap();
             assert_eq!((banked.available_count, banked.usable_count), (1, 1));
@@ -142,6 +140,34 @@ fn a_failed_session_lookup_leaves_the_saved_resets_and_windows_known() {
                 anthropic_reset::cached_limit_reset_offer("fixture-only", Some("probe-three"));
             assert!(offer.is_none(), "an unanswered lookup invents no offer");
             assert!(!ineligible, "an unanswered lookup is unknown, not denied");
+        });
+    });
+}
+
+#[test]
+fn a_caller_the_endpoint_does_not_evaluate_is_reported_with_its_reason() {
+    // Recorded answer for the jcode identity: `ineligible_reason: "surface"`.
+    let recorded: Value = serde_json::from_str(include_str!(
+        "fixtures/claude_usage_real_cedar_surface.json"
+    ))
+    .unwrap();
+    with_home(|runtime| {
+        runtime.block_on(async {
+            let server = Loopback::start(move |_| (200, recorded.clone())).await;
+            let base = format!("{}/api/oauth", server.base);
+            read(&base, "label:probe-surface", "probe-surface")
+                .await
+                .unwrap();
+            assert!(
+                anthropic_banked::cached_banked_resets("fixture-only", Some("probe-surface"))
+                    .is_none(),
+                "an unevaluated program is unknown, not zero resets"
+            );
+            assert_eq!(
+                anthropic_banked::not_evaluated_reason("fixture-only", Some("probe-surface"))
+                    .as_deref(),
+                Some("surface")
+            );
         });
     });
 }

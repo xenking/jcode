@@ -73,7 +73,7 @@ pub(super) fn authorize(
             .header("Content-Type", "application/json")
             .header(
                 "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                crate::provider::anthropic::usage_endpoint_user_agent(),
             )
             .header("anthropic-beta", "oauth-2025-04-20"),
         &crate::provider::anthropic::new_oauth_request_id(),
