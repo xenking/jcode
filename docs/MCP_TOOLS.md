@@ -51,7 +51,8 @@ would otherwise treat them as read-only.
 | `approval` off (default) | Runs, as before. |
 | `readOnlyHint = true` | Runs. |
 | Anything else, a person is attached | One prompt per call with the server, tool name and arguments. Choices: Deny, Allow once, Always allow this tool, Always allow every tool on this server. |
-| Anything else, no person (`jcode run`, swarm worker) | Waits up to 30 s (`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS`, `0` = refuse at once) for a client to attach, then refuses with an error naming `jcode mcp approvals allow`. The tool does not run. The refusal and every prompt are logged as `MCP_APPROVAL`. |
+| Anything else, a swarm worker whose root session has a client | The same card is shown on the root session's client, labelled with the worker's name plus the server, tool and arguments. The answer resolves the worker's call; "Always" answers are saved as for any session. With several root clients the first answer wins. Only that client can answer: the coordinator model cannot, and a message typed in the root session is not an answer. Logged as `MCP_APPROVAL ... session=<worker> routed_to=<root> ...`. |
+| Anything else, no person (`jcode run`, a worker whose root has no client) | Waits up to 30 s (`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS`, `0` = refuse at once) for a client to attach (to the session or its root), then refuses with an error naming `jcode mcp approvals allow`. The tool does not run. The refusal and every prompt are logged as `MCP_APPROVAL`. |
 | Listed in `approve_free` (`"*"` = every tool) | Runs. |
 | Malformed annotations (for example `"readOnlyHint": "yes"`) | Treated as a write. |
 

@@ -155,10 +155,13 @@ the card offers **Allow once**, **Always allow this tool**, **Always allow every
 The two "Always" answers are written to the MCP file the server is read from (normally \`~/.jcode/mcp.json\`):
 the raw tool name in that server's \`approve_free\` list, or \`"*"\` there for every tool on the server. They apply at
 once to the running daemon and every session (the policy is re-read on every call). List or undo them with
-\`jcode mcp approvals\` (\`jcode mcp approvals revoke <server> [<tool>]\`). A background session that hits a gated
-tool shows the request on the attached client (the daemon log has one \`MCP_APPROVAL outcome=… session=… server=…
-tool=…\` line per request); with no client attached it waits up to 30 s for one (\`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS\`,
-\`0\` refuses at once), then refuses with the \`jcode mcp approvals allow <server> [<tool>]\` hint instead of hanging.
+\`jcode mcp approvals\` (\`jcode mcp approvals revoke <server> [<tool>]\`). A swarm worker that hits a gated
+tool shows the request, labelled with the worker's name and the server, tool and arguments, on the client attached to the
+swarm's root session; only a person's answer there resolves it (the coordinator model cannot answer, and with several
+clients the first answer wins). The daemon log has one \`MCP_APPROVAL outcome=… session=… [routed_to=…] server=…
+tool=…\` line per request. With no client attached to the session or its root it waits up to 30 s for one
+(\`JCODE_MCP_APPROVAL_ATTACH_WAIT_SECS\`, \`0\` refuses at once), then refuses with the
+\`jcode mcp approvals allow <server> [<tool>]\` hint instead of hanging.
 If the work installer rewrites \`mcp.json\`, re-run \`jcode mcp approvals\` to see which grants survived. Settings written under \`[mcp.servers.*]\` in
 \`config.toml\` are not read: jcode warns at startup and names \`~/.jcode/mcp.json\` as the file that is.
 The work overlay's installer pre-approves only its local-only review tools; anything with an external write

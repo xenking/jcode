@@ -739,6 +739,20 @@ fn the_card_offers_four_one_line_options_and_nothing_else_counts() {
     }
 }
 
+#[test]
+fn every_option_line_fits_an_80_column_terminal() {
+    // Picker row: "› 4. <label> - <description>" inside a 2-column border.
+    const INNER_WIDTH: usize = 80 - 2;
+    for option in card_options() {
+        let line = format!(
+            "› 4. {} - {}",
+            option.label,
+            option.description.unwrap_or_default()
+        );
+        assert!(line.chars().count() <= INNER_WIDTH, "{line}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn always_allow_tool_is_saved_and_the_next_call_is_not_asked() {
     let Some(f) = Fixture::on_disk(json!("annotations"), &[]).await else {
@@ -880,7 +894,9 @@ async fn with_nobody_attaching_the_wait_ends_with_an_actionable_refusal() {
         "{message}"
     );
     assert_eq!(
-        log_line("refused_no_client", &ctx("nobody"), &request),
+        log_line("refused_no_client", &ctx("nobody"), &request, None),
         "MCP_APPROVAL outcome=refused_no_client session=nobody server=gated tool=plan_item"
     );
 }
+
+mod worker_routing;

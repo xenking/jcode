@@ -6,6 +6,16 @@
 /// MCP approval request ids carry this prefix after the `ask-` the transport adds.
 pub(crate) const MCP_REQUEST_PREFIX: &str = "mcp-approval-";
 
+/// A swarm worker's approval request, shown on its root session's client. A
+/// message typed in the root session is never an answer to it.
+pub(crate) const WORKER_REQUEST_PREFIX: &str = "mcp-approval-worker-";
+
+pub(crate) fn is_worker_approval(request_id: &str) -> bool {
+    request_id
+        .strip_prefix("ask-")
+        .is_some_and(|rest| rest.starts_with(WORKER_REQUEST_PREFIX))
+}
+
 pub(crate) fn is_owner_approval(request_id: &str) -> bool {
     request_id.starts_with("ask-premium-spawn-")
 }

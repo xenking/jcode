@@ -84,20 +84,20 @@ pub(super) fn install_bridge_and_then(
     members: SwarmMembers,
     on_published: impl FnOnce(),
 ) {
-    let root_of: crate::ask_route::RootLookup = {
+    let ancestors_of: crate::ask_route::AncestorLookup = {
         let members = Arc::clone(&members);
         Arc::new(move |session: &str| {
             let members = Arc::clone(&members);
             let session = session.to_string();
             Box::pin(async move {
-                super::swarm_ancestry::swarm_ancestors(&*members.read().await, &session).pop()
+                super::swarm_ancestry::swarm_ancestors(&*members.read().await, &session)
             })
         })
     };
     let Some(crate::ask_route::InstalledRoute {
         mut requests,
         cancelled,
-    }) = crate::ask_route::install(session_id, root_of)
+    }) = crate::ask_route::install(session_id, ancestors_of)
     else {
         return;
     };

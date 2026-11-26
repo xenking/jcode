@@ -3,6 +3,7 @@
 //! A turn may outlive its originating socket. A newly attached client must be
 //! able to answer subsequent questions without waiting for that turn's lock.
 use super::StdinInputRequest;
+use super::approval_request::is_worker_approval;
 pub(crate) use super::approval_request::{is_human_approval, is_owner_approval};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -388,7 +389,9 @@ pub(crate) fn answer_with_text(
     };
     let Some(request_id) = requests
         .values()
-        .filter(|pending| !is_owner_approval(&pending.request_id))
+        .filter(|pending| {
+            !is_owner_approval(&pending.request_id) && !is_worker_approval(&pending.request_id)
+        })
         .min_by_key(|pending| pending.generation)
         .map(|pending| pending.request_id.clone())
     else {
@@ -406,11 +409,21 @@ pub(crate) fn answer_with_text(
 
 /// Wait without losing a concurrent attachment notification.
 pub(crate) async fn wait_for_sender(session_id: &str) -> UnboundedSender<StdinInputRequest> {
+    wait_for_first_sender(&[session_id.to_owned()]).await.1
+}
+
+/// Wait until any of `sessions` has a client; the earliest listed one wins.
+pub(crate) async fn wait_for_first_sender(
+    sessions: &[String],
+) -> (String, UnboundedSender<StdinInputRequest>) {
     loop {
         let mut notified = std::pin::pin!(ROUTES_CHANGED.notified());
         notified.as_mut().enable();
-        if let Some(sender) = sender(session_id) {
-            return sender;
+        if let Some(found) = sessions
+            .iter()
+            .find_map(|session| sender(session).map(|tx| (session.clone(), tx)))
+        {
+            return found;
         }
         notified.await;
     }

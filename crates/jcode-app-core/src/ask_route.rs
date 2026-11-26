@@ -13,14 +13,15 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Finds the root coordinator of a session's spawn chain.
-pub(crate) type RootLookup =
-    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
+/// Finds the spawn chain above a session: its spawner first, the root last,
+/// empty for a session nobody spawned.
+pub(crate) type AncestorLookup =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> + Send + Sync>;
 
 struct Route {
     tx: mpsc::UnboundedSender<EscalationRequest>,
     cancelled: CancellationToken,
-    root_of: RootLookup,
+    ancestors_of: AncestorLookup,
 }
 
 static ROUTES: LazyLock<Mutex<HashMap<String, Route>>> =
@@ -47,7 +48,12 @@ impl EscalationRequest {
         Vec<AskQuestion>,
         oneshot::Sender<Result<EscalatedAsk>>,
     ) {
-        (self.request_id, self.tool_call_id, self.questions, self.reply)
+        (
+            self.request_id,
+            self.tool_call_id,
+            self.questions,
+            self.reply,
+        )
     }
 }
 
@@ -69,7 +75,7 @@ pub(crate) struct InstalledRoute {
 /// Install a route for `session_id`. Idempotent: a live route is reused, so
 /// reload revival and repeated spawn paths cannot stack routes. Returns the
 /// receiving end only when a new route was created.
-pub(crate) fn install(session_id: &str, root_of: RootLookup) -> Option<InstalledRoute> {
+pub(crate) fn install(session_id: &str, ancestors_of: AncestorLookup) -> Option<InstalledRoute> {
     let mut routes = routes();
     if routes
         .get(session_id)
@@ -84,7 +90,7 @@ pub(crate) fn install(session_id: &str, root_of: RootLookup) -> Option<Installed
         Route {
             tx,
             cancelled: cancelled.clone(),
-            root_of,
+            ancestors_of,
         },
     ) {
         previous.cancelled.cancel();
@@ -115,13 +121,20 @@ pub(crate) fn clear_for_test() {
     }
 }
 
+/// The spawn chain above a routed session, spawner first and root last. `None`
+/// when the session has no route; `Some(vec![])` when it has one but no
+/// ancestor is known.
+pub(crate) async fn ancestors(session_id: &str) -> Option<Vec<String>> {
+    let ancestors_of = routes()
+        .get(session_id)
+        .map(|route| Arc::clone(&route.ancestors_of))?;
+    Some(ancestors_of(session_id).await)
+}
+
 /// The root coordinator a routed session escalates to. `None` when the session
 /// has no route; `Some(None)` when it has one but no ancestor is known.
 pub(crate) async fn coordinator_root(session_id: &str) -> Option<Option<String>> {
-    let root_of = routes()
-        .get(session_id)
-        .map(|route| Arc::clone(&route.root_of))?;
-    Some(root_of(session_id).await)
+    Some(ancestors(session_id).await?.pop())
 }
 
 /// Ask the coordinator, from inside the `ask` tool.
