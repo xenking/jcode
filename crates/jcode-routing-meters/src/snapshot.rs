@@ -2,7 +2,7 @@
 
 use chrono::TimeZone;
 use jcode_routing_policy::config::MeterSource;
-use jcode_routing_policy::{AccountId, AccountState, Grant, Policy, Reading, Snapshot};
+use jcode_routing_policy::{AccountId, AccountState, Balance, Grant, Policy, Reading, Snapshot};
 
 use crate::ledger::{Ledger, window_reset, window_start};
 
@@ -12,6 +12,10 @@ pub trait Meters {
     fn readings(&self, account: &AccountId, now: i64) -> Option<Vec<Reading>>;
     /// Reset grants the account holds, from cached metadata only.
     fn grants(&self, _account: &AccountId, _now: i64) -> Vec<Grant> {
+        Vec::new()
+    }
+    /// Credit balances the account holds, from cached metadata only.
+    fn balances(&self, _account: &AccountId, _now: i64) -> Vec<Balance> {
         Vec::new()
     }
 }
@@ -32,6 +36,10 @@ pub fn build<Tz: TimeZone>(
 ) -> Snapshot {
     let mut snapshot = Snapshot::default();
     for account in &policy.accounts {
+        let balances = meters.balances(&account.id, now);
+        if !balances.is_empty() {
+            snapshot.balances.insert(account.id.clone(), balances);
+        }
         let readings = meters
             .readings(&account.id, now)
             .filter(|readings| !readings.is_empty());

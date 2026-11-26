@@ -410,3 +410,31 @@ fn readings_reach_the_engine_through_the_snapshot() {
     // The spent subscription hands over to the next account.
     assert!(matches!(decision, Decision::Use { account, .. } if account == id("huggingface")));
 }
+
+struct Funded;
+
+impl Meters for Funded {
+    fn readings(&self, _account: &AccountId, _now: i64) -> Option<Vec<Reading>> {
+        None
+    }
+    fn balances(&self, account: &AccountId, _now: i64) -> Vec<jcode_routing_policy::Balance> {
+        (account.as_str() == "claude:team")
+            .then(|| jcode_routing_policy::Balance {
+                unit: Unit::Credits,
+                remaining: 12.5,
+                resets_at: None,
+                pays_past_limits: false,
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+#[test]
+fn a_balance_reaches_the_snapshot_without_any_window_reading() {
+    let policy = policy(HF_POLICY);
+    let snapshot = build(&policy, NOW, &Funded, None, &Utc);
+    assert_eq!(snapshot.balances.len(), 1);
+    assert_eq!(snapshot.balances[&id("claude:team")][0].remaining, 12.5);
+    assert!(snapshot.accounts.is_empty());
+}

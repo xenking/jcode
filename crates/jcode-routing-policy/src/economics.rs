@@ -5,6 +5,7 @@
 //! `λ`, in units of the model's list input price. Both sides of a comparison
 //! run the same model, so the list price itself cancels out.
 
+use crate::config::Unit;
 use crate::policy::{AccountId, Window};
 
 /// How far a session is from losing its prompt cache.
@@ -100,6 +101,23 @@ pub struct Grant {
     pub windows: Vec<Window>,
     /// Only for this model class (`fable`), or every class.
     pub model_class: Option<String>,
+}
+
+/// A balance the provider states for an account: what is left, never what it
+/// started with. Credits and grants are spent down, so a balance has no rate
+/// window; it is unit amounts with, when the provider states one, a date at
+/// which what remains is lost.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Balance {
+    pub unit: Unit,
+    pub remaining: f64,
+    /// Unix seconds the provider says the balance resets or lapses. `None`
+    /// when it states none, which never means "never": the balance is just
+    /// spent after every pool that resets.
+    pub resets_at: Option<i64>,
+    /// The provider keeps serving from this balance once the account's rate
+    /// windows are spent.
+    pub pays_past_limits: bool,
 }
 
 /// The cost of each way out of a warm session whose account cannot serve.

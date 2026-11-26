@@ -13,7 +13,7 @@ pub mod state;
 mod strategy;
 
 pub use economics::{
-    CacheContext, CacheFactors, Grant, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+    Balance, CacheContext, CacheFactors, Grant, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
 };
 pub use engine::{
     AccountState, Availability, Decision, GateOption, Intents, PaidIntent, Reading, Request, Role,
@@ -25,6 +25,8 @@ pub use policy::{
 };
 pub use strategy::HealthTracker;
 
+#[cfg(test)]
+mod balance_tests;
 #[cfg(test)]
 mod economics_tests;
 #[cfg(test)]

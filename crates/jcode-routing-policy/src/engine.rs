@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{BudgetAction, MeterSource, OnLimit, PaidMode, Unit};
 use crate::economics::{
-    CacheContext, Grant, Leave, Options, Pool, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
+    Balance, CacheContext, Grant, Leave, Options, Pool, Redemption, SWEEP_BEFORE_EXPIRY_SECS, Seam,
     grant_wastes,
 };
 use crate::policy::{Account, AccountId, Budget, Policy, Scope, Window};
@@ -57,6 +57,9 @@ pub struct Snapshot {
     /// When each ledger budget's window resets next (unix seconds), passed by
     /// the caller so `decide` stays free of calendar knowledge.
     pub resets: BTreeMap<String, i64>,
+    /// Credit balances the providers state, per account. A balance is a pool
+    /// of its own: it needs no capacity, only what remains.
+    pub balances: BTreeMap<AccountId, Vec<Balance>>,
 }
 
 /// An account chosen until a deadline (unix seconds).
@@ -189,6 +192,9 @@ struct Standing<'p> {
     /// Every pool is behind its pace line, so its room would be lost at the
     /// reset: the soonest such reset (or wasting grant expiry).
     lost_room: Option<i64>,
+    /// It spends a balance that states no reset: after every pool that resets
+    /// and, at equal priority, after every account that still has plan room.
+    on_balance: bool,
     /// `λ`: what one unit of its quota is worth now.
     price: f64,
     /// A reset grant that would lapse unused makes its room free.
@@ -446,7 +452,8 @@ fn warm_options(request: Request<'_>, current: &Standing<'_>, target: &Standing<
 }
 
 /// The order of choice: room that would be lost (soonest reset first), then
-/// priority for the request's class, then the lowest `λ`, then the current
+/// priority for the request's class, then plan room before a balance that
+/// never resets, then the lowest `λ`, then the current
 /// account, then lighter load, then config order. Unknown load sorts after
 /// known load.
 fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
@@ -461,6 +468,7 @@ fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
                 .for_class(class)
                 .cmp(&b.account.priority.for_class(class))
         })
+        .then_with(|| a.on_balance.cmp(&b.on_balance))
         .then_with(|| a.price.total_cmp(&b.price))
         .then_with(|| is_current(b).cmp(&is_current(a)))
         .then_with(|| match (a.load, b.load) {
@@ -578,6 +586,15 @@ fn stand<'p>(
                 .collect()
         })
         .unwrap_or_default();
+    // Balances with something left that have not lapsed.
+    let balances: Vec<&Balance> = snapshot
+        .balances
+        .get(&account.id)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.remaining > 0.0 && b.resets_at.is_none_or(|at| at > now))
+        .collect();
+    let pays_past = balances.iter().any(|b| b.pays_past_limits);
     let subagent_reserve = if request.role == Role::Subagent {
         policy.subagent_reserve_pct
     } else {
@@ -651,10 +668,15 @@ fn stand<'p>(
     } else {
         None
     };
-    let lost_room = match (lost_room, free_grant) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
+    // What remains of a balance with a stated reset is lost at that reset.
+    let lost_room = [
+        lost_room,
+        free_grant,
+        balances.iter().filter_map(|b| b.resets_at).min(),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
 
     let mut hits: Vec<(OnLimit, String)> = Vec::new();
     // The percent windows at their wall. A reset grant can only clear these.
@@ -662,6 +684,7 @@ fn stand<'p>(
     let mut clearable = true;
     let mut warnings = Vec::new();
     let mut resets_at: Option<i64> = None;
+    let mut on_balance = false;
     let mut note_reset = |reading: &Reading| {
         if let Some(at) = reading.resets_at {
             resets_at = Some(resets_at.map_or(at, |seen: i64| seen.max(at)));
@@ -681,6 +704,19 @@ fn stand<'p>(
             },
         };
         if spent {
+            // A plan window past its ceiling does not stop an account whose
+            // balance the provider keeps serving from: it runs on credits.
+            if reading.unit == Unit::Percent && pays_past {
+                on_balance = true;
+                warnings.push(format!(
+                    "{} {} {} at {}, running on its credit balance",
+                    account.id,
+                    reading.window,
+                    amount(reading.unit, reading.used),
+                    limit
+                ));
+                continue;
+            }
             note_reset(reading);
             if reading.unit == Unit::Percent {
                 walls.push(reading.window);
@@ -782,6 +818,9 @@ fn stand<'p>(
                 .collect::<Vec<_>>(),
         )
     });
+    // With no plan window at all the balance is all the account spends.
+    let on_balance = (on_balance || !readings.iter().any(|r| r.unit == Unit::Percent))
+        && balances.iter().any(|b| b.resets_at.is_none());
     let load = readings
         .iter()
         .filter(|r| r.unit == Unit::Percent)
@@ -815,6 +854,7 @@ fn stand<'p>(
         load,
         resets_at,
         lost_room,
+        on_balance,
         price,
         free_grant: free_grant.is_some(),
         redeemable,
