@@ -97,5 +97,5 @@ pub(super) fn strip_relative_age_text(text: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "client_lifecycle_catalog_dedup_tests.rs"]
+#[path = "../../clients/connection/specs/client_lifecycle_catalog_dedup_tests.rs"]
 mod tests;

@@ -29,6 +29,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use super::SessionAgents;
 
+#[path = "client_session/detached_source.rs"]
 mod detached_source;
 pub(in crate::server) use detached_source::*;
 

@@ -7,7 +7,7 @@
     "crates/jcode-app-core/src/ambient/runner.rs": 1,
     "crates/jcode-app-core/src/screen_context.rs": 1,
     "crates/jcode-app-core/src/server.rs": 1,
-    "crates/jcode-app-core/src/server/assistant_text.rs": 1,
+    "crates/jcode-app-core/src/server/execution/turns/assistant_text.rs": 1,
     "crates/jcode-app-core/src/server/await_members_state.rs": 1,
     "crates/jcode-app-core/src/server/diagnostics/commands/debug.rs": 1,
     "crates/jcode-app-core/src/server/runtime_support/recovery/reload_recovery.rs": 4,

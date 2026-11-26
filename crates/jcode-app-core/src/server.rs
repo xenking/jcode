@@ -1,39 +1,68 @@
+#[path = "server/catalog/providers/account_usage.rs"]
 mod account_usage;
 pub(crate) use crate::attachment;
+#[path = "server/catalog/providers/available_models_cache.rs"]
 mod available_models_cache;
+#[path = "server/catalog/providers/available_models_dedup.rs"]
 mod available_models_dedup;
 pub(crate) use crate::await_members_state;
 pub use await_members_state::set_dependency_delivery as set_await_dependency_delivery;
+#[path = "server/services/background/background_services.rs"]
 mod background_services;
+#[path = "server/services/background/background_task_inspection.rs"]
 mod background_task_inspection;
+#[path = "server/services/background/background_tasks.rs"]
 mod background_tasks;
+#[path = "server/clients/communication/client_comm.rs"]
 mod client_comm;
+#[path = "server/clients/communication/client_comm_channels.rs"]
 mod client_comm_channels;
+#[path = "server/clients/communication/client_comm_context.rs"]
 mod client_comm_context;
+#[path = "server/clients/communication/client_comm_message.rs"]
 mod client_comm_message;
+#[path = "server/clients/communication/client_comm_swarms.rs"]
 mod client_comm_swarms;
+#[path = "server/clients/connection/client_disconnect_cleanup.rs"]
 mod client_disconnect_cleanup;
+#[path = "server/clients/connection/client_lifecycle.rs"]
 mod client_lifecycle;
+#[path = "server/clients/connection/client_lifecycle_logging.rs"]
 mod client_lifecycle_logging;
+#[path = "server/clients/requests/client_lightweight_control.rs"]
 mod client_lightweight_control;
+#[path = "server/clients/requests/client_session.rs"]
 mod client_session;
+#[path = "server/clients/history/client_state.rs"]
 mod client_state;
+#[path = "server/services/background/cold_agent_wake.rs"]
 mod cold_agent_wake;
+#[path = "server/catalog/providers/model_refresh.rs"]
 mod model_refresh;
+#[path = "server/execution/spawn/premium_spawn.rs"]
 mod premium_spawn;
 #[path = "server/transport/socket/session_connections.rs"]
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
 #[path = "server/transport/socket/client_writer.rs"]
 mod client_writer;
+#[path = "server/coordination/tasks/comm_await.rs"]
 mod comm_await;
+#[path = "server/coordination/tasks/comm_control.rs"]
 mod comm_control;
+#[path = "server/coordination/tasks/comm_plan.rs"]
 mod comm_plan;
+#[path = "server/coordination/workers/comm_session.rs"]
 mod comm_session;
+#[path = "server/coordination/tasks/comm_sync.rs"]
 mod comm_sync;
+#[path = "server/coordination/tasks/comm_worker_control.rs"]
 mod comm_worker_control;
+#[path = "server/sessions/management/configured_name.rs"]
 mod configured_name;
+#[path = "server/sessions/state/context_breakdown.rs"]
 mod context_breakdown;
+#[path = "server/services/integrations/shake_tools.rs"]
 mod shake_tools;
 use configured_name::normalize_configured_server_name;
 #[path = "server/diagnostics/commands/debug.rs"]
@@ -59,22 +88,34 @@ mod debug_swarm_write;
 #[path = "server/diagnostics/inspection/debug_testers.rs"]
 mod debug_testers;
 use crate::durable_state;
+#[path = "server/coordination/workers/group_transfer.rs"]
 mod group_transfer;
+#[path = "server/execution/spawn/headless.rs"]
 mod headless;
 pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTransferSession};
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
+#[path = "server/services/background/idle_hibernation.rs"]
 mod idle_hibernation;
+#[path = "server/services/background/idle_unload.rs"]
 mod idle_unload;
+#[path = "server/execution/routing/jade_relay.rs"]
 mod jade_relay;
+#[path = "server/execution/turns/lane_dispatch.rs"]
 mod lane_dispatch;
 mod lifecycle;
+#[path = "server/services/background/live_status.rs"]
 mod live_status;
+#[path = "server/execution/turns/live_turn.rs"]
 mod live_turn;
+#[path = "server/services/integrations/mobile_local.rs"]
 mod mobile_local;
+#[path = "server/catalog/providers/provider_control.rs"]
 mod provider_control;
 #[path = "server/runtime_support/recovery/reload.rs"]
 mod reload;
+#[path = "server/execution/routing/routing_requests.rs"]
 mod routing_requests;
+#[path = "server/execution/routing/routing_turn.rs"]
 mod routing_turn;
 pub use routing_turn::route_unattached_turn;
 #[path = "server/runtime_support/recovery/recovery_owner.rs"]
@@ -83,8 +124,10 @@ mod recovery_owner;
 pub(crate) mod reload_recovery;
 #[path = "server/runtime_support/recovery/reload_transcript.rs"]
 mod reload_transcript;
+#[path = "server/execution/routing/routing_view_request.rs"]
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
+#[path = "server/coordination/workers/ask_escalation.rs"]
 pub(crate) mod ask_escalation;
 use crate::reload_state;
 use crate::reload_trace;
@@ -110,10 +153,13 @@ mod runtime_ssh_loops;
 mod runtime_ssh_sessions;
 #[path = "server/runtime_support/control/runtime_upgrade.rs"]
 mod runtime_upgrade;
+#[path = "server/sessions/management/session_notifications.rs"]
 mod session_notifications;
 #[path = "server/transport/socket/socket.rs"]
 mod socket;
+#[path = "server/execution/spawn/spawn_model_selection.rs"]
 mod spawn_model_selection;
+#[path = "server/execution/spawn/spawn_policy.rs"]
 mod spawn_policy;
 #[path = "server/swarms/membership/swarm.rs"]
 mod swarm;
@@ -149,10 +195,14 @@ mod swarm_watchdog;
 mod swarm_watchdog_delivery;
 #[path = "server/swarms/membership/swarm_working_members.rs"]
 mod swarm_working_members;
+#[path = "server/execution/turns/turn_execution.rs"]
 mod turn_execution;
+#[path = "server/execution/turns/turn_failover.rs"]
 mod turn_failover;
 mod util;
+#[path = "server/coordination/workers/worker_compaction.rs"]
 mod worker_compaction;
+#[path = "server/coordination/workers/worker_revive.rs"]
 mod worker_revive;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -214,6 +264,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 
+#[path = "server/sessions/management/session_manager.rs"]
 mod session_manager;
 pub(super) use session_manager::SessionManager;
 pub(super) type SessionAgents = Arc<SessionManager>;
@@ -615,8 +666,11 @@ use runtime_memory_sampling::{
     capture_runtime_memory_attribution_sample, capture_runtime_memory_process_sample,
 };
 
+#[path = "server/sessions/management/session_control.rs"]
 mod session_control;
+#[path = "server/sessions/state/state.rs"]
 mod state;
+#[path = "server/services/integrations/subscribe_working_dir.rs"]
 mod subscribe_working_dir;
 
 pub use self::session_control::SessionControlHandle;
@@ -674,6 +728,7 @@ use self::util::{
     startup_headless_recovery_test_delay, swarm_id_for_dir, swarm_id_for_session,
 };
 
+#[path = "server/services/integrations/file_activity.rs"]
 mod file_activity;
 use self::file_activity::{
     FileActivityEntry, PendingFileActivityNotice, deliver_file_activity_notice,
@@ -681,6 +736,7 @@ use self::file_activity::{
     parse_file_activity_line_range,
 };
 
+#[path = "server/services/integrations/file_touch_service.rs"]
 mod file_touch_service;
 pub(crate) use self::file_touch_service::FileTouchService;
 
@@ -693,9 +749,11 @@ mod socket_tests;
 mod startup_tests;
 
 #[cfg(test)]
+#[path = "server/execution/turns/queue_tests.rs"]
 mod queue_tests;
 
 #[cfg(test)]
+#[path = "server/services/integrations/file_activity_tests.rs"]
 mod file_activity_tests;
 
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
@@ -711,7 +769,7 @@ const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 mod reload_marker_scope_tests;
 
 #[cfg(test)]
-#[path = "server/idle_monitor_tests.rs"]
+#[path = "server/services/background/idle_monitor_tests.rs"]
 mod idle_monitor_tests;
 
 /// How often the retained-heap watchdog samples allocator retention.

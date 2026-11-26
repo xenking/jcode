@@ -29,6 +29,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use super::SessionAgents;
 
+#[path = "comm_control/worker_report.rs"]
 mod worker_report;
 pub(super) use worker_report::persist_worker_report;
 
@@ -40,6 +41,7 @@ use assignment_targets::{
 #[cfg(test)]
 use assignment_targets::{is_drivable_auto_worker, member_has_active_assignment};
 
+#[path = "comm_control/assignment_runs.rs"]
 mod assignment_runs;
 pub(in crate::server) use assignment_runs::*;
 
@@ -1838,5 +1840,6 @@ pub(super) fn handle_client_debug_response(
     let _ = client_debug_response_tx.send((id, output));
 }
 
+#[path = "comm_control/member_targets.rs"]
 mod member_targets;
 pub(in crate::server) use member_targets::*;

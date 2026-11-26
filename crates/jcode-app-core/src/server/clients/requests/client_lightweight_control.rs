@@ -1307,4 +1307,5 @@ pub(super) async fn handle_lightweight_control_request(
 }
 
 #[cfg(test)]
+#[path = "client_lightweight_control/lightweight_swarm_member_tests.rs"]
 mod lightweight_swarm_member_tests;

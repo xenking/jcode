@@ -452,7 +452,7 @@ mod stop_reason_tests {
 }
 
 #[cfg(test)]
-#[path = "live_context_tests.rs"]
+#[path = "../../services/background/live_context_tests.rs"]
 mod context_tests;
 
 #[cfg(test)]

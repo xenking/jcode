@@ -1313,9 +1313,10 @@ pub(super) async fn handle_comm_stop(
     let _ = client_event_tx.send(response);
 }
 
+#[path = "comm_session/stop_cleanup.rs"]
 mod stop_cleanup;
 
-#[path = "swarms/supervision/swarm_stop_target.rs"]
+#[path = "../../swarms/supervision/swarm_stop_target.rs"]
 pub(super) mod swarm_stop_target;
 use swarm_stop_target::*;
 

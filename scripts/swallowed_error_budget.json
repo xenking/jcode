@@ -216,12 +216,12 @@
       "let_underscore": 19,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/account_usage.rs": {
+    "crates/jcode-app-core/src/server/catalog/providers/account_usage.rs": {
       "dot_ok": 0,
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/ask_escalation.rs": {
+    "crates/jcode-app-core/src/server/coordination/workers/ask_escalation.rs": {
       "dot_ok": 2,
       "let_underscore": 6,
       "unwrap_or_default": 1
@@ -231,12 +231,12 @@
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/background_task_inspection.rs": {
+    "crates/jcode-app-core/src/server/services/background/background_task_inspection.rs": {
       "dot_ok": 5,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/background_tasks.rs": {
+    "crates/jcode-app-core/src/server/services/background/background_tasks.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
@@ -246,97 +246,97 @@
       "let_underscore": 50,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_comm_channels.rs": {
+    "crates/jcode-app-core/src/server/clients/communication/client_comm_channels.rs": {
       "dot_ok": 0,
       "let_underscore": 8,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_comm_context.rs": {
+    "crates/jcode-app-core/src/server/clients/communication/client_comm_context.rs": {
       "dot_ok": 0,
       "let_underscore": 6,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/client_comm_message.rs": {
+    "crates/jcode-app-core/src/server/clients/communication/client_comm_message.rs": {
       "dot_ok": 0,
       "let_underscore": 4,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/client_comm_swarms.rs": {
+    "crates/jcode-app-core/src/server/clients/communication/client_comm_swarms.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_event_control.rs": {
+    "crates/jcode-app-core/src/server/clients/connection/client_event_control.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_lifecycle.rs": {
+    "crates/jcode-app-core/src/server/clients/connection/client_lifecycle.rs": {
       "dot_ok": 0,
       "let_underscore": 6,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_lifecycle_logging.rs": {
+    "crates/jcode-app-core/src/server/clients/connection/client_lifecycle_logging.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_lightweight_control.rs": {
+    "crates/jcode-app-core/src/server/clients/requests/client_lightweight_control.rs": {
       "dot_ok": 4,
       "let_underscore": 5,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_processing.rs": {
+    "crates/jcode-app-core/src/server/clients/connection/client_processing.rs": {
       "dot_ok": 0,
       "let_underscore": 8,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/client_session.rs": {
+    "crates/jcode-app-core/src/server/clients/requests/client_session.rs": {
       "dot_ok": 5,
       "let_underscore": 18,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/client_state.rs": {
+    "crates/jcode-app-core/src/server/clients/history/client_state.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/server/client_subscribe_context.rs": {
+    "crates/jcode-app-core/src/server/clients/connection/client_subscribe_context.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/cold_agent_wake.rs": {
+    "crates/jcode-app-core/src/server/services/background/cold_agent_wake.rs": {
       "dot_ok": 5,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/comm_await.rs": {
+    "crates/jcode-app-core/src/server/coordination/tasks/comm_await.rs": {
       "dot_ok": 0,
       "let_underscore": 8,
       "unwrap_or_default": 7
     },
-    "crates/jcode-app-core/src/server/comm_control.rs": {
+    "crates/jcode-app-core/src/server/coordination/tasks/comm_control.rs": {
       "dot_ok": 0,
       "let_underscore": 44,
       "unwrap_or_default": 3
     },
-    "crates/jcode-app-core/src/server/comm_plan.rs": {
+    "crates/jcode-app-core/src/server/coordination/tasks/comm_plan.rs": {
       "dot_ok": 0,
       "let_underscore": 19,
       "unwrap_or_default": 4
     },
-    "crates/jcode-app-core/src/server/comm_session.rs": {
+    "crates/jcode-app-core/src/server/coordination/workers/comm_session.rs": {
       "dot_ok": 5,
       "let_underscore": 10,
       "unwrap_or_default": 11
     },
-    "crates/jcode-app-core/src/server/comm_sync.rs": {
+    "crates/jcode-app-core/src/server/coordination/tasks/comm_sync.rs": {
       "dot_ok": 1,
       "let_underscore": 14,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/context_breakdown.rs": {
+    "crates/jcode-app-core/src/server/sessions/state/context_breakdown.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 0
@@ -381,22 +381,22 @@
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/file_activity.rs": {
+    "crates/jcode-app-core/src/server/services/integrations/file_activity.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/headless.rs": {
+    "crates/jcode-app-core/src/server/execution/spawn/headless.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/history_paging_bounded.rs": {
+    "crates/jcode-app-core/src/server/clients/history/history_paging_bounded.rs": {
       "dot_ok": 3,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/jade_relay.rs": {
+    "crates/jcode-app-core/src/server/execution/routing/jade_relay.rs": {
       "dot_ok": 2,
       "let_underscore": 9,
       "unwrap_or_default": 2
@@ -406,17 +406,17 @@
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/live_turn.rs": {
+    "crates/jcode-app-core/src/server/execution/turns/live_turn.rs": {
       "dot_ok": 1,
       "let_underscore": 7,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/premium_spawn.rs": {
+    "crates/jcode-app-core/src/server/execution/spawn/premium_spawn.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/server/provider_control.rs": {
+    "crates/jcode-app-core/src/server/catalog/providers/provider_control.rs": {
       "dot_ok": 0,
       "let_underscore": 33,
       "unwrap_or_default": 0
@@ -471,7 +471,7 @@
       "let_underscore": 10,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/server/state.rs": {
+    "crates/jcode-app-core/src/server/sessions/state/state.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
@@ -516,7 +516,7 @@
       "let_underscore": 2,
       "unwrap_or_default": 2
     },
-    "crates/jcode-app-core/src/server/turn_failover.rs": {
+    "crates/jcode-app-core/src/server/execution/turns/turn_failover.rs": {
       "dot_ok": 0,
       "let_underscore": 5,
       "unwrap_or_default": 1

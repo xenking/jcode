@@ -1068,5 +1068,5 @@ async fn background_task_progress_notifies_attached_clients() {
 #[path = "runtime_support/recovery/startup_recovery_tests.rs"]
 mod startup_recovery;
 
-#[path = "mobile_local_tests.rs"]
+#[path = "services/integrations/mobile_local_tests.rs"]
 mod mobile_local;

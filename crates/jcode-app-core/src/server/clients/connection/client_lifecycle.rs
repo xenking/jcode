@@ -111,18 +111,29 @@ macro_rules! dispatch_queued_prompt {
     };
 }
 
+#[path = "client_lifecycle/actions.rs"]
 pub(in crate::server) mod actions;
+#[path = "client_lifecycle/attach_requests.rs"]
 mod attach_requests;
+#[path = "client_lifecycle/connection.rs"]
 mod connection;
+#[path = "client_lifecycle/connection_loop.rs"]
 mod connection_loop;
+#[path = "client_lifecycle/dispatch.rs"]
 mod dispatch;
+#[path = "client_lifecycle/outcome.rs"]
 mod outcome;
+#[path = "client_lifecycle/runtime_command.rs"]
 mod runtime_command;
+#[path = "client_lifecycle/session_requests.rs"]
 mod session_requests;
+#[path = "client_lifecycle/settings_requests.rs"]
 mod settings_requests;
+#[path = "client_lifecycle/turn_requests.rs"]
 mod turn_requests;
 use connection::{ClientConnection, Handshake};
 use outcome::{Outcome, RequestContext};
+#[path = "client_lifecycle/comm_dispatch.rs"]
 mod comm_dispatch;
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
@@ -523,7 +534,7 @@ impl ModelCatalogRetry {
 }
 
 #[cfg(test)]
-#[path = "client_lifecycle_catalog_retry_tests.rs"]
+#[path = "specs/client_lifecycle_catalog_retry_tests.rs"]
 mod model_catalog_retry_tests;
 
 #[path = "client_processing.rs"]
@@ -600,7 +611,7 @@ async fn publish_available_models_for_client(
 }
 
 #[cfg(test)]
-#[path = "client_lifecycle_tests.rs"]
+#[path = "specs/client_lifecycle_tests.rs"]
 mod tests;
 
 #[path = "connection_metadata.rs"]
@@ -608,7 +619,7 @@ mod connection_metadata;
 use connection_metadata::*;
 
 #[cfg(test)]
-#[path = "client_lifecycle_metadata_tests.rs"]
+#[path = "specs/client_lifecycle_metadata_tests.rs"]
 mod metadata_tests;
 
 #[cfg(test)]
