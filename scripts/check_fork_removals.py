@@ -28,6 +28,7 @@ DELETIONS = {
         }),
         ("sponsored-discovery", "c4c8724b2", set()),
         ("telemetry-delivery", "ad3d483fd", set()),
+        ("telemetry-facade", "12e9de789", set()),
         ("automatic-setup", "035792212", set()),
         ("swarm-format-owner", "402c31582", set()),
         ("slash-parser-owner", "b1bc37f54", set()),
@@ -118,11 +119,11 @@ def inspect(checkout, repo, tree, retired):
         reject("sponsored-discovery", "crates/jcode-app-core/src/tool/mod.rs", r'"integration_tools"')
         reject("sponsored-discovery", "crates/jcode-config-types/src/lib.rs", r"\bstruct SponsorsConfig\b")
 
-        telemetry_path = "crates/jcode-telemetry-core/src/lib.rs"
-        telemetry = read(telemetry_path)
-        for name in ("send_payload", "send_transcript_payload"):
-            if not re.search(rf"(?m)^#\[cfg\(not\(test\)\)\]\s*fn {name}\([^\n]*\) -> bool \{{\s*false\s*\}}", telemetry):
-                problems.append(f"telemetry-delivery: production {name} must remain a no-op in {telemetry_path}")
+        # The telemetry crate is a facade: no filesystem, threads, network or persistence.
+        reject("telemetry-facade", "crates/jcode-telemetry-core/src/lib.rs",
+               r"\b(?:std::(?:fs|thread|net|env)|tokio|reqwest|ureq|jcode_storage|jcode_provider_core::blocking)\b|\bfn is_enabled\(\) -> bool \{\s*(?!\s|false\b)")
+        reject("telemetry-facade", "crates/jcode-telemetry-core/Cargo.toml",
+               r"(?m)^(?:jcode-storage|jcode-logging|jcode-core|jcode-build-meta|uuid|walkdir|chrono|reqwest|ureq|tokio)\b|blocking-http")
         for path in ("scripts/install.sh", "scripts/install_release.sh", "scripts/install.ps1"):
             reject("telemetry-delivery", path, r"\b(?:report_install_funnel|persist_install_conversion_id|telemetry\.jcode\.sh)\b")
         for path in ("scripts/install.sh", "scripts/install_release.sh"):
