@@ -76,7 +76,7 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
         assert!(app.session.has_no_messages());
         assert_eq!(
             startup_skill_commands(&mut app, "/"),
-            vec!["/startup-global"]
+            vec!["/native-ui", "/startup-global"]
         );
         assert_eq!(
             startup_skill_commands(&mut app, "/startup-g"),
@@ -84,7 +84,7 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
         );
         assert_eq!(
             crate::tui::TuiState::available_skills(&app),
-            vec!["startup-global"]
+            vec!["native-ui", "startup-global"]
         );
     });
 }
@@ -109,11 +109,11 @@ fn skill_startup_minimal_clients_keep_project_overlays_separate() {
         });
         assert_eq!(
             startup_skill_commands(&mut first, "/"),
-            vec!["/startup-global", "/startup-project-a"]
+            vec!["/native-ui", "/startup-global", "/startup-project-a"]
         );
         assert_eq!(
             startup_skill_commands(&mut second, "/"),
-            vec!["/startup-global", "/startup-project-b"]
+            vec!["/native-ui", "/startup-global", "/startup-project-b"]
         );
         assert!(
             first
