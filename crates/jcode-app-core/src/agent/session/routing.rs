@@ -117,30 +117,6 @@ impl Agent {
         self.persist_session_best_effort("routed account route");
     }
 
-    /// Binds the labelled API key routing last served this session with, if
-    /// the session still runs on that key's provider.
-    pub(crate) fn restore_routed_key_account(&mut self) {
-        let Some(account) = self.session.routed_key_account().and_then(AccountId::parse) else {
-            return;
-        };
-        let Some(label) = account.label() else {
-            return;
-        };
-        let serving = self
-            .provider
-            .serving_api_key_account()
-            .and_then(|serving| AccountId::parse(&serving));
-        if serving.is_none_or(|serving| serving.provider() != account.provider()) {
-            return;
-        }
-        if let Err(error) = self.provider.set_api_key_account(Some(label)) {
-            logging::warn(&format!(
-                "routing: could not restore {account} for {}: {error}",
-                self.session.id()
-            ));
-        }
-    }
-
     pub(crate) fn routing_parent_id(&self) -> Option<String> {
         self.session.parent_id().map(str::to_owned)
     }

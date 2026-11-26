@@ -1,4 +1,5 @@
 use super::*;
+use jcode_routing_policy::AccountId;
 
 fn assistant_output_tail_after<'a>(
     messages: impl IntoIterator<
@@ -314,6 +315,30 @@ impl Agent {
             }
         }
         self.restore_routed_key_account();
+    }
+
+    /// Binds the labelled API key routing last served this session with, if
+    /// the session still runs on that key's provider.
+    fn restore_routed_key_account(&mut self) {
+        let Some(account) = self.session.routed_key_account().and_then(AccountId::parse) else {
+            return;
+        };
+        let Some(label) = account.label() else {
+            return;
+        };
+        let serving = self
+            .provider
+            .serving_api_key_account()
+            .and_then(|serving| AccountId::parse(&serving));
+        if serving.is_none_or(|serving| serving.provider() != account.provider()) {
+            return;
+        }
+        if let Err(error) = self.provider.set_api_key_account(Some(label)) {
+            logging::warn(&format!(
+                "routing: could not restore {account} for {}: {error}",
+                self.session.id()
+            ));
+        }
     }
 
     pub(super) fn reconcile_explicit_provider_pin_route(&mut self) {
