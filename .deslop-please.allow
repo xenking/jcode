@@ -271,6 +271,7 @@ shallow-module jcode_routing_meters
 shallow-module jcode_session_types
 shallow-module jcode_storage
 shallow-module jcode_swarm_core
+shallow-module jcode_telemetry_core
 shallow-module jcode_todo_policy
 shallow-module jcode_tool_core
 shallow-module jcode_tui::tui::app::auth
@@ -282,7 +283,6 @@ shallow-module jcode_tui_core
 shallow-module jcode_tui_messages
 shallow-module jcode_tui_visual_debug
 shallow-module jcode_update_core
-shallow-module jcode_usage_types
 shallow-module ratatui_core::buffer
 shallow-module ratatui_core::layout::rect
 wide-directory crates/
