@@ -10,6 +10,9 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[path = "oauth_claude_daemon.rs"]
+mod daemon;
+
 const REFRESH_LOCK: &str = "claude-oauth-refresh";
 const REFRESH_LOCK_TIMEOUT: Duration = Duration::from_secs(40);
 static DAEMONS: AtomicUsize = AtomicUsize::new(0);
@@ -41,7 +44,10 @@ pub struct ClaudeRefreshDeferred;
 
 impl fmt::Display for ClaudeRefreshDeferred {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Claude OAuth refresh is handled by the daemon that owns this login")
+        f.write_str(
+            "Claude OAuth token needs refreshing, but only the jcode daemon refreshes it. \
+             Start it with `jcode server start` (or run any jcode session), then retry",
+        )
     }
 }
 
@@ -146,7 +152,15 @@ async fn exchange(refresh_token: String, label: String) -> Result<OAuthTokens> {
         "Claude OAuth: attempting refresh (account={label}, pid={})",
         std::process::id()
     ));
-    exchange_at(&client, claude::TOKEN_URL, &refresh_token).await
+    exchange_at(&client, &token_url(), &refresh_token).await
+}
+
+/// Debug builds only: runtime proofs point refresh at a fake endpoint.
+fn token_url() -> String {
+    match std::env::var("JCODE_CLAUDE_TOKEN_URL") {
+        Ok(url) if cfg!(debug_assertions) => url,
+        _ => claude::TOKEN_URL.to_string(),
+    }
 }
 
 async fn exchange_at(
@@ -199,15 +213,63 @@ pub async fn refresh_claude_tokens_for_account(
     observed_refresh: &str,
     label: &str,
 ) -> Result<OAuthTokens> {
-    if !daemon_can_refresh() || borrowed_auth_file()? {
+    let borrowed = borrowed_auth_file()?;
+    if !daemon_can_refresh() || borrowed {
         let stored = load_claude_tokens_for_account(label)?;
         if rotated_fresh(&stored, observed_refresh) {
             return Ok(stored);
         }
         ensure_refresh_allowed(&stored)?;
-        return Err(ClaudeRefreshDeferred.into());
+        // A daemon process never asks itself, and a borrowed login is not ours to rotate.
+        if borrowed || DAEMONS.load(Ordering::Relaxed) != 0 {
+            return Err(ClaudeRefreshDeferred.into());
+        }
+        return refreshed_by_daemon(label).await;
     }
     refresh_with(observed_refresh, label, exchange).await
+}
+
+/// Non-daemon callers (`jcode run`, `review`, ...): the daemon refreshes, then
+/// the saved credentials are re-read.
+async fn refreshed_by_daemon(label: &str) -> Result<OAuthTokens> {
+    match daemon::request_refresh(label).await {
+        Ok(false) => Err(ClaudeRefreshDeferred.into()),
+        Ok(true) => {
+            let stored = load_claude_tokens_for_account(label)?;
+            ensure!(
+                super::super::refresh_coordinator::expiry_is_fresh(stored.expires_at),
+                "the jcode daemon reported success but the stored Claude login is still expired"
+            );
+            Ok(stored)
+        }
+        Err(error) => Err(error.context("the jcode daemon could not refresh the Claude login")),
+    }
+}
+
+/// Daemon side of a client's refresh request. Renews the stored login unless it
+/// is already fresh; the rotation itself is serialized by `refresh_with`.
+pub async fn refresh_claude_login_for_client(label: Option<&str>) -> Result<()> {
+    ensure!(
+        daemon_can_refresh(),
+        "this process does not own Claude OAuth refresh"
+    );
+    renew_stored_login(label, exchange).await
+}
+
+async fn renew_stored_login<Exchange, Reply>(label: Option<&str>, exchange: Exchange) -> Result<()>
+where
+    Exchange: FnOnce(String, String) -> Reply + Send + 'static,
+    Reply: Future<Output = Result<OAuthTokens>> + Send + 'static,
+{
+    let label = label.map(str::to_owned).unwrap_or_else(|| {
+        claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
+    });
+    let stored = load_claude_tokens_for_account(&label)?;
+    if super::super::refresh_coordinator::expiry_is_fresh(stored.expires_at) {
+        return Ok(());
+    }
+    refresh_with(&stored.refresh_token, &label, exchange).await?;
+    Ok(())
 }
 
 fn rotated_fresh(stored: &OAuthTokens, observed_refresh: &str) -> bool {
@@ -305,3 +367,7 @@ where
 #[cfg(test)]
 #[path = "oauth_tests/claude_refresh.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "oauth_tests/claude_daemon_refresh.rs"]
+mod daemon_tests;

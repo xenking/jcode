@@ -864,6 +864,20 @@ pub enum Request {
         account_label: Option<String>,
     },
 
+    /// Ask the daemon that owns a provider login to renew it now. Only that
+    /// daemon may rotate the refresh grant, so one-shot clients (`jcode run`,
+    /// `review`, ...) send this and re-read the credential store once `Done`
+    /// arrives. The reply never carries tokens.
+    #[serde(rename = "refresh_auth")]
+    RefreshAuth {
+        id: u64,
+        /// Provider whose login to renew (`claude`).
+        provider: String,
+        /// Stored account label; `None` means the active account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
     /// Answer an `ask_user_request` from the `ask` tool.
     #[serde(rename = "ask_user_response")]
     AskUserResponse {

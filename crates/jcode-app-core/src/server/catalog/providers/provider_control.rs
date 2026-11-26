@@ -99,6 +99,10 @@ pub(super) use pending_model_switch::handle_cancel_pending_model_change;
 #[cfg(test)]
 use pending_model_switch::has_pending_model_switch;
 
+#[path = "provider_control/refresh_auth.rs"]
+mod refresh_auth;
+pub(super) use refresh_auth::handle_refresh_auth;
+
 #[path = "provider_control/deferred_operations.rs"]
 mod deferred_operations;
 use deferred_operations::{

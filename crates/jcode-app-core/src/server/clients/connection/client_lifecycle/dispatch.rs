@@ -69,6 +69,7 @@ fn route_of(request: &Request) -> Route {
         | Request::InvalidateOpenAiUsage { .. }
         | Request::NotifyAuthChanged { .. }
         | Request::PersistSession { .. }
+        | Request::RefreshAuth { .. }
         | Request::RefreshModels { .. }
         | Request::SetCompactionMode { .. }
         | Request::SetContextCap { .. }

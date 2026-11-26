@@ -122,6 +122,21 @@ pub fn runtime_dir() -> PathBuf {
     user_runtime_dir()
 }
 
+/// Where the shared jcode daemon listens: `$JCODE_SOCKET`, else `jcode.sock`
+/// in the runtime dir.
+pub fn socket_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
+        return PathBuf::from(custom);
+    }
+    default_socket_path()
+}
+
+/// The shared-daemon socket for this runtime dir, ignoring any
+/// `--socket`/`JCODE_SOCKET` override.
+pub fn default_socket_path() -> PathBuf {
+    runtime_dir().join("jcode.sock")
+}
+
 /// Default runtime directory, independent of daemon-specific overrides.
 pub fn user_runtime_dir() -> PathBuf {
     if let Some(dir) = test_runtime_dir() {

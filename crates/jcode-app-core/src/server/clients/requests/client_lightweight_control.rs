@@ -538,6 +538,19 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
+        Request::RefreshAuth {
+            id,
+            provider,
+            account_label,
+        } => {
+            super::provider_control::handle_refresh_auth(
+                id,
+                provider,
+                account_label,
+                &client_event_tx,
+            )
+            .await;
+        }
         Request::NotifyAuthChanged {
             id, provider, auth, ..
         } => {

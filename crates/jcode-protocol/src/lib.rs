@@ -993,6 +993,7 @@ impl Request {
             Request::AccountUsage { id } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
+            Request::RefreshAuth { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AskUserResponse { id, .. } => *id,
             Request::RoutingGateAnswer { id, .. } => *id,
@@ -1051,6 +1052,7 @@ impl Request {
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                | Request::RefreshAuth { .. }
                 // One-shot login clients report new credentials without a
                 // session. Subscribed connections still take the
                 // session-local path that also switches their model.

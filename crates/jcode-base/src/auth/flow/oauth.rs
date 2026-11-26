@@ -739,7 +739,8 @@ mod claude_refresh;
 #[cfg(test)]
 use claude_refresh::claude_refresh_error_is_invalid_scope;
 pub use claude_refresh::{
-    ClaudeRefreshDeferred, claim_claude_daemon_refresh, refresh_claude_tokens,
+    ClaudeRefreshDeferred, claim_claude_daemon_refresh, refresh_claude_login_for_client,
+    refresh_claude_tokens,
     refresh_claude_tokens_for_account,
 };
 

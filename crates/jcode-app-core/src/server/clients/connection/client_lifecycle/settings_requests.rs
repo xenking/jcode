@@ -244,6 +244,13 @@ impl ClientConnection {
             Request::InvalidateAnthropicUsage { id, account_label } => {
                 handle_invalidate_anthropic_usage(id, account_label, &self.client_event_tx).await;
             }
+            Request::RefreshAuth {
+                id,
+                provider,
+                account_label,
+            } => {
+                handle_refresh_auth(id, provider, account_label, &self.client_event_tx).await;
+            }
             other => unreachable!("request {other:?} is not a settings request"),
         }
         Ok(Outcome::Next)
