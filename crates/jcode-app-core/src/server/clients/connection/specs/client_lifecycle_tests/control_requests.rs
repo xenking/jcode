@@ -185,17 +185,25 @@ async fn background_request_is_refused_while_a_prompt_waits_for_a_person() {
 
     let (client, mut requests) = tokio::sync::mpsc::unbounded_channel();
     let _attachment = crate::tool::interactive::attach(session_id, client);
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    crate::tool::interactive::sender(session_id)
-        .unwrap()
-        .send(crate::tool::StdinInputRequest {
-            request_id: "ask-mcp-approval-test".into(),
-            prompt: "approve?".into(),
-            is_password: false,
-            ask_questions: Some(serde_json::json!([{}])),
-            response_tx: reply,
-        })
-        .unwrap();
+    // Asked the way production asks it: through the registry, as an MCP approval.
+    let prompt = tokio::spawn(crate::tool::interactive::ask(
+        crate::tool::interactive::AskRequest {
+            requester: session_id.into(),
+            call: "mcp-approval-test".into(),
+            questions: vec![crate::protocol::AskQuestion {
+                question: "approve?".into(),
+                header: None,
+                options: Vec::new(),
+                multi_select: false,
+                allow_other: true,
+            }],
+            kind: crate::protocol::AskKind::McpApproval,
+            chain: Some(Vec::new()),
+            direct: None,
+            attach_wait: None,
+            parks_turn: false,
+        },
+    ));
     let _shown = requests.recv().await.unwrap();
 
     assert!(
@@ -209,7 +217,7 @@ async fn background_request_is_refused_while_a_prompt_waits_for_a_person() {
         "no",
         vec![]
     ));
-    let _ = answer.await;
+    let _ = prompt.await;
     assert!(
         control.request_background_current_tool(),
         "once the prompt is answered the tool can be moved again"
