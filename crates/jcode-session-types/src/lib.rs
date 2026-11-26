@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod ask;
+pub mod account_icon;
 pub mod assistant_text;
 mod codemode;
 pub use codemode::*;

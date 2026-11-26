@@ -118,6 +118,10 @@ pub enum PaidMode {
 pub struct AccountConfig {
     /// `provider:label` for a labelled credential, or `provider` for a single one.
     pub id: String,
+    /// Emoji shown first wherever this account is named. Empty uses the default
+    /// for the account's label (see `jcode_session_types::account_icon`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub kind: AccountKind,
     pub priority: PriorityConfig,
     /// Model-id globs (`*` wildcard) this account serves. Empty serves every model.
@@ -149,6 +153,7 @@ impl Default for AccountConfig {
     fn default() -> Self {
         Self {
             id: String::new(),
+            icon: None,
             kind: AccountKind::Subscription,
             priority: PriorityConfig::Flat(1),
             models: Vec::new(),
