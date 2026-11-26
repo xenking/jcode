@@ -128,9 +128,7 @@ fn claude_spend_credits(spend: &Value) -> Option<CreditsReport> {
             CreditsState::Unknown
         },
         unit: CreditUnit::Usd,
-        balance: used
-            .zip(limit)
-            .map(|(used, limit)| (limit - used).max(0.0)),
+        balance: used.zip(limit).map(|(used, limit)| (limit - used).max(0.0)),
         used,
         limit,
         ..Default::default()
