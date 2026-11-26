@@ -244,6 +244,8 @@ fn ctx(session: &str) -> ToolContext {
 /// prompts it was shown.
 struct Ui {
     prompts: Arc<Mutex<Vec<(String, String)>>>,
+    /// What the registry said each prompt is, read while it was shown.
+    kinds: Arc<Mutex<Vec<crate::protocol::AskKind>>>,
     _attachment: crate::tool::interactive::Attachment,
 }
 
@@ -252,8 +254,13 @@ fn attach_ui(session: &str, answer: &'static str) -> Ui {
     let attachment = crate::tool::interactive::attach(session, tx);
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&prompts);
+    let kinds = Arc::new(Mutex::new(Vec::new()));
+    let seen_kinds = Arc::clone(&kinds);
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
+            if let Some(kind) = crate::tool::interactive::kind_of(&request.request_id) {
+                seen_kinds.lock().unwrap().push(kind);
+            }
             let question = request
                 .ask_questions
                 .as_ref()
@@ -274,6 +281,7 @@ fn attach_ui(session: &str, answer: &'static str) -> Ui {
     });
     Ui {
         prompts,
+        kinds,
         _attachment: attachment,
     }
 }
@@ -372,11 +380,13 @@ async fn write_tool_asks_once_per_call_with_name_and_arguments() {
     let prompts = ui.prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 2, "no remembered approval: {prompts:?}");
     assert_ne!(prompts[0].0, prompts[1].0);
-    for (request_id, question) in &prompts {
-        assert!(
-            crate::tool::interactive::is_human_approval(request_id),
-            "{request_id}"
-        );
+    let kinds = ui.kinds.lock().unwrap().clone();
+    assert_eq!(kinds.len(), 2);
+    assert!(
+        kinds.iter().all(|kind| kind.is_human_approval()),
+        "{kinds:?}"
+    );
+    for (_, question) in &prompts {
         assert!(question.contains("write-item"), "{question}");
         assert!(question.contains("fake"), "{question}");
     }
@@ -610,19 +620,6 @@ async fn batch_cannot_launder_a_write() {
         .unwrap_or_else(|error| format!("{error:#}"));
     assert!(out.contains("needs a human yes"), "{out}");
     assert!(f.writes().is_empty(), "{out}");
-}
-
-#[test]
-fn nothing_but_a_person_can_answer_an_mcp_approval() {
-    assert!(crate::tool::interactive::is_human_approval(
-        "ask-mcp-approval-1234"
-    ));
-    assert!(crate::tool::interactive::is_human_approval(
-        "ask-premium-spawn-1234"
-    ));
-    assert!(!crate::tool::interactive::is_human_approval(
-        "ask-call-1234"
-    ));
 }
 
 /// A call that waits for a person must not be moved to the background after a

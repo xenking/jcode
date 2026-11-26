@@ -661,14 +661,21 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         request_id: "ask-1".to_string(),
         questions: questions.clone(),
         tool_call_id: "call_1".to_string(),
+        kind: AskKind::PremiumSpawn,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"ask_user_request\""));
+    // A daemon from before ask kinds sends none, which means a plain question.
+    let old: ServerEvent = serde_json::from_str(
+        r#"{"type":"ask_user_request","request_id":"ask-0","questions":[],"tool_call_id":"c"}"#,
+    )?;
+    assert!(matches!(old, ServerEvent::AskUserRequest { kind: AskKind::Question, .. }));
     let decoded: ServerEvent = serde_json::from_str(json.trim())?;
-    let ServerEvent::AskUserRequest { request_id, questions: q, .. } = decoded else {
+    let ServerEvent::AskUserRequest { request_id, questions: q, kind, .. } = decoded else {
         return Err(anyhow!("expected AskUserRequest"));
     };
     assert_eq!(request_id, "ask-1");
+    assert_eq!(kind, AskKind::PremiumSpawn);
     assert_eq!(q, questions);
 
     let response = AskResponse {

@@ -229,8 +229,7 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
         | Request::CommTaskControl { session_id, .. }
         | Request::CommSubscribeChannel { session_id, .. }
         | Request::CommUnsubscribeChannel { session_id, .. }
-        | Request::CommAwaitMembers { session_id, .. }
-        | Request::CommAnswerEscalatedAsk { session_id, .. } => Some(session_id),
+        | Request::CommAwaitMembers { session_id, .. } => Some(session_id),
         _ => None,
     }
 }
@@ -954,24 +953,6 @@ pub(super) async fn handle_lightweight_control_request(
                 sessions,
                 swarm_members,
                 swarms_by_id,
-            )
-            .await;
-        }
-        Request::CommAnswerEscalatedAsk {
-            id,
-            session_id: req_session_id,
-            worker_session_id,
-            request_id,
-            answers,
-        } => {
-            super::ask_escalation::handle_answer_request(
-                id,
-                &req_session_id,
-                &worker_session_id,
-                request_id,
-                answers,
-                &client_event_tx,
-                swarm_members,
             )
             .await;
         }

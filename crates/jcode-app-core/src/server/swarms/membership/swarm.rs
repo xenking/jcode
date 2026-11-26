@@ -63,9 +63,7 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
-    // A stopped or removed worker can never consume its parked escalated ask.
-    // Withdraw it so the coordinator is not left with a dead question.
-    super::ask_escalation::withdraw_worker(session_id);
+    super::ask_chain::withdraw_worker(session_id);
     crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",

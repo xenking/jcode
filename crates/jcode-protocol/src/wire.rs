@@ -1279,24 +1279,6 @@ pub enum Request {
         #[serde(default = "default_true")]
         wake: bool,
     },
-
-    /// Answer an escalated `ask` from a swarm worker. Escalation happens when a
-    /// worker has no interactive client and its question was forwarded to the
-    /// swarm root coordinator (see `ServerEvent::AskEscalated`).
-    #[serde(rename = "comm_answer_escalated_ask")]
-    CommAnswerEscalatedAsk {
-        id: u64,
-        session_id: String,
-        /// Worker whose ask is waiting.
-        worker_session_id: String,
-        /// Escalation id from `ServerEvent::AskEscalated`. Optional when the
-        /// worker has exactly one pending escalated ask.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-        /// Answers in `AskResponse` shape. `None` (or omitted) declines.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        answers: Option<Vec<AskAnswer>>,
-    },
 }
 
 mod events;

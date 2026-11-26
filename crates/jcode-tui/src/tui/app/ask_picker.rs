@@ -2,13 +2,14 @@
 //!
 //! Pure state machine: keys in, an optional `AskResponse` out. Rendered as an
 //! inline view above the composer, so it reuses the passive inline renderer.
-use crate::protocol::{AskAnswer, AskQuestion, AskResponse};
+use crate::protocol::{AskAnswer, AskKind, AskQuestion, AskResponse};
 use crossterm::event::KeyCode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AskPickerState {
     request_id: String,
     tool_call_id: String,
+    kind: AskKind,
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently shown.
     pub current: usize,
@@ -27,18 +28,20 @@ pub(crate) enum AskKeyOutcome {
 
 impl AskPickerState {
     pub fn new(request_id: String, questions: Vec<AskQuestion>) -> Self {
-        Self::for_tool_call(request_id, String::new(), questions)
+        Self::for_tool_call(request_id, String::new(), AskKind::Question, questions)
     }
 
     pub fn for_tool_call(
         request_id: String,
         tool_call_id: String,
+        kind: AskKind,
         questions: Vec<AskQuestion>,
     ) -> Self {
         let n = questions.len();
         Self {
             request_id,
             tool_call_id,
+            kind,
             questions,
             current: 0,
             cursor: 0,
@@ -54,8 +57,7 @@ impl AskPickerState {
 
     /// Approval prompts raised by the client itself. They must be answered at the terminal.
     pub(crate) fn needs_terminal_input(&self) -> bool {
-        self.request_id.starts_with("ask-premium-spawn-")
-            || self.request_id.starts_with("ask-mcp-approval-")
+        self.kind.is_human_approval()
     }
 
     fn question(&self) -> &AskQuestion {
@@ -227,12 +229,13 @@ impl super::App {
         &mut self,
         request_id: String,
         tool_call_id: String,
+        kind: AskKind,
         questions: Vec<AskQuestion>,
     ) {
         if questions.is_empty() {
             return;
         }
-        let picker = AskPickerState::for_tool_call(request_id, tool_call_id, questions);
+        let picker = AskPickerState::for_tool_call(request_id, tool_call_id, kind, questions);
         self.inline_interactive_state = None;
         self.set_inline_view(picker.view());
         self.ask_picker = Some(picker);

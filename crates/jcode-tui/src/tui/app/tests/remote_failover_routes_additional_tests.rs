@@ -68,6 +68,7 @@ fn open_approval_prompt(app: &mut App) {
     app.open_ask_picker(
         "ask-mcp-approval-test".into(),
         "call-1".into(),
+        crate::protocol::AskKind::McpApproval,
         vec![crate::protocol::AskQuestion {
             question: "Allow MCP tool?".into(),
             header: Some("MCP approval".into()),

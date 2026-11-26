@@ -127,8 +127,8 @@ mod reload_transcript;
 #[path = "server/execution/routing/routing_view_request.rs"]
 mod routing_view_request;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
-#[path = "server/coordination/workers/ask_escalation.rs"]
-pub(crate) mod ask_escalation;
+#[path = "server/coordination/workers/ask_chain.rs"]
+pub(crate) mod ask_chain;
 use crate::reload_state;
 use crate::reload_trace;
 #[path = "server/deployment/rollout.rs"]

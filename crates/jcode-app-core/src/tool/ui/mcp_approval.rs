@@ -5,8 +5,8 @@
 //! enforces the answer. It sits in the registry's dispatch path, so a call made
 //! directly, through `batch`, or from a `codemode` program meets the same gate.
 //! The model cannot answer for the user: the request id is classed as a human
-//! approval, which the Desktop automation tool and TUI key injection refuse to
-//! answer (see [`super::approval_request::is_human_approval`]).
+//! approval ([`crate::protocol::AskKind::is_human_approval`]), which the Desktop
+//! automation tool and TUI key injection refuse to answer.
 //!
 //! Every call asks, with the tool name and its arguments in front of the user,
 //! unless the user answered "Always allow this tool" (or "... every tool on
@@ -15,13 +15,13 @@
 //! attached client waits a bounded time for one to attach, then is refused
 //! with an error that says how to allow the tool. A swarm worker has no client:
 //! its card goes to the nearest client up its spawn chain, in practice the
-//! root session's (see [`super::chain_route`]; never to the coordinator model
-//! through the `ask` escalation), and that client's answer resolves the call.
+//! root session's (see [`super::interactive::ask`]; never to a coordinator
+//! model), and that client's answer resolves the call.
 
-use super::approval_request::{MCP_REQUEST_PREFIX, WORKER_REQUEST_PREFIX};
-use super::{ToolContext, chain_route};
+use super::ToolContext;
+use super::interactive::{self, AskFailure, AskRequest};
 use crate::mcp::approvals::{self, Grant};
-use crate::protocol::{AskOption, AskQuestion, AskResponse};
+use crate::protocol::{AskKind, AskOption, AskQuestion, AskResponse};
 use anyhow::Result;
 use jcode_tool_core::McpApprovalRequest;
 use serde_json::Value;
@@ -166,8 +166,8 @@ async fn require_within(
         project_dir,
     } = request;
     // A swarm worker has no client; its approvals go to the nearest client up
-    // its spawn chain (see `chain_route`).
-    let chain = chain_route::chain(ctx).await;
+    // its spawn chain (see `interactive::ask`).
+    let chain = interactive::spawn_chain(&ctx.session_id).await;
     let who = if chain.is_empty() {
         String::new()
     } else {
@@ -176,7 +176,7 @@ async fn require_within(
             crate::id::extract_session_name(&ctx.session_id).unwrap_or(&ctx.session_id)
         )
     };
-    let questions = [AskQuestion {
+    let questions = vec![AskQuestion {
         question: format!(
             "{who}Allow MCP tool \"{tool}\" on server \"{server}\" with arguments {}?",
             render_arguments(arguments)
@@ -186,32 +186,27 @@ async fn require_within(
         multi_select: false,
         allow_other: false,
     }];
-    let prefix = if !chain.is_empty() {
-        WORKER_REQUEST_PREFIX
+    let kind = if chain.is_empty() {
+        AskKind::McpApproval
     } else {
-        MCP_REQUEST_PREFIX
+        AskKind::WorkerMcpApproval
     };
-    let request_id = format!("{prefix}{}", uuid::Uuid::new_v4());
+    let call = format!("mcp-approval-{}", uuid::Uuid::new_v4());
     let started = Instant::now();
-    // The attach wait sits inside the parked ask, like the question itself, so a
+    log("asked", ctx, request, chain.last().map(String::as_str));
+    // The wait sits inside the parked ask, like the question itself, so a
     // reload does not wait for a person who is not there.
-    let response = crate::turn_activity::global()
-        .wait_for_ask(&ctx.session_id, &request_id, async {
-            let route = match chain_route::find(ctx, &chain) {
-                Some(route) => route,
-                None => {
-                    log("waiting_for_client", ctx, request, None);
-                    chain_route::wait(ctx, &chain, wait).await?
-                }
-            };
-            let routed_to = route.via.clone();
-            log("asked", ctx, request, routed_to.as_deref());
-            Some((
-                chain_route::deliver(route, &questions, &request_id).await,
-                routed_to,
-            ))
-        })
-        .await;
+    let response = interactive::ask(AskRequest {
+        requester: ctx.session_id.clone(),
+        call,
+        questions,
+        kind,
+        chain: Some(chain.clone()),
+        direct: ctx.stdin_request_tx.clone(),
+        attach_wait: Some(wait),
+        parks_turn: true,
+    })
+    .await;
     // Outside a turn there is no wait clock to charge; that is not an error.
     if HUMAN_WAIT
         .try_with(|clock| clock.add(started.elapsed()))
@@ -219,11 +214,11 @@ async fn require_within(
     {
         crate::logging::debug("MCP approval wait was not charged to a turn clock");
     }
-    let (response, routed_to) = match response {
-        None => {
-            let root = chain.last();
-            log("refused_no_client", ctx, request, root.map(String::as_str));
-            let nobody = match root {
+    let routed_to = chain.last().map(String::as_str);
+    let response = match response {
+        Err(AskFailure::NoClient) => {
+            log("refused_no_client", ctx, request, routed_to);
+            let nobody = match chain.last() {
                 Some(root) => format!(
                     "session {} and its root session {root} have no attached client",
                     ctx.session_id
@@ -242,8 +237,8 @@ async fn require_within(
                 ),
             ));
         }
-        Some((Err(error), routed_to)) => {
-            log("no_answer", ctx, request, routed_to.as_deref());
+        Err(error) => {
+            log("no_answer", ctx, request, routed_to);
             return Err(Refusal::error(
                 "No answer to the prompt",
                 format!(
@@ -252,12 +247,12 @@ async fn require_within(
                 ),
             ));
         }
-        Some((Ok(response), routed_to)) => (response, routed_to),
+        Ok(response) => response,
     };
     let decision = Decision::from_response(response);
     let grant = match decision {
         Decision::Deny => {
-            log(decision.label(), ctx, request, routed_to.as_deref());
+            log(decision.label(), ctx, request, routed_to);
             return Err(Refusal::error(
                 "Denied by the user",
                 format!(
@@ -278,7 +273,7 @@ async fn require_within(
                 path.display()
             )),
             Err(error) => {
-                log("grant_not_saved", ctx, request, routed_to.as_deref());
+                log("grant_not_saved", ctx, request, routed_to);
                 return Err(Refusal::error(
                     "Approval not saved",
                     format!(
@@ -289,7 +284,7 @@ async fn require_within(
             }
         }
     }
-    log(decision.label(), ctx, request, routed_to.as_deref());
+    log(decision.label(), ctx, request, routed_to);
     Ok(())
 }
 

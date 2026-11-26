@@ -211,7 +211,7 @@ impl PreparedSwarmWorker {
                 }
             })
             .unwrap_or_default();
-        let questions = [AskQuestion {
+        let questions = vec![AskQuestion {
             question: format!(
                 "Allow one premium swarm worker for {label} using {} via {route} at effort {effort}? {}{terms}",
                 self.model, self.speed,
@@ -232,12 +232,18 @@ impl PreparedSwarmWorker {
             multi_select: false,
             allow_other: false,
         }];
-        let request_id = format!("premium-spawn-{}", uuid::Uuid::new_v4());
-        let owner_ui = crate::tool::interactive::owner_sender(&owner)
-            .context("Premium worker requires explicit owner approval from an attached UI")?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            crate::tool::ask_client(owner_ui, &questions, &request_id),
+            crate::tool::interactive::ask(crate::tool::interactive::AskRequest {
+                requester: owner.clone(),
+                call: format!("premium-spawn-{}", uuid::Uuid::new_v4()),
+                questions,
+                kind: crate::protocol::AskKind::PremiumSpawn,
+                chain: Some(Vec::new()),
+                direct: None,
+                attach_wait: Some(std::time::Duration::ZERO),
+                parks_turn: false,
+            }),
         )
         .await
         .ok()

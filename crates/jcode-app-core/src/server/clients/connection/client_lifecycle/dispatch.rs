@@ -92,7 +92,6 @@ fn route_of(request: &Request) -> Route {
         | Request::ClientDebugCommand { .. }
         | Request::ClientDebugResponse { .. }
         | Request::CloseApplet { .. }
-        | Request::CommAnswerEscalatedAsk { .. }
         | Request::CommApprovePlan { .. }
         | Request::CommAssignNext { .. }
         | Request::CommAssignRole { .. }

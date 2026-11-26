@@ -46,11 +46,7 @@ impl Tool for DesktopTool {
         ) {
             bail!("use macos_computer_use for native computer use in this session");
         }
-        if matches!(&action, DesktopAction::Click { selector, .. } if selector.starts_with("ask:ask-cold-wake-"))
-        {
-            bail!("answer the cold-session wake confirmation directly in the chat");
-        }
-        if matches!(&action, DesktopAction::Click { selector, .. } if selector.strip_prefix("ask:").is_some_and(super::interactive::is_human_approval))
+        if matches!(&action, DesktopAction::Click { selector, .. } if selector.strip_prefix("ask:").and_then(super::interactive::kind_of).is_some_and(crate::protocol::AskKind::is_human_approval))
         {
             bail!(
                 "an approval must be answered by the user directly in the chat, not by automation"

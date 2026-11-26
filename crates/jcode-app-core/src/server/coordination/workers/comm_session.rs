@@ -1252,7 +1252,7 @@ pub(super) async fn handle_comm_stop(
         for session in tree.keys() {
             stop_cleanup::close_stopped_session(sessions, soft_interrupt_queues, session).await?;
 
-            super::ask_escalation::withdraw_worker(session);
+            super::ask_chain::withdraw_worker(session);
             super::comm_await::stop_session_awaits(await_members_runtime, session).await;
             {
                 let members = swarm_members.read().await;

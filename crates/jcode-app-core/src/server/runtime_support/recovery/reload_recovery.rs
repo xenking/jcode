@@ -325,7 +325,7 @@ fn notify_record_ready(path: PathBuf) {
     RECORD_CHANGED.notify_one();
 }
 
-/// Reconsider an orphaned ask after a client or escalation route is installed.
+/// Reconsider an orphaned ask after a client attaches to its session or one above it.
 /// No durable state changes here: a still-unanswered ask must survive restart.
 pub(super) fn ask_owner_available(session_id: &str) {
     if let Ok(path) = path_for_session(session_id)
@@ -335,13 +335,22 @@ pub(super) fn ask_owner_available(session_id: &str) {
     }
 }
 
-pub(super) fn install_ask_bridge(
+/// A client attached to `session_id`: reconsider its own interrupted ask and
+/// those of every session it spawned, whose cards it can now show.
+pub(super) async fn ask_owners_available(
+    members: &Arc<RwLock<HashMap<String, super::SwarmMember>>>,
     session_id: &str,
-    members: Arc<RwLock<HashMap<String, super::SwarmMember>>>,
 ) {
-    super::ask_escalation::install_bridge_and_then(session_id, members, || {
-        ask_owner_available(session_id);
-    });
+    ask_owner_available(session_id);
+    let members = members.read().await;
+    for id in members.keys().filter(|id| id.as_str() != session_id) {
+        if super::swarm_ancestry::swarm_ancestors(&members, id)
+            .iter()
+            .any(|ancestor| ancestor == session_id)
+        {
+            ask_owner_available(id);
+        }
+    }
 }
 
 pub(super) fn take_changed_paths() -> HashSet<PathBuf> {
@@ -901,7 +910,6 @@ pub(super) fn mark_delivered_if_matching_continuation(
     let _ = crate::tool::selfdev::ReloadContext::load_for_session(session_id);
     Ok(true)
 }
-
 
 #[cfg(test)]
 mod tests {

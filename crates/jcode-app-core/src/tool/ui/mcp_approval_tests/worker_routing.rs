@@ -3,15 +3,14 @@
 
 use super::*;
 
-/// A worker session whose root is `root`, as the swarm installs it.
+/// A worker session whose root is `root`, as the swarm registers it.
 struct Worker {
     id: String,
-    _route: Option<crate::ask_route::InstalledRoute>,
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        crate::ask_route::remove(&self.id);
+        crate::tool::interactive::withdraw(&self.id);
     }
 }
 
@@ -22,17 +21,14 @@ fn worker(id: &str, root: &str) -> Worker {
 /// A worker whose spawn chain is `chain`, nearest spawner first, root last.
 fn chain_worker(id: &str, chain: &[&str]) -> Worker {
     let chain: Vec<String> = chain.iter().map(|s| s.to_string()).collect();
-    let route = crate::ask_route::install(
+    crate::tool::interactive::set_spawn_chain(
         id,
         Arc::new(move |_| {
             let chain = chain.clone();
             Box::pin(async move { chain })
         }),
     );
-    Worker {
-        id: id.into(),
-        _route: route,
-    }
+    Worker { id: id.into() }
 }
 
 fn request(tool: &str) -> jcode_tool_core::McpApprovalRequest {
@@ -57,8 +53,11 @@ async fn a_workers_card_reaches_the_root_client_and_allow_once_runs_exactly_that
     assert_eq!(f.writes(), [r#"write-item:{"n": 7}"#]);
     let prompts = ui.prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 1, "{prompts:?}");
-    let (request_id, question) = &prompts[0];
-    assert!(crate::tool::interactive::is_human_approval(request_id));
+    let (_, question) = &prompts[0];
+    assert_eq!(
+        ui.kinds.lock().unwrap().as_slice(),
+        [crate::protocol::AskKind::WorkerMcpApproval]
+    );
     for part in [
         "w4-worker-once",
         "fake",

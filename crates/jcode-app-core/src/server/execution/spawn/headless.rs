@@ -153,11 +153,11 @@ pub(super) async fn create_headless_session(
         .register_new(client_session_id.clone(), Arc::clone(&agent))
         .await?;
     // A spawned worker runs turns with no attached client, so its `ask` is
-    // escalated to the swarm root instead of failing. Installed here (and on
+    // shown on its spawner's or the root's client. Registered here (and on
     // reload revival) rather than per turn so a parked ask survives agent
     // recreation.
     if report_back_to_session_id.is_some() {
-        super::reload_recovery::install_ask_bridge(&client_session_id, Arc::clone(swarm_members));
+        super::ask_chain::register(&client_session_id, Arc::clone(swarm_members));
     }
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;

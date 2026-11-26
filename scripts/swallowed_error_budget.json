@@ -216,11 +216,6 @@
       "let_underscore": 3,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/coordination/workers/ask_escalation.rs": {
-      "dot_ok": 2,
-      "let_underscore": 6,
-      "unwrap_or_default": 1
-    },
     "crates/jcode-app-core/src/server/await_members_state.rs": {
       "dot_ok": 1,
       "let_underscore": 1,

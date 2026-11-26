@@ -33,6 +33,47 @@ pub fn stored_ask_answer_text(content: &str) -> Option<String> {
     has_question.then(|| lines.join("\n"))
 }
 
+/// Who a pending ask may be answered by, and how. Carried with the ask so no
+/// consumer has to infer authority from the shape of its request id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    /// A question the model asked; a typed message may answer it.
+    #[default]
+    Question,
+    /// An MCP call approval for the session's own tool call.
+    McpApproval,
+    /// An MCP call approval for a swarm worker, shown on its root's client.
+    WorkerMcpApproval,
+    /// Approval to spend on a premium worker; only the owner's terminal answers.
+    PremiumSpawn,
+    /// Whether a message may wake a cold session.
+    ColdWake,
+}
+
+impl AskKind {
+    pub fn is_question(&self) -> bool {
+        *self == Self::Question
+    }
+
+    /// Approvals only a person may answer: never the model, automation tools,
+    /// key injection or a plain-text stdin reply.
+    pub fn is_human_approval(self) -> bool {
+        self != Self::Question
+    }
+
+    /// Only the owner's own terminal UI may answer.
+    pub fn is_owner_approval(self) -> bool {
+        self == Self::PremiumSpawn
+    }
+
+    /// A message typed in the session may answer it. A worker's approval is
+    /// shown on its root's client and no message typed there is its answer.
+    pub fn accepts_typed_text(self) -> bool {
+        !matches!(self, Self::PremiumSpawn | Self::WorkerMcpApproval)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOption {
     pub label: String,

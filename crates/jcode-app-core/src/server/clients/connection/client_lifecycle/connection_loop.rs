@@ -1189,7 +1189,11 @@ impl ClientConnection {
                     attachment.set_desktop_capabilities(self.desktop);
                 }
                 if newly_attached {
-                    super::super::reload_recovery::ask_owner_available(&self.client_session_id);
+                    super::super::reload_recovery::ask_owners_available(
+                        &self.env.swarm_members,
+                        &self.client_session_id,
+                    )
+                    .await;
                     // Messages parked behind an update outlive the daemon that took them.
                     // Other queued prompts stay queued until the user acts.
                     if !self.client_is_processing {

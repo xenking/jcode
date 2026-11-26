@@ -113,23 +113,7 @@ impl Agent {
                     }
                     (crate::tool::ToolOutput::new("[Tool 'ask' cancelled by the user]"), true)
                 }
-                result = async {
-                    let mut ctx = ctx;
-                    if crate::tool::interactive::sender(&ctx.session_id).is_none() {
-                        ctx.stdin_request_tx = crate::turn_activity::global().wait_for_ask(
-                            &ctx.session_id,
-                            &ctx.tool_call_id,
-                            async {
-                                if wait_for_recovery_coordinator(&ctx.session_id).await {
-                                    None
-                                } else {
-                                    Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await)
-                                }
-                            },
-                        ).await;
-                    }
-                    self.registry.execute("ask", ask.input.clone(), ctx).await
-                } => {
+                result = self.registry.execute("ask", ask.input.clone(), ctx) => {
                     // No attached user or another transient failure is not an answer.
                     // Leave the durable marker intact for the next recovery attempt.
                     let output = result?;
@@ -169,15 +153,14 @@ impl Agent {
             if is_error {
                 crate::recovery_gate::cancel(&self.session.id())?;
             } else if let Some(identity) = self.server_turn_observer().snapshot().1
-                && !crate::recovery_gate::admit_ask_answer(
-                    &self.session,
-                    &identity,
-                    &ask.id,
-                )?
+                && !crate::recovery_gate::admit_ask_answer(&self.session, &identity, &ask.id)?
             {
                 return Ok(false);
             }
-            let stored = &self.session.message_at(result_index).expect("transcript message");
+            let stored = &self
+                .session
+                .message_at(result_index)
+                .expect("transcript message");
             label_session_images(
                 &self.session,
                 &stored.id,
@@ -646,10 +629,7 @@ mod tests {
                 tokio::join!(agent.resume_interrupted_ask(&events, &guard), interrupt);
             assert!(!result.unwrap());
             let restored = Session::load(session_id).unwrap();
-            assert_eq!(
-                interrupted_ask(&restored).is_some(),
-                remains_pending
-            );
+            assert_eq!(interrupted_ask(&restored).is_some(), remains_pending);
             if remains_pending {
                 assert!(event_rx.try_recv().is_err());
             } else {
@@ -708,21 +688,4 @@ mod tests {
         assert!(result.unwrap());
         assert!(interrupted_ask(&Session::load(session_id).unwrap()).is_none());
     }
-}
-
-/// Whether this session escalates asks to a coordinator. Waits (bounded) for
-/// that coordinator to have a client attached, so a replayed ask is not
-/// answered by assumption while the coordinator is still reconnecting.
-async fn wait_for_recovery_coordinator(session_id: &str) -> bool {
-    let Some(root) = crate::ask_route::coordinator_root(session_id).await else {
-        return false;
-    };
-    if let Some(root) = root {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            crate::tool::interactive::wait_for_sender(&root),
-        )
-        .await;
-    }
-    true
 }

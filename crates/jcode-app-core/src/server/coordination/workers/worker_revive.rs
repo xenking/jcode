@@ -123,7 +123,7 @@ pub(super) async fn live_or_revived_agent(
             if let Some(mut event_rx) = event_rx {
                 tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
             }
-            super::reload_recovery::install_ask_bridge(session_id, Arc::clone(swarm_members));
+            super::ask_chain::register(session_id, Arc::clone(swarm_members));
         }
         let agent = Arc::new(Mutex::new(agent));
         slot.publish(Arc::clone(&agent)).await?;

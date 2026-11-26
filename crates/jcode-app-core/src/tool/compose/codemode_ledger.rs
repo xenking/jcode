@@ -75,7 +75,6 @@ impl CallLedger {
                 }
                 "message" | "broadcast" => (Some("swarm"), Some(CodemodeDirection::Outbound)),
                 "channel" => (Some("channel"), Some(CodemodeDirection::Outbound)),
-                "answer" => (direct(), Some(CodemodeDirection::Outbound)),
                 "spawn" => (Some("worker"), None),
                 "status" | "summary" | "focus" | "stop" | "resume" | "retry" | "wake" | "start"
                 | "start_task" | "replace" | "reassign" | "assign_task" | "assign_role"

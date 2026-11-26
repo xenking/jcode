@@ -2,9 +2,9 @@
 
 use super::reload_recovery::{
     ACTIVE_ATTEMPTS, ADMISSION_RETRY_INTERVAL, ActiveAttempt, GARBAGE_COLLECTION_INTERVAL,
-    RECORD_CHANGED, ReloadRecoveryRecord, ReloadRecoveryRole, ReloadRecoveryStatus, admit_resume,
-    cancel, claim, collect_garbage, finish_pending, install_ask_bridge, lock_store,
-    peek_for_session, read_record_at, record_paths, recovery_dir, take_changed_paths,
+    RECORD_CHANGED, ReloadRecoveryRecord, ReloadRecoveryStatus, admit_resume, cancel, claim,
+    collect_garbage, finish_pending, lock_store, peek_for_session, read_record_at, record_paths,
+    recovery_dir, take_changed_paths,
 };
 use anyhow::Result;
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -305,16 +305,15 @@ impl RecoveryOwner {
             .get(session_id)
             .is_some_and(|member| member.is_headless && member.report_back_to_session_id.is_some())
         {
-            install_ask_bridge(session_id, Arc::clone(&self.swarm.members));
+            super::ask_chain::register(session_id, Arc::clone(&self.swarm.members));
         }
-        if crate::tool::interactive::sender(session_id).is_none()
-            && !super::ask_escalation::has_bridge(session_id)
+        if !crate::tool::interactive::has_reachable_client(session_id).await
             && crate::agent::Agent::interrupted_ask_tool_id(&crate::session::Session::load(
                 session_id,
             )?)
             .is_some()
         {
-            // Keep the durable obligation, but wait for an answer route rather
+            // Keep the durable obligation, but wait for a client to show it to rather
             // than loading the same transcript on every admission retry.
             return Ok(RecoveryAdmission::WaitingForAskOwner);
         }

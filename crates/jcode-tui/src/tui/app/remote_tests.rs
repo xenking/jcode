@@ -69,6 +69,7 @@ fn live_ask_result_preserves_questions_without_tool_input_event() {
             request_id: "request-not-derived-from-tool".into(),
             tool_call_id: "call-1".into(),
             questions,
+            kind: Default::default(),
         },
         &mut remote,
     );
@@ -128,6 +129,7 @@ fn rex_status_tracks_question_resume_success_and_acknowledgement() {
                 {"question":"Which?", "options":[{"label":"A"},{"label":"B"}]}
             ]))
             .unwrap(),
+            kind: Default::default(),
         },
         &mut remote,
     );

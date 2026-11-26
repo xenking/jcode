@@ -1731,6 +1731,7 @@ fn handle_server_event_inner(
             request_id,
             questions,
             tool_call_id,
+            kind,
         } => {
             if !tool_call_id.is_empty() {
                 let input = serde_json::json!({"questions": questions});
@@ -1752,7 +1753,7 @@ fn handle_server_event_inner(
                     });
                 }
             }
-            app.open_ask_picker(request_id, tool_call_id, questions);
+            app.open_ask_picker(request_id, tool_call_id, kind, questions);
             true
         }
         ServerEvent::RoutingDecision {

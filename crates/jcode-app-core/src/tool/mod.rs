@@ -14,7 +14,6 @@ mod apply_patch;
 mod ask;
 #[path = "fs/line_anchor.rs"]
 mod line_anchor;
-pub(crate) use ask::{ask_client, ask_for_real_answer};
 #[path = "bash/bash.rs"]
 mod bash;
 pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
@@ -75,10 +74,6 @@ mod gmail;
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 #[path = "ui/applet.rs"]
 pub mod applet;
-#[path = "ui/cards/approval_request.rs"]
-mod approval_request;
-#[path = "ui/cards/chain_route.rs"]
-mod chain_route;
 #[allow(dead_code)]
 #[path = "todo/goal.rs"]
 mod goal;

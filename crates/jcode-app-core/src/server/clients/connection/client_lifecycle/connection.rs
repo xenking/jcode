@@ -334,12 +334,15 @@ impl ClientConnection {
                     if let Some(questions) = req.ask_questions {
                         match serde_json::from_value(questions) {
                             Ok(questions) => {
+                                let kind = crate::tool::interactive::kind_of(&request_id)
+                                    .unwrap_or_default();
                                 send_client_event_best_effort(
                                     &client_event_tx,
                                     ServerEvent::AskUserRequest {
                                         request_id,
                                         questions,
                                         tool_call_id: req.prompt,
+                                        kind,
                                     },
                                     "client_lifecycle: AskUserRequest",
                                 );

@@ -11,7 +11,7 @@ use super::{
     non_blank, status_target_sessions,
 };
 use crate::plan::PlanItem;
-use crate::protocol::{AskAnswer, CommDeliveryMode, SwarmWorkerControl};
+use crate::protocol::{CommDeliveryMode, SwarmWorkerControl};
 use anyhow::Result;
 use jcode_message_types::SpeedMode;
 use jcode_swarm_core::validate_swarm_tldr;
@@ -106,14 +106,6 @@ pub(super) struct CommunicateInput {
     /// active phase.
     #[serde(default, alias = "stage")]
     pub(super) phase: Option<u32>,
-    /// Escalated `ask` answer payload, in `AskResponse` shape: one object per
-    /// question. Used by `action = "answer"`.
-    #[serde(default)]
-    pub(super) answers: Option<Vec<AskAnswer>>,
-    /// Escalation id from the `ask_escalated` event or the coordinator
-    /// notification. Optional when the worker has one pending escalated ask.
-    #[serde(default)]
-    pub(super) request_id: Option<String>,
 }
 
 /// How a message is delivered, shared by every messaging action.
@@ -196,11 +188,6 @@ pub(super) struct Cleanup {
 }
 
 pub(super) enum Command {
-    Answer {
-        worker: String,
-        request_id: Option<String>,
-        answers: Option<Vec<AskAnswer>>,
-    },
     Share {
         key: String,
         value: String,
@@ -373,19 +360,6 @@ impl CommunicateInput {
         let action = canonical_swarm_action(&self.action).to_string();
 
         Ok(match action.as_str() {
-            "answer" => Command::Answer {
-                worker: self
-                    .to_session
-                    .take()
-                    .or_else(|| self.target_session.take())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "'to_session' is required for answer action: the worker whose escalated ask you are answering"
-                        )
-                    })?,
-                request_id: self.request_id.take(),
-                answers: self.answers.take(),
-            },
             "share" | "share_append" => {
                 let key = self
                     .key

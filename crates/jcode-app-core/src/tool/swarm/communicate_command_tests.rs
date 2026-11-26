@@ -22,10 +22,6 @@ fn error(input: Value) -> String {
 fn missing_required_fields_report_the_action_specific_message() {
     let cases = [
         (
-            json!({"action": "answer"}),
-            "'to_session' is required for answer action: the worker whose escalated ask you are answering",
-        ),
-        (
             json!({"action": "share"}),
             "'key' is required for share action",
         ),

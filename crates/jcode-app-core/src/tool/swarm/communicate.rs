@@ -672,7 +672,6 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "list_swarms",
     "sessions",
     "focus",
-    "answer",
 ];
 
 /// Map common action synonyms/typos to the canonical swarm action name. Models
@@ -858,21 +857,6 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["notify", "interrupt", "wake"]
                 },
-                "answers": {
-                    "type": "array",
-                    "description": "answer: one object per question, in order.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "selected": {"type": "array", "items": {"type": "string"}},
-                            "other": {"type": "string"}
-                        }
-                    }
-                },
-                "request_id": {
-                    "type": "string",
-                    "description": "answer: escalation id when the worker has several pending asks."
-                },
             }
         });
 
@@ -899,25 +883,6 @@ impl Tool for CommunicateTool {
             .map_err(anyhow::Error::msg)?;
 
         match params.into_command(&ctx.session_id)? {
-            Command::Answer {
-                worker,
-                request_id,
-                answers,
-            } => {
-                let request = Request::CommAnswerEscalatedAsk {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    worker_session_id: worker.clone(),
-                    request_id,
-                    answers,
-                };
-                let response = send_request(request).await?;
-                ensure_success(&response)?;
-                Ok(ToolOutput::new(format!(
-                    "Escalated ask answered. Worker {worker} resumes with your answer."
-                ))
-                .with_title("Ask answered"))
-            }
             Command::Share { key, value, append } => {
                 let request = Request::CommShare {
                     id: REQUEST_ID,

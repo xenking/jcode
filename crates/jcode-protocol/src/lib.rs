@@ -49,7 +49,7 @@ mod notifications;
 pub use jcode_session_types::TurnStopReason;
 pub use jcode_session_types::{
     ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer,
-    AskOption, AskQuestion, AskResponse, format_ask_answers, validate_ask_questions,
+    AskKind, AskOption, AskQuestion, AskResponse, format_ask_answers, validate_ask_questions,
 };
 pub use notifications::{FeatureToggle, NotificationType};
 
@@ -1028,7 +1028,6 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
-            Request::CommAnswerEscalatedAsk { id, .. } => *id,
         }
     }
 
@@ -1086,7 +1085,6 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
-                | Request::CommAnswerEscalatedAsk { .. }
         )
     }
 }

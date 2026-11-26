@@ -1274,7 +1274,9 @@ impl<'a> ActionCx<'a> {
                 request_id,
                 input,
             } => {
-                if crate::tool::interactive::is_human_approval(&request_id) {
+                if crate::tool::interactive::kind_of(&request_id)
+                    .is_some_and(crate::protocol::AskKind::is_human_approval)
+                {
                     send_client_event_best_effort(
                         &self.client_event_tx,
                         ServerEvent::Error {
@@ -1301,7 +1303,8 @@ impl<'a> ActionCx<'a> {
                 request_id,
                 response,
             } => {
-                if crate::tool::interactive::is_owner_approval(&request_id)
+                if crate::tool::interactive::kind_of(&request_id)
+                    .is_some_and(crate::protocol::AskKind::is_owner_approval)
                     && !(self.local_jcode_peer && self.connection_client_name == Some("jcode-tui"))
                 {
                     send_client_event_best_effort(
@@ -1504,7 +1507,6 @@ impl<'a> ActionCx<'a> {
             | Request::CommListModels { .. }
             | Request::CommStop { .. }
             | Request::CommWorkerControl { .. }
-            | Request::CommAnswerEscalatedAsk { .. }
             | Request::CommAssignRole { .. }
             | Request::CommSummary { .. }
             | Request::CommStatus { .. }

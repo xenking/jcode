@@ -332,43 +332,30 @@ isolation. The coordinator is responsible for planning and plan updates; worktre
 managers are responsible for integration; agents collaborate directly to resolve
 conflicts.
 
-## Escalated `ask`
+## `ask` from a worker
 
-A spawned worker runs its turns on the daemon with no attached client, so the
-`ask` tool cannot prompt a human. Instead of failing, it escalates:
+A spawned worker runs its turns on the daemon with no attached client of its
+own. Its `ask` is routed to a person, never to a model:
 
-1. The worker's tool call parks on an answer channel. Nothing runs the model, so
-   a parked worker spends no tokens. Its member row shows
-   `waiting for the coordinator to answer ask`.
-2. The swarm root of the spawn chain (`report_back_to_session_id` ancestry)
-   receives two deliveries:
-   - `ServerEvent::AskEscalated` on the root daemon subscription (wire
-     `type: "ask_escalated"`), for example:
+1. The question is registered once, keyed by its ask id, with the spawn chain
+   above the worker (`report_back_to_session_id` ancestry: spawner first, root
+   last). The worker's tool call parks on it and spends no tokens.
+2. The card is shown on the nearest client in `[worker, spawner, .., root]` as an
+   ordinary `ask_user_request`. The question text names the worker
+   (`Worker "rabbit": ...`) when the card is shown away from it. When several
+   clients are attached to that session all of them see it; the first answer
+   wins and the others are dismissed. The client answers with
+   `ask_user_response`, and the answer is the worker's ordinary `ask` tool
+   result.
+3. If no client is reachable the ask stays pending, with no timeout, and is shown
+   as soon as a client attaches to any session in the chain. Nothing answers it
+   for the owner: there is no recommended-option fallback and no escalation to a
+   coordinator model. A card whose clients all go away moves to the next
+   reachable client.
 
-     ```json
-     {"type":"ask_escalated","request_id":"ask-esc-…","worker_session_id":"session_worker","worker_name":"rabbit","lane":"parser","questions":[{"question":"Which parser?","header":"Parser","options":[{"label":"Enums (Recommended)","description":"Smallest diff"},{"label":"Trait objects"}],"multi_select":false,"allow_other":false}],"timeout_secs":1800}
-     ```
-
-     `worker_name`, `lane`, `questions[].header`, and each option's
-     `description` can be omitted. `request_id` identifies this delivery, not
-     the original tool call. The recommendation marker is part of the label;
-   - a `BusEvent::SwarmAskEscalated` wake, so an idle coordinator starts a turn
-     with the rendered question (a busy one gets it as a system interrupt).
-3. The coordinator answers with `swarm action="answer"`,
-   `to_session=<worker>`, `answers` in `AskResponse` shape
-   (`answers: [{selected, other, comments}]`, one object per question), and
-   optionally `request_id` when the worker has several pending asks. The answer
-   is delivered as the ordinary `ask` tool result (`format_ask_answers`), so the
-   worker continues as if a human had answered. If the owner must decide, the
-   coordinator calls `ask` itself first and passes that answer on.
-4. `{"type":"ask_escalation_closed","request_id":"…","worker_session_id":"…","reason":"answered"}`
-   lets clients clear the escalation card. `reason` is `answered` (including
-   decline), `withdrawn`, or `timed_out`. External wake mode additionally emits
-   `wake_requested` with `reason: "swarm_ask_escalated"` and rendered text.
-
-Fallbacks: if no interactive client exists anywhere in the chain, the
-recommended options are assumed and the tool result says so. The same happens
-after a 30 minute timeout. Stopping or removing the worker withdraws the parked
-ask and fails its tool call as cancelled. A daemon reload interrupts the worker
-turn. Recovery allows up to 30 seconds for the root to reconnect, then either
-replays the ask with a fresh request ID or uses the no-client fallback.
+Stopping or removing the worker withdraws its pending asks and fails the tool
+call as cancelled. A daemon reload or rollout exec interrupts the worker's turn;
+the persisted interrupted call is replayed after restart and registers the ask
+again, so it reappears on the first client that attaches. A plain stop and start
+of the daemon does not resume workers (see the recovery rules), so their asks go
+with them.

@@ -144,19 +144,15 @@ pub(super) async fn assess(
                 .map(|time| time.timestamp_millis())
         });
         let tokens = use_sample.or_else(|| {
-            stored
-                .as_ref()?
-                .iter_messages()
-                .rev()
-                .find_map(|message| {
-                    let usage = message.token_usage.as_ref()?;
-                    Some(
-                        usage
-                            .prompt_tokens
-                            .unwrap_or(usage.input_tokens)
-                            .saturating_add(usage.output_tokens),
-                    )
-                })
+            stored.as_ref()?.iter_messages().rev().find_map(|message| {
+                let usage = message.token_usage.as_ref()?;
+                Some(
+                    usage
+                        .prompt_tokens
+                        .unwrap_or(usage.input_tokens)
+                        .saturating_add(usage.output_tokens),
+                )
+            })
         })?;
         Risk::assess(
             &target,
@@ -191,15 +187,25 @@ pub(super) async fn approved(sender: &str, operator_chain: &[String], risk: &Ris
     if let Ok(Some(decision)) = edit(sender, |state| (state.allow_cold_wake, false)) {
         return decision;
     }
-    let question = [risk.question()];
-    let request = format!("cold-wake-{}", uuid::Uuid::new_v4());
+    let Some((requester, chain)) = operator_chain.split_first() else {
+        return false;
+    };
     let response = tokio::time::timeout(
         APPROVAL_TIMEOUT,
-        crate::tool::ask_for_real_answer(operator_chain, &request, &question),
+        crate::tool::interactive::ask(crate::tool::interactive::AskRequest {
+            requester: requester.clone(),
+            call: format!("cold-wake-{}", uuid::Uuid::new_v4()),
+            questions: vec![risk.question()],
+            kind: crate::protocol::AskKind::ColdWake,
+            chain: Some(chain.to_vec()),
+            direct: None,
+            attach_wait: Some(Duration::ZERO),
+            parks_turn: false,
+        }),
     )
     .await
     .ok()
-    .flatten();
+    .and_then(Result::ok);
     let Some(answers) = response.and_then(|response| response.answers) else {
         return false;
     };

@@ -41,7 +41,6 @@ mod comm_format;
 mod cpu_time;
 mod durable_state;
 pub mod server_client;
-pub(crate) mod ask_route;
 pub mod ambient_session;
 pub(crate) mod serde_coerce;
 pub mod ambient_tools;

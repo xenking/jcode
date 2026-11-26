@@ -238,9 +238,9 @@ async fn reviewed_checkpoint_reissues_live_ask_on_the_replacement_socket() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
-    use crate::server::ask_escalation::tests::member;
-    use crate::server::{ask_escalation, reload_recovery};
+async fn socket_recovery_shows_headless_ask_on_the_root_client_when_it_attaches() {
+    use crate::server::ask_chain::tests::member;
+    use crate::server::{ask_chain, reload_recovery};
 
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -300,14 +300,14 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
         .insert(worker.into(), member);
     let runtime = server.runtime();
     let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
-    let recovery = crate::server::recovery_owner::RecoveryOwner::new(&server.handles)
-        .reconcile_once()
-        .await;
-    assert_eq!(
-        recovery.tasks.len(),
-        1,
-        "the daemon must admit the headless worker"
+    let owner = crate::server::recovery_owner::RecoveryOwner::new(&server.handles);
+    let recovery = owner.reconcile_once().await;
+    assert!(
+        recovery.tasks.is_empty(),
+        "no client is reachable from the worker, so its ask stays durable and unadmitted"
     );
+    let stop = tokio_util::sync::CancellationToken::new();
+    owner.spawn(stop.clone(), recovery);
 
     let (reader, mut writer) = crate::transport::Stream::connect(&socket)
         .await
@@ -332,63 +332,51 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
         .expect("socket event timeout")
     }
 
-    writer.write_all(format!("{}\n", json!({"type":"subscribe","id":1,"target_session_id":root,"working_dir":home._home.path(),"continue_on_disconnect":true})).as_bytes()).await.unwrap();
-    let received = event(&mut reader, |e| {
-        if let ServerEvent::SessionId { session_id } = e {
-            assert_eq!(session_id, root, "socket did not reattach to the root");
-        }
-        matches!(e, ServerEvent::AskEscalated { .. })
-    })
-    .await;
-    let ServerEvent::AskEscalated {
-        request_id,
-        worker_session_id,
-        questions,
-        ..
-    } = received
-    else {
-        unreachable!()
-    };
-    assert_eq!(worker_session_id, worker);
-    assert_eq!(questions[0].options[0].label, "A (Recommended)");
-    assert_eq!(
-        provider.0.load(Ordering::SeqCst),
-        0,
-        "the worker must be parked before provider continuation"
-    );
-    writer.write_all(format!("{}\n", json!({"type":"comm_answer_escalated_ask","id":2,"session_id":root,"worker_session_id":worker,"request_id":request_id,"answers":[{"selected":["B"]}]})).as_bytes()).await.unwrap();
-    let acknowledged = std::cell::Cell::new(false);
-    let closed = std::cell::Cell::new(false);
-    event(&mut reader, |e| {
-        match e {
-            ServerEvent::Done { id: 2 } => acknowledged.set(true),
-            ServerEvent::AskEscalationClosed { reason, .. } => {
-                assert_eq!(reason, "answered");
-                closed.set(true);
-            }
-            _ => {}
-        }
-        acknowledged.get() && closed.get()
-    })
-    .await;
-    for task in recovery.tasks {
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-    let restored = crate::session::Session::load(worker).unwrap();
-    assert!(
-        restored
+    let answered = |session: &crate::session::Session| {
+        session
             .iter_messages()
             .flat_map(|m| &m.content)
             .any(|block| matches!(block,
                 ContentBlock::ToolResult { tool_use_id, content, is_error: None }
                     if tool_use_id == "worker-ask" && content == "User answers:\n1. Which? -> B\n"
             ))
+    };
+    writer.write_all(format!("{}\n", json!({"type":"subscribe","id":1,"target_session_id":root,"working_dir":home._home.path(),"continue_on_disconnect":true})).as_bytes()).await.unwrap();
+    let received = event(&mut reader, |e| {
+        if let ServerEvent::SessionId { session_id } = e {
+            assert_eq!(session_id, root, "socket did not reattach to the root");
+        }
+        matches!(e, ServerEvent::AskUserRequest { .. })
+    })
+    .await;
+    let ServerEvent::AskUserRequest {
+        request_id,
+        tool_call_id,
+        questions,
+        ..
+    } = received
+    else {
+        unreachable!()
+    };
+    assert_eq!(tool_call_id, "worker-ask");
+    assert!(questions[0].question.contains("Which?"));
+    assert_eq!(questions[0].options[0].label, "A (Recommended)");
+    assert!(
+        !answered(&crate::session::Session::load(worker).unwrap()),
+        "the worker stays parked on the ask until the root client answers"
     );
+    writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":2,"request_id":request_id,"response":{"answers":[{"selected":["B"]}]}})).as_bytes()).await.unwrap();
+    event(&mut reader, |e| matches!(e, ServerEvent::Done { id: 2 })).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !answered(&crate::session::Session::load(worker).unwrap()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the worker must continue with the root client's answer");
+    stop.cancel();
 
-    ask_escalation::withdraw_worker(worker);
+    ask_chain::withdraw_worker(worker);
     runtime.shutdown().await;
     daemon.await.unwrap();
 }
