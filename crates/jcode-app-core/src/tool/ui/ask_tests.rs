@@ -23,6 +23,7 @@ fn input() -> Value {
 #[tokio::test(start_paused = true)]
 async fn a_headless_ask_with_no_client_is_never_answered_for_the_user() {
     let task = tokio::spawn(AskTool.execute(input(), ctx("ask-tool-headless", None)));
+    tokio::task::yield_now().await; // the ask is registered before time moves
     // Longer than any timeout the ask could once have had.
     tokio::time::advance(Duration::from_secs(24 * 3600)).await;
     tokio::task::yield_now().await;

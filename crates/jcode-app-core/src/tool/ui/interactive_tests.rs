@@ -193,6 +193,7 @@ async fn an_ask_nobody_can_answer_is_withdrawn_with_its_session() {
 async fn an_ask_with_no_client_stays_pending_however_long_and_shows_when_one_attaches() {
     let session = "no-client-session";
     let waiter = spawn_ask(request(session, "no-client-1"));
+    tokio::task::yield_now().await; // the ask is registered before time moves
     tokio::time::advance(Duration::from_secs(7 * 24 * 3600)).await;
     tokio::task::yield_now().await;
     assert!(!waiter.is_finished(), "nothing may answer for the user");
