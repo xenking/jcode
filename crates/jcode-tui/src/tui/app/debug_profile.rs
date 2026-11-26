@@ -1,6 +1,145 @@
 use super::*;
 use std::borrow::Cow;
 
+const LARGE_DISPLAY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct ProviderMessageMemoryStats {
+    content_blocks: usize,
+    text_bytes: usize,
+    reasoning_bytes: usize,
+    tool_use_input_json_bytes: usize,
+    tool_result_bytes: usize,
+    image_data_bytes: usize,
+    openai_compaction_bytes: usize,
+    large_blob_count: usize,
+    large_blob_bytes: usize,
+    large_tool_result_count: usize,
+    large_tool_result_bytes: usize,
+    max_block_bytes: usize,
+}
+
+impl ProviderMessageMemoryStats {
+    fn record_bytes(&mut self, bytes: usize) {
+        self.max_block_bytes = self.max_block_bytes.max(bytes);
+        if bytes >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+            self.large_blob_count += 1;
+            self.large_blob_bytes += bytes;
+        }
+    }
+
+    fn record_message(&mut self, message: &crate::message::Message) {
+        for block in &message.content {
+            self.content_blocks += 1;
+            match block {
+                crate::message::ContentBlock::Text { text, .. } => {
+                    self.text_bytes += text.len();
+                    self.record_bytes(text.len());
+                }
+                crate::message::ContentBlock::Reasoning { text }
+                | crate::message::ContentBlock::ReasoningTrace { text } => {
+                    self.reasoning_bytes += text.len();
+                    self.record_bytes(text.len());
+                }
+                crate::message::ContentBlock::AnthropicThinking {
+                    thinking,
+                    signature,
+                } => {
+                    let bytes = thinking.len() + signature.len();
+                    self.reasoning_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::OpenAIReasoning {
+                    id,
+                    summary,
+                    encrypted_content,
+                    status,
+                } => {
+                    let bytes = id.len()
+                        + summary.iter().map(String::len).sum::<usize>()
+                        + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                        + status.as_ref().map(String::len).unwrap_or(0);
+                    self.reasoning_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::ToolUse { input, .. } => {
+                    let bytes = crate::process_memory::estimate_json_bytes(input);
+                    self.tool_use_input_json_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::ToolResult { content, .. } => {
+                    self.tool_result_bytes += content.len();
+                    if content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+                        self.large_tool_result_count += 1;
+                        self.large_tool_result_bytes += content.len();
+                    }
+                    self.record_bytes(content.len());
+                }
+                crate::message::ContentBlock::Image { data, .. } => {
+                    self.image_data_bytes += data.len();
+                    self.record_bytes(data.len());
+                }
+                crate::message::ContentBlock::OpenAICompaction { encrypted_content } => {
+                    self.openai_compaction_bytes += encrypted_content.len();
+                    self.record_bytes(encrypted_content.len());
+                }
+                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
+                    self.record_bytes(tool_name.len());
+                }
+                crate::message::ContentBlock::ProviderNative { item, .. } => {
+                    let bytes = crate::process_memory::estimate_json_bytes(item);
+                    self.tool_result_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::Unknown => {}
+            }
+        }
+    }
+
+    fn payload_text_bytes(&self) -> usize {
+        self.text_bytes
+            + self.reasoning_bytes
+            + self.tool_result_bytes
+            + self.image_data_bytes
+            + self.openai_compaction_bytes
+    }
+}
+
+#[derive(Default)]
+struct DisplayMessageMemoryStats {
+    role_bytes: usize,
+    content_bytes: usize,
+    tool_call_text_bytes: usize,
+    title_bytes: usize,
+    tool_data_json_bytes: usize,
+    large_content_count: usize,
+    large_content_bytes: usize,
+    max_content_bytes: usize,
+}
+
+impl DisplayMessageMemoryStats {
+    fn record_message(&mut self, message: &DisplayMessage) {
+        self.role_bytes += message.role.len();
+        self.content_bytes += message.content.len();
+        self.tool_call_text_bytes += message
+            .tool_calls
+            .iter()
+            .map(|call| call.len())
+            .sum::<usize>();
+        self.title_bytes += message.title.as_ref().map(|title| title.len()).unwrap_or(0);
+        self.tool_data_json_bytes += message
+            .tool_data
+            .as_ref()
+            .map(crate::process_memory::estimate_json_bytes)
+            .unwrap_or(0);
+        self.max_content_bytes = self.max_content_bytes.max(message.content.len());
+        if message.content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+            self.large_content_count += 1;
+            self.large_content_bytes += message.content.len();
+        }
+    }
+}
+
 impl App {
     pub(in crate::tui::app) fn runtime_memory_profile(&self) -> serde_json::Value {
         self.memory_profile_value(false)

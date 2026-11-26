@@ -1,5 +1,79 @@
 use super::*;
 
+fn percentile_ms(samples_ms: &[f64], percentile: f64) -> f64 {
+    if samples_ms.is_empty() {
+        return 0.0;
+    }
+    let percentile = percentile.clamp(0.0, 1.0);
+    let rank = ((samples_ms.len() - 1) as f64 * percentile).round() as usize;
+    samples_ms[rank.min(samples_ms.len() - 1)]
+}
+
+fn summarize_mermaid_ui_bench(
+    samples: &[MermaidUiBenchSample],
+    protocol_supported: bool,
+    protocol: Option<String>,
+) -> MermaidUiBenchSummary {
+    let mut elapsed_ms = 0.0;
+    let mut first_worker_render_frame = None;
+    let mut first_protocol_render_frame = None;
+    let mut first_deferred_idle_frame = None;
+    let mut pending_frames = 0usize;
+    let mut protocol_render_frames = 0usize;
+    let mut protocol_rebuild_frames = 0usize;
+    let mut saw_pending = false;
+    let mut time_to_first_worker_render_ms = None;
+    let mut time_to_first_protocol_render_ms = None;
+    let mut time_to_deferred_idle_ms = None;
+
+    for sample in samples {
+        elapsed_ms += sample.frame_ms;
+        if sample.deferred_pending_after > 0 {
+            saw_pending = true;
+            pending_frames += 1;
+        }
+        if first_worker_render_frame.is_none() && sample.deferred_worker_renders > 0 {
+            first_worker_render_frame = Some(sample.frame);
+            time_to_first_worker_render_ms = Some(elapsed_ms);
+        }
+        let protocol_rendered = sample.image_state_hits > 0
+            || sample.image_state_misses > 0
+            || sample.fit_state_reuse_hits > 0
+            || sample.fit_protocol_rebuilds > 0
+            || sample.viewport_state_reuse_hits > 0
+            || sample.viewport_protocol_rebuilds > 0;
+        if protocol_rendered {
+            protocol_render_frames += 1;
+            if first_protocol_render_frame.is_none() {
+                first_protocol_render_frame = Some(sample.frame);
+                time_to_first_protocol_render_ms = Some(elapsed_ms);
+            }
+        }
+        if sample.fit_protocol_rebuilds > 0 || sample.viewport_protocol_rebuilds > 0 {
+            protocol_rebuild_frames += 1;
+        }
+        if saw_pending && first_deferred_idle_frame.is_none() && sample.deferred_pending_after == 0
+        {
+            first_deferred_idle_frame = Some(sample.frame);
+            time_to_deferred_idle_ms = Some(elapsed_ms);
+        }
+    }
+
+    MermaidUiBenchSummary {
+        protocol_supported,
+        protocol,
+        pending_frames,
+        protocol_render_frames,
+        protocol_rebuild_frames,
+        first_worker_render_frame,
+        first_protocol_render_frame,
+        first_deferred_idle_frame,
+        time_to_first_worker_render_ms,
+        time_to_first_protocol_render_ms,
+        time_to_deferred_idle_ms,
+    }
+}
+
 #[path = "debug_bench_scroll_content.rs"]
 mod scroll_content;
 
