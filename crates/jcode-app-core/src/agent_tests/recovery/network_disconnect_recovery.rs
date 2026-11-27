@@ -140,6 +140,37 @@ async fn streaming_turn_waits_for_network_on_connect_error_and_resumes() {
 }
 
 #[tokio::test]
+async fn streaming_turn_retries_when_required_egress_recovers() {
+    let _guard = crate::storage::lock_test_env();
+    let provider_impl = ScriptedNetworkProvider::new(vec![
+        MockCallScript::ConnectError("required egress proxy 'corp' is unreachable".into()),
+        MockCallScript::SuccessText("recovered through the proxy".into()),
+    ]);
+    let calls = provider_impl.calls.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider_impl);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    with_test_network_hooks(TestNetworkHooks::from_probe_sequence(vec![true]), async {
+        agent
+            .run_once_streaming_mpsc("keep going", Vec::new(), None, tx)
+            .await
+            .expect("the same turn should retry a transient egress failure");
+    })
+    .await;
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    let mut output = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text } = event {
+            output.push_str(&text);
+        }
+    }
+    assert_eq!(output, "recovered through the proxy");
+}
+
+#[tokio::test]
 async fn streaming_turn_rolls_back_partial_stream_and_resumes_after_disconnect() {
     let _guard = crate::storage::lock_test_env();
     let provider_impl = ScriptedNetworkProvider::new(vec![

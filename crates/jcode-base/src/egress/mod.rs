@@ -24,6 +24,8 @@ use crate::config::Config;
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const PROBE_TTL: Duration = Duration::from_secs(5);
+// Expire a failed probe before the turn's first (1s) retry.
+const FAILED_PROBE_TTL: Duration = Duration::from_millis(500);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PROXY_HEAD: usize = 16 * 1024;
 
@@ -86,7 +88,12 @@ struct Endpoint {
     port: u16,
     client: Client,
     fresh_client: Client,
-    health: tokio::sync::Mutex<Option<(Instant, bool)>>,
+    health: tokio::sync::Mutex<Option<ProxyHealth>>,
+}
+
+struct ProxyHealth {
+    checked: Instant,
+    result: Result<(), io::ErrorKind>,
 }
 
 fn proxy_client(url: &Url, pooled: bool) -> Result<Client> {
@@ -144,21 +151,33 @@ impl Endpoint {
         Ok(endpoint)
     }
 
-    async fn reachable(&self) -> bool {
+    async fn check_reachability(&self) -> Result<(), io::ErrorKind> {
         let mut health = self.health.lock().await;
-        if let Some((checked, reachable)) = *health
-            && checked.elapsed() < PROBE_TTL
-        {
-            return reachable;
+        if let Some(cached) = health.as_ref() {
+            let ttl = if cached.result.is_ok() {
+                PROBE_TTL
+            } else {
+                FAILED_PROBE_TTL
+            };
+            if cached.checked.elapsed() < ttl {
+                return cached.result;
+            }
         }
-        let reachable = timeout(
+        let result = match timeout(
             PROBE_TIMEOUT,
             TcpStream::connect((self.host.as_str(), self.port)),
         )
         .await
-        .is_ok_and(|result| result.is_ok());
-        *health = Some((Instant::now(), reachable));
-        reachable
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(error.kind()),
+            Err(_) => Err(io::ErrorKind::TimedOut),
+        };
+        *health = Some(ProxyHealth {
+            checked: Instant::now(),
+            result,
+        });
+        result
     }
 
     async fn tunnel(&self, host: &str, port: u16) -> io::Result<TcpStream> {
@@ -344,15 +363,17 @@ async fn select(config: &Config, provider: &str, label: Option<&str>) -> Result<
     };
     let endpoint = Endpoint::for_url(&spec.url)
         .map_err(|_| anyhow::anyhow!("egress proxy '{name}' has an invalid URL"))?;
-    if endpoint.reachable().await {
-        Ok(Transport(Some(endpoint)))
-    } else if spec.required {
-        bail!("required egress proxy '{name}' is unreachable")
-    } else {
-        crate::logging::warn(&format!(
-            "optional egress proxy '{name}' is unreachable, sending directly"
-        ));
-        Ok(Transport::default())
+    match endpoint.check_reachability().await {
+        Ok(()) => Ok(Transport(Some(endpoint))),
+        Err(kind) if spec.required => {
+            bail!("required egress proxy '{name}' is unreachable: {kind}")
+        }
+        Err(_) => {
+            crate::logging::warn(&format!(
+                "optional egress proxy '{name}' is unreachable, sending directly"
+            ));
+            Ok(Transport::default())
+        }
     }
 }
 
