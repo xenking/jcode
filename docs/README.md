@@ -21,7 +21,7 @@ Reference documentation for the jcode codebase.
 - CLI and TUI: [Run in CI, review Git changes, and start in a worktree](CLI_GIT_WORKFLOWS.md)
 - MCP servers: `MCP_REMOTE.md`
 - Platform: `WINDOWS.md`, `TERMINAL_CAPABILITIES.md`
-- Fork (xenking/jcode): `FORK_LEDGER.md`, `FORK_UPDATES.md`, `PAIRED_DESKTOP.md`, `rollout-daemon-transaction.md`
+- Fork (xenking/jcode): `FORK_LEDGER.md`, `FORK_UPDATES.md`, `PAIRED_DESKTOP.md`, `DESKTOP_STATE.md`, `rollout-daemon-transaction.md`
 - Routing: `ROUTING.md`, `ACCOUNT_ROUTING.md`, `MODEL_ROUTING.md`
 - Code Mode and MCP: `CODEMODE.md`, `MCP_TOOLS.md`
 - Context size and token estimates: `TOKEN_ESTIMATION.md`
