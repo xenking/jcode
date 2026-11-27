@@ -128,6 +128,30 @@ const OAUTH_API_BASE: &str = "https://api.anthropic.com/api/oauth";
 /// First read: the usage windows and the saved-reset (`cedar_ember`) program.
 const SAVED_RESETS_QUERY: &str = "cedar_ember=1&skip_spend=1";
 
+/// [`SAVED_RESETS_QUERY`] without `skip_spend`: a credits seat (enterprise)
+/// states its balance in the `spend` block, which `skip_spend` answers with
+/// `null`, so its credits would never be read.
+const SAVED_RESETS_WITH_SPEND_QUERY: &str = "cedar_ember=1";
+
+/// The first-read query for a login, by how its plan is paid.
+fn usage_query_for_plan(plan: Option<&str>) -> &'static str {
+    match auth::account_identity::default_kind("claude", plan, false) {
+        jcode_usage_types::CredentialKind::Credits => SAVED_RESETS_WITH_SPEND_QUERY,
+        _ => SAVED_RESETS_QUERY,
+    }
+}
+
+fn usage_query(account_label: Option<&str>) -> &'static str {
+    let plan = account_label.and_then(|label| {
+        auth::claude::list_accounts()
+            .ok()?
+            .into_iter()
+            .find(|account| account.label == label)?
+            .subscription_type
+    });
+    usage_query_for_plan(plan.as_deref())
+}
+
 /// Second read, only when no saved reset is spendable: the session-reset
 /// (`juniper_tide`) program.
 const SESSION_RESET_QUERY: &str = "at_wall=1&skip_spend=1";
@@ -225,7 +249,12 @@ async fn fetch_anthropic_usage_data_uncached(
     let probe_started = Instant::now();
     // Quota meters leave from the same egress as the account's inference.
     let client = crate::egress::client("claude", account_label.as_deref()).await?;
-    let response = usage_request(&client, base, SAVED_RESETS_QUERY, &access_token)
+    let response = usage_request(
+        &client,
+        base,
+        usage_query(account_label.as_deref()),
+        &access_token,
+    )
         .send()
         .await;
 

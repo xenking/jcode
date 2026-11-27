@@ -174,3 +174,40 @@ fn recorded_max_response_reads_the_weekly_windows_and_no_credits() {
     // Spend is off on this plan, so there is no credit line to invent.
     assert!(data.credits.is_none());
 }
+
+#[test]
+fn a_stated_prepaid_balance_is_the_balance_even_without_a_cap() {
+    let money =
+        |minor: u64| serde_json::json!({"amount_minor": minor, "exponent": 2, "currency": "USD"});
+    let data = data(
+        &serde_json::json!({
+            "spend": {"enabled": true, "balance": money(1_950_000), "used": money(50_000), "limit": null}
+        })
+        .to_string(),
+    );
+    let credits = data.credits.as_ref().expect("spend is read");
+    assert_eq!(credits.state, CreditsState::Known);
+    assert!((credits.balance.unwrap() - 19_500.0).abs() < 1e-9);
+    assert_eq!(credits.limit, None);
+    // Spend that is off, as on a personal plan, states nothing to show.
+    let off = serde_json::json!({"spend": {"enabled": false, "balance": null, "used": money(0)}});
+    assert!(data_credits(&off).is_none());
+}
+
+fn data_credits(value: &serde_json::Value) -> Option<jcode_usage_types::CreditsReport> {
+    data(&value.to_string()).credits
+}
+
+#[test]
+fn only_a_credits_plan_asks_for_its_spend_block() {
+    // `skip_spend` makes the provider answer `spend: null`, so an enterprise
+    // seat read that way can never show its balance.
+    assert!(!usage_query_for_plan(Some("enterprise")).contains("skip_spend"));
+    for plan in [Some("max_20x"), Some("team"), Some("pro"), None] {
+        assert!(
+            usage_query_for_plan(plan).contains("skip_spend"),
+            "{plan:?}"
+        );
+    }
+    assert!(usage_query_for_plan(Some("enterprise")).contains("cedar_ember=1"));
+}

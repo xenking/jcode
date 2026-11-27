@@ -121,14 +121,17 @@ fn claude_spend_credits(spend: &Value) -> Option<CreditsReport> {
     }
     let used = minor_money_usd(spend.get("used"));
     let limit = minor_money_usd(spend.get("limit")).filter(|limit| *limit > 0.0);
+    let stated_balance = minor_money_usd(spend.get("balance"));
     Some(CreditsReport {
-        state: if used.is_some() {
+        state: if used.is_some() || stated_balance.is_some() {
             CreditsState::Known
         } else {
             CreditsState::Unknown
         },
         unit: CreditUnit::Usd,
-        balance: used.zip(limit).map(|(used, limit)| (limit - used).max(0.0)),
+        // A stated balance (prepaid credits) beats one derived from a cap.
+        balance: stated_balance
+            .or_else(|| used.zip(limit).map(|(used, limit)| (limit - used).max(0.0))),
         used,
         limit,
         ..Default::default()
