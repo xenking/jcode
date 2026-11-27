@@ -39,6 +39,7 @@ mod profile;
 #[path = "agent/context/setting_log.rs"]
 mod setting_log;
 use profile::effective_tool_selection;
+pub(crate) use setting_log::SettingCause;
 #[path = "agent/context/prompt_context.rs"]
 mod prompt_context;
 #[path = "agent/context/prompting.rs"]
@@ -487,7 +488,7 @@ pub struct Agent {
     /// What the chat log last said about provider, model, effort and mode.
     setting_log: setting_log::SettingLog,
     /// Why the next setting change happens, when the caller knows.
-    setting_cause: Option<String>,
+    setting_cause: Option<SettingCause>,
     /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
     jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy

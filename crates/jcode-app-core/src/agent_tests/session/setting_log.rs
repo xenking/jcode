@@ -19,17 +19,20 @@ fn add_prompt(agent: &mut Agent) {
 }
 
 #[tokio::test]
-async fn a_change_applied_later_is_written_with_its_cause() {
+async fn a_change_the_user_did_not_make_is_written_with_its_cause_and_his_own_never() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("model-a"));
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
     add_prompt(&mut agent);
-    agent.set_setting_cause("chosen during the previous turn, applied at the next request");
+    agent.set_setting_cause("routing: limit reached");
     agent.set_model("model-b").unwrap();
+    // His choice applied later, e.g. after a busy turn, is still his: no row.
+    agent.set_setting_cause(SettingCause::User);
+    agent.set_model("model-c").unwrap();
     assert_eq!(
         setting_rows(&agent.session),
-        ["Model: model-a → model-b (chosen during the previous turn, applied at the next request)"]
+        ["Model: model-a → model-b (routing: limit reached)"]
     );
 }
 
@@ -88,7 +91,7 @@ async fn only_mode_changes_the_user_did_not_make_are_logged() {
     add_prompt(&mut agent);
     agent.begin_setting_change();
     agent.session.set_pinned_skill_names(vec!["review".into()]);
-    agent.log_setting_changes("you changed the mode");
+    agent.log_setting_changes(SettingCause::User);
     agent.begin_setting_change();
     agent.session.set_pinned_skill_names(Vec::new());
     agent.log_setting_changes("a skill invocation pinned it");

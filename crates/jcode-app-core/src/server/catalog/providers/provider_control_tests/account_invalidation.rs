@@ -164,6 +164,7 @@ async fn claude_login_restores_opus_in_catalog_without_switching_the_session() {
         74,
         RouteSelection::from_model_route(opus),
         false,
+        false,
         &agent,
         &tx,
     )

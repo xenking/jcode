@@ -16,21 +16,25 @@ pub use jcode_session_types::{
 };
 use std::collections::HashMap;
 
-/// Causes of settings the user changed himself. The footer already shows
-/// those, so the chat never carries them; every other cause is news.
-const USER_SETTING_CAUSES: [&str; 2] = ["you chose it", "you changed the mode"];
+/// Causes older daemons wrote for settings the user changed himself, also the
+/// deferred forms ("you chose it while the agent was busy; …"). The writer now
+/// drops such changes by their typed cause; sessions saved before still hold them.
+const LEGACY_USER_SETTING_CAUSES: [&str; 3] = [
+    "you chose it",
+    "you changed the mode",
+    "chosen during the previous turn, applied at the next request",
+];
 
-pub fn is_user_setting_cause(cause: &str) -> bool {
-    USER_SETTING_CAUSES.contains(&cause)
-}
-
-/// A `Name: old → new (cause)` row. Sessions saved before user changes were
-/// dropped at the writer still hold them.
+/// A `Name: old → new (cause)` row the user caused himself.
 fn is_user_setting_change(content: &str) -> bool {
     content
         .strip_suffix(')')
         .and_then(|row| row.rsplit_once(" ("))
-        .is_some_and(|(_, cause)| is_user_setting_cause(cause))
+        .is_some_and(|(_, cause)| {
+            LEGACY_USER_SETTING_CAUSES
+                .iter()
+                .any(|user| cause.starts_with(user))
+        })
 }
 
 fn display_replay_rows(

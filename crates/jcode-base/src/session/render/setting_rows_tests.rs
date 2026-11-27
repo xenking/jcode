@@ -42,6 +42,14 @@ fn rows_for_changes_the_user_made_are_never_rendered() {
             (2, "Model: a → b (you chose it)"),
             (3, "Reasoning effort: low → high (you chose it)"),
             (4, "Mode: off → review (you changed the mode)"),
+            (
+                5,
+                "Model: a → b (you chose it while the agent was busy; applied when it finished)",
+            ),
+            (
+                6,
+                "Reasoning effort: low → high (chosen during the previous turn, applied at the next request)",
+            ),
             (30, "Model: b → c (automatic failover after: 429)"),
         ],
         Some(10),

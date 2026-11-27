@@ -3,10 +3,24 @@
 use super::*;
 
 impl ClientConnection {
+    /// A turn of this session is running, from any client; a held agent lock alone is not one.
+    fn turn_running(&self) -> bool {
+        self.client_is_processing
+            || crate::turn_cancel_registry::has_active_turn(&self.client_session_id)
+    }
+
     pub(super) async fn settings_requests(&mut self, request: Request) -> Result<Outcome> {
         match request {
             Request::CycleModel { id, direction } => {
-                handle_cycle_model(id, direction, &self.agent, &self.client_event_tx).await;
+                let turn_running = self.turn_running();
+                handle_cycle_model(
+                    id,
+                    direction,
+                    turn_running,
+                    &self.agent,
+                    &self.client_event_tx,
+                )
+                .await;
             }
             Request::RefreshModels { id } => {
                 handle_refresh_models(id, &self.provider, &self.agent, &self.client_event_tx).await;
@@ -15,7 +29,8 @@ impl ClientConnection {
                 handle_set_premium_mode(id, mode, &self.agent, &self.client_event_tx).await;
             }
             Request::SetModel { id, model } => {
-                handle_set_model(id, model, &self.agent, &self.client_event_tx).await;
+                let turn_running = self.turn_running();
+                handle_set_model(id, model, turn_running, &self.agent, &self.client_event_tx).await;
             }
             Request::CancelPendingModelChange { id } => {
                 handle_cancel_pending_model_change(id, &self.agent, &self.client_event_tx);
@@ -25,10 +40,12 @@ impl ClientConnection {
                 selection,
                 automatic_failover,
             } => {
+                let turn_running = self.turn_running();
                 handle_set_route(
                     id,
                     selection,
                     automatic_failover,
+                    turn_running,
                     &self.agent,
                     &self.client_event_tx,
                 )

@@ -94,10 +94,10 @@ use catalog_activity::format_auth_catalog_refresh_complete;
 
 #[path = "provider_control/pending_model_switch.rs"]
 mod pending_model_switch;
-use pending_model_switch::defer_model_switch;
 pub(super) use pending_model_switch::handle_cancel_pending_model_change;
 #[cfg(test)]
 use pending_model_switch::has_pending_model_switch;
+use pending_model_switch::{defer_model_switch, lock_unless_turn_running};
 
 #[path = "provider_control/refresh_auth.rs"]
 mod refresh_auth;
@@ -232,10 +232,11 @@ fn apply_cycle_model(
 pub(super) async fn handle_cycle_model(
     id: u64,
     direction: i8,
+    turn_running: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
         apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
     } else {
         defer_model_switch(
@@ -440,10 +441,11 @@ fn apply_set_route(
 pub(super) async fn handle_set_model(
     id: u64,
     model: String,
+    turn_running: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
         apply_set_model(id, model, &mut agent_guard, client_event_tx);
     } else {
         defer_model_switch(
@@ -463,10 +465,11 @@ pub(super) async fn handle_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     automatic_failover: bool,
+    turn_running: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
         apply_set_route(
             id,
             selection,

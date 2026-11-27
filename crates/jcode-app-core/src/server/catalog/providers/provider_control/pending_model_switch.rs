@@ -51,6 +51,25 @@ fn settle_event(request_id: u64, pending: Option<&PendingModelSwitch>) -> Server
     }
 }
 
+/// The agent for an immediate switch, or `None` when a turn owns it. A held
+/// lock alone is no turn: attach and history building hold it briefly, and a
+/// switch asked for then must apply now, not report "queued".
+pub(super) async fn lock_unless_turn_running(
+    agent: &Arc<Mutex<Agent>>,
+    turn_running: bool,
+) -> Option<tokio::sync::MutexGuard<'_, Agent>> {
+    if let Ok(guard) = agent.try_lock() {
+        return Some(guard);
+    }
+    if turn_running {
+        return None;
+    }
+    // shortcut: a lock held without a turn for over 2 s falls back to the deferred path.
+    tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock())
+        .await
+        .ok()
+}
+
 /// Queue `apply` behind the running turn and tell the client right away.
 pub(super) fn defer_model_switch<F>(
     operation: &'static str,

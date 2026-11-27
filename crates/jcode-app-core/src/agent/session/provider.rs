@@ -1209,7 +1209,7 @@ impl Agent {
         }
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(self.session.id(), current.as_deref());
-        self.log_setting_changes("you chose it");
+        self.log_setting_changes(SettingCause::User);
         self.log_env_snapshot("set_reasoning_effort");
         // Effort is explicit session state: persist it even before the first
         // visible message, like the model and title. `save()` skips that case,
@@ -1226,7 +1226,7 @@ impl Agent {
         let Some(effort) = crate::session_effort::take_pending_effort(self.session.id()) else {
             return;
         };
-        self.set_setting_cause("chosen during the previous turn, applied at the next request");
+        self.set_setting_cause(SettingCause::User);
         match self.set_reasoning_effort(&effort) {
             Ok(current) => crate::logging::info(&format!(
                 "Applied reasoning effort '{}' chosen during the turn",
@@ -1561,11 +1561,11 @@ impl Agent {
     }
 }
 
-fn source_cause(source: crate::provider::ProviderModelSelectionSource) -> &'static str {
+fn source_cause(source: crate::provider::ProviderModelSelectionSource) -> SettingCause {
     match source {
         crate::provider::ProviderModelSelectionSource::Auth => {
-            "account login or token refresh re-selected the route"
+            "account login or token refresh re-selected the route".into()
         }
-        _ => "you chose it",
+        _ => SettingCause::User,
     }
 }

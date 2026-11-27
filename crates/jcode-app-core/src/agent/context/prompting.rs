@@ -406,7 +406,7 @@ impl Agent {
                 Some(StoredDisplayRole::System),
             );
         }
-        self.log_setting_changes("you changed the mode");
+        self.log_setting_changes(SettingCause::User);
         self.session.save()?;
         Ok(())
     }

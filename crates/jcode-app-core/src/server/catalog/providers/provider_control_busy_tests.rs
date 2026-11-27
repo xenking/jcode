@@ -588,7 +588,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let lock = agent.lock().await;
     timeout(
         Duration::from_millis(100),
-        handle_set_route(29, selection, true, &agent, &tx),
+        handle_set_route(29, selection, true, true, &agent, &tx),
     )
     .await
     .expect("route request must not block on the agent lock");
@@ -677,7 +677,13 @@ async fn set_model_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_model(8, "test-model-b".to_string(), &agent, &client_event_tx),
+        handle_set_model(
+            8,
+            "test-model-b".to_string(),
+            true,
+            &agent,
+            &client_event_tx,
+        ),
     )
     .await
     .expect("model changes must not wait for a busy agent mutex");
@@ -719,7 +725,7 @@ async fn cancelled_pending_model_change_never_applies() {
     let (provider, agent, tx, mut rx) = test_agent("session_cancel_pending_model").await;
     let busy_agent_lock = agent.lock().await;
 
-    handle_set_model(21, "test-model-b".to_string(), &agent, &tx).await;
+    handle_set_model(21, "test-model-b".to_string(), true, &agent, &tx).await;
     assert!(matches!(
         rx.try_recv(),
         Ok(ServerEvent::ModelChangePending { id: 21, .. })
@@ -763,8 +769,8 @@ async fn newer_pending_model_change_replaces_the_older_one() {
     let (provider, agent, tx, mut rx) = test_agent("session_replace_pending_model").await;
     let busy_agent_lock = agent.lock().await;
 
-    handle_set_model(31, "test-model-b".to_string(), &agent, &tx).await;
-    handle_set_model(32, "test-model-a".to_string(), &agent, &tx).await;
+    handle_set_model(31, "test-model-b".to_string(), true, &agent, &tx).await;
+    handle_set_model(32, "test-model-a".to_string(), true, &agent, &tx).await;
     assert!(matches!(
         rx.try_recv(),
         Ok(ServerEvent::ModelChangePending { id: 31, .. })
@@ -1053,3 +1059,6 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
     let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
     assert_eq!(saved.model(), Some("gemini-4-neon-high"));
 }
+
+#[path = "provider_control_busy_tests/model_deferral.rs"]
+mod model_deferral;

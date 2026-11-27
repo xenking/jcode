@@ -18,6 +18,27 @@ struct Settings {
 #[derive(Default)]
 pub(super) struct SettingLog(Option<Settings>);
 
+/// Why a setting changed. A change the user asked for himself, now or after a
+/// busy turn, is tracked but never written: the footer shows it. Every other
+/// cause is news and is written as `(why)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SettingCause {
+    User,
+    Auto(String),
+}
+
+impl From<&str> for SettingCause {
+    fn from(why: &str) -> Self {
+        Self::Auto(why.to_owned())
+    }
+}
+
+impl From<String> for SettingCause {
+    fn from(why: String) -> Self {
+        Self::Auto(why)
+    }
+}
+
 const UNRECORDED_CAUSE: &str = "changed outside a recorded path, e.g. an account re-login";
 
 /// One line, bounded: provider errors may be multi-line JSON.
@@ -68,9 +89,8 @@ impl Agent {
         }
     }
 
-    /// Why the next logged change happens (failover, a queued change applied at
-    /// the turn boundary). Consumed by the next [`Self::log_setting_changes`].
-    pub(crate) fn set_setting_cause(&mut self, cause: impl Into<String>) {
+    /// Why the next logged change happens (failover, a routing move). Consumed by the next [`Self::log_setting_changes`].
+    pub(crate) fn set_setting_cause(&mut self, cause: impl Into<SettingCause>) {
         self.setting_cause = Some(cause.into());
     }
 
@@ -90,7 +110,7 @@ impl Agent {
 
     /// Write what changed since the last report into the chat log, persist it and
     /// publish it to attached clients.
-    pub(crate) fn log_setting_changes(&mut self, default_cause: &str) {
+    pub(crate) fn log_setting_changes(&mut self, default_cause: impl Into<SettingCause>) {
         let current = self.current_settings();
         let Some(previous) = self.setting_log.0.replace(current.clone()) else {
             return;
@@ -98,10 +118,10 @@ impl Agent {
         let cause = self
             .setting_cause
             .take()
-            .unwrap_or_else(|| default_cause.to_owned());
-        if crate::session::is_user_setting_cause(&cause) {
+            .unwrap_or_else(|| default_cause.into());
+        let SettingCause::Auto(cause) = cause else {
             return;
-        }
+        };
         let rows = [
             ("Provider", &previous.provider, &current.provider),
             ("Model", &previous.model, &current.model),
