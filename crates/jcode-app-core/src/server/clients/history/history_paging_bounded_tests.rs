@@ -157,6 +157,7 @@ async fn initial_history_page_replays_context_occupancy_but_scrollback_does_not(
             output_tokens: 20,
             cache_read_input_tokens: Some(90_000),
             cache_creation_input_tokens: None,
+            request_elapsed_ms: None,
         }),
     );
     session.save().unwrap();

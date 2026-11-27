@@ -52,6 +52,7 @@ fn assistant_message(second: i64, prompt_tokens: u64) -> StoredMessage {
             output_tokens: 10,
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            request_elapsed_ms: None,
         }),
     }
 }

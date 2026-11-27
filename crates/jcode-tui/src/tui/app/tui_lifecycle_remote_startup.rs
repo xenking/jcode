@@ -4,6 +4,16 @@ use super::*;
 
 impl App {
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        Self::new_for_remote_with_initial_model(resume_session, fresh_spawn, None)
+    }
+
+    /// `initial_model_spec` is a CLI-requested `--provider`/`--model`, applied once after
+    /// connecting to an already-running shared server.
+    pub fn new_for_remote_with_initial_model(
+        resume_session: Option<String>,
+        fresh_spawn: bool,
+        initial_model_spec: Option<String>,
+    ) -> Self {
         let new_start = Instant::now();
         let mut lap = Instant::now();
         let mut laps: Vec<(&'static str, u128)> = Vec::new();
@@ -29,6 +39,7 @@ impl App {
         mark("minimal", &mut laps);
         app.is_remote = true;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
+        app.pending_initial_model_spec = initial_model_spec;
         app.remote_startup_phase = Some(super::super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 

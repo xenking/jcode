@@ -200,10 +200,11 @@ pub async fn run_tui_client(
     }
     startup_profile::mark("terminal_title");
 
-    let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
-    if let Some(model_spec) = initial_model_spec {
-        app.set_initial_model_spec(model_spec);
-    }
+    let mut app = tui::App::new_for_remote_with_initial_model(
+        resume_session.clone(),
+        fresh_spawn,
+        initial_model_spec,
+    );
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }

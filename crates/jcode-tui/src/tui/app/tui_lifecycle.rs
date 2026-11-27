@@ -1506,12 +1506,6 @@ impl App {
         self.remote_startup_phase_started = Some(Instant::now());
     }
 
-    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
-    /// after connecting to an already-running shared server.
-    pub fn set_initial_model_spec(&mut self, model_spec: String) {
-        self.pending_initial_model_spec = Some(model_spec);
-    }
-
     pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
         self.pending_initial_model_spec.take()
     }

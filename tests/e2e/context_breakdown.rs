@@ -157,6 +157,7 @@ async fn context_breakdown_private_bridge_reads_draft_live_inactive_and_restored
         output_tokens: 0,
         cache_read_input_tokens: None,
         cache_creation_input_tokens: None,
+        request_elapsed_ms: None,
     });
     saved.save()?;
 

@@ -766,6 +766,7 @@ async fn history_attach_replays_persisted_context_occupancy() {
             output_tokens: 120,
             cache_read_input_tokens: Some(180_000),
             cache_creation_input_tokens: None,
+            request_elapsed_ms: None,
         }),
     );
     session.save().expect("save session");

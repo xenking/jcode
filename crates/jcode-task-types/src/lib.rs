@@ -200,7 +200,7 @@ macro_rules! semantic_state {
     (
         $(#[$meta:meta])*
         $name:ident {
-            $( $variant:ident = $label:literal, score: $score:literal ),+ $(,)?
+            $( $variant:ident = $label:literal $(| $alias:literal)?, score: $score:literal ),+ $(,)?
         }
     ) => {
         $(#[$meta])*
@@ -219,7 +219,7 @@ macro_rules! semantic_state {
 
             pub fn parse(value: &str) -> Option<Self> {
                 match value.trim().to_ascii_lowercase().as_str() {
-                    $( $label => Some(Self::$variant), )+
+                    $( $label $(| $alias)? => Some(Self::$variant), )+
                     _ => None,
                 }
             }
@@ -260,7 +260,8 @@ semantic_state! {
     IntentUnderstanding {
         Uncertain = "uncertain", score: 40,
         Partial = "partial", score: 80,
-        Clear = "clear", score: 100,
+        // Saved plans written before `Complete` was folded into `Clear` still say "complete".
+        Clear = "clear" | "complete", score: 100,
     }
 }
 
@@ -888,7 +889,6 @@ mod semantic_state_tests {
         assert!(serde_json::from_str::<ConfidenceState>("\"bogus\"").is_err());
         assert!(serde_json::from_str::<ConfidenceState>("85").is_err());
         assert!(serde_json::from_str::<ConfidenceState>("\"85\"").is_err());
-        assert!(serde_json::from_str::<IntentUnderstanding>("\"complete\"").is_err());
         assert!(serde_json::from_str::<IntentUnderstanding>("97").is_err());
     }
 
@@ -927,6 +927,12 @@ mod semantic_state_tests {
         assert_eq!(json["difficulty"], "involved");
         assert_eq!(json["autonomy"], "proactive");
         assert!(json.get("end_to_end_ownership").is_none());
+    }
+
+    #[test]
+    fn saved_complete_intent_reads_as_clear() {
+        let state: IntentUnderstanding = serde_json::from_str("\"complete\"").unwrap();
+        assert_eq!(state, IntentUnderstanding::Clear);
     }
 
     #[test]
