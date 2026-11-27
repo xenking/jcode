@@ -347,5 +347,5 @@ pub async fn import_local_app_login(
 }
 
 #[cfg(test)]
-#[path = "tests/cursor_login_tests.rs"]
+#[path = "../tests/cursor_login_tests.rs"]
 mod tests;

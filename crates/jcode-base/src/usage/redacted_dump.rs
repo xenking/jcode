@@ -271,7 +271,7 @@ async fn openai_account(account: auth::codex::OpenAiAccount, now_ms: i64) -> Val
 /// The Cursor login's raw responses: the usage read jcode makes plus the plan,
 /// profile, web usage summary and legacy request counts. Stored token only.
 async fn cursor_account(tokens: auth::cursor::CursorDirectTokens) -> Value {
-    let label = auth::cursor::load_login().map(|login| login.label);
+    let label = auth::cursor::login::load_login().map(|login| login.label);
     let mut entry = json!({"provider": "cursor", "label": label, "source": tokens.source});
     entry["responses"] = if auth::cursor::token_is_expiring_soon(&tokens.access_token) {
         json!("stored token expired: the dump never refreshes or writes credentials")
@@ -291,7 +291,7 @@ async fn cursor_account(tokens: auth::cursor::CursorDirectTokens) -> Value {
                         .body("{}")
                 };
                 let mut summary = client.get("https://cursor.com/api/usage-summary");
-                if let Some(cookie) = auth::cursor::session_cookie(&tokens.access_token) {
+                if let Some(cookie) = auth::cursor::login::session_cookie(&tokens.access_token) {
                     summary = summary.header("Cookie", cookie);
                 }
                 json!([

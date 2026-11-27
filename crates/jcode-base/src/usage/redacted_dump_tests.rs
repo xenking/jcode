@@ -143,10 +143,10 @@ fn the_cursor_web_session_cookie_names_the_user_and_the_token() {
         r#"{"sub":"github|1245379"}"#,
     );
     let token = format!("eyJhbGciOiJub25lIn0.{payload}.sig");
-    let cookie = auth::cursor::session_cookie(&token).unwrap();
+    let cookie = auth::cursor::login::session_cookie(&token).unwrap();
     assert!(
         cookie.starts_with("WorkosCursorSessionToken=1245379%3A%3AeyJ"),
         "{cookie}"
     );
-    assert!(auth::cursor::session_cookie("not-a-jwt").is_none());
+    assert!(auth::cursor::login::session_cookie("not-a-jwt").is_none());
 }

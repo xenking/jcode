@@ -1236,9 +1236,9 @@ async fn a_cursor_login_without_usage_does_not_ask_for_an_api_key() {
     let tokens = crate::auth::cursor::CursorDirectTokens {
         access_token: "access".into(),
         refresh_token: None,
-        source: crate::auth::cursor::CURSOR_LOGIN_SOURCE,
+        source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
     };
-    crate::auth::cursor::save_login(None, &tokens, None).unwrap();
+    crate::auth::cursor::login::save_login(None, &tokens, None).unwrap();
 
     let report = provider_fetch::cursor_key_status_report().await;
 

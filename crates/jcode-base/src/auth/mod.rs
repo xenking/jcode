@@ -22,7 +22,7 @@ pub mod codex;
 mod commands;
 #[path = "providers/copilot.rs"]
 pub mod copilot;
-#[path = "providers/cursor.rs"]
+#[path = "providers/cursor/mod.rs"]
 pub mod cursor;
 #[path = "status/doctor.rs"]
 pub mod doctor;
@@ -1479,8 +1479,8 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
             "CURSOR_ACCESS_TOKEN / CURSOR_API_KEY environment variable".to_string(),
         ));
     }
-    if let Ok(path) = crate::auth::cursor::login_path()
-        && crate::auth::cursor::load_login().is_some()
+    if let Ok(path) = crate::auth::cursor::login::login_path()
+        && crate::auth::cursor::login::load_login().is_some()
     {
         return Some((
             AuthCredentialSource::JcodeManagedFile,

@@ -223,7 +223,7 @@ pub fn oauth_identity(provider: &str, label: &str) -> Option<AccountIdentity> {
 
 /// The saved Cursor login, named by its masked email and plan like the other logins.
 pub fn cursor_identity(raw_plan: Option<&str>) -> Option<AccountIdentity> {
-    let login = crate::auth::cursor::load_login()?;
+    let login = crate::auth::cursor::login::load_login()?;
     Some(identity(
         "cursor",
         login.label,
@@ -315,9 +315,9 @@ mod tests {
         let tokens = crate::auth::cursor::CursorDirectTokens {
             access_token: "access".into(),
             refresh_token: None,
-            source: crate::auth::cursor::CURSOR_LOGIN_SOURCE,
+            source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
         };
-        crate::auth::cursor::save_login(None, &tokens, Some("developer@example.com".into()))
+        crate::auth::cursor::login::save_login(None, &tokens, Some("developer@example.com".into()))
             .unwrap();
         let identity = cursor_identity(Some("pro")).unwrap();
         match previous {

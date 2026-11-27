@@ -172,7 +172,7 @@ enum PendingScriptableLogin {
     /// Cursor browser login: no callback, resume with `--complete`.
     Cursor {
         account_label: Option<String>,
-        challenge: auth::cursor::CursorLoginChallenge,
+        challenge: auth::cursor::login::CursorLoginChallenge,
     },
     MuseSubscription {
         device_code: String,
@@ -1067,9 +1067,9 @@ async fn login_cursor_flow(requested_label: Option<&str>, options: &LoginOptions
     let client = crate::provider::shared_http_client();
     let login = if options.import_local_app {
         eprintln!("Reading the Cursor app's sign-in (read-only)...");
-        auth::cursor::import_local_app_login(&client, requested_label).await?
+        auth::cursor::login::import_local_app_login(&client, requested_label).await?
     } else {
-        let challenge = auth::cursor::begin_login()?;
+        let challenge = auth::cursor::login::begin_login()?;
         eprintln!(
             "Sign in to Cursor in your browser:\n  {}",
             challenge.login_url
@@ -1078,15 +1078,15 @@ async fn login_cursor_flow(requested_label: Option<&str>, options: &LoginOptions
             crate::companion_client::open_url(&challenge.login_url);
         }
         eprintln!("Waiting for you to approve the sign-in...");
-        let tokens = auth::cursor::complete_login(&client, &challenge).await?;
-        let email = auth::cursor::fetch_account_email(&client, &tokens.access_token).await;
-        auth::cursor::save_login(requested_label, &tokens, email)?
+        let tokens = auth::cursor::login::complete_login(&client, &challenge).await?;
+        let email = auth::cursor::login::fetch_account_email(&client, &tokens.access_token).await;
+        auth::cursor::login::save_login(requested_label, &tokens, email)?
     };
     eprintln!("Successfully logged in to Cursor!");
     eprintln!(
         "Account '{}' stored at {}",
         login.label,
-        auth::cursor::login_path()?.display()
+        auth::cursor::login::login_path()?.display()
     );
     if let Some(email) = &login.email {
         eprintln!("Profile email: {}", crate::usage::mask_email(email));
@@ -1098,7 +1098,7 @@ async fn login_cursor_flow(requested_label: Option<&str>, options: &LoginOptions
             status: "authenticated",
             provider: "cursor".to_string(),
             account_label: Some(login.label.clone()),
-            credentials_path: Some(auth::cursor::login_path()?.display().to_string()),
+            credentials_path: Some(auth::cursor::login::login_path()?.display().to_string()),
             email: login.email.as_deref().map(crate::usage::mask_email),
         },
     )

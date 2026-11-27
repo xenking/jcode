@@ -17,13 +17,8 @@ const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
 pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
 pub const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
 
-#[path = "cursor_login.rs"]
-mod login;
-pub use login::{
-    CURSOR_LOGIN_SOURCE, CursorLogin, CursorLoginChallenge, begin_login, clear_login,
-    complete_login, fetch_account_email, import_local_app_login, load_login, login_path,
-    read_local_app_login, save_login, session_cookie,
-};
+pub mod login;
+use login::{CURSOR_LOGIN_SOURCE, load_login};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalCursorAuthSource {
@@ -721,5 +716,5 @@ fn timestamp_header_now() -> String {
 }
 
 #[cfg(test)]
-#[path = "tests/cursor_tests.rs"]
+#[path = "../tests/cursor_tests.rs"]
 mod tests;

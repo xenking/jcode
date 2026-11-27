@@ -833,7 +833,7 @@ pub(super) async fn cursor_key_status_report() -> ProviderUsage {
         Err(e) => {
             // A signed-in login that reaches here got no usage back: the key
             // advice would point at the wrong credential.
-            let error = if auth::cursor::load_login().is_some() {
+            let error = if auth::cursor::login::load_login().is_some() {
                 "Cursor returned no usage for this login. Sign in again with `jcode login --provider cursor`.".to_string()
             } else {
                 format!("Cursor usage unavailable: {}", e)

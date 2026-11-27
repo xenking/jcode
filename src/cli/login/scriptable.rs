@@ -287,7 +287,7 @@ pub(super) async fn start_scriptable_login(
             )
         }
         LoginProviderTarget::Cursor => {
-            let challenge = auth::cursor::begin_login()?;
+            let challenge = auth::cursor::login::begin_login()?;
             let auth_url = challenge.login_url.clone();
             let pending = PendingScriptableLogin::Cursor {
                 account_label: account_label.map(str::to_owned),
@@ -805,9 +805,9 @@ pub(super) async fn complete_scriptable_cursor_login(
     };
 
     let client = crate::provider::shared_http_client();
-    let tokens = auth::cursor::complete_login(&client, &challenge).await?;
-    let email = auth::cursor::fetch_account_email(&client, &tokens.access_token).await;
-    let login = auth::cursor::save_login(account_label.as_deref(), &tokens, email)?;
+    let tokens = auth::cursor::login::complete_login(&client, &challenge).await?;
+    let email = auth::cursor::login::fetch_account_email(&client, &tokens.access_token).await;
+    let login = auth::cursor::login::save_login(account_label.as_deref(), &tokens, email)?;
     clear_pending_login(&pending_path);
     crate::telemetry::record_auth_success(provider_id, "oauth");
     emit_scriptable_auth_success(
@@ -816,7 +816,7 @@ pub(super) async fn complete_scriptable_cursor_login(
             status: "authenticated",
             provider: provider_id.to_string(),
             account_label: Some(login.label.clone()),
-            credentials_path: Some(auth::cursor::login_path()?.display().to_string()),
+            credentials_path: Some(auth::cursor::login::login_path()?.display().to_string()),
             email: login.email.as_deref().map(crate::usage::mask_email),
         },
     )?;
