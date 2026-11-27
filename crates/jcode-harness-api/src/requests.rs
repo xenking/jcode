@@ -589,6 +589,26 @@ pub enum ApiRequest {
     /// Needs no attached session. Replies with `RoutingView`.
     GetRoutingView,
 
+    /// Read one Desktop state space. Needs a dedicated connection with no
+    /// attached session and the `desktop_state_v1` capability. Replies with
+    /// `DesktopState`.
+    DesktopStateGet { space: String },
+
+    /// Like `DesktopStateGet`, and push `DesktopStateChanged` for the space
+    /// whenever another connection changes it.
+    DesktopStateSubscribe { space: String },
+
+    /// Apply `changes` on top of `expected_rev`. A key another writer changed
+    /// after `expected_rev` conflicts; other keys apply. Replies with
+    /// `DesktopStateApplied`, `DesktopStateConflict` or `DesktopStateRejected`.
+    DesktopStatePut {
+        space: String,
+        /// Writer label, shown to other subscribers on pushes.
+        device: String,
+        expected_rev: u64,
+        changes: Vec<crate::DesktopStateChange>,
+    },
+
     /// Override the session context budget. Null or zero restores the default.
     SetContextCap {
         session_id: String,
@@ -733,6 +753,25 @@ pub enum PermissionDecision {
 
 impl std::fmt::Debug for ApiRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Drafts are private: log where a put went, never what it carries.
+        if let Self::DesktopStatePut {
+            space,
+            device,
+            expected_rev,
+            changes,
+        } = self
+        {
+            return f
+                .debug_struct("DesktopStatePut")
+                .field("space", space)
+                .field("device", device)
+                .field("expected_rev", expected_rev)
+                .field(
+                    "keys",
+                    &changes.iter().map(|change| &change.key).collect::<Vec<_>>(),
+                )
+                .finish();
+        }
         if let Self::SetSessionEnv { session_id, .. } = self {
             return f
                 .debug_struct("SetSessionEnv")

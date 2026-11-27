@@ -5,6 +5,7 @@ mod assistant_text;
 mod catalog_activity;
 mod control_replies;
 mod credentials;
+mod desktop_state;
 mod event;
 mod request;
 mod search_hooks;
@@ -221,6 +222,10 @@ pub struct BridgeState {
     pub(crate) side_questions_supported: bool,
     /// The daemon carries routing events, gate answers and intents.
     pub(crate) routing_supported: bool,
+    /// The daemon serves `desktop_state_*` on a dedicated connection.
+    pub(crate) desktop_state_supported: bool,
+    /// Legacy id -> API id of in-flight Desktop state requests.
+    pending_desktop_state: Vec<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -285,6 +290,7 @@ impl BridgeState {
             session_tools_supported: daemon.session_tools(),
             side_questions_supported: daemon.side_questions(),
             routing_supported: daemon.routing(),
+            desktop_state_supported: daemon.desktop_state(),
             force_stop_turn_supported: daemon.force_stop_turn(),
             supports_user_response: hello["supports_user_response"].as_bool().unwrap_or(false),
             supports_applets: hello["supports_applets"].as_bool(),
@@ -574,6 +580,9 @@ impl BridgeState {
 
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
+        if let Some(frames) = self.desktop_state_event(event) {
+            return frames;
+        }
         match event["type"].as_str().unwrap_or("") {
             "turn_state" => {
                 if self.turn_fence.state(event) {

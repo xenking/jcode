@@ -346,6 +346,44 @@ pub enum ApiEvent {
         view: crate::RoutingView,
     },
 
+    /// Reply to `DesktopStateGet` / `DesktopStateSubscribe`; also sent without
+    /// a request when a subscriber missed pushes and must resync.
+    DesktopState {
+        space: String,
+        rev: u64,
+        entries: Vec<crate::DesktopStateEntry>,
+    },
+
+    /// A `DesktopStatePut` was applied; `entries` are what changed.
+    DesktopStateApplied {
+        space: String,
+        rev: u64,
+        entries: Vec<crate::DesktopStateEntry>,
+    },
+
+    /// A `DesktopStatePut` lost to another writer. `entries` is everything that
+    /// changed since its `expected_rev` (all live entries when `full`).
+    DesktopStateConflict {
+        space: String,
+        rev: u64,
+        full: bool,
+        entries: Vec<crate::DesktopStateEntry>,
+    },
+
+    /// A `DesktopStatePut` was refused; nothing was stored.
+    DesktopStateRejected {
+        reason: crate::DesktopStateRejection,
+        message: String,
+    },
+
+    /// Another connection changed a subscribed space.
+    DesktopStateChanged {
+        space: String,
+        rev: u64,
+        device: String,
+        entries: Vec<crate::DesktopStateEntry>,
+    },
+
     /// A session context override changed, including its resolved budget.
     ContextCapChanged {
         session_id: String,

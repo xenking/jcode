@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 24;
+export const API_VERSION_MINOR = 25;
 export const SIDE_QUESTIONS_CAPABILITY = "side_questions_v1";
 /** Routing events, gate answers, intents and the routing view. */
 export const ROUTING_CAPABILITY = "routing_v1";
@@ -121,6 +121,20 @@ export interface RoutingApiKeyView {
   provider: string;
   keys: RoutingKeyView[];
 }
+
+/** One Desktop state entry. `value` is absent for a deletion. */
+export interface DesktopStateEntry {
+  key: string;
+  rev: number;
+  value?: unknown;
+}
+
+export interface DesktopStateChange {
+  key: string;
+  value?: unknown;
+}
+
+export type DesktopStateRejection = "invalid" | "too_large" | "unavailable";
 
 /** The routing configuration with live usage, for a settings page. */
 export interface RoutingView {
@@ -583,6 +597,10 @@ export type ApiRequest =
   | { req: "routing_gate_answer"; session_id: string; gate_id: string; choice: RoutingGateChoice }
   | { req: "routing_intent"; session_id: string; action: RoutingIntentAction }
   | { req: "get_routing_view" }
+  /** Needs a dedicated connection with no attached session. */
+  | { req: "desktop_state_get"; space: string }
+  | { req: "desktop_state_subscribe"; space: string }
+  | { req: "desktop_state_put"; space: string; device: string; expected_rev: number; changes: DesktopStateChange[] }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "set_speed_mode"; session_id: string; speed_mode: SpeedMode }
   | { req: "compact"; session_id: string }
@@ -829,6 +847,11 @@ export type ApiEvent =
   /** Text answer to `routing_intent`. */
   | { ev: "routing_status"; text: string }
   | { ev: "routing_view"; view: RoutingView }
+  | { ev: "desktop_state"; space: string; rev: number; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_applied"; space: string; rev: number; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_conflict"; space: string; rev: number; full: boolean; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_rejected"; reason: DesktopStateRejection; message: string }
+  | { ev: "desktop_state_changed"; space: string; rev: number; device: string; entries: DesktopStateEntry[] }
   /** Persisted prompt occupancy replayed on attach, so a context meter is filled before the next turn reports usage. Not a turn's usage: no cost or turn stats. */
   | { ev: "context_occupancy"; session_id: string; prompt_tokens: number }
   /** Cumulative keepalive-only usage. Not a turn or transcript event. */
@@ -1079,6 +1102,11 @@ export const KNOWN_EVENT_KINDS = [
   "routing_gate_closed",
   "routing_status",
   "routing_view",
+  "desktop_state",
+  "desktop_state_applied",
+  "desktop_state_conflict",
+  "desktop_state_rejected",
+  "desktop_state_changed",
   "context_occupancy",
   "cache_keepalive",
   "kv_cache_miss",
@@ -1191,6 +1219,9 @@ export const KNOWN_REQUEST_KINDS = [
   "routing_gate_answer",
   "routing_intent",
   "get_routing_view",
+  "desktop_state_get",
+  "desktop_state_subscribe",
+  "desktop_state_put",
   "set_reasoning_effort",
   "set_speed_mode",
   "compact",

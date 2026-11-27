@@ -7,6 +7,10 @@ impl BridgeState {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
 
+        if req.starts_with("desktop_state_") {
+            return self.desktop_state_request(request, api_id);
+        }
+
         if matches!(req, "routing_gate_answer" | "routing_intent") && !self.routing_supported {
             return Self::error_reply(
                 api_id,
