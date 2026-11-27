@@ -39,6 +39,7 @@ pub mod config;
 pub mod console;
 pub mod context_limits;
 pub mod copilot_usage;
+pub mod desktop_state;
 pub mod detected_emails;
 pub mod egress;
 #[cfg(feature = "embeddings")]
