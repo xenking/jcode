@@ -8,8 +8,33 @@ fn setting_rows(session: &Session) -> Vec<String> {
         .collect()
 }
 
+fn add_prompt(agent: &mut Agent) {
+    agent.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".into(),
+            cache_control: None,
+        }],
+    );
+}
+
 #[tokio::test]
-async fn every_model_change_is_written_into_the_chat_with_its_cause_and_persisted() {
+async fn a_change_applied_later_is_written_with_its_cause() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("model-a"));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    add_prompt(&mut agent);
+    agent.set_setting_cause("chosen during the previous turn, applied at the next request");
+    agent.set_model("model-b").unwrap();
+    assert_eq!(
+        setting_rows(&agent.session),
+        ["Model: model-a → model-b (chosen during the previous turn, applied at the next request)"]
+    );
+}
+
+#[tokio::test]
+async fn only_changes_the_user_did_not_make_are_written_into_the_chat_and_persisted() {
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ExplicitPinProvider::new("model-a"));
     let provider_dyn: Arc<dyn Provider> = provider.clone();
@@ -18,8 +43,10 @@ async fn every_model_change_is_written_into_the_chat_with_its_cause_and_persiste
     agent.session.save_prepared().expect("materialize session");
     let mut bus = crate::bus::Bus::global().subscribe();
 
+    // His own choice is in the footer: no row, no event, before or after the first prompt.
     agent.set_model("model-b").unwrap();
     agent.set_model("model-b").unwrap();
+    add_prompt(&mut agent);
     agent.set_failover_cause("429 usage limit reached\nretry in 3h");
     agent.set_model("model-c").unwrap();
     // A change behind the agent's back is caught at the next request boundary.
@@ -27,7 +54,6 @@ async fn every_model_change_is_written_into_the_chat_with_its_cause_and_persiste
     agent.log_unrecorded_setting_changes();
 
     let expected = vec![
-        "Model: model-a → model-b (you chose it)".to_owned(),
         "Model: model-b → model-c (automatic failover after: 429 usage limit reached)".to_owned(),
         "Model: model-c → model-d (changed outside a recorded path, e.g. an account re-login)"
             .to_owned(),
@@ -54,23 +80,21 @@ async fn every_model_change_is_written_into_the_chat_with_its_cause_and_persiste
 }
 
 #[tokio::test]
-async fn mode_changes_are_logged() {
+async fn only_mode_changes_the_user_did_not_make_are_logged() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("model-a"));
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
+    add_prompt(&mut agent);
     agent.begin_setting_change();
     agent.session.set_pinned_skill_names(vec!["review".into()]);
     agent.log_setting_changes("you changed the mode");
     agent.begin_setting_change();
     agent.session.set_pinned_skill_names(Vec::new());
-    agent.log_setting_changes("you changed the mode");
+    agent.log_setting_changes("a skill invocation pinned it");
     assert_eq!(
         setting_rows(&agent.session),
-        [
-            "Mode: off → review (you changed the mode)",
-            "Mode: review → off (you changed the mode)"
-        ]
+        ["Mode: review → off (a skill invocation pinned it)"]
     );
 }
 
@@ -112,6 +136,7 @@ async fn an_unchanged_account_writes_no_rows_and_a_real_move_writes_exactly_one(
     let provider: Arc<dyn Provider> = Arc::new(LoginProvider(label.clone()));
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
+    add_prompt(&mut agent);
 
     for _ in 0..50 {
         agent.log_unrecorded_setting_changes();

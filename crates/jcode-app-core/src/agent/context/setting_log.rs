@@ -1,5 +1,6 @@
-//! Every change of provider, model, reasoning effort or mode is written into the
-//! session's chat log as `old → new (cause)`, whatever caused it. Mutators call
+//! Every change of provider, model, reasoning effort or mode the user did not make
+//! is written into the session's chat log as `old → new (cause)`. His own changes
+//! are tracked but not written: the footer shows them. Mutators call
 //! [`Agent::begin_setting_change`] first and [`Agent::log_setting_changes`] last;
 //! the request boundary calls the latter again as a net for paths that do not.
 
@@ -98,6 +99,9 @@ impl Agent {
             .setting_cause
             .take()
             .unwrap_or_else(|| default_cause.to_owned());
+        if crate::session::is_user_setting_cause(&cause) {
+            return;
+        }
         let rows = [
             ("Provider", &previous.provider, &current.provider),
             ("Model", &previous.model, &current.model),

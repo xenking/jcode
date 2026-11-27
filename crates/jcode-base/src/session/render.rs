@@ -4,6 +4,8 @@ mod response_stats;
 mod image_context_tests;
 #[cfg(test)]
 mod prompt_count_tests;
+#[cfg(test)]
+mod setting_rows_tests;
 
 use super::{Session, StoredDisplayRole, StoredMemoryInjection};
 use crate::message::{ContentBlock, Role, ToolCall};
@@ -14,10 +16,31 @@ pub use jcode_session_types::{
 };
 use std::collections::HashMap;
 
+/// Causes of settings the user changed himself. The footer already shows
+/// those, so the chat never carries them; every other cause is news.
+const USER_SETTING_CAUSES: [&str; 2] = ["you chose it", "you changed the mode"];
+
+pub fn is_user_setting_cause(cause: &str) -> bool {
+    USER_SETTING_CAUSES.contains(&cause)
+}
+
+/// A `Name: old → new (cause)` row. Sessions saved before user changes were
+/// dropped at the writer still hold them.
+fn is_user_setting_change(content: &str) -> bool {
+    content
+        .strip_suffix(')')
+        .and_then(|row| row.rsplit_once(" ("))
+        .is_some_and(|(_, cause)| is_user_setting_cause(cause))
+}
+
 fn display_replay_rows(
     session: &Session,
     start: usize,
 ) -> Vec<(chrono::DateTime<chrono::Utc>, RenderedMessage)> {
+    let first_prompt = session
+        .messages
+        .iter()
+        .find(|msg| stored_message_is_user_turn(msg));
     let boundary = if start == 0 {
         None
     } else {
@@ -38,8 +61,18 @@ fn display_replay_rows(
             {
                 return None;
             }
+            let mut timestamp = event.timestamp;
+            if role == "setting_change" {
+                // A move made while the first turn starts lands after that
+                // prompt; a fresh session shows no settings before it.
+                if is_user_setting_change(content) {
+                    return None;
+                }
+                let prompt_at = first_prompt?.timestamp;
+                timestamp = prompt_at.map_or(timestamp, |at| timestamp.max(at));
+            }
             Some((
-                event.timestamp,
+                timestamp,
                 RenderedMessage {
                     role: role.clone(),
                     content: content.clone(),
