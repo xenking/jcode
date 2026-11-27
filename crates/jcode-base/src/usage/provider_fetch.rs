@@ -750,7 +750,8 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     match response {
         Ok(response) if response.status().is_success() => {
             let json: serde_json::Value = response.json().await.unwrap_or_default();
-            let report = cursor_plan_usage_report(&json);
+            let mut report = cursor_plan_usage_report(&json);
+            report.account = auth::account_identity::cursor_identity(cursor_plan_id(&json));
             crate::routing_meters::publish_cursor_limits(&report.limits);
             // A 200 with neither usage fields nor membership info carries
             // nothing usable; fall back to the key-status probe. Membership
@@ -766,18 +767,21 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     }
 }
 
+/// The plan Cursor reports: `team` for a team spend pool, else the membership type.
+fn cursor_plan_id(json: &serde_json::Value) -> Option<&str> {
+    json.get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+}
+
 pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
     let plan = json
         .get("planUsage")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let membership = json
-        .get("spendLimitUsage")
-        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
-        .map(|_| "Team")
-        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
-        .unwrap_or("Pro");
+    let membership = cursor_plan_id(json).unwrap_or("Pro");
     let mut chars = membership.chars();
     let membership_title: String = match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),

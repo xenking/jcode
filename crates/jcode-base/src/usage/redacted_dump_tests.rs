@@ -94,3 +94,59 @@ fn one_uuid_keeps_one_placeholder_and_different_ones_differ() {
     assert_eq!(value["b"], "<uuid-1>");
     assert_eq!(value["c"], "<uuid-2>");
 }
+
+#[test]
+fn cursor_profile_plan_and_summary_bodies_lose_ids_and_emails_but_keep_meters() {
+    let mut value = json!({
+        "provider": "cursor",
+        "responses": [
+            {"path": "DashboardService/GetMe", "status": 200, "body": {
+                "authId": "github|1245379",
+                "userId": 4821936,
+                "teamId": 77123,
+                "email": "someone.private@example.com",
+            }},
+            {"path": "cursor.com/api/usage-summary", "status": 200, "body": {
+                "membershipType": "pro",
+                "billingCycleEnd": "2026-12-01T00:00:00.000Z",
+                "individualUsage": {
+                    "plan": {"used": 1516, "limit": 2000, "autoPercentUsed": 3.3, "apiPercentUsed": 0.7},
+                    "onDemand": {"enabled": true, "used": 0, "limit": 5000},
+                },
+            }},
+        ],
+    });
+    redact(&mut value);
+    let text = value.to_string();
+    for leaked in [
+        "github|",
+        "1245379",
+        "4821936",
+        "77123",
+        "someone.private",
+        "@",
+    ] {
+        assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+    }
+    let summary = &value["responses"][1]["body"];
+    assert_eq!(summary["membershipType"], "pro");
+    assert_eq!(summary["individualUsage"]["plan"]["limit"], 2000);
+    assert_eq!(summary["individualUsage"]["plan"]["autoPercentUsed"], 3.3);
+    assert_eq!(summary["individualUsage"]["onDemand"]["limit"], 5000);
+}
+
+#[test]
+fn the_cursor_web_session_cookie_names_the_user_and_the_token() {
+    // `sub` is `github|1245379`: the cookie carries the id after the bar.
+    let payload = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        r#"{"sub":"github|1245379"}"#,
+    );
+    let token = format!("eyJhbGciOiJub25lIn0.{payload}.sig");
+    let cookie = auth::cursor::session_cookie(&token).unwrap();
+    assert!(
+        cookie.starts_with("WorkosCursorSessionToken=1245379%3A%3AeyJ"),
+        "{cookie}"
+    );
+    assert!(auth::cursor::session_cookie("not-a-jwt").is_none());
+}
