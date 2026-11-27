@@ -1078,9 +1078,7 @@ async fn login_cursor_flow(requested_label: Option<&str>, options: &LoginOptions
             crate::companion_client::open_url(&challenge.login_url);
         }
         eprintln!("Waiting for you to approve the sign-in...");
-        let tokens = auth::cursor::login::complete_login(&client, &challenge).await?;
-        let email = auth::cursor::login::fetch_account_email(&client, &tokens.access_token).await;
-        auth::cursor::login::save_login(requested_label, &tokens, email)?
+        auth::cursor::login::finish_login(&client, &challenge, requested_label).await?
     };
     eprintln!("Successfully logged in to Cursor!");
     eprintln!(

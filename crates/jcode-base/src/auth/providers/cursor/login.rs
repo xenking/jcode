@@ -15,7 +15,7 @@ const POLL_ATTEMPTS: u32 = 150;
 const POLL_FIRST_DELAY: Duration = Duration::from_secs(1);
 const POLL_MAX_DELAY: Duration = Duration::from_secs(10);
 const POLL_MAX_TRANSPORT_ERRORS: u32 = 3;
-pub const CURSOR_LOGIN_SOURCE: &str = "cursor_login";
+pub(crate) const CURSOR_LOGIN_SOURCE: &str = "cursor_login";
 const LABEL_PREFIX: &str = "cursor";
 
 /// The saved Cursor login. Never printed or logged; only `label` and the
@@ -83,8 +83,19 @@ pub fn begin_login() -> Result<CursorLoginChallenge> {
     })
 }
 
+/// Wait for the browser to approve the login, then save it under `requested`.
+pub async fn finish_login(
+    client: &Client,
+    challenge: &CursorLoginChallenge,
+    requested: Option<&str>,
+) -> Result<CursorLogin> {
+    let tokens = complete_login(client, challenge).await?;
+    let email = fetch_account_email(client, &tokens.access_token).await;
+    save_login(requested, &tokens, email)
+}
+
 /// Wait for the browser to approve the login. 404 means "not yet".
-pub async fn complete_login(
+async fn complete_login(
     client: &Client,
     challenge: &CursorLoginChallenge,
 ) -> Result<CursorDirectTokens> {
@@ -154,7 +165,7 @@ async fn poll_tokens(
 
 /// The account email, from Cursor's own profile. Only trusted when the profile
 /// names the same subject as the token; any failure just leaves it off.
-pub async fn fetch_account_email(client: &Client, access_token: &str) -> Option<String> {
+async fn fetch_account_email(client: &Client, access_token: &str) -> Option<String> {
     fetch_account_email_from(client, CURSOR_API_BASE, access_token).await
 }
 
@@ -193,7 +204,7 @@ fn token_subject(access_token: &str) -> Option<String> {
 }
 
 /// The `Cookie` value cursor.com's web API takes: the token as its user's web session.
-pub fn session_cookie(access_token: &str) -> Option<String> {
+pub(crate) fn session_cookie(access_token: &str) -> Option<String> {
     let subject = token_subject(access_token)?;
     let user_id = subject.rsplit('|').next()?;
     Some(format!(
@@ -207,7 +218,7 @@ pub fn login_path() -> Result<PathBuf> {
 }
 
 /// The saved login, if any. A file that cannot be read counts as no login.
-pub fn load_login() -> Option<CursorLogin> {
+pub(crate) fn load_login() -> Option<CursorLogin> {
     let path = login_path().ok().filter(|path| path.exists())?;
     crate::storage::harden_secret_file_permissions(&path);
     let login: CursorLogin = crate::storage::read_json(&path).ok()?;
@@ -216,7 +227,7 @@ pub fn load_login() -> Option<CursorLogin> {
 
 /// Save the login under `requested` (a new name labels a new login, the saved
 /// label logs in again), keeping the one login jcode owns.
-pub fn save_login(
+fn save_login(
     requested: Option<&str>,
     tokens: &CursorDirectTokens,
     email: Option<String>,
@@ -260,74 +271,13 @@ pub(super) fn update_login_tokens(tokens: &CursorDirectTokens) -> Result<()> {
     write_login(&login)
 }
 
-pub fn clear_login() -> Result<()> {
-    let path = login_path()?;
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("Failed to remove {}", path.display()))?;
-    }
-    crate::auth::AuthStatus::invalidate_cache();
-    Ok(())
-}
-
-/// The sign-in of the local Cursor app (its `state.vscdb`, else the Cursor CLI's
-/// `auth.json`), read-only. The error says exactly what is missing.
-pub fn read_local_app_login() -> Result<(CursorDirectTokens, Option<String>)> {
-    let vscdb = cursor_vscdb_paths().into_iter().find(|path| path.exists());
-    if let Some(path) = &vscdb {
-        let path = crate::storage::validate_external_auth_file(path)?;
-        if let Ok(access_token) = read_vscdb_key(&path, "cursorAuth/accessToken") {
-            let refresh_token = read_vscdb_key(&path, "cursorAuth/refreshToken").ok();
-            let email = read_vscdb_key(&path, "cursorAuth/cachedEmail").ok();
-            return Ok((
-                CursorDirectTokens {
-                    access_token,
-                    refresh_token,
-                    source: "cursor_vscdb",
-                },
-                email,
-            ));
-        }
-    }
-    let auth_file = cursor_auth_file_path()?;
-    if auth_file.exists() {
-        let safe = crate::storage::validate_external_auth_file(&auth_file)?;
-        let parsed: CursorAuthFileData = serde_json::from_slice(&std::fs::read(&safe)?)
-            .with_context(|| format!("Failed to parse {}", auth_file.display()))?;
-        if let Some(access_token) = parsed.access_token.filter(|t| !t.trim().is_empty()) {
-            return Ok((
-                CursorDirectTokens {
-                    access_token: access_token.trim().to_string(),
-                    refresh_token: parsed.refresh_token.filter(|t| !t.trim().is_empty()),
-                    source: "cursor_auth_file",
-                },
-                None,
-            ));
-        }
-    }
-    match vscdb {
-        Some(path) => anyhow::bail!(
-            "Cursor is installed but not signed in: no sign-in in {}. Sign in to Cursor, or run `jcode login --provider cursor` for a browser login.",
-            path.display()
-        ),
-        None => anyhow::bail!(
-            "Cursor is not installed or has never been signed in on this machine: no state.vscdb at {} and no Cursor CLI login at {}. Run `jcode login --provider cursor` for a browser login.",
-            cursor_vscdb_paths()
-                .first()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            auth_file.display()
-        ),
-    }
-}
-
 /// Copy the local Cursor app's sign-in into jcode's own login. Nothing is
 /// written to the Cursor app's files.
 pub async fn import_local_app_login(
     client: &Client,
     requested: Option<&str>,
 ) -> Result<CursorLogin> {
-    let (tokens, cached_email) = read_local_app_login()?;
+    let (tokens, cached_email) = super::read_local_app_login()?;
     let tokens = if token_is_expiring_soon(&tokens.access_token) {
         let refresh = tokens.refresh_token.as_deref().context(
             "Cursor's stored sign-in has expired and has no refresh token. Open Cursor and sign in again.",
@@ -344,6 +294,15 @@ pub async fn import_local_app_login(
         None => fetch_account_email(client, &tokens.access_token).await,
     };
     save_login(requested, &tokens, email)
+}
+
+#[cfg(test)]
+pub(crate) fn save_login_for_tests(
+    requested: Option<&str>,
+    tokens: &CursorDirectTokens,
+    email: Option<String>,
+) -> Result<CursorLogin> {
+    save_login(requested, tokens, email)
 }
 
 #[cfg(test)]

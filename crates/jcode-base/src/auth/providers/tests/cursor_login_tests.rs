@@ -199,7 +199,7 @@ fn saved_login_is_private_labelled_and_feeds_the_token_resolver() {
     assert_eq!(resolved.refresh_token.as_deref(), Some("refresh-secret"));
     assert!(has_cursor_native_auth());
 
-    clear_login().unwrap();
+    std::fs::remove_file(login_path().unwrap()).unwrap();
     assert!(load_login().is_none());
 }
 
@@ -253,7 +253,7 @@ async fn importing_the_local_app_copies_its_sign_in_without_touching_the_app_fil
 #[test]
 fn importing_says_exactly_what_is_missing() {
     let (_home, _path) = TestHome::new();
-    let missing = read_local_app_login().unwrap_err().to_string();
+    let missing = super::read_local_app_login().unwrap_err().to_string();
     assert!(missing.contains("not installed"), "{missing}");
     assert!(missing.contains("state.vscdb"), "{missing}");
     assert!(
@@ -264,7 +264,7 @@ fn importing_says_exactly_what_is_missing() {
     let vscdb = cursor_vscdb_paths().into_iter().next().unwrap();
     std::fs::create_dir_all(vscdb.parent().unwrap()).unwrap();
     create_mock_vscdb_at(&vscdb, &[("other/key", "value")]);
-    let signed_out = read_local_app_login().unwrap_err().to_string();
+    let signed_out = super::read_local_app_login().unwrap_err().to_string();
     assert!(signed_out.contains("not signed in"), "{signed_out}");
 }
 

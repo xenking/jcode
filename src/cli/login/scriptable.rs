@@ -805,9 +805,8 @@ pub(super) async fn complete_scriptable_cursor_login(
     };
 
     let client = crate::provider::shared_http_client();
-    let tokens = auth::cursor::login::complete_login(&client, &challenge).await?;
-    let email = auth::cursor::login::fetch_account_email(&client, &tokens.access_token).await;
-    let login = auth::cursor::login::save_login(account_label.as_deref(), &tokens, email)?;
+    let login =
+        auth::cursor::login::finish_login(&client, &challenge, account_label.as_deref()).await?;
     clear_pending_login(&pending_path);
     crate::telemetry::record_auth_success(provider_id, "oauth");
     emit_scriptable_auth_success(
