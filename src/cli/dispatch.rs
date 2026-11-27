@@ -388,8 +388,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         #[cfg(unix)]
         Some(Command::Rollout(args)) => super::rollout_host::run_cli(args)?,
-        Some(Command::Usage { json, requests }) => {
-            commands::run_usage_command(json, requests).await?;
+        Some(Command::Usage {
+            json,
+            requests,
+            dump_redacted,
+        }) => {
+            commands::run_usage_command(json, requests, dump_redacted).await?;
         }
         Some(Command::Titles { action }) => {
             commands::run_titles_command(action).await?;

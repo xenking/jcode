@@ -2161,7 +2161,14 @@ pub fn run_version_command(emit_json: bool) -> Result<()> {
     report_info::run_version_command(emit_json)
 }
 
-pub async fn run_usage_command(emit_json: bool, requests: bool) -> Result<()> {
+pub async fn run_usage_command(
+    emit_json: bool,
+    requests: bool,
+    dump_redacted: Option<std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(path) = dump_redacted {
+        return report_info::run_usage_dump(&path).await;
+    }
     if requests {
         return report_info::run_request_usage_command(emit_json);
     }

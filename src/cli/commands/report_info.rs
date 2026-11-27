@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -565,6 +565,19 @@ pub(super) fn run_request_usage_command(emit_json: bool) -> Result<()> {
         }
         println!("  {} .. {}", route.first_request, route.last_request);
     }
+    Ok(())
+}
+
+/// `jcode usage --dump-redacted PATH`: raw provider responses for a bug report.
+pub(super) async fn run_usage_dump(path: &std::path::Path) -> Result<()> {
+    let dump = crate::usage::dump_redacted_usage().await;
+    let accounts = dump["accounts"].as_array().map_or(0, Vec::len);
+    std::fs::write(path, serde_json::to_string_pretty(&dump)?)
+        .with_context(|| format!("Could not write {}", path.display()))?;
+    println!(
+        "Wrote {accounts} account(s) to {}. Emails, ids and tokens are removed; read the file before sharing it.",
+        path.display()
+    );
     Ok(())
 }
 

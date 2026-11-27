@@ -398,6 +398,11 @@ pub(crate) enum Command {
         /// on this machine instead of provider limits
         #[arg(long)]
         requests: bool,
+        /// Write the raw usage, limits and saved-reset responses of every
+        /// saved login to PATH with emails, ids and tokens removed, then
+        /// exit. Reads only; never refreshes or writes credentials.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["json", "requests"])]
+        dump_redacted: Option<std::path::PathBuf>,
     },
 
     /// Inspect and steer account routing: policy, holds, paid accounts, acknowledgements

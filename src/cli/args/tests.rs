@@ -1283,3 +1283,20 @@ fn auto_update_is_opt_in_flag() {
             .auto_update
     );
 }
+
+#[test]
+fn usage_dump_redacted_takes_a_path_and_no_other_output_mode() {
+    let args = Args::try_parse_from(["jcode", "usage", "--dump-redacted", "out.json"]).unwrap();
+    match args.command {
+        Some(Command::Usage { dump_redacted, .. }) => {
+            assert_eq!(
+                dump_redacted.as_deref(),
+                Some(std::path::Path::new("out.json"))
+            );
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+    assert!(
+        Args::try_parse_from(["jcode", "usage", "--json", "--dump-redacted", "out.json"]).is_err()
+    );
+}

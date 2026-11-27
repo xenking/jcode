@@ -52,6 +52,8 @@ mod loopback_tests;
 #[cfg(test)]
 mod egress_tests;
 mod provider_fetch;
+mod redacted_dump;
+pub use redacted_dump::dump_redacted_usage;
 mod remote_accounts;
 mod routing_readings;
 #[cfg(test)]
