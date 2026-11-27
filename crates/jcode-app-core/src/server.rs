@@ -27,6 +27,8 @@ mod client_comm_swarms;
 mod client_disconnect_cleanup;
 #[path = "server/clients/connection/client_lifecycle.rs"]
 mod client_lifecycle;
+#[path = "server/clients/connection/desktop_state_stream.rs"]
+mod desktop_state_stream;
 #[path = "server/clients/connection/client_lifecycle_logging.rs"]
 mod client_lifecycle_logging;
 #[path = "server/clients/requests/client_lightweight_control.rs"]

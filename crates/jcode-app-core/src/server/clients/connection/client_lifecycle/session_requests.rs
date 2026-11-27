@@ -198,6 +198,22 @@ impl ClientConnection {
                     }
                 }
             }
+            // Only a dedicated connection serves these; a session connection
+            // must not pretend to.
+            Request::DesktopStateGet { id, .. }
+            | Request::DesktopStatePut { id, .. }
+            | Request::DesktopStateSubscribe { id, .. } => {
+                send_client_event_best_effort(
+                    &self.client_event_tx,
+                    ServerEvent::Error {
+                        id,
+                        message: "Desktop state needs a dedicated connection, not a session"
+                            .into(),
+                        retry_after_secs: None,
+                    },
+                    "client_lifecycle: desktop state on a session connection",
+                );
+            }
             Request::Ping { id } => {
                 let event = super::super::session_connections::connection_presence_pong(
                     id,

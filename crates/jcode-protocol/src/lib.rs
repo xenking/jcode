@@ -47,6 +47,9 @@ pub use screen::*;
 mod notifications;
 
 pub use jcode_session_types::TurnStopReason;
+pub use jcode_session_types::desktop_state::{
+    DESKTOP_STATE_CAPABILITY, DesktopStateChange, DesktopStateEntry, DesktopStateRejection,
+};
 pub use jcode_session_types::{
     ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer, AskKind,
     AskOption, AskQuestion, AskRecord, AskResponse, validate_ask_questions,
@@ -999,6 +1002,9 @@ impl Request {
             Request::RoutingGateAnswer { id, .. } => *id,
             Request::RoutingIntent { id, .. } => *id,
             Request::RoutingView { id } => *id,
+            Request::DesktopStateGet { id, .. }
+            | Request::DesktopStateSubscribe { id, .. }
+            | Request::DesktopStatePut { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
@@ -1033,6 +1039,16 @@ impl Request {
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
         }
+    }
+
+    /// A request only a dedicated Desktop state connection serves.
+    pub fn is_desktop_state_request(&self) -> bool {
+        matches!(
+            self,
+            Request::DesktopStateGet { .. }
+                | Request::DesktopStateSubscribe { .. }
+                | Request::DesktopStatePut { .. }
+        )
     }
 
     pub fn is_lightweight_control_request(&self) -> bool {

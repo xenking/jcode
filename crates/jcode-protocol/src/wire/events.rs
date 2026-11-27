@@ -1377,6 +1377,52 @@ pub enum ServerEvent {
     #[serde(rename = "routing_view")]
     RoutingView { id: u64, view: RoutingView },
 
+    /// Answer to `desktop_state_get` / `desktop_state_subscribe`.
+    #[serde(rename = "desktop_state")]
+    DesktopState {
+        id: u64,
+        space: String,
+        rev: u64,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` was applied. `entries` are what changed.
+    #[serde(rename = "desktop_state_applied")]
+    DesktopStateApplied {
+        id: u64,
+        space: String,
+        rev: u64,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` lost to another writer. `entries` is what changed
+    /// since the request's `expected_rev` (all live entries when `full`).
+    #[serde(rename = "desktop_state_conflict")]
+    DesktopStateConflict {
+        id: u64,
+        space: String,
+        rev: u64,
+        full: bool,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` was refused; nothing was stored.
+    #[serde(rename = "desktop_state_rejected")]
+    DesktopStateRejected {
+        id: u64,
+        reason: DesktopStateRejection,
+        message: String,
+    },
+
+    /// Pushed to subscribers when another connection changed the space.
+    #[serde(rename = "desktop_state_changed")]
+    DesktopStateChanged {
+        space: String,
+        rev: u64,
+        device: String,
+        entries: Vec<DesktopStateEntry>,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

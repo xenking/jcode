@@ -42,6 +42,9 @@ fn route_of(request: &Request) -> Route {
         | Request::Message { .. }
         | Request::SoftInterrupt { .. } => Route::Turn,
         Request::Clear { .. }
+        | Request::DesktopStateGet { .. }
+        | Request::DesktopStatePut { .. }
+        | Request::DesktopStateSubscribe { .. }
         | Request::GetState { .. }
         | Request::GetTodos { .. }
         | Request::OpenrigHostIdentity { .. }

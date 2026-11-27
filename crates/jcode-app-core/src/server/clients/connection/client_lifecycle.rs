@@ -368,6 +368,27 @@ pub(super) async fn handle_client(
                     }
                     return Ok(());
                 }
+                if request.is_desktop_state_request() {
+                    return match crate::desktop_state::DesktopStateHub::global() {
+                        Ok(hub) => {
+                            let mut writer = writer.lock().await;
+                            super::desktop_state_stream::serve(request, &mut reader, &mut *writer, hub)
+                                .await
+                        }
+                        Err(error) => {
+                            crate::logging::warn(&format!("desktop state store: {error:#}"));
+                            write_direct_event(
+                                &writer,
+                                &ServerEvent::DesktopStateRejected {
+                                    id: request.id(),
+                                    reason: crate::protocol::DesktopStateRejection::Unavailable,
+                                    message: "the Desktop state store is unavailable".into(),
+                                },
+                            )
+                            .await
+                        }
+                    };
+                }
                 if !request.is_lightweight_control_request() {
                     crate::logging::info(&format!(
                         "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",

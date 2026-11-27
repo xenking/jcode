@@ -251,6 +251,7 @@ pub(super) fn connection_presence_pong(
             "openrig_host_identity_v1".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
             jcode_session_types::routing::ROUTING_CAPABILITY.into(),
+            crate::protocol::DESKTOP_STATE_CAPABILITY.into(),
         ],
         user_connected_session_ids,
         daemon_identity: jcode_build_support::runtime_generation::serving_identity(
@@ -296,6 +297,19 @@ mod tests {
             runtime: crate::protocol::SwarmMemberRuntime::default(),
             task_label: None,
         }
+    }
+
+    #[test]
+    fn presence_pong_advertises_desktop_state() {
+        let event = connection_presence_pong(
+            1,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(HashMap::new())),
+        );
+        let ServerEvent::Pong { capabilities, .. } = event else {
+            panic!("expected pong");
+        };
+        assert!(capabilities.iter().any(|cap| cap == "desktop_state_v1"));
     }
 
     #[test]

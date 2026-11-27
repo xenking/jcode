@@ -907,6 +907,30 @@ pub enum Request {
     #[serde(rename = "routing_view")]
     RoutingView { id: u64 },
 
+    /// Read one Desktop state space. First frame of a dedicated connection that
+    /// then serves only `desktop_state_*` requests; advertised by
+    /// [`crate::DESKTOP_STATE_CAPABILITY`].
+    #[serde(rename = "desktop_state_get")]
+    DesktopStateGet { id: u64, space: String },
+
+    /// Like `desktop_state_get`, and push `desktop_state_changed` for this
+    /// space for the life of the connection.
+    #[serde(rename = "desktop_state_subscribe")]
+    DesktopStateSubscribe { id: u64, space: String },
+
+    /// Apply `changes` on top of `expected_rev`. Answered with
+    /// `desktop_state_applied`, `desktop_state_conflict` or
+    /// `desktop_state_rejected`.
+    #[serde(rename = "desktop_state_put")]
+    DesktopStatePut {
+        id: u64,
+        space: String,
+        /// Writer label, echoed on pushes to other subscribers.
+        device: String,
+        expected_rev: u64,
+        changes: Vec<DesktopStateChange>,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {
