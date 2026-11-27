@@ -1479,6 +1479,14 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
             "CURSOR_ACCESS_TOKEN / CURSOR_API_KEY environment variable".to_string(),
         ));
     }
+    if let Ok(path) = crate::auth::cursor::login_path()
+        && crate::auth::cursor::load_login().is_some()
+    {
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            path.display().to_string(),
+        ));
+    }
     if let Ok(file_path) = crate::auth::cursor::cursor_auth_file_path()
         && file_path.exists()
         && crate::auth::external_trust::source_allowed_for_path(

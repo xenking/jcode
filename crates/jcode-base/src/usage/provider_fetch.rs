@@ -827,13 +827,20 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
 /// Fallback key-status probe. The `/v0/me` error body still tells us the key
 /// is live and which plan tier it is on when the usage endpoint is out of
 /// reach.
-async fn cursor_key_status_report() -> ProviderUsage {
+pub(super) async fn cursor_key_status_report() -> ProviderUsage {
     let api_key = match auth::cursor::load_api_key() {
         Ok(api_key) => api_key,
         Err(e) => {
+            // A signed-in login that reaches here got no usage back: the key
+            // advice would point at the wrong credential.
+            let error = if auth::cursor::load_login().is_some() {
+                "Cursor returned no usage for this login. Sign in again with `jcode login --provider cursor`.".to_string()
+            } else {
+                format!("Cursor usage unavailable: {}", e)
+            };
             return ProviderUsage {
                 provider_name: "Cursor".to_string(),
-                error: Some(format!("Cursor usage unavailable: {}", e)),
+                error: Some(error),
                 ..Default::default()
             };
         }
