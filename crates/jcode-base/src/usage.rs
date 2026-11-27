@@ -9,6 +9,7 @@ pub use account_fetch::fetch_oauth_account_usage;
 mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
+mod anthropic_saved_reset;
 mod imported_banked;
 pub(crate) use anthropic_fable_reset::{auto_reset_fable_usage, auto_reset_fable_usage_with};
 mod anthropic_response;
@@ -63,6 +64,10 @@ mod startup_snapshot;
 pub use accessors::*;
 pub use anthropic_banked::AnthropicBankedResets;
 pub use jcode_usage_types::{BankedGrant, BankedGrantStatus};
+pub use anthropic_saved_reset::{
+    PendingSavedClaudeReset, SavedClaudeResetUnavailable, consume_saved_claude_reset,
+    prepare_saved_claude_reset,
+};
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
     PendingAnthropicLimitReset, consume_anthropic_limit_reset,

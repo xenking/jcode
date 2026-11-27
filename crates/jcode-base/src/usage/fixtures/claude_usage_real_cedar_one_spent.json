@@ -1,0 +1,70 @@
+{
+  "cedar_ember": {
+    "at_limit": false,
+    "cooldown_until": null,
+    "eligible": true,
+    "event_props": {
+      "billing_path": "stripe",
+      "billing_period": "unknown",
+      "extra_usage_state": "not_configured",
+      "surface": "claude_code_cli",
+      "tenure_bucket": "90-364",
+      "tier": "claude_max_20x"
+    },
+    "exhausted": [],
+    "grants": [
+      {
+        "arm": null,
+        "blocking": [],
+        "clears": [
+          "seven_day",
+          "seven_day_overage_included"
+        ],
+        "ends_at": "2026-12-10T22:00:00+00:00",
+        "gives_back_weekly": false,
+        "id": "full-reset-2611",
+        "label": "One full limit reset (November 2026)",
+        "paused": false,
+        "percent_used": {
+          "seven_day": 28,
+          "seven_day_overage_included": 3
+        },
+        "resets_left": 0,
+        "resets_total": 1,
+        "starts_at": "2026-11-10T21:30:00+00:00",
+        "type": "weekly",
+        "unavailable_reason": "unavailable",
+        "usable_now": false,
+        "use_requires_limit": false
+      },
+      {
+        "arm": null,
+        "blocking": [],
+        "clears": [
+          "seven_day_overage_included"
+        ],
+        "ends_at": "2027-03-09T07:59:00+00:00",
+        "gives_back_weekly": true,
+        "id": "launch-2610-fable",
+        "label": "New model launch: one Fable reset for Max, Team Premium and Enterprise Premium",
+        "paused": false,
+        "percent_used": {
+          "seven_day": 28,
+          "seven_day_overage_included": 3
+        },
+        "resets_left": 1,
+        "resets_total": 1,
+        "starts_at": "2026-11-09T18:00:00+00:00",
+        "type": "full",
+        "unavailable_reason": null,
+        "usable_now": true,
+        "use_requires_limit": false
+      }
+    ],
+    "ineligible_reason": null,
+    "next_grant_id": "launch-2610-fable",
+    "paused_held": false,
+    "weekly_resets_at": "2026-11-30T23:00:00+00:00"
+  },
+  "juniper_tide": null
+}

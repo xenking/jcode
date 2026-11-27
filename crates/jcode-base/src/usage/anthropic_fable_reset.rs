@@ -30,24 +30,58 @@ impl Drop for InvalidateOnDrop<'_> {
 }
 
 #[derive(Debug, Deserialize)]
-struct Status {
+pub(super) struct Status {
     eligible: bool,
     at_limit: bool,
     exhausted: Vec<String>,
-    grants: Vec<Grant>,
+    #[serde(default)]
+    next_grant_id: Option<String>,
+    pub(super) grants: Vec<Grant>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Grant {
-    id: String,
-    resets_left: u64,
+pub(super) struct Grant {
+    pub(super) id: String,
+    pub(super) resets_left: u64,
     starts_at: Option<String>,
-    ends_at: Option<String>,
+    pub(super) ends_at: Option<String>,
     clears: Vec<String>,
     paused: bool,
     usable_now: bool,
     gives_back_weekly: bool,
     blocking: Vec<String>,
+    #[serde(default)]
+    pub(super) label: Option<String>,
+}
+
+/// What a redemption answers to: the daemon's own retry rules, or one grant a
+/// person reviewed and confirmed.
+#[derive(Clone, Copy)]
+pub(super) enum Spend<'a> {
+    Automatic(ResetMode),
+    Saved(&'a str),
+}
+
+/// The grant the server selects for a confirmed manual redemption. The
+/// provider's own `usable_now` decides, so a saved reset can be spent before
+/// any wall, but never a paused, blocked, spent or lapsed one.
+pub(super) fn saved_grant(status: &Status, now: chrono::DateTime<chrono::Utc>) -> Option<&Grant> {
+    let next = status.next_grant_id.as_deref()?;
+    if !status.eligible {
+        return None;
+    }
+    status.grants.iter().find(|grant| {
+        grant.id == next
+            && valid_id(&grant.id)
+            && grant.resets_left > 0
+            && !grant.paused
+            && grant.usable_now
+            && grant.blocking.is_empty()
+            && grant
+                .ends_at
+                .as_deref()
+                .is_none_or(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| at > now))
+    })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -85,7 +119,7 @@ fn eligible_grant(status: &Status, now: chrono::DateTime<chrono::Utc>) -> Option
     })
 }
 
-fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
+pub(super) fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
     let extract = |path| {
         profile
             .pointer(path)
@@ -99,7 +133,11 @@ fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
     Ok((extract("/account/uuid")?, extract("/organization/uuid")?))
 }
 
-async fn status(client: &reqwest::Client, base: &str, token: &str) -> Result<Option<Status>> {
+pub(super) async fn status(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Option<Status>> {
     let value = get_json(client, &format!("{base}{STATUS}"), token).await?;
     let Some(block) = value.get("cedar_ember") else {
         return Ok(None);
@@ -149,7 +187,7 @@ pub(crate) async fn auto_reset_fable_usage_with(
         &token,
         &label,
         &crate::storage::jcode_dir()?.join("fable-resets"),
-        mode,
+        Spend::Automatic(mode),
     )
     .await
 }
@@ -188,16 +226,24 @@ async fn redeem(
     label: &str,
     root: &std::path::Path,
 ) -> Result<bool> {
-    redeem_with(client, base, token, label, root, ResetMode::AtWall).await
+    redeem_with(
+        client,
+        base,
+        token,
+        label,
+        root,
+        Spend::Automatic(ResetMode::AtWall),
+    )
+    .await
 }
 
-async fn redeem_with(
+pub(super) async fn redeem_with(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     label: &str,
     root: &std::path::Path,
-    mode: ResetMode,
+    spend: Spend<'_>,
 ) -> Result<bool> {
     // The profile and usage requests use the exact same pinned token.
     let profile = get_json(client, &format!("{base}/api/oauth/profile"), token).await?;
@@ -234,7 +280,11 @@ async fn redeem_with(
     };
     // A concurrent claimant cleared the quota. Retry is safe without spending
     // anything or erasing its possibly uncertain durable journal.
-    if mode == ResetMode::AtWall && waited && !before.at_limit && before.exhausted.is_empty() {
+    if matches!(spend, Spend::Automatic(ResetMode::AtWall))
+        && waited
+        && !before.at_limit
+        && before.exhausted.is_empty()
+    {
         super::anthropic_reset::invalidate_anthropic_usage_reset_state(Some(label));
         return Ok(true);
     }
@@ -245,9 +295,12 @@ async fn redeem_with(
         return Ok(false);
     }
     let now = chrono::Utc::now();
-    let grant = match mode {
-        ResetMode::AtWall => eligible_grant(&before, now),
-        ResetMode::Expiring { within_secs } => expiring_grant(&before, now, within_secs),
+    let grant = match spend {
+        Spend::Automatic(ResetMode::AtWall) => eligible_grant(&before, now),
+        Spend::Automatic(ResetMode::Expiring { within_secs }) => {
+            expiring_grant(&before, now, within_secs)
+        }
+        Spend::Saved(id) => saved_grant(&before, now).filter(|grant| grant.id == id),
     };
     let Some(grant) = grant else {
         return Ok(false);
@@ -281,19 +334,38 @@ async fn redeem_with(
     #[derive(Deserialize)]
     struct Claim {
         result: String,
+        #[serde(default)]
         cleared: Vec<String>,
     }
     let claim: Claim = response
         .json()
         .await
         .context("Unrecognized Fable reset result; pending marker retained")?;
+    let saved = matches!(spend, Spend::Saved(_));
     if claim.result != "reset"
-        || !before
-            .exhausted
-            .iter()
-            .all(|limit| limit == "seven_day" || claim.cleared.contains(limit))
+        || (!saved
+            && !before
+                .exhausted
+                .iter()
+                .all(|limit| limit == "seven_day" || claim.cleared.contains(limit)))
     {
+        // These answers say nothing was spent, so a person may try again later
+        // without the marker suppressing every future claim on this account.
+        if saved
+            && matches!(
+                claim.result.as_str(),
+                "not_limited" | "ineligible" | "unavailable" | "cooldown"
+            )
+        {
+            std::fs::remove_file(&marker)?;
+        }
         return Ok(false);
+    }
+    // A confirmed claim is the whole answer for a saved reset: it may be
+    // spent with no limit reached, so there is no wall left to verify clear.
+    if saved {
+        std::fs::remove_file(&marker)?;
+        return Ok(true);
     }
     let Some(after) = status(client, base, token).await? else {
         return Ok(false);
