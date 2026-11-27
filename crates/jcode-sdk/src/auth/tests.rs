@@ -50,6 +50,10 @@ fn catalog_is_capability_filtered_and_uses_shared_aliases() {
         client.resolve_provider("jcode").unwrap().method,
         LoginMethod::ApiKey
     );
+    assert_eq!(
+        client.resolve_provider("cursor").unwrap().method,
+        LoginMethod::DeviceCode
+    );
     assert!(client.resolve_provider("grok-build").is_none());
     for provider in client.providers() {
         assert_eq!(client.resolve_provider(provider.id), Some(provider));

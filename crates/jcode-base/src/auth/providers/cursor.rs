@@ -17,6 +17,14 @@ const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
 pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
 pub const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
 
+#[path = "cursor_login.rs"]
+mod login;
+pub use login::{
+    CURSOR_LOGIN_SOURCE, CursorLogin, CursorLoginChallenge, begin_login, clear_login,
+    complete_login, fetch_account_email, import_local_app_login, load_login, login_path,
+    read_local_app_login, save_login, session_cookie,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalCursorAuthSource {
     CursorAuthFile,
@@ -379,6 +387,14 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
         }
     }
 
+    if let Some(login) = load_login() {
+        return Ok(CursorDirectTokens {
+            access_token: login.access_token.trim().to_string(),
+            refresh_token: login.refresh_token.map(|t| t.trim().to_string()),
+            source: CURSOR_LOGIN_SOURCE,
+        });
+    }
+
     let file_path = cursor_auth_file_path()?;
     if file_path.exists()
         && crate::auth::external_trust::source_allowed_for_path(
@@ -421,10 +437,12 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
         if let Some(refresh_token) = tokens.refresh_token.as_deref()
             && let Ok(refreshed) = refresh_direct_access_token(client, refresh_token).await
         {
-            return Ok(CursorDirectTokens {
+            let refreshed = CursorDirectTokens {
                 source: tokens.source,
                 ..refreshed
-            });
+            };
+            persist_refreshed_login(&refreshed);
+            return Ok(refreshed);
         }
     }
 
@@ -473,6 +491,7 @@ pub async fn refresh_resolved_tokens(
         .context("Cursor token was rejected and no refresh token is available")?;
     let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
     refreshed.source = tokens.source;
+    persist_refreshed_login(&refreshed);
     if tokens.source == "cursor_auth_file"
         && let Err(err) = save_auth_file_tokens(&refreshed)
     {
@@ -481,6 +500,17 @@ pub async fn refresh_resolved_tokens(
         ));
     }
     Ok(refreshed)
+}
+
+/// jcode's own login keeps its refreshed tokens; Cursor's files are never touched here.
+fn persist_refreshed_login(tokens: &CursorDirectTokens) {
+    if tokens.source == CURSOR_LOGIN_SOURCE
+        && let Err(err) = login::update_login_tokens(tokens)
+    {
+        crate::logging::warn(&format!(
+            "Could not persist refreshed Cursor login: {err:#}"
+        ));
+    }
 }
 
 fn save_auth_file_tokens(tokens: &CursorDirectTokens) -> Result<()> {
@@ -646,7 +676,7 @@ async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<C
     })
 }
 
-fn token_is_expiring_soon(token: &str) -> bool {
+pub fn token_is_expiring_soon(token: &str) -> bool {
     let Some(exp) = token_expiry_epoch_secs(token) else {
         return false;
     };

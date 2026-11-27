@@ -131,3 +131,11 @@ Notes:
   `grok_cli_auth_json`). Cursor's `auth.json` is the same: trusting it also lets
   jcode write refreshed tokens back, merged into the existing JSON so Cursor's
   other keys survive.
+- Cursor keeps its own login in `~/.jcode/cursor-login.json` (mode 0600, one
+  labelled account). `jcode login --provider cursor` signs in through
+  `cursor.com/loginDeepControl` and polls for approval, as the Cursor agent CLI
+  does; `--from-app` copies the sign-in of the local Cursor app (`state.vscdb`,
+  else the Cursor CLI's `auth.json`) once, read-only, and says exactly what is
+  missing when Cursor is absent or signed out. The login refreshes in place. It
+  never joins Auto-switch until the owner places it. Not supported: several
+  Cursor accounts at once.
