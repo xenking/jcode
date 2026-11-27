@@ -28,6 +28,10 @@ pub struct AccountPool {
     /// derive their priority from locally known subscription metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub priorities: BTreeMap<String, u32>,
+    /// Auto-switch is off: the list is kept, but no session moves to another
+    /// account (routing, rotation, failover) without the user's own action.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 /// Locally known plan only. Never probes the network or exposes token material.
@@ -462,6 +466,11 @@ impl AccountPool {
         self.members = order;
     }
 
+    /// Whether Jcode may move a session between accounts by itself.
+    pub fn auto_switch(&self) -> bool {
+        !self.manual
+    }
+
     /// Order same-provider failover candidates: pool members only, cycling
     /// from the account after `current` so rotation spreads load instead of
     /// always retrying the first account.
@@ -562,9 +571,15 @@ mod tests {
             serde_json::from_str(r#"{"members":["openai-api"],"excluded":["antigravity"]}"#)
                 .unwrap();
         assert!(pool.priorities.is_empty());
+        assert!(pool.auto_switch(), "a file without the key is Auto-switch on");
         pool.set_priority("openai-api", 7);
         let saved = serde_json::to_string(&pool).unwrap();
+        assert!(!saved.contains("manual"), "{saved}");
         assert_eq!(serde_json::from_str::<AccountPool>(&saved).unwrap(), pool);
+        pool.manual = true;
+        let saved = serde_json::to_string(&pool).unwrap();
+        let reloaded = serde_json::from_str::<AccountPool>(&saved).unwrap();
+        assert!(!reloaded.auto_switch());
     }
 
     #[test]

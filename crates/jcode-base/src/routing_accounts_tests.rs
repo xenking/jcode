@@ -1,5 +1,5 @@
 use super::*;
-use jcode_routing_policy::config::{AccountKind, OnLimit};
+use jcode_routing_policy::config::{AccountKind, OnLimit, RoutingMode};
 use jcode_routing_policy::{AccountId, Policy, Priority};
 use std::collections::BTreeMap;
 
@@ -8,6 +8,7 @@ fn saved(id: &str) -> SavedAccount {
         id: id.into(),
         display_name: id.into(),
         kind: AccountKind::Subscription,
+        api_key: false,
     }
 }
 
@@ -47,10 +48,10 @@ fn saved_logins_are_routed_in_pool_priority_order_without_any_entry() {
 
     let routing = effective(&RoutingConfig::default(), &three_logins(), &pool);
 
-    // Pool rotation order first, then the logins the pool never placed.
+    // The page's order: priority tiers, the user's placement within a tier.
     assert_eq!(
         ids(&routing),
-        ["claude:panda", "claude:otter", "claude:fox"]
+        ["claude:panda", "claude:fox", "claude:otter"]
     );
     let policy = policy_of(&routing);
     let priority = |raw: &str| {
@@ -158,4 +159,170 @@ fn an_icon_tells_accounts_of_one_provider_apart_and_a_lone_account_shows_none() 
     );
     assert_eq!(icon_in(&lone, "claude:fox"), Some("🚀".into()));
     assert_eq!(icon_in(&lone, "openai:otter"), None);
+}
+
+fn key(id: &str) -> SavedAccount {
+    SavedAccount {
+        kind: AccountKind::Metered,
+        api_key: true,
+        ..saved(id)
+    }
+}
+
+fn config_entry(id: &str, priority: Option<u32>) -> AccountConfig {
+    AccountConfig {
+        id: id.into(),
+        priority: priority.map(PriorityConfig::Flat),
+        ..AccountConfig::default()
+    }
+}
+
+fn priority_of(routing: &RoutingConfig, raw: &str) -> Option<u32> {
+    let policy = policy_of(routing);
+    match &policy.account(&AccountId::parse(raw)?)?.priority {
+        Priority::Flat(priority) => Some(*priority),
+        other => panic!("flat priority expected, got {other:?}"),
+    }
+}
+
+/// A pool with a priority for every account, so no plan is looked up on disk.
+fn pool_for(accounts: &[SavedAccount]) -> AccountPool {
+    AccountPool {
+        priorities: accounts
+            .iter()
+            .map(|account| (pool_key(&account.id).to_string(), 1))
+            .collect(),
+        ..AccountPool::default()
+    }
+}
+
+/// The accounts page shape of a machine with four logins and three metered
+/// keys nobody put on the Auto-switch list.
+fn work_logins() -> Vec<SavedAccount> {
+    let mut credits = saved("claude:claude-panda");
+    credits.kind = AccountKind::Credits;
+    vec![
+        saved("claude:claude-otter"),
+        saved("claude:claude-fox"),
+        saved("openai:openai-otter"),
+        credits,
+        key("opencode-go:second"),
+        key("huggingface:billed"),
+        key("omlx"),
+    ]
+}
+
+#[test]
+fn metered_keys_are_not_routed_until_the_user_puts_them_on_the_list() {
+    let pool = pool_for(&work_logins());
+    let routing = effective(&RoutingConfig::default(), &work_logins(), &pool);
+    assert_eq!(
+        ids(&routing),
+        [
+            "claude:claude-otter",
+            "claude:claude-fox",
+            "openai:openai-otter",
+            "claude:claude-panda",
+        ]
+    );
+
+    // Placing a key on the page is what adds it, after the logins it follows.
+    let placed = AccountPool {
+        members: vec!["claude:claude-otter".into(), "opencode-go:second".into()],
+        ..pool
+    };
+    let routing = effective(&RoutingConfig::default(), &work_logins(), &placed);
+    assert_eq!(
+        ids(&routing)[..2],
+        ["claude:claude-otter", "opencode-go:second"]
+    );
+    assert!(!ids(&routing).contains(&"huggingface:billed"));
+    assert!(!ids(&routing).contains(&"omlx"));
+}
+
+#[test]
+fn the_pages_order_is_the_priority() {
+    let pool = AccountPool {
+        members: vec![
+            "claude:fox".into(),
+            "claude:panda".into(),
+            "claude:otter".into(),
+        ],
+        priorities: pool([("claude:otter", 1), ("claude:panda", 1), ("claude:fox", 1)]).priorities,
+        ..AccountPool::default()
+    };
+    let routing = effective(&RoutingConfig::default(), &three_logins(), &pool);
+    assert_eq!(
+        ids(&routing),
+        ["claude:fox", "claude:panda", "claude:otter"]
+    );
+    assert!(priority_of(&routing, "claude:fox") < priority_of(&routing, "claude:panda"));
+    assert!(priority_of(&routing, "claude:panda") < priority_of(&routing, "claude:otter"));
+}
+
+// Migration: what the machine routed before and after, for the shapes of a
+// config written when `[[routing.accounts]]` was the account list.
+#[test]
+fn an_account_list_written_by_hand_keeps_routing_exactly_what_it_names() {
+    let written = RoutingConfig {
+        mode: RoutingMode::Auto,
+        accounts: vec![
+            config_entry("claude:claude-otter", Some(1)),
+            config_entry("claude:claude-fox", Some(2)),
+            config_entry("openai:openai-otter", Some(1)),
+            config_entry("claude:claude-panda", Some(9)),
+        ],
+        ..RoutingConfig::default()
+    };
+    let routing = effective(&written, &work_logins(), &pool_for(&work_logins()));
+    assert_eq!(routing.mode, RoutingMode::Auto);
+    // The four he wrote keep their priorities; only the keys nobody listed leave.
+    assert_eq!(
+        ids(&routing),
+        [
+            "claude:claude-otter",
+            "claude:claude-fox",
+            "openai:openai-otter",
+            "claude:claude-panda",
+        ]
+    );
+    for (account, priority) in [
+        ("claude:claude-otter", 1),
+        ("claude:claude-fox", 2),
+        ("openai:openai-otter", 1),
+        ("claude:claude-panda", 9),
+    ] {
+        assert_eq!(priority_of(&routing, account), Some(priority), "{account}");
+    }
+
+    // A key he did write down stays routed even though the page keeps it manual.
+    let mut with_key = written;
+    with_key
+        .accounts
+        .push(config_entry("opencode-go:second", None));
+    let routing = effective(&with_key, &work_logins(), &pool_for(&work_logins()));
+    assert!(ids(&routing).contains(&"opencode-go:second"));
+    assert!(!ids(&routing).contains(&"huggingface:billed"));
+}
+
+#[test]
+fn auto_switch_off_means_routing_is_off_whatever_the_config_says() {
+    let auto = RoutingConfig {
+        mode: RoutingMode::Auto,
+        ..RoutingConfig::default()
+    };
+    let manual = AccountPool {
+        manual: true,
+        ..pool_for(&three_logins())
+    };
+    assert_eq!(
+        effective(&auto, &three_logins(), &manual).mode,
+        RoutingMode::Off
+    );
+    // The list itself is kept for when the switch goes back on.
+    assert_eq!(ids(&effective(&auto, &three_logins(), &manual)).len(), 3);
+    assert_eq!(
+        effective(&auto, &three_logins(), &pool_for(&three_logins())).mode,
+        RoutingMode::Auto
+    );
 }

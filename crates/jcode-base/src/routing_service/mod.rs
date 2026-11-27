@@ -299,6 +299,14 @@ impl RoutingService {
         let Some(active) = self.active(&input.provider, &input.model) else {
             return Plan::Inactive;
         };
+        // A session on an account outside the Auto-switch list stays where its
+        // user put it: routing moves sessions among the pool, it never pulls one in.
+        if let Some(current) = &input.current
+            && family(current.provider()) == family(&input.provider)
+            && !active.policy.accounts.iter().any(|a| &a.id == current)
+        {
+            return Plan::Inactive;
+        }
         self.warm().await;
         let now = self.env.now();
         let evaluation = self.evaluate(&active, input, now).await;
@@ -494,7 +502,9 @@ impl RoutingService {
     async fn warm(&self) {
         self.warmed
             .get_or_init(|| async {
-                for note in self.env.routing().0.retired_keys() {
+                // Once per daemon start; `jcode routing status` names them too.
+                let cache = crate::config::config().cache.retired_keys();
+                for note in self.env.routing().0.retired_keys().into_iter().chain(cache) {
                     crate::logging::warn(&format!("routing: {note}"));
                 }
                 self.env.warm().await;

@@ -1,18 +1,19 @@
-//! The routed account list: every saved login, ranked by the account pool.
+//! The routed account list: the Auto-switch list of the accounts page.
 //!
-//! Logging in is enough to be routed. Each saved OAuth login and labelled API
-//! key becomes a routing account with the kind its plan gives it, the priority
-//! `account-pool.json` gives it and the pool's rotation order; an account the
-//! pool excludes stays out. `[[routing.accounts]]` only overrides one account's
-//! kind, priority, `on_limit`, egress, models or icon, and an entry for an
-//! account that is not saved is kept as written.
+//! The accounts the user keeps on that list (`account-pool.json`: placed
+//! members in order, plus the OAuth logins nobody moved to Manual) are the
+//! routing accounts, with the kind their plan gives them and their position as
+//! priority. Metered API keys and anything in Manual are not routed.
+//! `[[routing.accounts]]` only overrides one account's kind, priority,
+//! `on_limit`, egress, models or icon, and an entry for an account that is not
+//! saved is kept as written.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use jcode_routing_policy::config::{AccountConfig, PriorityConfig, RoutingConfig};
+use jcode_routing_policy::config::{AccountConfig, PriorityConfig, RoutingConfig, RoutingMode};
 
-use crate::auth::account_pool::AccountPool;
+use crate::auth::account_pool::{AccountPool, default_member};
 pub use crate::routing_view::icon_in;
 use crate::routing_view::{Measured, SavedAccount, build, provider_keys, saved_accounts};
 use jcode_routing_policy::{AccountId, Reading};
@@ -31,38 +32,51 @@ fn pool_key(id: &str) -> &str {
     }
 }
 
-/// `routing` with `accounts` replaced by the effective list: `saved` in the
-/// pool's rotation order with the pool's priorities, minus what the pool
-/// excludes, then the overrides applied.
+/// `routing` with `accounts` replaced by the effective list: the accounts on
+/// the Auto-switch list of the accounts page (`pool.partition`, the same call
+/// the page uses) in that order, each with its position as priority, then the
+/// overrides applied. A saved login the page keeps in Manual (every metered API
+/// key until it is placed) is not routed unless `[[routing.accounts]]` names it.
+/// With Auto-switch off on the page routing is off: nothing moves by itself.
 pub fn effective(
     routing: &RoutingConfig,
     saved: &[SavedAccount],
     pool: &AccountPool,
 ) -> RoutingConfig {
     let listed = |id: &str| routing.account(id, |entry| Some(entry.clone()));
-    let mut saved: Vec<&SavedAccount> = saved.iter().collect();
-    saved.sort_by_key(|account| {
-        let key = pool_key(&account.id);
-        pool.members
-            .iter()
-            .position(|member| member == key)
-            .unwrap_or(usize::MAX)
-    });
+    let keyed: Vec<(String, bool)> = saved
+        .iter()
+        .map(|account| {
+            let key = pool_key(&account.id);
+            (key.to_string(), default_member(key, account.api_key))
+        })
+        .collect();
+    let (members, _) = pool.partition(&keyed);
+    let mut order: Vec<&SavedAccount> = members
+        .iter()
+        .filter_map(|member| {
+            saved
+                .iter()
+                .find(|account| pool_key(&account.id) == *member)
+        })
+        .collect();
+    // An account the config names is routed even when the page keeps it manual.
+    let named: Vec<&SavedAccount> = saved
+        .iter()
+        .filter(|account| {
+            !order.iter().any(|taken| taken.id == account.id) && listed(&account.id).is_some()
+        })
+        .collect();
+    order.extend(named);
     let mut accounts: Vec<AccountConfig> = Vec::new();
-    for account in &saved {
-        let key = pool_key(&account.id);
-        let entry = listed(&account.id);
-        // An excluded login stays out unless the config names it.
-        if entry.is_none() && pool.excluded.iter().any(|excluded| excluded == key) {
-            continue;
-        }
+    for (position, account) in order.iter().enumerate() {
         let found = AccountConfig {
             id: account.id.clone(),
             kind: Some(account.kind),
-            priority: Some(PriorityConfig::Flat(pool.priority(key))),
+            priority: Some(PriorityConfig::Flat(position as u32)),
             ..AccountConfig::default()
         };
-        accounts.push(match entry {
+        accounts.push(match listed(&account.id) {
             Some(entry) => AccountConfig {
                 kind: entry.kind.or(found.kind),
                 priority: entry.priority.or(found.priority),
@@ -81,6 +95,11 @@ pub fn effective(
     accounts.extend(unsaved.into_iter().flatten());
     RoutingConfig {
         accounts,
+        mode: if pool.manual {
+            RoutingMode::Off
+        } else {
+            routing.mode
+        },
         ..routing.clone()
     }
 }

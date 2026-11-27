@@ -97,11 +97,19 @@ fn status(json: bool, now: i64) -> Result<()> {
     let policy = Policy::from_config(&routing, &config.egress);
     let mut state = crate::routing_state::load();
     state.prune(now);
+    let manual = !crate::auth::account_pool::AccountPool::load().auto_switch();
+    // Retired keys are ignored; this output and the daemon log are where they are named.
+    let notes: Vec<String> = config
+        .routing
+        .retired_keys()
+        .into_iter()
+        .chain(config.cache.retired_keys())
+        .collect();
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&status_json(config.routing.mode, &policy, &state, now))?
-        );
+        let mut status = status_json(config.routing.mode, &policy, &state, now);
+        status["manual"] = manual.into();
+        status["notes"] = notes.into();
+        println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
     }
     let mode = match config.routing.mode {
@@ -110,6 +118,12 @@ fn status(json: bool, now: i64) -> Result<()> {
         RoutingMode::Auto => "auto",
     };
     println!("mode: {mode}");
+    if manual {
+        println!("auto-switch: off (Accounts page): no session moves without you");
+    }
+    for note in &notes {
+        println!("config note: {note}");
+    }
     let policy = match policy {
         Ok(policy) => policy,
         Err(errors) => {

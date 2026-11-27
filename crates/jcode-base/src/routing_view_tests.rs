@@ -277,3 +277,19 @@ fn the_view_never_serializes_a_key_value() {
     let back: RoutingView = serde_json::from_str(&json).unwrap();
     assert_eq!(back, view);
 }
+
+// The retired-key note is for the log and `routing status`, not a settings problem.
+#[test]
+fn retired_keys_never_reach_the_settings_view() {
+    let routing: RoutingConfig =
+        toml::from_str("mode = \"auto\"\nreserve_floor_pct = 5\n").unwrap();
+    assert!(!routing.retired_keys().is_empty());
+    let view = build(
+        &routing,
+        &BTreeMap::new(),
+        |_| Snapshot::default(),
+        &Fixture(BTreeMap::new()),
+        &[],
+    );
+    assert!(view.problems.is_empty(), "{:?}", view.problems);
+}

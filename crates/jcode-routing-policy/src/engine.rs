@@ -367,16 +367,7 @@ pub fn decide(
                 leave_warm(request, current, best)
             }
             _ => {
-                let reason = match request.current {
-                    Some(current) if current != &best.account.id => {
-                        format!(
-                            "{current} outranked by {} ({})",
-                            best.account.id,
-                            tier_label(best, request)
-                        )
-                    }
-                    _ => tier_label(best, request),
-                };
+                let reason = tier_label(best);
                 use_account(best, reason, None)
             }
         },
@@ -480,14 +471,13 @@ fn rank(a: &Standing<'_>, b: &Standing<'_>, request: Request<'_>) -> Ordering {
         .then_with(|| a.index.cmp(&b.index))
 }
 
-fn tier_label(standing: &Standing<'_>, request: Request<'_>) -> String {
+/// Why `standing` is the account to use, as a sentence about that account.
+fn tier_label(standing: &Standing<'_>) -> String {
+    let id = &standing.account.id;
     match standing.lost_room {
-        Some(_) if standing.free_grant => "a reset grant would expire unused".to_string(),
-        Some(_) => "behind pace, room would be lost at the reset".to_string(),
-        None => format!(
-            "priority {}",
-            standing.account.priority.for_class(request.model_class)
-        ),
+        Some(_) if standing.free_grant => format!("a reset grant on {id} would expire unused"),
+        Some(_) => format!("{id} resets soon and its room would be lost"),
+        None => format!("{id} ranks first"),
     }
 }
 

@@ -295,6 +295,34 @@ fn account_router_respects_disabled_failover() {
     });
 }
 
+// Auto-switch off on the accounts page: manual means no move without the user.
+#[test]
+fn account_router_with_auto_switch_off_never_moves_and_names_the_blocked_account() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            let (provider, attempts, _cleanup) =
+                account_routing_fixture(&[("openai-otter", "429 Too Many Requests")]);
+            assert!(has_eligible_alternate_account("openai"), "on: a spare exists");
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.manual = true;
+            pool.save().expect("save the switch");
+
+            assert!(!has_eligible_alternate_account("openai"));
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .expect("the blocked account fails the request");
+            assert!(parse_failover_prompt_message(&error.to_string()).is_none());
+            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"], "no retry elsewhere");
+            assert!(
+                error.to_string().contains("openai-otter"),
+                "the failure names the account: {error}"
+            );
+        });
+    });
+}
+
 #[derive(Clone)]
 struct ApiKeyAccountRoutingProvider {
     inner: AccountRoutingStreamProvider,

@@ -81,7 +81,7 @@ impl MultiProvider {
         };
         let default = crate::auth::account_pool::default_member(&key, api_key);
         let pool = crate::auth::account_pool::AccountPool::load();
-        !pool.excluded.contains(&key) && pool.is_member(&key, default)
+        pool.auto_switch() && !pool.excluded.contains(&key) && pool.is_member(&key, default)
     }
 
     fn account_failover_prompt(
@@ -98,7 +98,8 @@ impl MultiProvider {
         // Missing pins cannot heal to a different account. Neither may an
         // explicitly manual account silently enroll itself in the pool.
         let pool = crate::auth::account_pool::AccountPool::load();
-        if !labels.iter().any(|label| label == current)
+        if !pool.auto_switch()
+            || !labels.iter().any(|label| label == current)
             || !pool.is_member(
                 &crate::auth::account_pool::account_key(key, Some(current)),
                 true,
@@ -136,7 +137,10 @@ impl MultiProvider {
         };
         let pool = crate::auth::account_pool::AccountPool::load();
         let source_default = !source_key.ends_with("-api");
-        if pool.excluded.contains(&source_key) || !pool.is_member(&source_key, source_default) {
+        if !pool.auto_switch()
+            || pool.excluded.contains(&source_key)
+            || !pool.is_member(&source_key, source_default)
+        {
             return None;
         }
         let mut candidates: Vec<(String, ActiveProvider, String, String)> = Vec::new();

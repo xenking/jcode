@@ -24,7 +24,7 @@ each role (workers, review, titles, compaction) uses, not which account.
 | Layer | Switch | What it is |
 | --- | --- | --- |
 | Account pool (legacy) | always present | `account-pool.json`: membership, order and priority of logins. Used for session start, same-provider failover and cross-provider failover **only while the routing policy is not in charge**: with `[routing] mode = "auto"` routing is the one decider per provider, and the pool's pre-request rotation, banked-reset redemption and same-provider failover prompts stand down (the pool still supplies membership, order and priority). |
-| Routing policy | `[routing] mode` | Every saved login is a routing account, ranked by the pool's priority and order; `[[routing.accounts]]` only overrides one account's kind, priority, limits, egress, models or icon. `[[routing.budgets]]` adds budgets. A pure engine decides per turn; a daemon service applies it. |
+| Routing policy | `[routing] mode` | The routing accounts are the Auto-switch list of the accounts page (section 2, "The Auto-switch list"), in that order; `[[routing.accounts]]` only overrides one account's kind, priority, limits, egress, models or icon. `[[routing.budgets]]` adds budgets. A pure engine decides per turn; a daemon service applies it. |
 
 `[routing] mode` (default **`off`**):
 
@@ -99,10 +99,27 @@ ranks a fresh healthy usage report ahead of unknown quota inside a tier.
 Missing Claude plan metadata is backfilled at startup through the profile
 endpoint, at most two requests at a time and at most once per account per
 fifteen minutes per process. The TUI cycles saved OAuth accounts with
-`Ctrl+Alt+J` / `Ctrl+Alt+K`. The routing policy takes its account list from the
-saved logins and this file: members set the order, `priorities` the priority,
-and an `excluded` login is not routed (unless `[[routing.accounts]]` names it).
-Nothing needs to be imported.
+`Ctrl+Alt+J` / `Ctrl+Alt+K`.
+
+### The Auto-switch list
+
+The accounts page has two groups, **Auto-switch** (ordered) and **Manual**, and
+a switch **On / Off** on the Auto-switch group. The page is the one place the
+user sets the pool; the routing policy reads exactly what it shows.
+
+| On the page | In files | Effect |
+| --- | --- | --- |
+| Account in the Auto-switch list, position N | `account-pool.json` `members` (order), `excluded`, `priorities` | A routing account. Its position is its priority (first is the default for new sessions, the rest take over in order when one runs out or fails), unless `[[routing.accounts]]` sets a `priority` for it |
+| Account in Manual | `excluded`, or never placed and not a default member | Not routed: nothing moves a session to it. A session the user put on it stays there |
+| Switch Off | `account-pool.json` `"manual": true` | Nothing moves a session by itself: routing is off whatever `[routing] mode` says, and so are the pool's rotation, same-provider and cross-provider failover and the fresh-session pool pick. A blocked account fails the request, and the error names the account |
+
+Never-placed accounts follow `default_member`: OAuth and device logins and the
+Jcode subscription are in the list, metered API keys (`opencode-go`,
+`huggingface`, a local `omlx`, `cerebras`, the `*-api` routes) and `antigravity`
+are in Manual until the user drags them in. Only a `[[routing.accounts]]` entry
+that names a saved login adds it when the page keeps it in Manual; nothing is
+copied between the two files. Removing the `manual` key (or switching On) returns
+to the previous behaviour; an absent file means On.
 
 ## 3. What is measured
 
@@ -176,12 +193,15 @@ context. In order:
    sessions) or a **block** (subagents, headless), with the reached limits as the
    reason; if every account is `block` the decision is a block.
 
-The reason string of a decision names the cause, for example `priority 2`,
-`behind pace, room would be lost at the reset`, `a reset grant would expire
-unused`, `claude:a outranked by claude:b (priority 1)`, `pinned to claude:a`,
-`claude:a cannot serve (claude:a 5h 99%), moving to claude:b`. A forced move
-always names why the old account could not serve: the window and percent, an
-eviction, a down proxy or a `block` budget.
+The reason string of a decision names the cause, for example `claude:b ranks
+first`, `claude:b resets soon and its room would be lost`, `a reset grant on
+claude:b would expire unused`, `pinned to claude:a`, `claude:a cannot serve
+(claude:a 5h 99%), moving to claude:b`. A forced move always names why the old
+account could not serve: the window and percent, an eviction, a down proxy or a
+`block` budget. Room that would be lost at a reset drains first only where the
+session has nothing to lose: at its start (a new session has no account to leave,
+the reason never names one) or with a cold cache. A warm session is never moved
+for pace.
 
 ### Limits (when an account counts as spent)
 
@@ -502,9 +522,10 @@ Retired and ignored (a config that sets them still loads): `reserve_floor_pct`,
 
 ### `[[routing.accounts]]`
 
-Optional. Every saved login is routed without an entry; an entry only overrides
-the keys it sets for the account with that `id`. An entry for an id that is not a
-saved login is kept as written.
+Optional. Every account on the Auto-switch list is routed without an entry; an
+entry only overrides the keys it sets for the account with that `id`, and naming a
+saved login adds it even when the page keeps it in Manual. An entry for an id that
+is not a saved login is kept as written.
 
 | Key | Default | Meaning / validation |
 | --- | --- | --- |
@@ -580,7 +601,9 @@ action = "ask"
 
 - `jcode routing status [--json]`: mode, config problems and retired-key notes,
   paid state, hold, acks and every routed account (kind, priority, on-limit,
-  models, egress). This is the place to read the table.
+  models, egress), and the config notes (retired keys). This is the place to read
+  the table and the notes; they are also logged once per daemon start and never
+  shown in the Desktop.
 - `jcode routing paid auto|off|<dur>`, `hold <id> [dur]|off`, `ack <id> [dur]`,
   `unstick`.
 - No `pin`/`switch`: those are per session.
@@ -595,9 +618,13 @@ durations against the routed accounts and answers with text
 
 ### Header chip and gate
 
-The daemon sends a `RoutingDecision` per decided turn; clients show the serving
-account (with its pending target and warning count) as a chip. A reached limit
-opens the gate view with the options of section 5.
+The daemon sends a `RoutingDecision` per decided turn. Desktop shows the footer
+account chip only while something needs a look: the daemon moved the session, or
+warns about its account (a warning count `⚠` and the account's name, never the
+`provider:id`). With one account, or with several and nothing to report, there is
+no chip: the model chip already leads with the account's icon. The chip goes once
+its popover has been opened and closed. A reached limit opens the gate view with
+the options of section 5.
 
 ### Settings page
 
@@ -607,12 +634,16 @@ network I/O and reads no key value.
 
 ### Icons, popover, account-aware picker
 
-- **No transcript dump.** The routing table is never written into the chat. In
-  Desktop the account chip opens/toggles the **Account routing** popover with the
-  same rows (running account, why, per-account kind/priority/state); in the TUI it
-  is `/acct status` (a scrollable view) and in the CLI `jcode routing status`. The
-  only chat notice about a change is the single `setting_change` row
-  `old -> new (cause)`, written when the account actually changes.
+- **No transcript dump.** The routing table is never written into the chat. The
+  Desktop popover (opened by the chip) has at most three lines: `Running on
+  <account name>`, one plain reason only when a move happened (`Moved from
+  claude-otter: claude-fox resets soon and its room would be lost`; with no move,
+  the first warning if there is one), and a **Manage accounts** action that opens
+  the accounts page. No table, no mode, no `paid:` line, no config note. The table
+  and the notes are `/acct status` in a session (a typed command's answer replaces
+  the popover's lines) and `jcode routing status` in the CLI. The only chat notice
+  about a change is the single `setting_change` row `old -> new (cause)`, written
+  when the account actually changes.
 - **Per-account icon.** An icon exists to tell accounts of one provider apart, so
   it is shown **first** wherever the account is named (model picker rows, the
   status-bar chip, the routing popover and `routing status`, the change notices,

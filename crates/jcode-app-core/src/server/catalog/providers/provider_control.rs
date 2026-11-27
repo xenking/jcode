@@ -364,7 +364,8 @@ pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
                     && login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
             });
     let pool = crate::auth::account_pool::AccountPool::load();
-    !pool.excluded.contains(&key)
+    pool.auto_switch()
+        && !pool.excluded.contains(&key)
         && pool.is_member(
             &key,
             crate::auth::account_pool::default_member(&key, api_key),

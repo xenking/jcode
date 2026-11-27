@@ -905,3 +905,79 @@ fn a_forced_move_names_why_the_account_could_not_serve() {
         }
     }
 }
+
+// The popover incident: another account is behind its pace line, so its room
+// is lost at the reset. That drains first for a session with nothing to lose,
+// never for one with a warm cache.
+fn pace_pair() -> (Policy, Snapshot, AccountId) {
+    let policy = policy(
+        vec![
+            account("claude:otter", AccountKind::Subscription, 1),
+            account("claude:fox", AccountKind::Subscription, 2),
+        ],
+        vec![],
+    );
+    let mut snap = Snapshot::default();
+    snap.accounts.insert(
+        id("claude:otter"),
+        // Ahead of its pace line and still under the ceiling: nothing to lose.
+        ready(id("claude:otter"), vec![pct(Window::hours(5), 90.0)]).1,
+    );
+    // 60% used with 6% of the week left: far behind pace.
+    snap.accounts.insert(
+        id("claude:fox"),
+        ready(
+            id("claude:fox"),
+            vec![pct_at(Window::days(7), 60.0, NOW + 36_000)],
+        )
+        .1,
+    );
+    (policy, snap, id("claude:otter"))
+}
+
+#[test]
+fn a_warm_session_is_never_moved_for_pace() {
+    let (policy, snap, current) = pace_pair();
+    let decision = decide(
+        &policy,
+        &snap,
+        &Intents::default(),
+        warm_request(&current, Seam::Warm),
+        NOW,
+    );
+    let Decision::Use {
+        account, pending, ..
+    } = &decision
+    else {
+        panic!("expected a stay, got {decision:?}");
+    };
+    assert_eq!(account.as_str(), "claude:otter");
+    assert_eq!(pending.as_ref().map(AccountId::as_str), Some("claude:fox"));
+    // The same account is taken once the cache is cold.
+    let cold = decide(
+        &policy,
+        &snap,
+        &Intents::default(),
+        warm_request(&current, Seam::Cold),
+        NOW,
+    );
+    assert_eq!(moved_to(&cold), Some("claude:fox"));
+}
+
+#[test]
+fn a_new_session_starts_on_the_account_behind_pace_without_leaving_anything() {
+    let (policy, snap, current) = pace_pair();
+    let decision = decide(
+        &policy,
+        &snap,
+        &Intents::default(),
+        warm_request(&current, Seam::Start),
+        NOW,
+    );
+    assert_eq!(used(&decision), "claude:fox");
+    assert!(
+        !reason_of(&decision).contains("claude:otter"),
+        "a new session has no account to leave: {}",
+        reason_of(&decision)
+    );
+}

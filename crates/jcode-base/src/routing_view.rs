@@ -180,11 +180,10 @@ pub fn build(
     measured: &dyn Measured,
     keys: &[ProviderKeys],
 ) -> RoutingView {
-    let (policy, mut problems) = match Policy::from_config(routing, egress) {
+    let (policy, problems) = match Policy::from_config(routing, egress) {
         Ok(policy) => (Some(policy), Vec::new()),
         Err(errors) => (None, errors.into_iter().map(|error| error.0).collect()),
     };
-    problems.extend(routing.retired_keys());
     let snapshot = policy.as_ref().map(measure).unwrap_or_default();
     let routed_readings = |id: &str| {
         AccountId::parse(id)
@@ -286,6 +285,8 @@ pub struct SavedAccount {
     /// Subscription for OAuth plans, metered for API keys, credits for
     /// credit-funded plans, until `[[routing.accounts]]` says otherwise.
     pub kind: AccountKind,
+    /// A labelled API key, never in the Auto-switch list until it is placed.
+    pub api_key: bool,
 }
 
 fn credential_kind(kind: jcode_usage_types::CredentialKind) -> AccountKind {
@@ -308,6 +309,7 @@ pub fn saved_accounts(keys: &[ProviderKeys]) -> Vec<SavedAccount> {
         saved.push(SavedAccount {
             display_name: identity.display_name,
             kind: credential_kind(identity.kind),
+            api_key: false,
             id: id.to_string(),
         });
     }
@@ -320,6 +322,7 @@ pub fn saved_accounts(keys: &[ProviderKeys]) -> Vec<SavedAccount> {
                     |label| format!("{} · {label} · API key", provider.provider),
                 ),
                 kind: credential_kind(kind),
+                api_key: true,
                 id: account.id.to_string(),
             });
         }

@@ -637,6 +637,23 @@ async fn an_account_behind_a_down_required_proxy_is_skipped() {
     assert!(matches!(plan, Plan::Move(ref outcome) if outcome.account == account("claude:b")));
 }
 
+// A login the user keeps in Manual is not in the policy. A session he put on
+// it stays there, even cold and even with a better pooled account around.
+#[tokio::test]
+async fn a_session_on_an_account_outside_the_list_is_never_moved() {
+    let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
+    env.set_used("claude:a", 5.0);
+    let service = RoutingService::new(env.clone());
+
+    for seam in [Seam::Start, Seam::Cold, Seam::Warm] {
+        let plan = service
+            .plan(&input("claude:manual", seam, Role::Interactive))
+            .await;
+        assert_eq!(plan, Plan::Inactive, "{seam:?}");
+    }
+    assert!(env.log_lines().is_empty());
+}
+
 #[tokio::test]
 async fn a_manually_picked_account_survives_the_next_cold_decision() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);

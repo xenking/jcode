@@ -83,6 +83,7 @@ pub(super) fn same_provider_account_failover_enabled() -> bool {
     crate::config::Config::load()
         .provider
         .same_provider_account_failover
+        && crate::auth::account_pool::AccountPool::load().auto_switch()
 }
 
 pub(super) fn active_account_label_for_provider(provider: ActiveProvider) -> Option<String> {
@@ -170,7 +171,13 @@ pub fn has_alternate_account_in_pool(provider: &str, model: &str) -> bool {
 
 pub(super) fn account_switch_guidance(provider: ActiveProvider) -> Option<String> {
     let kind = multi_account_provider_kind(provider)?;
-    active_account_label_for_provider(provider)?;
+    let label = active_account_label_for_provider(provider)?;
+    if !crate::auth::account_pool::AccountPool::load().auto_switch() {
+        return Some(format!(
+            "Auto-switch is off, so Jcode stayed on {} account `{label}`. Switch account yourself or turn Auto-switch on in Accounts.",
+            kind.display_name()
+        ));
+    }
     let alternatives = same_provider_account_candidates(provider);
     Some(if alternatives.is_empty() {
         format!(
