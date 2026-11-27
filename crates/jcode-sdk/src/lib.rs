@@ -146,6 +146,7 @@ mod client;
 pub mod cloud;
 pub mod collections;
 pub mod desktop_control;
+pub mod desktop_state;
 mod diagnostics;
 mod errors;
 mod launch;

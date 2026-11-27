@@ -78,6 +78,17 @@ it makes the bridge answer `unknown_request` with "Update Jcode on that
 machine"; Desktop shows that and keeps working without sync. Desktop never
 restarts a remote daemon.
 
+## Rust SDK
+
+`jcode_sdk::desktop_state` wraps the three requests for any transport the SDK
+reaches (local bridge, SSH, paired gateway): `DesktopStateClient::{get,
+subscribe, put}` return typed snapshots and a put outcome (`Applied`,
+`Conflict { full }`, `Rejected`). `DesktopStateMirror` keeps a client's copy of a
+space current and replaces it on a `full` conflict or a resync push.
+`DesktopStateSync` owns a connection that reconnects with backoff, resubscribes
+and reports a fresh snapshot after every reconnect. A daemon without the
+capability fails with `UnsupportedCapability` ("Update Jcode on that machine").
+
 ## Not yet done
 
 - Desktop client: one `Space` per machine, push/pull, draft lease. See the
