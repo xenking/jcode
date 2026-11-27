@@ -274,7 +274,7 @@ fn until_text(until: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn accounts_are_named_icon_first() {
-        assert_eq!(super::named("claude:claude-fox"), "🦊 claude:claude-fox");
+    fn a_lone_account_is_named_without_an_icon() {
+        assert_eq!(super::named("claude:claude-fox"), "claude:claude-fox");
     }
 }
