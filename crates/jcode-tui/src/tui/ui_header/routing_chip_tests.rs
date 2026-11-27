@@ -16,10 +16,10 @@ fn text(spans: &[Span<'_>]) -> String {
 }
 
 fn named(account: &str) -> String {
-    format!(
-        "{} {account}",
-        crate::routing_view::resolved_account_icon(account)
-    )
+    match crate::routing_view::resolved_account_icon(account) {
+        Some(icon) => format!("{icon} {account}"),
+        None => account.to_owned(),
+    }
 }
 
 #[test]

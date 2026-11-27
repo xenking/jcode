@@ -67,7 +67,10 @@ pub(crate) fn run(action: RoutingCommand) -> Result<()> {
 /// An account as people read it: its icon first, then the id.
 fn named(account: impl std::fmt::Display) -> String {
     let id = account.to_string();
-    format!("{} {id}", crate::routing_view::resolved_account_icon(&id))
+    match crate::routing_view::resolved_account_icon(&id) {
+        Some(icon) => format!("{icon} {id}"),
+        None => id,
+    }
 }
 
 fn secs(raw: &str) -> Result<i64> {

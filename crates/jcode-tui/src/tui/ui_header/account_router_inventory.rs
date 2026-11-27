@@ -5,8 +5,10 @@ use super::*;
 /// `icon provider  masked-email`: the account's icon first. `provider_key` is
 /// the routing id prefix (`claude`, `openai`).
 fn account_label(provider_key: &str, label: &str, name: &str, email: Option<&str>) -> String {
-    let icon = crate::routing_view::resolved_account_icon(&format!("{provider_key}:{label}"));
-    format!("{icon} {name:<9} {}", masked_identity(email))
+    let icon = crate::routing_view::resolved_account_icon(&format!("{provider_key}:{label}"))
+        .map(|icon| format!("{icon} "))
+        .unwrap_or_default();
+    format!("{icon}{name:<9} {}", masked_identity(email))
 }
 
 /// The provider word of an account row's identity text, past its icon.

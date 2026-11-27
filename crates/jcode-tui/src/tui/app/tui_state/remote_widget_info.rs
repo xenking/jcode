@@ -426,8 +426,13 @@ impl App {
             .clone()
             .or_else(|| (!self.is_remote).then(local_label).flatten());
         let Some(label) = label else { return hint };
-        let icon = crate::routing_view::resolved_account_icon(&format!("{key}:{label}"));
-        Some(format!("{icon} {}", hint.unwrap_or(label)))
+        let named = hint.unwrap_or_else(|| label.clone());
+        Some(
+            match crate::routing_view::resolved_account_icon(&format!("{key}:{label}")) {
+                Some(icon) => format!("{icon} {named}"),
+                None => named,
+            },
+        )
     }
 
     pub(super) fn widget_usage_info(

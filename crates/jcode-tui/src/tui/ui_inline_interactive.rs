@@ -54,15 +54,21 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
         .filter(|identity| identity.label == label);
     // The account's icon leads wherever the account is named. The daemon's
     // resolved icon wins; an older daemon sends none, so derive the default.
-    let icon = route.icon.clone().unwrap_or_else(|| {
-        let account = jcode_provider_core::route_pool_key(&route.api_method).unwrap_or_default();
-        crate::routing_view::resolved_account_icon(&account)
-    });
+    let icon = route
+        .icon
+        .clone()
+        .or_else(|| {
+            let account =
+                jcode_provider_core::route_pool_key(&route.api_method).unwrap_or_default();
+            crate::routing_view::resolved_account_icon(&account)
+        })
+        .map(|icon| format!("{icon} "))
+        .unwrap_or_default();
     // The user's name for the login (`team · Max 20x`), else its email. The
     // internal label is the last resort.
     match identity.and_then(|identity| identity.display_name.or(identity.email())) {
-        Some(name) => format!("{icon} oauth · {name}"),
-        None => format!("{icon} {}", api_method_display(&route.api_method)),
+        Some(name) => format!("{icon}oauth · {name}"),
+        None => format!("{icon}{}", api_method_display(&route.api_method)),
     }
 }
 

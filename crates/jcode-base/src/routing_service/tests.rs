@@ -680,6 +680,25 @@ async fn status_names_every_account_with_its_icon_first() {
 }
 
 #[tokio::test]
+async fn status_leaves_a_providers_only_account_without_an_icon() {
+    let env = FakeEnv::new(
+        RoutingMode::Auto,
+        &[("claude:claude-fox", 1), ("openai:openai-otter", 2)],
+    );
+    let service = RoutingService::new(env.clone());
+    let current = account("claude:claude-fox");
+
+    let text = service
+        .apply_intent("s", Some(&current), RoutingIntentAction::Status)
+        .unwrap();
+
+    assert!(text.contains("this session: claude:claude-fox"), "{text}");
+    assert!(text.contains("* claude:claude-fox"), "{text}");
+    assert!(text.contains("  openai:openai-otter"), "{text}");
+    assert!(!text.contains('🦊') && !text.contains('🦦'), "{text}");
+}
+
+#[tokio::test]
 async fn intents_are_validated_and_reported() {
     let env = FakeEnv::new(RoutingMode::Auto, &[("claude:a", 1), ("claude:b", 2)]);
     let service = RoutingService::new(env.clone());

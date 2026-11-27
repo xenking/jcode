@@ -107,11 +107,10 @@ impl RoutingService {
     pub fn named(&self, account: impl std::fmt::Display) -> String {
         let id = account.to_string();
         let (routing, _) = self.env.routing();
-        let configured = routing.account(&id, |raw| Some(raw.icon.clone())).flatten();
-        format!(
-            "{} {id}",
-            jcode_session_types::account_icon::account_icon(&id, configured.as_deref())
-        )
+        match crate::routing_accounts::icon_in(&routing, &id) {
+            Some(icon) => format!("{icon} {id}"),
+            None => id,
+        }
     }
 
     /// Keeps `session` on an account the person picked by hand: the next

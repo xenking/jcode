@@ -107,6 +107,21 @@ pub fn routing() -> RoutingConfig {
     effective(&crate::config::config().routing, saved, pool)
 }
 
+/// The icon `account` shows among `routing`'s accounts: its configured icon, else
+/// the stable default when its provider has several accounts, else none.
+pub fn icon_in(routing: &RoutingConfig, account: &str) -> Option<String> {
+    let provider = jcode_session_types::account_icon::provider_of(account);
+    let siblings = routing
+        .accounts
+        .iter()
+        .filter(|entry| jcode_session_types::account_icon::provider_of(entry.id.trim()) == provider)
+        .count();
+    let configured = routing
+        .account(account, |raw| Some(raw.icon.clone()))
+        .flatten();
+    jcode_session_types::account_icon::disambiguating_icon(account, configured.as_deref(), siblings)
+}
+
 struct CachedMeasure(i64);
 
 impl Measured for CachedMeasure {

@@ -125,7 +125,8 @@ async fn an_unchanged_account_writes_no_rows_and_a_real_move_writes_exactly_one(
     let rows = setting_rows(&agent.session);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(
-        rows[0].starts_with("Provider: 🦊 claude (claude-fox) → 🦦 claude (claude-otter)"),
+        // One login per provider in the test home: no icon to tell apart.
+        rows[0].starts_with("Provider: claude (claude-fox) → claude (claude-otter)"),
         "{rows:?}"
     );
 }

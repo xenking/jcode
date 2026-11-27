@@ -93,9 +93,7 @@ fn identity(
     let email = email.as_deref().map(crate::usage::mask_email);
     let plan = raw_plan.as_deref().and_then(plan_display);
     AccountIdentity {
-        icon: Some(crate::config::resolved_account_icon(&format!(
-            "{provider}:{label}"
-        ))),
+        icon: None,
         provider: provider.to_owned(),
         display_name: display_name(
             &label,
@@ -145,7 +143,29 @@ pub fn oauth_identities() -> Vec<AccountIdentity> {
         ));
     }
     tell_apart(&mut identities);
+    give_icons(&mut identities);
     identities
+}
+
+/// The default icon only where a provider has several logins; an icon the user
+/// configured stays. Counted here, not via the routing list, which is built
+/// from these identities.
+fn give_icons(identities: &mut [AccountIdentity]) {
+    let routing = &crate::config::config().routing;
+    for index in 0..identities.len() {
+        let provider = identities[index].provider.clone();
+        let siblings = identities
+            .iter()
+            .filter(|other| other.provider == provider)
+            .count();
+        let id = format!("{provider}:{}", identities[index].label);
+        let configured = routing.account(&id, |raw| Some(raw.icon.clone())).flatten();
+        identities[index].icon = jcode_session_types::account_icon::disambiguating_icon(
+            &id,
+            configured.as_deref(),
+            siblings,
+        );
+    }
 }
 
 /// Two logins of one provider can read the same (one email on two plans of the

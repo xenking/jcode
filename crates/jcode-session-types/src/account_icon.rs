@@ -5,6 +5,10 @@
 //! emoji picked by a stable hash of the label from the same palette, so the
 //! icon never changes between runs or machines. `[[routing.accounts]] icon`
 //! overrides either.
+//!
+//! An icon exists to tell accounts of one provider apart, so the default is
+//! shown only for a provider with more than one account ([`disambiguating_icon`]);
+//! a lone account shows an icon only when its owner configured one.
 
 /// `(animal, emoji)` for the animals accounts are usually named after.
 const ANIMALS: &[(&str, &str)] = &[
@@ -94,6 +98,25 @@ pub fn account_icon(account: &str, configured: Option<&str>) -> String {
     ANIMALS[(hash % ANIMALS.len() as u64) as usize].1.to_owned()
 }
 
+/// The provider of an account id (`claude:claude-fox` -> `claude`; `openrouter` -> `openrouter`).
+pub fn provider_of(account: &str) -> &str {
+    account
+        .split_once(':')
+        .map_or(account, |(provider, _)| provider)
+}
+
+/// The icon to show for `account` when its provider has `provider_accounts`
+/// accounts (itself included): the configured icon always, the default only
+/// where it tells accounts apart. Every surface that names an account uses this.
+pub fn disambiguating_icon(
+    account: &str,
+    configured: Option<&str>,
+    provider_accounts: usize,
+) -> Option<String> {
+    let configured = configured.map(str::trim).filter(|icon| !icon.is_empty());
+    (configured.is_some() || provider_accounts > 1).then(|| account_icon(account, configured))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +141,23 @@ mod tests {
     fn a_configured_icon_overrides_the_default_and_a_blank_one_does_not() {
         assert_eq!(account_icon("claude:claude-otter", Some(" 🚀 ")), "🚀");
         assert_eq!(account_icon("claude:claude-otter", Some("  ")), "🦦");
+    }
+
+    #[test]
+    fn a_default_icon_only_tells_accounts_of_one_provider_apart() {
+        assert_eq!(disambiguating_icon("claude:claude-fox", None, 1), None);
+        assert_eq!(disambiguating_icon("claude:claude-fox", None, 0), None);
+        assert_eq!(
+            disambiguating_icon("claude:claude-fox", None, 2),
+            Some("🦊".into())
+        );
+        assert_eq!(
+            disambiguating_icon("claude:claude-fox", Some("🚀"), 1),
+            Some("🚀".into()),
+            "an icon its owner set stays"
+        );
+        assert_eq!(disambiguating_icon("claude:claude-fox", Some(" "), 1), None);
+        assert_eq!(provider_of("claude:claude-fox"), "claude");
+        assert_eq!(provider_of("openrouter"), "openrouter");
     }
 }

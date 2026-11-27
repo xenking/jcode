@@ -509,7 +509,7 @@ saved login is kept as written.
 | Key | Default | Meaning / validation |
 | --- | --- | --- |
 | `id` | required | `provider:label` or `provider`; unique |
-| `icon` | unset | emoji shown first wherever the account is named; unset uses the animal of the label, else a stable hash pick (`jcode_session_types::account_icon`) |
+| `icon` | unset | emoji shown first wherever the account is named, even when it is the provider's only account. Unset: the default (the animal of the label, else a stable hash pick, `jcode_session_types::account_icon`) is shown only when the provider has more than one account |
 | `kind` | the saved plan's (subscription for OAuth plans, metered for API keys) | `subscription`, `credits`, `metered` |
 | `priority` | the pool's priority | integer, or a map by model class with optional `default`; empty map is an error |
 | `models` | `[]` (all) | `*`-globs of model ids this account serves |
@@ -613,13 +613,20 @@ network I/O and reads no key value.
   is `/acct status` (a scrollable view) and in the CLI `jcode routing status`. The
   only chat notice about a change is the single `setting_change` row
   `old -> new (cause)`, written when the account actually changes.
-- **Per-account icon.** Every account has a stable emoji, shown **first**
-  wherever the account is named: model picker rows, the status-bar chip, the
-  routing popover and `routing status`, the change notices, and the usage views
-  (Desktop usage sidebar, TUI info widget, `jcode usage`). Source:
-  `[[routing.accounts]] icon`, else `account_icon(label)`. Widths are measured in
-  display cells (emoji are wide) and chrome rows must not wrap
-  (`python3 scripts/check_tui_chrome.py`).
+- **Per-account icon.** An icon exists to tell accounts of one provider apart, so
+  it is shown **first** wherever the account is named (model picker rows, the
+  status-bar chip, the routing popover and `routing status`, the change notices,
+  and the usage views: Desktop usage sidebar, TUI info widget, `jcode usage`)
+  **only when the provider has more than one account**. A provider's only account
+  shows none. One predicate decides everywhere
+  (`jcode_session_types::account_icon::disambiguating_icon`, fed by
+  `jcode_base::routing_accounts::icon_in`); the daemon sends the resolved icon (or
+  none) in `RoutingAccountView.icon`, `ModelRoute.icon` and `AccountIdentity.icon`,
+  and clients show exactly what they are sent. Source: `[[routing.accounts]] icon`
+  (an icon the user set stays even on a lone account), else `account_icon(label)`.
+  Desktop's composer model chip leads with the serving account's icon under the
+  same rule. Widths are measured in display cells (emoji are wide) and chrome rows
+  must not wrap (`python3 scripts/check_tui_chrome.py`).
 - **Account-aware model picker (TUI and Desktop).** A model route for a provider
   with several logins lists one entry per account (`account = "provider:label"`,
   an optional field on `ModelRoute`/`ModelRouteInfo`, omitted on the wire when

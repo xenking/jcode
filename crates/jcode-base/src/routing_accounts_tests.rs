@@ -20,7 +20,7 @@ fn three_logins() -> Vec<SavedAccount> {
 }
 
 /// A pool with every login placed, so no priority is looked up on disk.
-fn pool(priorities: [(&str, u32); 3]) -> AccountPool {
+fn pool<const N: usize>(priorities: [(&str, u32); N]) -> AccountPool {
     AccountPool {
         priorities: priorities
             .into_iter()
@@ -124,4 +124,38 @@ fn an_entry_overrides_only_what_it_sets() {
     assert_eq!(find("claude:panda").priority, Some(PriorityConfig::Flat(9)));
     assert_eq!(find("claude:fox").on_limit, OnLimit::Switch);
     assert_eq!(find("opencode-go:work").kind, Some(AccountKind::Metered));
+}
+
+#[test]
+fn an_icon_tells_accounts_of_one_provider_apart_and_a_lone_account_shows_none() {
+    let routing = effective(&RoutingConfig::default(), &three_logins(), &pool([]));
+    // Two or more logins of a provider: each shows its default icon.
+    assert_eq!(icon_in(&routing, "claude:fox"), Some("🦊".into()));
+    assert_eq!(icon_in(&routing, "claude:otter"), Some("🦦".into()));
+
+    // One login per provider: nothing to tell apart, so no icon.
+    let lone = effective(
+        &RoutingConfig::default(),
+        &[saved("claude:fox"), saved("openai:otter")],
+        &pool([]),
+    );
+    assert_eq!(icon_in(&lone, "claude:fox"), None);
+    assert_eq!(icon_in(&lone, "openai:otter"), None);
+
+    // An icon the owner set himself stays on a lone account.
+    let configured = RoutingConfig {
+        accounts: vec![AccountConfig {
+            id: "claude:fox".into(),
+            icon: Some("🚀".into()),
+            ..AccountConfig::default()
+        }],
+        ..RoutingConfig::default()
+    };
+    let lone = effective(
+        &configured,
+        &[saved("claude:fox"), saved("openai:otter")],
+        &pool([]),
+    );
+    assert_eq!(icon_in(&lone, "claude:fox"), Some("🚀".into()));
+    assert_eq!(icon_in(&lone, "openai:otter"), None);
 }

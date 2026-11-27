@@ -56,7 +56,11 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
 
 pub use crate::config::resolved_account_icon;
 
-fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView {
+fn account_view(
+    routing: &RoutingConfig,
+    raw: &AccountConfig,
+    readings: &[Reading],
+) -> RoutingAccountView {
     let (priority, class_priority) = match raw.priority.as_ref().unwrap_or(&PriorityConfig::Flat(1))
     {
         PriorityConfig::Flat(priority) => (Some(*priority), BTreeMap::new()),
@@ -67,10 +71,7 @@ fn account_view(raw: &AccountConfig, readings: &[Reading]) -> RoutingAccountView
     };
     RoutingAccountView {
         id: raw.id.trim().to_string(),
-        icon: Some(jcode_session_types::account_icon::account_icon(
-            raw.id.trim(),
-            raw.icon.as_deref(),
-        )),
+        icon: crate::routing_accounts::icon_in(routing, raw.id.trim()),
         kind: match raw.kind.unwrap_or_default() {
             AccountKind::Subscription => "subscription",
             AccountKind::Credits => "credits",
@@ -183,7 +184,7 @@ pub fn build(
     };
 
     let (accounts, budgets) = routing.each(
-        |raw| account_view(raw, routed_readings(&raw.id)),
+        |raw| account_view(routing, raw, routed_readings(&raw.id)),
         |raw| {
             let resolved = policy.as_ref().and_then(|policy| {
                 policy

@@ -390,13 +390,18 @@ fn oauth_row_displays_email_instead_of_account_label() {
     let route = &mut picker.entries[0].options[0];
     route.api_method = "openai-oauth@work".into();
     route.detail = "account work · full.person@example.com · expired".into();
-    let icon = crate::routing_view::resolved_account_icon("openai:work");
     assert_eq!(
         route_method_display(route),
-        format!("{icon} oauth · full.person@example.com")
+        "oauth · full.person@example.com",
+        "a provider with one login shows no icon"
+    );
+    route.icon = Some("🦦".into());
+    assert_eq!(
+        route_method_display(route),
+        "🦦 oauth · full.person@example.com"
     );
     route.detail = "account work · quota reached, contact support@example.com".into();
-    assert_eq!(route_method_display(route), format!("{icon} oauth · work"));
+    assert_eq!(route_method_display(route), "🦦 oauth · work");
     route.detail = "[global] account work · full.person@example.com".into();
     assert!(route_method_display(route).contains("full.person@example.com"));
     route.api_method = "openai-api-key".into();
@@ -410,11 +415,13 @@ fn oauth_row_shows_the_account_name_and_plan_before_the_email() {
     route.api_method = "claude-oauth@claude-otter".into();
     route.detail =
         "account claude-otter [team · Max 20x] · t***m@example.com · requires extra usage".into();
+    assert_eq!(route_method_display(route), "oauth · team · Max 20x");
+    // The daemon's resolved icon (the provider has several logins, or the
+    // user set one) leads the row.
+    route.icon = Some("🦦".into());
     assert_eq!(route_method_display(route), "🦦 oauth · team · Max 20x");
     // A detail naming another login never labels this one.
     route.api_method = "claude-oauth@claude-fox".into();
-    assert_eq!(route_method_display(route), "🦊 oauth · claude-fox");
-    // The daemon's resolved icon (a configured override) wins over the default.
     route.icon = Some("🚀".into());
     assert_eq!(route_method_display(route), "🚀 oauth · claude-fox");
 }
@@ -427,6 +434,7 @@ fn oauth_email_is_visible_in_unselected_suggestion_rows_and_width_scan() {
     picker.selected = 1;
     picker.entries[0].options[0].api_method = "claude-oauth@personal".into();
     picker.entries[0].options[0].detail = "account personal · full.person@example.com".into();
+    picker.entries[0].options[0].icon = Some("🦊".into());
     let lines = model_suggestion_lines(&picker, 6);
     assert!(
         lines

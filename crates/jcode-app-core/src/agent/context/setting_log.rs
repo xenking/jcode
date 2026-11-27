@@ -38,9 +38,11 @@ impl Agent {
                     Some(jcode_provider_core::ActiveProvider::OpenAI) => "openai",
                     _ => "claude",
                 };
-                let icon =
-                    jcode_base::routing_view::resolved_account_icon(&format!("{key}:{account}"));
-                format!("{icon} {provider} ({account})")
+                let named = format!("{provider} ({account})");
+                match jcode_base::routing_view::resolved_account_icon(&format!("{key}:{account}")) {
+                    Some(icon) => format!("{icon} {named}"),
+                    None => named,
+                }
             }
             None => provider,
         };

@@ -90,13 +90,8 @@ fn header_chip_follows_the_decision_at_narrow_and_wide_widths() {
     );
     let wide = header_text(&app, 140);
     assert!(wide.contains("claude:team"), "{wide}");
-    assert!(
-        wide.contains(&format!(
-            "→ {} claude:spare",
-            crate::routing_view::resolved_account_icon("claude:spare")
-        )),
-        "{wide}"
-    );
+    // One account per provider on this machine: nothing to tell apart, no icon.
+    assert!(wide.contains("→ claude:spare"), "{wide}");
     for width in [20u16, 32, 48, 64] {
         for line in persistent_header(&app, width) {
             assert!(line.width() < usize::from(width), "width={width}: {line:?}");

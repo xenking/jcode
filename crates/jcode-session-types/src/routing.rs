@@ -108,7 +108,8 @@ pub struct RoutingView {
 pub struct RoutingAccountView {
     /// `provider` or `provider:label`.
     pub id: String,
-    /// Resolved icon: the configured `icon`, else the stable default for the label.
+    /// Resolved icon: the configured `icon`, else the stable default for the
+    /// label when the provider has several accounts, else none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     /// `subscription`, `credits` or `metered`.
