@@ -61,8 +61,9 @@ fn supported(provider: LoginProviderDescriptor) -> Option<LoginProvider> {
     use LoginProviderTarget::*;
     let method = match provider.target {
         Claude | OpenAi | Gemini | Antigravity | Google => LoginMethod::OAuth,
-        Copilot => LoginMethod::DeviceCode,
-        ClaudeApiKey | OpenAiApiKey | OpenRouter | Cursor | Jcode => LoginMethod::ApiKey,
+        // Cursor signs in through its browser page and polls for approval.
+        Copilot | Cursor => LoginMethod::DeviceCode,
+        ClaudeApiKey | OpenAiApiKey | OpenRouter | Jcode => LoginMethod::ApiKey,
         // The harness key API stores any key-based catalog profile in its own env file.
         OpenAiCompatible(profile) if profile.requires_api_key => LoginMethod::ApiKey,
         _ => return None,

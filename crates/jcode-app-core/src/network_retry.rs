@@ -184,6 +184,10 @@ fn classify_text(text: &str) -> Option<String> {
         return None;
     }
 
+    if text.contains("required egress proxy '") && text.contains("' is unreachable") {
+        return Some("the required egress proxy is temporarily unreachable".to_string());
+    }
+
     let network_markers = [
         "connection reset",
         "connection aborted",
@@ -698,6 +702,7 @@ mod tests {
              client error (Connect): tls handshake eof",
             // Body cut off mid-stream.
             "error decoding response body: request or response body error: operation timed out",
+            "required egress proxy 'corp' is unreachable",
         ];
         for error in real_errors {
             assert!(
@@ -720,6 +725,8 @@ mod tests {
             "insufficient_quota: your credit balance is too low",
             "400 bad request: context length exceeded",
             "content_policy_violation",
+            "egress proxy 'corp' has an invalid URL",
+            "egress proxy 'corp' is not configured",
         ];
         for error in deterministic {
             assert!(

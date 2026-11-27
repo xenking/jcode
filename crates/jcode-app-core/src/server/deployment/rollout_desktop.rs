@@ -87,6 +87,11 @@ struct RestartWindow {
     process_env: BTreeMap<String, String>,
 }
 
+/// Desktop workspace snapshot formats a restart manifest may carry: the ones the
+/// new Desktop can restore (v1 flat, v2 spaces). Keep in step with the Desktop's
+/// accepted range, or a running Desktop can no longer be swapped.
+const SNAPSHOT_FORMATS_RESTARTABLE: std::ops::RangeInclusive<u64> = 1..=2;
+
 const PROFILE_ENV: &[&str] = &[
     "HOME",
     "XDG_STATE_HOME",
@@ -174,7 +179,11 @@ fn read_restart_windows(
             }
             let saved: RestartWindow = serde_json::from_reader(file)?;
             anyhow::ensure!(saved.pid == pid && window.parse() == Ok(saved.window));
-            anyhow::ensure!(saved.snapshot["format_version"].as_u64() == Some(1));
+            anyhow::ensure!(
+                saved.snapshot["format_version"]
+                    .as_u64()
+                    .is_some_and(|version| SNAPSHOT_FORMATS_RESTARTABLE.contains(&version))
+            );
             let tabs = saved.snapshot["slots"].as_array().context("missing tabs")?;
             anyhow::ensure!(saved.snapshot["active"].is_u64());
             anyhow::ensure!(tabs.iter().all(|tab| {
@@ -1214,6 +1223,31 @@ mod tests {
         );
         assert!(read_restart_windows(root.path(), 44, generation).is_err());
         save("42-8.json", fixture(44, 8));
+        assert!(read_restart_windows(root.path(), 42, generation).is_err());
+    }
+
+    #[test]
+    fn restart_windows_accept_the_spaces_snapshot_format_and_refuse_unknown_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let windows = root.path().join("windows");
+        std::fs::create_dir(&windows).unwrap();
+        let generation = std::time::SystemTime::now() - Duration::from_secs(30);
+        let save = |window: u64, version: u64| {
+            let value = serde_json::json!({
+                "pid": 42, "window": window, "updated_at_ms": 1,
+                "args": [], "env": [],
+                "snapshot": {"format_version": version, "active": 0, "slots": []}
+            });
+            std::fs::write(windows.join(format!("42-{window}.json")), value.to_string()).unwrap();
+        };
+        save(1, 2);
+        assert_eq!(
+            read_restart_windows(root.path(), 42, generation)
+                .unwrap()
+                .len(),
+            1
+        );
+        save(2, 3);
         assert!(read_restart_windows(root.path(), 42, generation).is_err());
     }
 

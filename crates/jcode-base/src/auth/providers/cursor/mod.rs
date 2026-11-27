@@ -3,19 +3,16 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
-// Cursor's server rejects stale client versions for chat ("Update Required").
-// This must track a real, currently-served Cursor IDE release (e.g. 3.8.x),
-// not the Composer model number. Override at runtime with
-// `JCODE_CURSOR_CLIENT_VERSION` if Cursor moves the floor again.
-const CURSOR_DIRECT_CLIENT_VERSION_DEFAULT: &str = "3.8.24";
 const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
-pub const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
+pub(crate) const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
+const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
+
+pub mod login;
+use login::{CURSOR_LOGIN_SOURCE, load_login};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalCursorAuthSource {
@@ -89,36 +86,66 @@ struct CursorRefreshRequest<'a> {
     refresh_token: &'a str,
 }
 
-/// Check if Cursor API key is available (env var or saved file).
-pub fn has_cursor_api_key() -> bool {
-    load_api_key().is_ok()
-}
-
 /// Whether direct Cursor native auth is available without relying on cursor-agent runtime.
 pub fn has_cursor_native_auth() -> bool {
-    load_access_token_from_env_or_file().is_ok() || has_cursor_vscdb_token() || has_cursor_api_key()
+    load_access_token_from_env_or_file().is_ok()
+        || has_cursor_vscdb_token()
+        || load_api_key().is_ok()
+}
+
+/// Which trusted Cursor sources hold a usable token: `(auth.json, state.vscdb)`.
+pub fn trusted_external_token_sources() -> (bool, bool) {
+    (has_cursor_auth_file_token(), has_cursor_vscdb_token())
 }
 
 /// Check whether a trusted Cursor auth.json contains a usable direct access token.
-pub fn has_cursor_auth_file_token() -> bool {
+fn has_cursor_auth_file_token() -> bool {
     let Ok(file_path) = cursor_auth_file_path() else {
         return false;
     };
-    if !file_path.exists()
-        || !crate::auth::external_trust::source_allowed_for_path(
-            CURSOR_AUTH_FILE_SOURCE_ID,
-            &file_path,
-        )
-    {
-        return false;
-    }
-
-    load_access_token_from_env_or_file()
-        .map(|tokens| tokens.source == "cursor_auth_file")
-        .unwrap_or(false)
+    auth_file_trusted(&file_path)
+        && load_access_token_from_env_or_file()
+            .map(|tokens| tokens.source == "cursor_auth_file")
+            .unwrap_or(false)
 }
 
-pub fn preferred_external_auth_source() -> Option<ExternalCursorAuthSource> {
+/// Cursor's auth.json exists and the user has trusted it.
+fn auth_file_trusted(path: &Path) -> bool {
+    path.exists()
+        && crate::auth::external_trust::source_allowed_for_path(CURSOR_AUTH_FILE_SOURCE_ID, path)
+}
+
+/// Cursor's state.vscdb exists and the user has trusted it.
+fn vscdb_trusted() -> bool {
+    find_cursor_vscdb().is_ok_and(|path| {
+        crate::auth::external_trust::source_allowed_for_path(CURSOR_VSCDB_SOURCE_ID, &path)
+    })
+}
+
+fn non_empty(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The tokens in a Cursor `auth.json`, `None` when it holds no access token.
+fn read_auth_file_tokens(file_path: &Path) -> Result<Option<CursorDirectTokens>> {
+    let safe_path = crate::storage::validate_external_auth_file(file_path)?;
+    let raw = std::fs::read_to_string(&safe_path)
+        .with_context(|| format!("Failed to read {}", file_path.display()))?;
+    let parsed: CursorAuthFileData = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", file_path.display()))?;
+    Ok(parsed
+        .access_token
+        .as_deref()
+        .and_then(non_empty)
+        .map(|access_token| CursorDirectTokens {
+            access_token,
+            refresh_token: parsed.refresh_token.as_deref().and_then(non_empty),
+            source: "cursor_auth_file",
+        }))
+}
+
+pub(crate) fn preferred_external_auth_source() -> Option<ExternalCursorAuthSource> {
     if cursor_auth_file_path()
         .map(|path| path.exists())
         .unwrap_or(false)
@@ -135,11 +162,9 @@ pub fn preferred_external_auth_source() -> Option<ExternalCursorAuthSource> {
 
 pub fn has_unconsented_external_auth() -> Option<ExternalCursorAuthSource> {
     let source = preferred_external_auth_source()?;
-    let allowed = source
-        .path()
-        .ok()
-        .map(|path| crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path))
-        .unwrap_or(false);
+    let allowed = source.path().is_ok_and(|path| {
+        crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
+    });
     if allowed { None } else { Some(source) }
 }
 
@@ -149,48 +174,27 @@ pub fn trust_external_auth_source(source: ExternalCursorAuthSource) -> Result<()
     Ok(())
 }
 
-/// Resolve the advertised client version for native Cursor API requests.
-pub fn cursor_direct_client_version() -> String {
-    std::env::var("JCODE_CURSOR_CLIENT_VERSION")
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or_else(|| CURSOR_DIRECT_CLIENT_VERSION_DEFAULT.to_string())
-}
-
 /// Check if Cursor IDE's local vscdb has an access token.
-pub fn has_cursor_vscdb_token() -> bool {
-    find_cursor_vscdb()
-        .ok()
-        .map(|path| {
-            crate::auth::external_trust::source_allowed_for_path(CURSOR_VSCDB_SOURCE_ID, &path)
-        })
-        .unwrap_or(false)
-        && read_vscdb_token().is_ok()
+fn has_cursor_vscdb_token() -> bool {
+    vscdb_trusted() && read_vscdb_token().is_ok()
 }
 
 /// Read access token from Cursor IDE's SQLite storage (state.vscdb).
 /// Uses the `sqlite3` CLI to avoid adding a native dependency.
-pub fn read_vscdb_token() -> Result<String> {
+fn read_vscdb_token() -> Result<String> {
     let db_path = find_cursor_vscdb()?;
     read_vscdb_key(&db_path, "cursorAuth/accessToken")
 }
 
 /// Read refresh token from Cursor IDE's SQLite storage (state.vscdb).
-pub fn read_vscdb_refresh_token() -> Result<String> {
+fn read_vscdb_refresh_token() -> Result<String> {
     let db_path = find_cursor_vscdb()?;
     read_vscdb_key(&db_path, "cursorAuth/refreshToken")
 }
 
-/// Read the machine ID from Cursor's vscdb (needed for API checksum header).
-pub fn read_vscdb_machine_id() -> Result<String> {
-    let db_path = find_cursor_vscdb()?;
-    read_vscdb_key(&db_path, "storage.serviceMachineId")
-}
-
 /// The email Cursor IDE is signed in with, read from its local state. Only
 /// the address is read, never a token.
-pub fn vscdb_cached_email() -> Option<String> {
+pub(crate) fn vscdb_cached_email() -> Option<String> {
     let path = cursor_vscdb_paths()
         .into_iter()
         .find(|path| path.exists())?;
@@ -363,48 +367,33 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 }
 
 /// Load direct Cursor tokens from env or Cursor's auth.json.
-pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
-    if let Ok(access_token) = std::env::var("CURSOR_ACCESS_TOKEN") {
-        let access_token = access_token.trim().to_string();
-        if !access_token.is_empty() {
-            let refresh_token = std::env::var("CURSOR_REFRESH_TOKEN")
+pub(crate) fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
+    if let Some(access_token) = std::env::var("CURSOR_ACCESS_TOKEN")
+        .ok()
+        .and_then(|raw| non_empty(&raw))
+    {
+        return Ok(CursorDirectTokens {
+            access_token,
+            refresh_token: std::env::var("CURSOR_REFRESH_TOKEN")
                 .ok()
-                .map(|raw| raw.trim().to_string())
-                .filter(|raw| !raw.is_empty());
-            return Ok(CursorDirectTokens {
-                access_token,
-                refresh_token,
-                source: "env",
-            });
-        }
+                .and_then(|raw| non_empty(&raw)),
+            source: "env",
+        });
+    }
+
+    if let Some(login) = load_login() {
+        return Ok(CursorDirectTokens {
+            access_token: login.access_token.trim().to_string(),
+            refresh_token: login.refresh_token.map(|t| t.trim().to_string()),
+            source: CURSOR_LOGIN_SOURCE,
+        });
     }
 
     let file_path = cursor_auth_file_path()?;
-    if file_path.exists()
-        && crate::auth::external_trust::source_allowed_for_path(
-            CURSOR_AUTH_FILE_SOURCE_ID,
-            &file_path,
-        )
+    if auth_file_trusted(&file_path)
+        && let Some(tokens) = read_auth_file_tokens(&file_path)?
     {
-        let safe_path = crate::storage::validate_external_auth_file(&file_path)?;
-        let raw = std::fs::read_to_string(&safe_path)
-            .with_context(|| format!("Failed to read {}", file_path.display()))?;
-        let parsed: CursorAuthFileData = serde_json::from_str(&raw)
-            .with_context(|| format!("Failed to parse {}", file_path.display()))?;
-        if let Some(access_token) = parsed
-            .access_token
-            .map(|token| token.trim().to_string())
-            .filter(|token| !token.is_empty())
-        {
-            return Ok(CursorDirectTokens {
-                access_token,
-                refresh_token: parsed
-                    .refresh_token
-                    .map(|token| token.trim().to_string())
-                    .filter(|token| !token.is_empty()),
-                source: "cursor_auth_file",
-            });
-        }
+        return Ok(tokens);
     }
 
     anyhow::bail!(
@@ -421,19 +410,16 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
         if let Some(refresh_token) = tokens.refresh_token.as_deref()
             && let Ok(refreshed) = refresh_direct_access_token(client, refresh_token).await
         {
-            return Ok(CursorDirectTokens {
+            let refreshed = CursorDirectTokens {
                 source: tokens.source,
                 ..refreshed
-            });
+            };
+            persist_refreshed_login(&refreshed);
+            return Ok(refreshed);
         }
     }
 
-    if find_cursor_vscdb()
-        .ok()
-        .map(|path| {
-            crate::auth::external_trust::source_allowed_for_path(CURSOR_VSCDB_SOURCE_ID, &path)
-        })
-        .unwrap_or(false)
+    if vscdb_trusted()
         && let Ok(access_token) = read_vscdb_token()
     {
         let refresh_token = read_vscdb_refresh_token().ok();
@@ -473,6 +459,7 @@ pub async fn refresh_resolved_tokens(
         .context("Cursor token was rejected and no refresh token is available")?;
     let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
     refreshed.source = tokens.source;
+    persist_refreshed_login(&refreshed);
     if tokens.source == "cursor_auth_file"
         && let Err(err) = save_auth_file_tokens(&refreshed)
     {
@@ -483,14 +470,20 @@ pub async fn refresh_resolved_tokens(
     Ok(refreshed)
 }
 
+/// jcode's own login keeps its refreshed tokens; Cursor's files are never touched here.
+fn persist_refreshed_login(tokens: &CursorDirectTokens) {
+    if tokens.source == CURSOR_LOGIN_SOURCE
+        && let Err(err) = login::update_login_tokens(tokens)
+    {
+        crate::logging::warn(&format!(
+            "Could not persist refreshed Cursor login: {err:#}"
+        ));
+    }
+}
+
 fn save_auth_file_tokens(tokens: &CursorDirectTokens) -> Result<()> {
     let file_path = cursor_auth_file_path()?;
-    if !file_path.exists()
-        || !crate::auth::external_trust::source_allowed_for_path(
-            CURSOR_AUTH_FILE_SOURCE_ID,
-            &file_path,
-        )
-    {
+    if !auth_file_trusted(&file_path) {
         return Ok(());
     }
     let file_path = crate::storage::validate_external_auth_file(&file_path)?;
@@ -535,6 +528,47 @@ fn merge_auth_file_tokens(existing: &[u8], tokens: &CursorDirectTokens) -> Resul
     Ok(out)
 }
 
+/// The sign-in of the local Cursor app (its `state.vscdb`, else the Cursor CLI's
+/// `auth.json`), read-only. The error says exactly what is missing.
+pub(super) fn read_local_app_login() -> Result<(CursorDirectTokens, Option<String>)> {
+    let vscdb = cursor_vscdb_paths().into_iter().find(|path| path.exists());
+    if let Some(path) = &vscdb {
+        let path = crate::storage::validate_external_auth_file(path)?;
+        if let Ok(access_token) = read_vscdb_key(&path, "cursorAuth/accessToken") {
+            let refresh_token = read_vscdb_key(&path, "cursorAuth/refreshToken").ok();
+            let email = read_vscdb_key(&path, "cursorAuth/cachedEmail").ok();
+            return Ok((
+                CursorDirectTokens {
+                    access_token,
+                    refresh_token,
+                    source: "cursor_vscdb",
+                },
+                email,
+            ));
+        }
+    }
+    let auth_file = cursor_auth_file_path()?;
+    if auth_file.exists()
+        && let Some(tokens) = read_auth_file_tokens(&auth_file)?
+    {
+        return Ok((tokens, None));
+    }
+    match vscdb {
+        Some(path) => anyhow::bail!(
+            "Cursor is installed but not signed in: no sign-in in {}. Sign in to Cursor, or run `jcode login --provider cursor` for a browser login.",
+            path.display()
+        ),
+        None => anyhow::bail!(
+            "Cursor is not installed or has never been signed in on this machine: no state.vscdb at {} and no Cursor CLI login at {}. Run `jcode login --provider cursor` for a browser login.",
+            cursor_vscdb_paths()
+                .first()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            auth_file.display()
+        ),
+    }
+}
+
 pub fn error_indicates_not_logged_in(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}").to_ascii_lowercase();
     text.contains("error_not_logged_in")
@@ -543,21 +577,9 @@ pub fn error_indicates_not_logged_in(err: &anyhow::Error) -> bool {
         || text.contains("action required: login")
 }
 
-/// Build the `x-client-key` header expected by Cursor's native API.
-pub fn client_key_for_access_token(access_token: &str) -> String {
-    sha256_hex(access_token)
-}
-
 /// Build the `x-session-id` header expected by Cursor's native API.
 pub fn session_id_for_access_token(access_token: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, access_token.as_bytes()).to_string()
-}
-
-/// Build the `x-cursor-checksum` header expected by Cursor's native API.
-pub fn checksum_for_access_token(access_token: &str) -> String {
-    let machine_id =
-        read_vscdb_machine_id().unwrap_or_else(|_| sha256_hex(&format!("{access_token}machineId")));
-    format!("{}{}", timestamp_header_now(), machine_id)
 }
 
 async fn refresh_direct_access_token(
@@ -579,15 +601,7 @@ async fn refresh_direct_access_token(
             .await
             .context("Failed to refresh Cursor access token")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
-            anyhow::bail!(
-                "Cursor access token refresh failed ({}): {}",
-                status,
-                body.trim()
-            );
-        }
+        let response = ensure_success(response, "Cursor access token refresh").await?;
 
         let parsed: CursorRefreshResponse = response
             .json()
@@ -615,6 +629,16 @@ async fn refresh_direct_access_token(
     result
 }
 
+/// The response itself, or an error carrying the HTTP status and body.
+async fn ensure_success(response: reqwest::Response, what: &str) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = crate::util::http_error_body(response, "HTTP error").await;
+    anyhow::bail!("{what} failed ({status}): {}", body.trim());
+}
+
 async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<CursorDirectTokens> {
     let response = client
         .post(format!("{CURSOR_API_BASE}/auth/exchange_user_api_key"))
@@ -625,15 +649,7 @@ async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<C
         .await
         .context("Failed to exchange Cursor API key for access token")?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = crate::util::http_error_body(response, "HTTP error").await;
-        anyhow::bail!(
-            "Cursor API key exchange failed ({}): {}",
-            status,
-            body.trim()
-        );
-    }
+    let response = ensure_success(response, "Cursor API key exchange").await?;
 
     let parsed: CursorApiKeyExchangeResponse = response
         .json()
@@ -646,7 +662,7 @@ async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<C
     })
 }
 
-fn token_is_expiring_soon(token: &str) -> bool {
+pub(crate) fn token_is_expiring_soon(token: &str) -> bool {
     let Some(exp) = token_expiry_epoch_secs(token) else {
         return false;
     };
@@ -663,33 +679,6 @@ fn token_expiry_epoch_secs(token: &str) -> Option<u64> {
     serde_json::from_slice::<JwtClaims>(&decoded).ok()?.exp
 }
 
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn timestamp_header_now() -> String {
-    let epoch_kiloseconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() / 1_000_000)
-        .unwrap_or(0);
-    let mut bytes = [
-        ((epoch_kiloseconds >> 40) & 0xFF) as u8,
-        ((epoch_kiloseconds >> 32) & 0xFF) as u8,
-        ((epoch_kiloseconds >> 24) & 0xFF) as u8,
-        ((epoch_kiloseconds >> 16) & 0xFF) as u8,
-        ((epoch_kiloseconds >> 8) & 0xFF) as u8,
-        (epoch_kiloseconds & 0xFF) as u8,
-    ];
-    let mut prev = 165u8;
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = (*byte ^ prev).wrapping_add(index as u8);
-        prev = *byte;
-    }
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
 #[cfg(test)]
-#[path = "tests/cursor_tests.rs"]
+#[path = "../tests/cursor_tests.rs"]
 mod tests;

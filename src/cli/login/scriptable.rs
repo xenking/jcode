@@ -9,19 +9,24 @@ pub(super) fn auto_scriptable_flow_reason(
         return None;
     }
 
-    let supports_scriptable = matches!(
-        provider.target,
-        LoginProviderTarget::Claude
-            | LoginProviderTarget::OpenAi
-            | LoginProviderTarget::Gemini
-            | LoginProviderTarget::Antigravity
-            | LoginProviderTarget::Google
-            | LoginProviderTarget::Copilot
-    ) || matches!(
-        provider.target,
-        LoginProviderTarget::OpenAiCompatible(profile)
-            if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id
-    );
+    let cursor_browser_login = provider.target == LoginProviderTarget::Cursor
+        && !options.supplies_api_key()
+        && !options.import_local_app;
+    let supports_scriptable = cursor_browser_login
+        || matches!(
+            provider.target,
+            LoginProviderTarget::Claude
+                | LoginProviderTarget::OpenAi
+                | LoginProviderTarget::Gemini
+                | LoginProviderTarget::Antigravity
+                | LoginProviderTarget::Google
+                | LoginProviderTarget::Copilot
+        )
+        || matches!(
+            provider.target,
+            LoginProviderTarget::OpenAiCompatible(profile)
+                if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id
+        );
     if !supports_scriptable {
         return None;
     }
@@ -281,6 +286,16 @@ pub(super) async fn start_scriptable_login(
                 current_time_ms() + (device_resp.expires_in as i64 * 1000),
             )
         }
+        LoginProviderTarget::Cursor => {
+            let challenge = auth::cursor::login::begin_login()?;
+            let auth_url = challenge.login_url.clone();
+            let pending = PendingScriptableLogin::Cursor {
+                account_label: account_label.map(str::to_owned),
+                challenge,
+            };
+            let expires_at_ms = pending.default_expires_at_ms();
+            (pending, auth_url, "complete", None, expires_at_ms)
+        }
         LoginProviderTarget::OpenAiCompatible(profile)
             if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
         {
@@ -311,7 +326,7 @@ pub(super) async fn start_scriptable_login(
         }
         _ => {
             anyhow::bail!(
-                "`--print-auth-url` is currently supported for: claude, openai, gemini, antigravity, google, copilot, muse-subscription."
+                "`--print-auth-url` is currently supported for: claude, openai, gemini, antigravity, google, copilot, cursor, muse-subscription."
             )
         }
     };
@@ -400,6 +415,12 @@ pub(super) async fn complete_scriptable_login(
             }
             complete_scriptable_copilot_login(provider.id, options).await
         }
+        LoginProviderTarget::Cursor => {
+            if input.is_some() || !options.complete {
+                anyhow::bail!("Cursor completion requires `--complete` and takes no other input.")
+            }
+            complete_scriptable_cursor_login(provider.id, options).await
+        }
         LoginProviderTarget::OpenAiCompatible(profile)
             if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
         {
@@ -414,7 +435,7 @@ pub(super) async fn complete_scriptable_login(
             complete_scriptable_muse_subscription_login(provider.id, options).await
         }
         _ => anyhow::bail!(
-            "Scriptable completion is currently supported for: claude, openai, gemini, antigravity, google, copilot, muse-subscription."
+            "Scriptable completion is currently supported for: claude, openai, gemini, antigravity, google, copilot, cursor, muse-subscription."
         ),
     }
 }
@@ -770,6 +791,40 @@ pub(super) async fn complete_scriptable_muse_subscription_login(
     Ok(LoginFlowOutcome::Completed)
 }
 
+pub(super) async fn complete_scriptable_cursor_login(
+    provider_id: &str,
+    options: &LoginOptions,
+) -> Result<LoginFlowOutcome> {
+    let pending_path = pending_login_path("cursor", options.flow_id.as_deref())?;
+    let PendingScriptableLogin::Cursor {
+        account_label,
+        challenge,
+    } = load_pending_login(&pending_path, "cursor")?
+    else {
+        anyhow::bail!("Pending Cursor login state is invalid.");
+    };
+
+    let client = crate::provider::shared_http_client();
+    let login =
+        auth::cursor::login::finish_login(&client, &challenge, account_label.as_deref()).await?;
+    clear_pending_login(&pending_path);
+    crate::telemetry::record_auth_success(provider_id, "oauth");
+    emit_scriptable_auth_success(
+        options.json,
+        ScriptableAuthSuccess {
+            status: "authenticated",
+            provider: provider_id.to_string(),
+            account_label: Some(login.label.clone()),
+            credentials_path: Some(auth::cursor::login::login_path()?.display().to_string()),
+            email: login.email.as_deref().map(crate::usage::mask_email),
+        },
+    )?;
+    if !options.json {
+        eprintln!("Cursor login complete (account: {}).", login.label);
+    }
+    Ok(LoginFlowOutcome::Completed)
+}
+
 pub(super) async fn complete_scriptable_copilot_login(
     provider_id: &str,
     options: &LoginOptions,
@@ -827,6 +882,7 @@ pub(super) fn pending_login_path_in(
                 | "antigravity"
                 | "google"
                 | "copilot"
+                | "cursor"
                 | "muse-subscription"
         ),
         "Unsupported scriptable login provider."
@@ -856,6 +912,7 @@ pub(super) fn cancel_scriptable_login(
         LoginProviderTarget::Antigravity => "antigravity",
         LoginProviderTarget::Google => "google",
         LoginProviderTarget::Copilot => "copilot",
+        LoginProviderTarget::Cursor => "cursor",
         LoginProviderTarget::OpenAiCompatible(profile)
             if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
         {

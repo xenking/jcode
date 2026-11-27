@@ -22,7 +22,7 @@ pub mod codex;
 mod commands;
 #[path = "providers/copilot.rs"]
 pub mod copilot;
-#[path = "providers/cursor.rs"]
+#[path = "providers/cursor/mod.rs"]
 pub mod cursor;
 #[path = "status/doctor.rs"]
 pub mod doctor;
@@ -1082,7 +1082,7 @@ fn probe_copilot_status(status: &mut AuthStatus) {
 fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
     match mode {
         AuthProbeMode::Full => {
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
             status.cursor = if cursor_has_native_auth {
                 AuthState::Available
@@ -1094,7 +1094,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         }
         AuthProbeMode::Fast => {
             // Avoid the vscdb probe in fast UI paths.
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
             status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
                 AuthState::Available
@@ -1477,6 +1477,14 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
         return Some((
             AuthCredentialSource::EnvironmentVariable,
             "CURSOR_ACCESS_TOKEN / CURSOR_API_KEY environment variable".to_string(),
+        ));
+    }
+    if let Ok(path) = crate::auth::cursor::login::login_path()
+        && crate::auth::cursor::login::load_login().is_some()
+    {
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            path.display().to_string(),
         ));
     }
     if let Ok(file_path) = crate::auth::cursor::cursor_auth_file_path()

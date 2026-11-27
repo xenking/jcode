@@ -750,7 +750,8 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     match response {
         Ok(response) if response.status().is_success() => {
             let json: serde_json::Value = response.json().await.unwrap_or_default();
-            let report = cursor_plan_usage_report(&json);
+            let mut report = cursor_plan_usage_report(&json);
+            report.account = auth::account_identity::cursor_identity(cursor_plan_id(&json));
             crate::routing_meters::publish_cursor_limits(&report.limits);
             // A 200 with neither usage fields nor membership info carries
             // nothing usable; fall back to the key-status probe. Membership
@@ -766,18 +767,21 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     }
 }
 
+/// The plan Cursor reports: `team` for a team spend pool, else the membership type.
+fn cursor_plan_id(json: &serde_json::Value) -> Option<&str> {
+    json.get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+}
+
 pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
     let plan = json
         .get("planUsage")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let membership = json
-        .get("spendLimitUsage")
-        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
-        .map(|_| "Team")
-        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
-        .unwrap_or("Pro");
+    let membership = cursor_plan_id(json).unwrap_or("Pro");
     let mut chars = membership.chars();
     let membership_title: String = match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -823,13 +827,20 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
 /// Fallback key-status probe. The `/v0/me` error body still tells us the key
 /// is live and which plan tier it is on when the usage endpoint is out of
 /// reach.
-async fn cursor_key_status_report() -> ProviderUsage {
+pub(super) async fn cursor_key_status_report() -> ProviderUsage {
     let api_key = match auth::cursor::load_api_key() {
         Ok(api_key) => api_key,
         Err(e) => {
+            // A signed-in login that reaches here got no usage back: the key
+            // advice would point at the wrong credential.
+            let error = if auth::cursor::login::load_login().is_some() {
+                "Cursor returned no usage for this login. Sign in again with `jcode login --provider cursor`.".to_string()
+            } else {
+                format!("Cursor usage unavailable: {}", e)
+            };
             return ProviderUsage {
                 provider_name: "Cursor".to_string(),
-                error: Some(format!("Cursor usage unavailable: {}", e)),
+                error: Some(error),
                 ..Default::default()
             };
         }

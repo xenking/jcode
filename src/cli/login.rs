@@ -35,6 +35,8 @@ pub struct LoginOptions {
     /// Use the OpenAI device-code flow (enter a short code at
     /// auth.openai.com/codex/device) instead of a localhost callback.
     pub device_code: bool,
+    /// Cursor: copy the sign-in of the local Cursor app instead of a browser login.
+    pub import_local_app: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
     pub google_services: Option<Vec<auth::google::GoogleService>>,
     /// Run the guided Google Cloud OAuth client setup even when a client is saved.
@@ -167,6 +169,11 @@ enum PendingScriptableLogin {
         verification_uri: String,
         interval: u64,
     },
+    /// Cursor browser login: no callback, resume with `--complete`.
+    Cursor {
+        account_label: Option<String>,
+        challenge: auth::cursor::login::CursorLoginChallenge,
+    },
     MuseSubscription {
         device_code: String,
         user_code: String,
@@ -191,6 +198,7 @@ impl PendingScriptableLogin {
             Self::Antigravity { .. } => "antigravity",
             Self::Google { .. } => "google",
             Self::Copilot { .. } => "copilot",
+            Self::Cursor { .. } => "cursor",
             Self::MuseSubscription { .. } => "muse-subscription",
         }
     }
@@ -416,9 +424,9 @@ pub async fn run_login_provider(
                 login_openai_compatible_flow(&profile, &options, account_label)
                     .map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Cursor => {
-                login_cursor_flow(&options).map(|_| LoginFlowOutcome::Completed)
-            }
+            LoginProviderTarget::Cursor => login_cursor_flow(account_label, &options)
+                .await
+                .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Copilot => device_login::login_copilot_flow(options.no_browser),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
@@ -609,7 +617,8 @@ fn maybe_persist_default_provider_after_login(
         .as_deref()
         .or(suggested_model.as_deref());
 
-    if let Err(err) = crate::auth::account_pool::set_default_model(model_to_save, Some(provider_id)) {
+    if let Err(err) = crate::auth::account_pool::set_default_model(model_to_save, Some(provider_id))
+    {
         crate::logging::warn(&format!(
             "Failed to save {} as the default provider after login: {}",
             provider_id, err
@@ -1051,11 +1060,49 @@ fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-fn login_cursor_flow(options: &LoginOptions) -> Result<()> {
-    eprintln!("Starting Cursor API key setup...");
+async fn login_cursor_flow(requested_label: Option<&str>, options: &LoginOptions) -> Result<()> {
+    if options.supplies_api_key() {
+        return login_cursor_api_key_flow(options);
+    }
+    let client = crate::provider::shared_http_client();
+    let login = if options.import_local_app {
+        eprintln!("Reading the Cursor app's sign-in (read-only)...");
+        auth::cursor::login::import_local_app_login(&client, requested_label).await?
+    } else {
+        let challenge = auth::cursor::login::begin_login()?;
+        eprintln!(
+            "Sign in to Cursor in your browser:\n  {}",
+            challenge.login_url
+        );
+        if !auth::browser_suppressed(options.no_browser) {
+            crate::companion_client::open_url(&challenge.login_url);
+        }
+        eprintln!("Waiting for you to approve the sign-in...");
+        auth::cursor::login::finish_login(&client, &challenge, requested_label).await?
+    };
+    eprintln!("Successfully logged in to Cursor!");
+    eprintln!(
+        "Account '{}' stored at {}",
+        login.label,
+        auth::cursor::login::login_path()?.display()
+    );
+    if let Some(email) = &login.email {
+        eprintln!("Profile email: {}", crate::usage::mask_email(email));
+    }
+    crate::telemetry::record_auth_success("cursor", "oauth");
+    emit_scriptable_auth_success(
+        options.json,
+        ScriptableAuthSuccess {
+            status: "authenticated",
+            provider: "cursor".to_string(),
+            account_label: Some(login.label.clone()),
+            credentials_path: Some(auth::cursor::login::login_path()?.display().to_string()),
+            email: login.email.as_deref().map(crate::usage::mask_email),
+        },
+    )
+}
 
-    eprintln!("Get your API key from: https://cursor.com/settings");
-    eprintln!("(Dashboard > Integrations > User API Keys)\n");
+fn login_cursor_api_key_flow(options: &LoginOptions) -> Result<()> {
     let key = obtain_api_key(options, "Cursor")?;
 
     save_named_api_key("cursor.env", "CURSOR_API_KEY", &key)?;

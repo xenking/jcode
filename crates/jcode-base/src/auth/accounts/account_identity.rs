@@ -221,6 +221,19 @@ pub fn oauth_identity(provider: &str, label: &str) -> Option<AccountIdentity> {
         .find(|identity| identity.provider == provider && identity.label == label)
 }
 
+/// The saved Cursor login, named by its masked email and plan like the other logins.
+pub fn cursor_identity(raw_plan: Option<&str>) -> Option<AccountIdentity> {
+    let login = crate::auth::cursor::login::load_login()?;
+    Some(identity(
+        "cursor",
+        login.label,
+        login.email,
+        raw_plan.map(str::to_owned),
+        true,
+        &NameBook::load(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +302,43 @@ mod tests {
         assert_eq!(
             default_kind("openai", Some("pro"), true),
             CredentialKind::Metered
+        );
+    }
+
+    #[test]
+    fn the_saved_cursor_login_is_named_by_its_masked_email_and_plan() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        assert!(cursor_identity(Some("pro")).is_none());
+        let tokens = crate::auth::cursor::CursorDirectTokens {
+            access_token: "access".into(),
+            refresh_token: None,
+            source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
+        };
+        crate::auth::cursor::login::save_login_for_tests(
+            None,
+            &tokens,
+            Some("developer@example.com".into()),
+        )
+        .unwrap();
+        let identity = cursor_identity(Some("pro")).unwrap();
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        assert_eq!(identity.label, "cursor-otter");
+        assert_eq!(identity.plan.as_deref(), Some("Pro"));
+        assert!(
+            identity.display_name.ends_with("· Pro"),
+            "{}",
+            identity.display_name
+        );
+        assert!(
+            !identity.display_name.contains("developer@"),
+            "{}",
+            identity.display_name
         );
     }
 }

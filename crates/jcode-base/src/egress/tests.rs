@@ -156,6 +156,25 @@ async fn required_proxy_down_fails_closed_and_nothing_leaves() {
 }
 
 #[tokio::test]
+async fn required_proxy_is_rechecked_on_first_online_retry() {
+    let addr = ("127.0.0.1", dead_port().await);
+    let config = assigned(&format!("http://{}:{}", addr.0, addr.1), true);
+    let error = transport_in(&config, "claude:team").await.err().unwrap();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "required egress proxy 'corp' is unreachable: {}",
+            io::ErrorKind::ConnectionRefused
+        )
+    );
+
+    let _listener = TcpListener::bind(addr).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let transport = transport_in(&config, "claude:team").await.unwrap();
+    assert!(transport.is_proxied());
+}
+
+#[tokio::test]
 async fn optional_proxy_down_goes_direct() {
     let config = assigned(&format!("http://127.0.0.1:{}", dead_port().await), false);
     let transport = transport_in(&config, "claude:team").await.unwrap();

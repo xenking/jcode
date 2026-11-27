@@ -346,9 +346,11 @@ pub const JCODE_SUBSCRIPTION_KEY: &str = "jcode";
 
 /// Default auto-switch membership for an account the user never placed:
 /// subscription logins (OAuth, device sign-in, the Jcode subscription) join,
-/// metered API keys stay manual so nobody is silently billed per token.
+/// metered API keys stay manual so nobody is silently billed per token. Cursor
+/// bills premium requests and on-demand credit, so it too joins only when the
+/// owner places it.
 pub fn default_member(key: &str, api_key: bool) -> bool {
-    key != "antigravity" && (key == JCODE_SUBSCRIPTION_KEY || !api_key)
+    !matches!(key, "antigravity" | "cursor") && (key == JCODE_SUBSCRIPTION_KEY || !api_key)
 }
 
 fn path() -> Result<PathBuf> {
@@ -683,6 +685,14 @@ mod tests {
             Some("openai-oauth:gpt-5.5")
         );
         assert_eq!(model_for_route(None, "openai-api"), None);
+    }
+
+    #[test]
+    fn cursor_joins_auto_switch_only_when_the_owner_places_it() {
+        let mut pool = AccountPool::default();
+        assert!(!pool.is_member("cursor", default_member("cursor", false)));
+        pool.place("cursor", true, 0, &["cursor"]);
+        assert!(pool.is_member("cursor", default_member("cursor", false)));
     }
 
     #[test]

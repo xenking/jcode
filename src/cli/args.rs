@@ -323,6 +323,11 @@ pub(crate) enum Command {
         #[command(flatten)]
         google: GoogleLoginArgs,
 
+        /// Cursor only: copy the sign-in of the Cursor app on this machine (read-only)
+        /// instead of opening a browser login.
+        #[arg(long, conflicts_with_all = ["print_auth_url", "complete", "api_key", "api_key_env"])]
+        from_app: bool,
+
         /// API base / endpoint URL (OpenAI-compatible profiles, Azure endpoint).
         #[arg(long)]
         api_base: Option<String>,

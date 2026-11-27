@@ -78,7 +78,7 @@ static BEARER: LazyLock<regex::Regex> = LazyLock::new(|| regex(r"(?i)bearer\s+\S
 /// Provider account, workspace and user ids (`user-abc123…`, `auth0|…`).
 static PROVIDER_ID: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex(
-        r"\b(?:user|org|acct|account|workspace|team|usr)[-_][A-Za-z0-9]{8,}\b|\b(?:auth0|google-oauth2)\|[A-Za-z0-9]+",
+        r"\b(?:user|org|acct|account|workspace|team|usr)[-_][A-Za-z0-9]{8,}\b|\b(?:auth0|google-oauth2|github|google|apple|workos)\|[A-Za-z0-9_-]+",
     )
 });
 /// Long opaque runs (hashes, base64 secrets). Words never mix this many
@@ -94,6 +94,7 @@ fn identifier_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     key == "uuid"
         || key == "sub"
+        || ["authid", "userid", "teamid", "workosid"].contains(&key.as_str())
         || key.ends_with("_uuid")
         || (key.ends_with("_id")
             && [
@@ -267,6 +268,59 @@ async fn openai_account(account: auth::codex::OpenAiAccount, now_ms: i64) -> Val
     entry
 }
 
+/// The Cursor login's raw responses: the usage read jcode makes plus the plan,
+/// profile, web usage summary and legacy request counts. Stored token only.
+async fn cursor_account(tokens: auth::cursor::CursorDirectTokens) -> Value {
+    let label = auth::cursor::login::load_login().map(|login| login.label);
+    let mut entry = json!({"provider": "cursor", "label": label, "source": tokens.source});
+    entry["responses"] = if auth::cursor::token_is_expiring_soon(&tokens.access_token) {
+        json!("stored token expired: the dump never refreshes or writes credentials")
+    } else {
+        match crate::egress::client("cursor", label.as_deref()).await {
+            Err(error) => json!(error.to_string()),
+            Ok(client) => {
+                let rpc = |service: &str, call: &str| {
+                    client
+                        .post(format!(
+                            "https://api2.cursor.sh/aiserver.v1.{service}/{call}"
+                        ))
+                        .bearer_auth(&tokens.access_token)
+                        .header("Connect-Protocol-Version", "1")
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .body("{}")
+                };
+                let mut summary = client.get("https://cursor.com/api/usage-summary");
+                if let Some(cookie) = auth::cursor::login::session_cookie(&tokens.access_token) {
+                    summary = summary.header("Cookie", cookie);
+                }
+                json!([
+                    get(
+                        rpc("DashboardService", "GetCurrentPeriodUsage"),
+                        "DashboardService/GetCurrentPeriodUsage"
+                    )
+                    .await,
+                    get(
+                        rpc("DashboardService", "GetPlanInfo"),
+                        "DashboardService/GetPlanInfo"
+                    )
+                    .await,
+                    get(rpc("DashboardService", "GetMe"), "DashboardService/GetMe").await,
+                    get(summary, "cursor.com/api/usage-summary").await,
+                    get(
+                        client
+                            .get("https://api2.cursor.sh/auth/usage")
+                            .bearer_auth(&tokens.access_token),
+                        "auth/usage"
+                    )
+                    .await,
+                ])
+            }
+        }
+    };
+    entry
+}
+
 /// Every saved login's raw responses, redacted. Network reads only.
 pub async fn dump_redacted_usage() -> Value {
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -276,6 +330,9 @@ pub async fn dump_redacted_usage() -> Value {
     }
     for account in auth::codex::list_accounts().unwrap_or_default() {
         accounts.push(openai_account(account, now_ms).await);
+    }
+    if let Ok(tokens) = auth::cursor::load_access_token_from_env_or_file() {
+        accounts.push(cursor_account(tokens).await);
     }
     let mut dump = json!({
         "tool": "jcode usage --dump-redacted",

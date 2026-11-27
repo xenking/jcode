@@ -1272,7 +1272,7 @@ fn ensure_grok_build_auth_allowed_for_explicit_choice() -> Result<()> {
 }
 
 fn ensure_cursor_auth_allowed_for_explicit_choice() -> Result<()> {
-    if auth::cursor::has_cursor_native_auth() || auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         return Ok(());
     }
     let Some(source) = auth::cursor::has_unconsented_external_auth() else {
@@ -1297,7 +1297,7 @@ fn ensure_cursor_auth_allowed_for_explicit_choice() -> Result<()> {
 }
 
 fn maybe_enable_cursor_auth_for_auto(has_other_provider: bool) -> Result<bool> {
-    if auth::cursor::has_cursor_native_auth() || auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         return Ok(true);
     }
     let Some(source) = auth::cursor::has_unconsented_external_auth() else {

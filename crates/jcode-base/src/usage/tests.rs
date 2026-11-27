@@ -1225,6 +1225,37 @@ fn cursor_plan_usage_report_builds_named_limits() {
     assert_eq!(dt.timestamp(), 1792835722);
 }
 
+#[tokio::test]
+async fn a_cursor_login_without_usage_does_not_ask_for_an_api_key() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_key = std::env::var_os("CURSOR_API_KEY");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("CURSOR_API_KEY");
+    let tokens = crate::auth::cursor::CursorDirectTokens {
+        access_token: "access".into(),
+        refresh_token: None,
+        source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
+    };
+    crate::auth::cursor::login::save_login_for_tests(None, &tokens, None).unwrap();
+
+    let report = provider_fetch::cursor_key_status_report().await;
+
+    for (name, value) in [
+        ("JCODE_HOME", previous_home),
+        ("CURSOR_API_KEY", previous_key),
+    ] {
+        match value {
+            Some(value) => crate::env::set_var(name, value),
+            None => crate::env::remove_var(name),
+        }
+    }
+    let error = report.error.expect("no usage was read");
+    assert!(error.contains("Sign in again"), "{error}");
+    assert!(!error.contains("API key"), "{error}");
+}
+
 #[test]
 fn cursor_plan_usage_report_prefers_team_spend_limit() {
     let json = serde_json::json!({

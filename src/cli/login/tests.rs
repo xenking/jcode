@@ -242,6 +242,75 @@ fn auto_scriptable_flow_reason_skips_when_scriptable_input_already_explicit() {
 }
 
 #[test]
+fn cursor_browser_login_is_scriptable_but_key_and_app_import_are_not() {
+    let provider =
+        crate::provider_catalog::resolve_login_provider("cursor").expect("resolve cursor");
+    assert_eq!(
+        auto_scriptable_flow_reason(provider, &LoginOptions::default(), false),
+        Some("non_interactive_terminal")
+    );
+    for options in [
+        LoginOptions {
+            openai_compatible_api_key_env: Some("CURSOR_API_KEY".into()),
+            ..LoginOptions::default()
+        },
+        LoginOptions {
+            import_local_app: true,
+            ..LoginOptions::default()
+        },
+    ] {
+        assert_eq!(auto_scriptable_flow_reason(provider, &options, false), None);
+    }
+}
+
+#[tokio::test]
+async fn cursor_print_auth_url_saves_a_resumable_flow_the_sdk_can_complete_or_cancel() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let provider =
+        crate::provider_catalog::resolve_login_provider("cursor").expect("resolve cursor");
+    let options = LoginOptions {
+        print_auth_url: true,
+        json: true,
+        flow_id: Some("cursor-flow".into()),
+        ..LoginOptions::default()
+    };
+
+    let outcome = start_scriptable_login(provider, Some("work"), &options)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LoginFlowOutcome::Deferred);
+    let pending = pending_login_path("cursor", Some("cursor-flow")).unwrap();
+    let PendingScriptableLogin::Cursor {
+        account_label,
+        challenge,
+    } = load_pending_login(&pending, "cursor").unwrap()
+    else {
+        panic!("expected a pending Cursor login");
+    };
+    assert_eq!(account_label.as_deref(), Some("work"));
+    assert!(
+        challenge
+            .login_url
+            .starts_with("https://cursor.com/loginDeepControl?")
+    );
+    cancel_scriptable_login(
+        provider,
+        &LoginOptions {
+            cancel: true,
+            flow_id: Some("cursor-flow".into()),
+            ..LoginOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!pending.exists());
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[test]
 fn scoped_pending_paths_validate_ids_and_preserve_legacy_layout() {
     let dir = Path::new("pending-login");
     assert_eq!(

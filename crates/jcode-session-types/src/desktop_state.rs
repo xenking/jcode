@@ -116,7 +116,15 @@ pub struct PanelDoc {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Compose panels only: the directory the new session will start in, a
+    /// path on the machine whose daemon holds this entry. That daemon is the
+    /// machine that owns the path, so a Desktop must write it only there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
+
+/// Longest compose directory a daemon accepts.
+pub const MAX_WORKING_DIR_LEN: usize = 1024;
 
 /// `draft/<panel id>`: unsent composer content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +244,21 @@ pub fn validate_entry(key: &str, value: &Value) -> Result<Value, DesktopStateVio
                     // or path would name another machine's resource.
                     identifier(session, 128, "session id")?;
                 }
+                if let Some(dir) = &doc.working_dir {
+                    if doc.kind != PanelKind::Compose {
+                        return Err(DesktopStateViolation::invalid(
+                            "only a compose panel carries a working directory",
+                        ));
+                    }
+                    if !dir.starts_with('/')
+                        || dir.len() > MAX_WORKING_DIR_LEN
+                        || dir.chars().any(char::is_control)
+                    {
+                        return Err(DesktopStateViolation::invalid(
+                            "working directory must be an absolute path without control characters",
+                        ));
+                    }
+                }
                 value
             } else {
                 parse::<DraftDoc>(value, key, |doc| doc.v)?.1
@@ -310,6 +333,29 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_working_directory_is_accepted_only_on_a_compose_panel_as_an_absolute_path() {
+        let compose = |dir: Value| json!({"v":1,"kind":"compose","working_dir":dir});
+        assert_eq!(
+            validate_entry("panel/p1", &compose(json!("/home/me/project"))).unwrap(),
+            compose(json!("/home/me/project"))
+        );
+        for bad in [json!("relative/dir"), json!("/a\nb"), json!(format!("/{}", "x".repeat(1100)))] {
+            assert_eq!(
+                rejection("panel/p1", compose(bad)),
+                DesktopStateRejection::Invalid
+            );
+        }
+        assert_eq!(
+            rejection(
+                "panel/p1",
+                json!({"v":1,"kind":"session","session_id":"s1","working_dir":"/tmp"})
+            ),
+            DesktopStateRejection::Invalid,
+            "a session carries its own directory"
+        );
     }
 
     #[test]
