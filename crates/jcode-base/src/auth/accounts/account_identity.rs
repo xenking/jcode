@@ -317,8 +317,12 @@ mod tests {
             refresh_token: None,
             source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
         };
-        crate::auth::cursor::login::save_login_for_tests(None, &tokens, Some("developer@example.com".into()))
-            .unwrap();
+        crate::auth::cursor::login::save_login_for_tests(
+            None,
+            &tokens,
+            Some("developer@example.com".into()),
+        )
+        .unwrap();
         let identity = cursor_identity(Some("pro")).unwrap();
         match previous {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
