@@ -1025,6 +1025,8 @@ fn render_background_task_success_fits_unicode_and_narrow_widths() {
 
 #[path = "tests/todo_card_tests.rs"]
 mod todo_card_tests;
+#[path = "tests/todo_card_width_tests.rs"]
+mod todo_card_width_tests;
 #[allow(unused_imports)]
 pub(crate) use todo_card_tests::*;
 
