@@ -709,6 +709,7 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
                 bind_addr: "127.0.0.1".to_string(),
                 enabled: true,
                 harness_enabled: false,
+                ..Default::default()
             });
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 

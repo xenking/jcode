@@ -43,7 +43,6 @@ pub use registry::DeviceRegistry;
 /// Default gateway port ("jc" on phone keypad = 52, but we use 7643)
 pub const DEFAULT_PORT: u16 = 7643;
 const WEBSOCKET_KEEPALIVE_INTERVAL_SECS: u64 = 20;
-const MAX_HARNESS_CONNECTIONS: usize = 16;
 type PairAttempts = Arc<tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>;
 
 #[derive(Clone)]
@@ -54,6 +53,15 @@ struct HarnessConnectionState {
 }
 
 pub use crate::config::GatewayConfig;
+
+/// The configured limit, with 0 meaning the default and a ceiling that keeps a
+/// typo from exhausting the daemon's file descriptors.
+fn harness_connection_limit(configured: usize) -> usize {
+    match configured {
+        0 => jcode_config_types::DEFAULT_MAX_HARNESS_CONNECTIONS,
+        limit => limit.min(256),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Gateway listener
@@ -85,7 +93,7 @@ pub async fn run_gateway(
     let harness = HarnessConnectionState {
         enabled: harness_enabled,
         daemon_socket,
-        slots: Arc::new(tokio::sync::Semaphore::new(MAX_HARNESS_CONNECTIONS)),
+        slots: Arc::new(tokio::sync::Semaphore::new(harness_connection_limit(config.max_harness_connections))),
     };
 
     loop {

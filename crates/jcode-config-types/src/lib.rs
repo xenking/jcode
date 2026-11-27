@@ -60,7 +60,7 @@ pub use display_env::{AnimationPrefs, ColorEdit, ColorPrefs, DisplayPreference, 
 pub use features::{
     DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, FeatureConfig, NativeScrollbarConfig,
 };
-pub use gateway::GatewayConfig;
+pub use gateway::{DEFAULT_MAX_HARNESS_CONNECTIONS, GatewayConfig};
 pub use keybinding_settings::KeybindingsConfig;
 pub use keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,

@@ -84,10 +84,10 @@ restarts a remote daemon.
   Desktop repository's remote-workspaces plan.
 - One connection per machine for all session panels. Today a paired Desktop
   opens one gateway WebSocket per open session, and the gateway admits 16
-  concurrent harness sockets (`MAX_HARNESS_CONNECTIONS` in
-  `jcode-base/src/gateway.rs`), so the Desktop state connection takes one of
+  concurrent harness sockets by default (`[gateway] max_harness_connections`,
+  1 to 256), so the Desktop state connection takes one of
   them. Multiplexing needs a channel id on harness frames, a bridge that holds
   one daemon connection per channel, a `multiplex_v1` capability and the
   matching change in the SDK's paired transport and Desktop, so it cannot ship
-  from the daemon side alone. Until then the cap stays the limit; making it a
-  `[gateway]` setting is the independent stopgap.
+  from the daemon side alone. Until then raise `max_harness_connections` if a machine
+  needs more open sessions.

@@ -13,6 +13,7 @@ Run Jcode on the Mac that owns the projects. Run Desktop on the Mac you use. Bot
    bind_addr = "127.0.0.1"
    port = 7643
    harness_enabled = true
+   max_harness_connections = 16   # optional: one WebSocket per open remote session
    ```
 
 3. Start the daemon with `jcode --socket "$JCODE_HOME/daemon.sock" serve`. Use a short absolute `JCODE_HOME` path so the Unix socket path fits. Confirm that the new loopback port answers `curl --fail http://127.0.0.1:7643/health`. An existing wildcard phone gateway is not a paired Desktop endpoint.
