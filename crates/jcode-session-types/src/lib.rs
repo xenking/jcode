@@ -13,6 +13,7 @@ pub use context_breakdown::{
     ContextActionSavings, ContextActionStatus, ContextBreakdown, ContextBreakdownCategory,
     ContextBreakdownKind, ContextMeter, ContextMeterState, ContextOccupancySource,
 };
+pub mod desktop_state;
 mod memory;
 mod shake_tools;
 pub use shake_tools::{
