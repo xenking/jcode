@@ -20,7 +20,7 @@ each entry remembers the revision at which it last changed.
 | --- | --- |
 | `layout` | rows of `{panel, width}` slots, any number of rows |
 | `focus` | the row and panel where the user last was |
-| `panel/<id>` | `{kind: session\|compose, session_id?, title?}` |
+| `panel/<id>` | `{kind: session\|compose, session_id?, title?, working_dir?}` (`working_dir` only on `compose`: an absolute path on this daemon's own machine) |
 | `draft/<panel id>` | `{text, cursor, model?, reasoning_effort?, attachments[]}` |
 
 Every value carries `v: 1`. The daemon stores each value by deserializing it
