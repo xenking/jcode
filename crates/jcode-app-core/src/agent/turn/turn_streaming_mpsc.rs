@@ -1419,6 +1419,7 @@ impl Agent {
                 continue 'turn_loop;
             }
             network_recovery.record_success();
+            let api_elapsed = api_start.elapsed();
 
             Agent::log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Info,
@@ -1625,6 +1626,7 @@ impl Agent {
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
                     cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                    request_elapsed_ms: Some(api_elapsed.as_millis() as u64),
                 });
                 let message_id =
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);

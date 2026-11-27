@@ -980,6 +980,7 @@ impl AlwaysListening {
                         .as_ref()
                         .is_some_and(ContinuousRecording::suppress_if_quiet)
             };
+            const QUIET_MIC_GRACE: Duration = Duration::from_secs(3);
             if let Some((text, at)) = self
                 .playback
                 .speech
@@ -996,11 +997,35 @@ impl AlwaysListening {
                         changed = true;
                     }
                 }
-            } else if host
-                .speech_player()
-                .is_some_and(|p| p.authorize_ready(claim))
+            } else if let Some(player) = host.speech_player()
+                && let Some(waited) = player.awaiting_quiet_elapsed()
             {
-                self.playback_trace().mark("quiet_authorized", 0);
+                let ambient_fallback = !disabled && waited >= QUIET_MIC_GRACE;
+                let mut used_ambient = false;
+                if player.authorize_ready(|| {
+                    if claim() {
+                        true
+                    } else if ambient_fallback
+                        && self
+                            .recording
+                            .as_ref()
+                            .is_some_and(ContinuousRecording::suppress_for_playback)
+                    {
+                        used_ambient = true;
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    self.playback_trace().mark(
+                        if used_ambient {
+                            "ambient_authorized"
+                        } else {
+                            "quiet_authorized"
+                        },
+                        waited.as_millis(),
+                    );
+                }
             } else if self.playback.ding
                 && host.speech_player().is_none_or(|p| p.is_idle())
                 && claim()

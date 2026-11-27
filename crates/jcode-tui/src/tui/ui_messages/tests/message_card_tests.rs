@@ -27,7 +27,7 @@ pub(super) fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         status: "in_progress".to_string(),
         priority: "high".to_string(),
         group: Some("pelican-bike-animation".to_string()),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         ..Default::default()
     }];
     let render = |goal: crate::todo::TodoGoal,
@@ -36,7 +36,7 @@ pub(super) fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
                   tool_data: Option<crate::message::ToolCall>| {
         let plan = crate::todo::TodoPlan {
             user_intention: Some(intention.to_string()),
-            understands_user_intent: Some(crate::todo::IntentUnderstanding::from_legacy_score(96)),
+            understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
             ..Default::default()
         };
         let mut content = format!(
@@ -69,7 +69,7 @@ pub(super) fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let initial = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(90)),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
             feedback_loop: Some(INITIAL_FEEDBACK.to_string()),
             ..Default::default()
         },
@@ -92,7 +92,7 @@ pub(super) fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let revised = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(98)),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
             feedback_loop: Some(REVISED_FEEDBACK.to_string()),
             ..Default::default()
         },
@@ -132,19 +132,19 @@ pub(super) fn visually_appealing_prompt_batched_retry_renders_complete_todo_card
         status: "in_progress".to_string(),
         priority: "high".to_string(),
         group: Some("pelican-bike".to_string()),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(95)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("pelican-bike".to_string()),
-        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(98)),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
         feedback_loop: Some(FEEDBACK.to_string()),
         feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(OBJECTIVE.to_string()),
-        understands_user_intent: Some(crate::todo::IntentUnderstanding::from_legacy_score(97)),
+        understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
         ..Default::default()
     };
     let todo_output = format!(
@@ -233,17 +233,17 @@ pub(super) fn render_ownership_gated_todo_result_keeps_the_full_card() {
         status: "in_progress".to_string(),
         priority: "high".to_string(),
         group: Some("ship outcome".to_string()),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(95)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         ..Default::default()
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("ship outcome".to_string()),
-        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
         feedback_loop: Some("Run the complete workflow".to_string()),
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
         feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-        delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(80)),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
         ..Default::default()
     }];
     let content = format!(
@@ -278,7 +278,7 @@ pub(super) fn render_ownership_gated_todo_result_keeps_the_full_card() {
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(!plain.contains("todo 1 items"), "{plain}");
 }
 

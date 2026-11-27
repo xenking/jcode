@@ -10,7 +10,7 @@ pub(super) const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in super::super) struct TodoConfidenceSummary {
-    pub completion_average: Option<u8>,
+    pub completion_average: Option<crate::todo::ConfidenceState>,
     pub completion_confidence_needs_validation: bool,
     pub confidence_spike_detected: bool,
     pub needs_more_work: bool,

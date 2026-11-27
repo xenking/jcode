@@ -880,17 +880,21 @@ fn todo_confidence_weight(priority: &str) -> u32 {
     }
 }
 
-fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> Option<u8> {
+fn weighted_confidence_average(
+    scores: impl IntoIterator<Item = (crate::todo::ConfidenceState, u32)>,
+) -> Option<crate::todo::ConfidenceState> {
     let mut weighted_sum = 0u32;
     let mut total_weight = 0u32;
-    for (score, weight) in scores {
-        weighted_sum += u32::from(score) * weight;
+    for (state, weight) in scores {
+        weighted_sum += u32::from(state.level()) * weight;
         total_weight += weight;
     }
     if total_weight == 0 {
         None
     } else {
-        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+        Some(crate::todo::ConfidenceState::from_level(
+            ((weighted_sum + total_weight / 2) / total_weight) as u8,
+        ))
     }
 }
 
@@ -910,7 +914,7 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
     let completion_average = weighted_confidence_average(
         completion_states
             .iter()
-            .map(|(_, state, weight)| (state.legacy_score(), *weight)),
+            .map(|(_, state, weight)| (*state, *weight)),
     );
     let missing_completion_confidence = completed
         .iter()
