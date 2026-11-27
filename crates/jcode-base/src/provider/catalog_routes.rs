@@ -419,7 +419,7 @@ fn qualify_saved_account_route(
     if let Some(account) =
         jcode_provider_core::route_pool_key(&format!("{}@{label}", route.api_method))
     {
-        route.icon = crate::config::resolved_account_icon(&account);
+        route.icon = crate::routing_accounts::resolved_account_icon(&account);
         route.account = Some(account);
     }
     route.api_method = format!("{}@{label}", route.api_method);

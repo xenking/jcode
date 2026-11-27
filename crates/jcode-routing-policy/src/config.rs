@@ -75,6 +75,14 @@ impl RoutingConfig {
             .find_map(pick)
     }
 
+    /// How many `[[routing.accounts]]` entries have an id (trimmed) that `keep` accepts.
+    pub fn count_accounts(&self, mut keep: impl FnMut(&str) -> bool) -> usize {
+        self.accounts
+            .iter()
+            .filter(|entry| keep(entry.id.trim()))
+            .count()
+    }
+
     /// Maps every `[[routing.accounts]]` and `[[routing.budgets]]` entry as written.
     pub fn each<A, B>(
         &self,

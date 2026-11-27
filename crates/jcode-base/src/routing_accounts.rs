@@ -111,15 +111,18 @@ pub fn routing() -> RoutingConfig {
 /// the stable default when its provider has several accounts, else none.
 pub fn icon_in(routing: &RoutingConfig, account: &str) -> Option<String> {
     let provider = jcode_session_types::account_icon::provider_of(account);
-    let siblings = routing
-        .accounts
-        .iter()
-        .filter(|entry| jcode_session_types::account_icon::provider_of(entry.id.trim()) == provider)
-        .count();
+    let siblings =
+        routing.count_accounts(|id| jcode_session_types::account_icon::provider_of(id) == provider);
     let configured = routing
         .account(account, |raw| Some(raw.icon.clone()))
         .flatten();
     jcode_session_types::account_icon::disambiguating_icon(account, configured.as_deref(), siblings)
+}
+
+/// [`icon_in`] over the loaded routing config: what every surface shows for a
+/// routing account (`None` for a provider's only account unless the user set an icon).
+pub fn resolved_account_icon(account: &str) -> Option<String> {
+    icon_in(&routing(), account)
 }
 
 struct CachedMeasure(i64);

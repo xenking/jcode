@@ -54,7 +54,7 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
         .collect()
 }
 
-pub use crate::config::resolved_account_icon;
+pub use crate::routing_accounts::resolved_account_icon;
 
 fn account_view(
     routing: &RoutingConfig,
