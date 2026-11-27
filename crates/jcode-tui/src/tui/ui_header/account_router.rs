@@ -772,6 +772,7 @@ mod tests {
                 ],
                 excluded: vec![],
                 priorities: [("openai-api".into(), 1)].into_iter().collect(),
+                manual: false,
             },
             ..Default::default()
         };

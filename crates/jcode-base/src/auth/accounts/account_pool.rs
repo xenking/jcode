@@ -571,7 +571,10 @@ mod tests {
             serde_json::from_str(r#"{"members":["openai-api"],"excluded":["antigravity"]}"#)
                 .unwrap();
         assert!(pool.priorities.is_empty());
-        assert!(pool.auto_switch(), "a file without the key is Auto-switch on");
+        assert!(
+            pool.auto_switch(),
+            "a file without the key is Auto-switch on"
+        );
         pool.set_priority("openai-api", 7);
         let saved = serde_json::to_string(&pool).unwrap();
         assert!(!saved.contains("manual"), "{saved}");
