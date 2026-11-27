@@ -154,6 +154,37 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     super::super::models::reset_model_catalog_services_for_tests();
 }
 
+/// An icon tells accounts of one provider apart: a provider's only saved login
+/// names its route without one.
+#[test]
+fn a_provider_with_one_saved_login_has_no_route_icon() {
+    let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "anthropic_accounts": [{"label": "work", "access": "test-access", "refresh": "test-refresh",
+                "expires": i64::MAX, "email": "work@example.test", "subscription_type": "max"}],
+            "active_anthropic_account": "work"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let routes = expand_saved_account_routes(vec![build_anthropic_oauth_route(
+        "claude-sonnet-4-6",
+        true,
+        "",
+    )]);
+    let route = routes
+        .iter()
+        .find(|route| route.api_method == "claude-oauth@work")
+        .expect("the saved login's route");
+    assert_eq!(route.account.as_deref(), Some("claude:work"));
+    assert_eq!(route.icon, None);
+}
+
 #[test]
 fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
     let _guard = EnvGuard::new();

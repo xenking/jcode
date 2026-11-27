@@ -222,6 +222,7 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
             .find(|identity| identity.provider == provider && identity.label == label)
             .map(|identity| identity.display_name.clone())
     };
+    let (claude_count, openai_count) = (claude.len(), openai.len());
     if !claude.is_empty() {
         routes.retain(|route| route.api_method != "claude-oauth");
         // Auth and disk-catalog reads are account facts, not model facts.
@@ -272,6 +273,7 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                     &account.label,
                     display_name_of("claude", &account.label).as_deref(),
                     account.email.as_deref(),
+                    claude_count,
                 );
                 routes.push(route);
             }
@@ -308,6 +310,7 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                     &account.label,
                     display_name_of("openai", &account.label).as_deref(),
                     account.email.as_deref(),
+                    openai_count,
                 );
                 routes.push(route);
             }
@@ -415,11 +418,22 @@ fn qualify_saved_account_route(
     label: &str,
     display_name: Option<&str>,
     email: Option<&str>,
+    provider_accounts: usize,
 ) {
     if let Some(account) =
         jcode_provider_core::route_pool_key(&format!("{}@{label}", route.api_method))
     {
-        route.icon = crate::routing_accounts::resolved_account_icon(&account);
+        // Counted from the saved logins at hand: asking the routing list would
+        // make this module and `routing_accounts` use each other.
+        let configured = crate::config::config()
+            .routing
+            .account(&account, |raw| Some(raw.icon.clone()))
+            .flatten();
+        route.icon = jcode_session_types::account_icon::disambiguating_icon(
+            &account,
+            configured.as_deref(),
+            provider_accounts,
+        );
         route.account = Some(account);
     }
     route.api_method = format!("{}@{label}", route.api_method);
