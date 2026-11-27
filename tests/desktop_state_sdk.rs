@@ -348,10 +348,9 @@ fn a_writer_older_than_the_deletion_window_resyncs_from_a_full_conflict() {
 fn sync_resubscribes_after_a_daemon_restart_and_the_state_survives() {
     let mut machine = Machine::new();
     machine.start();
-    let writer = machine.state();
+    let seed = machine.state();
     applied(
-        writer
-            .put("main", "laptop", 0, vec![set("draft/p1", draft("kept"))])
+        seed.put("main", "laptop", 0, vec![set("draft/p1", draft("kept"))])
             .unwrap(),
     );
 
@@ -378,13 +377,21 @@ fn sync_resubscribes_after_a_daemon_restart_and_the_state_survives() {
         unreachable!()
     };
     assert_eq!(first.entries[0].value, Some(draft("kept")));
+    // A writer handle works from another thread while this one waits for events.
+    let writer = sync.writer();
+    let first_rev = first.rev;
     let (rev, _) = applied(
-        sync.put(first.rev, vec![set("draft/p2", draft("from sync"))])
-            .unwrap(),
+        std::thread::spawn(move || {
+            writer
+                .put(first_rev, vec![set("draft/p2", draft("from sync"))])
+                .unwrap()
+        })
+        .join()
+        .unwrap(),
     );
     assert_eq!(rev, 2);
 
-    drop(writer);
+    drop(seed);
     machine.restart();
 
     next_event(&sync, "the loss", |event| {

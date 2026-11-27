@@ -86,7 +86,8 @@ subscribe, put}` return typed snapshots and a put outcome (`Applied`,
 `Conflict { full }`, `Rejected`). `DesktopStateMirror` keeps a client's copy of a
 space current and replaces it on a `full` conflict or a resync push.
 `DesktopStateSync` owns a connection that reconnects with backoff, resubscribes
-and reports a fresh snapshot after every reconnect. A daemon without the
+and reports a fresh snapshot after every reconnect; its `writer()` handle puts
+from another thread. A daemon without the
 capability fails with `UnsupportedCapability` ("Update Jcode on that machine").
 
 ## Not yet done

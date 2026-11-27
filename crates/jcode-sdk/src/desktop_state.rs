@@ -382,8 +382,37 @@ impl DesktopStateSync {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// A handle that writes through this sync's current connection from any
+    /// thread, while another waits for events.
+    pub fn writer(&self) -> DesktopStateWriter {
+        DesktopStateWriter {
+            space: self.space.clone(),
+            device: self.device.clone(),
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     /// Put on the current connection; `Disconnected` while it is down. A
     /// caller that lost a put merges the next snapshot and puts again.
+    pub fn put(
+        &self,
+        expected_rev: u64,
+        changes: Vec<DesktopStateChange>,
+    ) -> Result<DesktopStatePut> {
+        self.writer().put(expected_rev, changes)
+    }
+}
+
+/// Writes to a [`DesktopStateSync`]'s current connection. Cheap to clone.
+#[derive(Clone)]
+pub struct DesktopStateWriter {
+    space: String,
+    device: String,
+    shared: Arc<SyncShared>,
+}
+
+impl DesktopStateWriter {
+    /// `Disconnected` while the sync's connection is down or the sync is gone.
     pub fn put(
         &self,
         expected_rev: u64,
