@@ -28,7 +28,7 @@ impl ClientConnection {
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
-                client_name: _,
+                client_name,
             } => {
                 if let Err(message) = validated_subscribe_working_dir(
                     subscribe_working_dir.as_deref(),
@@ -235,6 +235,22 @@ impl ClientConnection {
                         &self.env.soft_interrupt_queues,
                     )
                     .await;
+                    // An API client (it names itself) creates a session to attach
+                    // to by id later, possibly after this daemon restarts. A
+                    // session that never ran a turn has no file until a prompt, so
+                    // the replacement daemon would find nothing and the address
+                    // would fail forever. A plain terminal client is not
+                    // addressed by id and keeps the lazy file.
+                    if self.provisional_session
+                        && client_name.is_some()
+                        && let Ok(mut agent) = self.agent.try_lock()
+                        && let Err(error) = agent.persist_session_now()
+                    {
+                        crate::logging::warn(&format!(
+                            "Could not persist new session {} for an API client: {error:#}",
+                            self.client_session_id
+                        ));
+                    }
                     // No catalog dedup baseline here. A fresh subscribe sends
                     // no catalog to the client (History does, and GetHistory
                     // records the baseline right after). Building the snapshot

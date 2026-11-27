@@ -1560,3 +1560,46 @@ async fn force_stop_never_returning_tool_over_socket_releases_session() {
 async fn live_reattached_socket_answers_ask_in_existing_turn() {
     sdk_socket_cancel_workflow(false, true, true, false, false, false, true, None).await;
 }
+
+/// A session an API client created but never ran a turn in must still load by
+/// id after a daemon restart, or the address the client keeps goes stale. A
+/// plain terminal client keeps the lazy file.
+#[tokio::test]
+async fn api_client_created_session_is_loadable_before_its_first_turn() {
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("api-create.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()), socket.clone(), home._runtime.path().join("api-create-debug.sock"),
+    );
+    let runtime = server.runtime();
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let mut created = Vec::new();
+    for (id, client_name) in [(1, Some("jcode-desktop-test/1")), (2, None)] {
+        let (reader, mut writer) = crate::transport::Stream::connect(&socket).await.unwrap().into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request = json!({"type":"subscribe","id":id,"working_dir":home._home.path()});
+        if let Some(name) = client_name {
+            request["client_name"] = json!(name);
+        }
+        writer.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if matches!(serde_json::from_str::<ServerEvent>(&line), Ok(ServerEvent::Done { id: done }) if done == id) {
+                    break;
+                }
+            }
+        }).await.expect("subscribe did not complete");
+        created.push((client_name, writer, reader));
+    }
+    let ids: Vec<String> = server.handles.sessions.snapshot().await.keys().cloned().collect();
+    let persisted: Vec<bool> = ids.iter().map(|id| crate::session::session_path(id).unwrap().exists()).collect();
+    assert_eq!(persisted.iter().filter(|exists| **exists).count(), 1, "exactly the API client's session is saved: {persisted:?}");
+    drop(created);
+    runtime.shutdown().await;
+    handle.await.unwrap();
+}
