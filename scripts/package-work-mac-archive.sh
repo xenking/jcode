@@ -149,6 +149,17 @@ default provider) is fixed in this pair: jcode commit \`$rustls_cli\` ("install 
 Harness wss connect") and Jcode Desktop commit \`$rustls_desktop\` ("lock rustls ring for paired Harness provider"),
 both contained in jcode $cli_sha / Desktop $desktop_sha.
 
+## 8b. Pairing is optional and symmetric
+Pairing in either direction is optional: each Mac works alone. Pair the personal Mac to this Mac (steps above),
+and, if you want it, this Mac to the personal one with the same steps run on the other machine. The two directions
+are independent and use the same invite flow; revoking one does not affect the other. Logins never travel: each
+machine keeps its own (\`jcode usage\` on each).
+When both machines run this build, the personal Desktop shows a section for this Mac (named by the label chosen at
+pairing, for example "work") under its own header, with its **own 4 workspaces**, and a connection status per machine.
+The Desktop's state (which sessions and panels are open, focus, unsent drafts) is kept by each machine's daemon
+(capability \`desktop_state_v1\`; \`docs/DESKTOP_STATE.md\`), so it follows between Desktops that use that machine.
+A machine that runs an older build says so in its section header and keeps working as before.
+
 ## 9. MCP tool approvals
 A tool that an MCP server marks as non-read-only (for example a review server) asks before it runs:
 the card offers **Allow once**, **Always allow this tool**, **Always allow every tool on this server** and **Deny**.
@@ -174,6 +185,20 @@ The work overlay's installer pre-approves only its local-only review tools; anyt
 - [ ] \`jcode usage\` runs and lists the logins you added
 - [ ] step 7 prints \`install-ok\`; a Desktop session opens and answers
 - [ ] after \`jcode server stop --force && jcode server start\` no session starts a turn by itself
+- [ ] \`jcode routing status\` runs; the three commands of step 10b were run and their output sent
+
+## 10b. Three commands to run on this Mac and send back
+These are read-only (they write no credentials, config or sessions). Run them once after the install and send the output
+(the files are redacted: emails, ids and tokens are removed; read them before sharing):
+\`\`\`sh
+jcode routing status
+jq -c 'select(.seam=="warm" and (.decision=="move" or .decision=="compact")) | {time,session,current,account,reason}' ~/.jcode/routing-decisions.jsonl*
+jcode usage --dump-redacted ~/jcode-usage-dump.json && grep -c '@' ~/jcode-usage-dump.json    # the count must be 0
+\`\`\`
+\`jcode routing status\` lists the accounts in the automatic pool (the Auto-switch list on the Accounts page) and any retired
+config keys as \`config note:\` lines. The \`jq\` line prints every move or compaction of an already running ("warm") session;
+no output means none happened. The usage dump makes 4 read requests per Claude login and 2 per OpenAI login and never
+refreshes tokens.
 
 ## 11. Rollback
 \`\`\`sh
