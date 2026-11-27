@@ -28,7 +28,7 @@ pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
 
 /// `icon id`: the account's icon first, as everywhere an account is named.
 fn named(account: &str) -> String {
-    match crate::routing_view::resolved_account_icon(account) {
+    match crate::routing_accounts::resolved_account_icon(account) {
         Some(icon) => format!("{icon} {account}"),
         None => account.to_owned(),
     }

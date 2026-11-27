@@ -39,7 +39,9 @@ impl Agent {
                     _ => "claude",
                 };
                 let named = format!("{provider} ({account})");
-                match jcode_base::routing_view::resolved_account_icon(&format!("{key}:{account}")) {
+                match jcode_base::routing_accounts::resolved_account_icon(&format!(
+                    "{key}:{account}"
+                )) {
                     Some(icon) => format!("{icon} {named}"),
                     None => named,
                 }

@@ -428,7 +428,7 @@ impl App {
         let Some(label) = label else { return hint };
         let named = hint.unwrap_or_else(|| label.clone());
         Some(
-            match crate::routing_view::resolved_account_icon(&format!("{key}:{label}")) {
+            match crate::routing_accounts::resolved_account_icon(&format!("{key}:{label}")) {
                 Some(icon) => format!("{icon} {named}"),
                 None => named,
             },

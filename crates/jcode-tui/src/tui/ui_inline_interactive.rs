@@ -60,7 +60,7 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
         .or_else(|| {
             let account =
                 jcode_provider_core::route_pool_key(&route.api_method).unwrap_or_default();
-            crate::routing_view::resolved_account_icon(&account)
+            crate::routing_accounts::resolved_account_icon(&account)
         })
         .map(|icon| format!("{icon} "))
         .unwrap_or_default();

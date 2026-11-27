@@ -54,7 +54,17 @@ fn windows(readings: &[Reading]) -> Vec<RoutingWindowView> {
         .collect()
 }
 
-pub use crate::routing_accounts::resolved_account_icon;
+/// The icon `account` shows among `routing`'s accounts: its configured icon, else
+/// the stable default when its provider has several accounts, else none.
+pub fn icon_in(routing: &RoutingConfig, account: &str) -> Option<String> {
+    let provider = jcode_session_types::account_icon::provider_of(account);
+    let siblings =
+        routing.count_accounts(|id| jcode_session_types::account_icon::provider_of(id) == provider);
+    let configured = routing
+        .account(account, |raw| Some(raw.icon.clone()))
+        .flatten();
+    jcode_session_types::account_icon::disambiguating_icon(account, configured.as_deref(), siblings)
+}
 
 fn account_view(
     routing: &RoutingConfig,
@@ -71,7 +81,7 @@ fn account_view(
     };
     RoutingAccountView {
         id: raw.id.trim().to_string(),
-        icon: crate::routing_accounts::icon_in(routing, raw.id.trim()),
+        icon: icon_in(routing, raw.id.trim()),
         kind: match raw.kind.unwrap_or_default() {
             AccountKind::Subscription => "subscription",
             AccountKind::Credits => "credits",

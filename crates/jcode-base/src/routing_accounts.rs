@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use jcode_routing_policy::config::{AccountConfig, PriorityConfig, RoutingConfig};
 
 use crate::auth::account_pool::AccountPool;
+pub use crate::routing_view::icon_in;
 use crate::routing_view::{Measured, SavedAccount, build, provider_keys, saved_accounts};
 use jcode_routing_policy::{AccountId, Reading};
 use jcode_session_types::routing::RoutingView;
@@ -105,18 +106,6 @@ pub fn routing() -> RoutingConfig {
         )
     });
     effective(&crate::config::config().routing, saved, pool)
-}
-
-/// The icon `account` shows among `routing`'s accounts: its configured icon, else
-/// the stable default when its provider has several accounts, else none.
-pub fn icon_in(routing: &RoutingConfig, account: &str) -> Option<String> {
-    let provider = jcode_session_types::account_icon::provider_of(account);
-    let siblings =
-        routing.count_accounts(|id| jcode_session_types::account_icon::provider_of(id) == provider);
-    let configured = routing
-        .account(account, |raw| Some(raw.icon.clone()))
-        .flatten();
-    jcode_session_types::account_icon::disambiguating_icon(account, configured.as_deref(), siblings)
 }
 
 /// [`icon_in`] over the loaded routing config: what every surface shows for a
