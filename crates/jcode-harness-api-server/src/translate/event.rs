@@ -1460,10 +1460,11 @@ impl BridgeState {
             }
             "available_models_updated" => {
                 self.note_models(event);
-                vec![
-                    ServerFrame::event(self.model_info(session(self), event)),
-                    ServerFrame::event(self.runtime_info()),
-                ]
+                let mut frames = vec![ServerFrame::event(self.model_info(session(self), event))];
+                if self.model_catalog_loaded {
+                    frames.push(ServerFrame::event(self.runtime_info()));
+                }
+                frames
             }
             "notification" => {
                 let message = event["message"].as_str().unwrap_or("");

@@ -737,6 +737,16 @@ impl BridgeState {
         self.translate_event(event, true)
     }
 
+    /// Whether `event` is a catalog whose routes were stripped to fit a live push.
+    fn catalog_is_stripped(event: &Value) -> bool {
+        event["available_models"]
+            .as_array()
+            .is_some_and(|models| !models.is_empty())
+            && event["available_model_routes"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+    }
+
     /// Read provider/model identity out of any legacy event that carries the
     /// `provider_name`/`provider_model` pair (the catalog reply and the
     /// available-models push both do).
@@ -746,7 +756,11 @@ impl BridgeState {
     /// is what lets `list_models` answer without a round trip.
     fn note_models(&mut self, event: &Value) {
         self.note_speed(event);
-        self.model_catalog_loaded = true;
+        // A catalog over the daemon's live-push size limit arrives with its
+        // model names but its routes stripped. That is not the catalog: keep
+        // the routes held (or ask for the full one) rather than call it empty.
+        let stripped = Self::catalog_is_stripped(event);
+        self.model_catalog_loaded |= !stripped;
         if let Some(models) = event["available_models"].as_array() {
             let names: Vec<String> = models
                 .iter()
@@ -775,7 +789,10 @@ impl BridgeState {
         if event.get("reasoning_effort").is_some() {
             self.current_effort = event["reasoning_effort"].as_str().map(str::to_string);
         }
-        if let Some(routes) = event["available_model_routes"].as_array() {
+        if let Some(routes) = event["available_model_routes"]
+            .as_array()
+            .filter(|_| !stripped)
+        {
             self.available_routes = routes
                 .iter()
                 .filter_map(|route| {

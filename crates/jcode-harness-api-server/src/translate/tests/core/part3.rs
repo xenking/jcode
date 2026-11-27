@@ -315,6 +315,37 @@ fn an_empty_catalog_replaces_stale_models_and_is_cached() {
     assert!(matches!(event, ApiEvent::Models { models, .. } if models.is_empty()));
 }
 
+/// A catalog over the daemon's live-push limit arrives as model names with no
+/// routes. Taking that for the catalog left every picker on the machine empty.
+#[test]
+fn a_catalog_stripped_of_its_routes_is_not_the_catalog() {
+    let stripped = json!({
+        "type": "available_models_updated", "provider_model": "m",
+        "available_models": ["m", "n"], "available_model_routes": []
+    });
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&stripped);
+    assert!(matches!(&frames[..], [frame] if matches!(frame.event, ApiEvent::ModelInfo { .. })));
+    // Nothing loaded: the next runtime-info request asks for the full catalog.
+    let out = state.api_request_to_legacy(&json!({
+        "req": "get_runtime_info", "id": 82, "session_id": "s1"
+    }));
+    let [Outbound::Legacy(probe)] = &out[..] else {
+        panic!("must fetch the full catalog");
+    };
+    assert_eq!(probe["type"], "get_model_catalog");
+    let route = json!({"model":"m","provider":"OpenAI","api_method":"openai-oauth",
+        "available":true,"detail":"ready"});
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": probe["id"], "session_id": "s1", "provider_model": "m",
+        "available_models": ["m", "n"], "available_model_routes": [route]
+    }));
+    assert!(matches!(&frames[0].event, ApiEvent::RuntimeInfo { routes, .. } if routes.len() == 1));
+    // Once the full catalog is held, a stripped push keeps its routes.
+    let frames = state.legacy_event_to_api(&stripped);
+    assert!(matches!(&frames[1].event, ApiEvent::RuntimeInfo { routes, .. } if routes.len() == 1));
+}
+
 #[test]
 fn runtime_info_waits_for_initial_catalog_and_propagates_errors() {
     let mut state = state_with_session();
