@@ -665,7 +665,7 @@ async fn validate_copilot_import() -> Result<String> {
 }
 
 async fn validate_cursor_import() -> Result<String> {
-    let has_api_key = auth::cursor::has_cursor_api_key();
+    let has_api_key = auth::cursor::load_api_key().is_ok();
     let (has_auth_file, has_vscdb) = auth::cursor::trusted_external_token_sources();
     if has_api_key || has_auth_file || has_vscdb {
         Ok(format!(

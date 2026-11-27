@@ -1082,7 +1082,7 @@ fn probe_copilot_status(status: &mut AuthStatus) {
 fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
     match mode {
         AuthProbeMode::Full => {
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
             status.cursor = if cursor_has_native_auth {
                 AuthState::Available
@@ -1094,7 +1094,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         }
         AuthProbeMode::Fast => {
             // Avoid the vscdb probe in fast UI paths.
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
             status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
                 AuthState::Available
