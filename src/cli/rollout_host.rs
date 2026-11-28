@@ -910,9 +910,30 @@ fn user_runtime_dir() -> Result<PathBuf> {
 const BUILD_ADMISSION: &str = include_str!("../../scripts/build-admission.py");
 
 fn disk_admission_command(owner: &str, kind: &str) -> Command {
-    let mut command = Command::new("python3");
-    command.args(["-c", BUILD_ADMISSION, "--owner", owner, "--kind", kind]);
-    command
+    // Unit tests exercise rollout sequencing only. The real helper reserves
+    // leases under ~/.local/state and shells out to cargo for build storage, so
+    // it would read the machine's state and fail whenever another build holds
+    // the admission gate. Run the wrapped command directly instead.
+    #[cfg(test)]
+    {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            r#"while [ "$1" != -- ]; do shift; done; shift; exec "$@""#,
+            "admission-stub",
+            "--owner",
+            owner,
+            "--kind",
+            kind,
+        ]);
+        command
+    }
+    #[cfg(not(test))]
+    {
+        let mut command = Command::new("python3");
+        command.args(["-c", BUILD_ADMISSION, "--owner", owner, "--kind", kind]);
+        command
+    }
 }
 
 fn git(dir: &Path) -> Command {
