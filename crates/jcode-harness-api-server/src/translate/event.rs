@@ -747,7 +747,7 @@ impl BridgeState {
                         // optional display metadata must not discard the transcript.
                         response_stats: serde_json::from_value(m["response_stats"].clone())
                             .inspect_err(|error| {
-                                eprintln!("harness optional response statistics invalid: {error}")
+                                diag!("harness optional response statistics invalid: {error}")
                             })
                             .unwrap_or(None),
                         timestamp_ms: m["timestamp_ms"].as_i64(),

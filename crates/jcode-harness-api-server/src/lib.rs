@@ -16,6 +16,17 @@
 // Tests hold the std env/home serialization lock across awaits on purpose.
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+/// Diagnostics to stderr that can never panic. The bridge also runs inside the
+/// daemon, whose stderr is a dead pipe once the client that started it exits,
+/// and `eprintln!` panics on a failed write: that killed the connection of any
+/// request that happened to log one (`list_sessions`, `search_sessions`).
+macro_rules! diag {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod allocator;
 pub mod background_progress;
 mod capabilities;
@@ -285,7 +296,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
     let _lock = match single_instance_lock(&api_socket)? {
         Some(lock) => lock,
         None => {
-            eprintln!(
+            diag!(
                 "harness API bridge: another bridge already owns {}; exiting",
                 api_socket.display()
             );
@@ -327,7 +338,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
         std::fs::set_permissions(&api_socket, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("restrict API socket {}", api_socket.display()))?;
     }
-    eprintln!(
+    diag!(
         "harness API bridge: listening on {} -> {}",
         api_socket.display(),
         legacy_socket.display()
@@ -362,7 +373,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
                 let retiring = Arc::clone(&retiring);
                 clients.spawn(async move {
                     if let Err(error) = handle_api_client(stream, legacy, retiring).await {
-                        eprintln!("harness API bridge: client ended: {error:#}");
+                        diag!("harness API bridge: client ended: {error:#}");
                     }
                     allocator::trim();
                 });

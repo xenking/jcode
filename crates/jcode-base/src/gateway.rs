@@ -93,7 +93,9 @@ pub async fn run_gateway(
     let harness = HarnessConnectionState {
         enabled: harness_enabled,
         daemon_socket,
-        slots: Arc::new(tokio::sync::Semaphore::new(harness_connection_limit(config.max_harness_connections))),
+        slots: Arc::new(tokio::sync::Semaphore::new(harness_connection_limit(
+            config.max_harness_connections,
+        ))),
     };
 
     loop {
@@ -315,8 +317,28 @@ async fn handle_ws_connection(
     // Send the server-side stream to the main server loop for handle_client
     let harness_task = if harness {
         let (read, write) = server_stream.into_split();
+        let device = device_name.clone();
         Some(tokio::spawn(async move {
-            let _ = jcode_harness_api_server::run_bridge_stream(read, write, daemon_socket).await;
+            // The client only sees the stream close: say why in the daemon log.
+            let run = jcode_harness_api_server::run_bridge_stream(read, write, daemon_socket);
+            match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    logging::warn(&format!(
+                        "Gateway: harness stream for {device} ended: {error:#}"
+                    ));
+                }
+                Err(panic) => {
+                    let what = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    logging::error(&format!(
+                        "Gateway: harness stream for {device} panicked: {what}"
+                    ));
+                }
+            }
         }))
     } else {
         client_tx.send(GatewayClient {

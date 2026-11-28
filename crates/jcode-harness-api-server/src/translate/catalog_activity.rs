@@ -63,7 +63,7 @@ impl BridgeState {
             let activity = match jcode_session_types::read_legacy_catalog_activity(&path) {
                 Ok(activity) => activity,
                 Err(error) => {
-                    eprintln!("harness API bridge: read legacy activity for {id}: {error}");
+                    diag!("harness API bridge: read legacy activity for {id}: {error}");
                     continue;
                 }
             };
@@ -81,7 +81,7 @@ impl BridgeState {
             {
                 match Connection::open(&path) {
                     Ok(opened) => connection = Some(opened),
-                    Err(error) => eprintln!(
+                    Err(error) => diag!(
                         "harness API bridge: open activity index {}: {error}",
                         path.display()
                     ),
@@ -91,7 +91,7 @@ impl BridgeState {
                 let value = match serde_json::to_string(&activity) {
                     Ok(value) => value,
                     Err(error) => {
-                        eprintln!("harness API bridge: encode legacy activity for {id}: {error}");
+                        diag!("harness API bridge: encode legacy activity for {id}: {error}");
                         continue;
                     }
                 };
@@ -107,7 +107,7 @@ impl BridgeState {
                          ELSE 1 END)",
                     params![id, value],
                 ) {
-                    eprintln!("harness API bridge: cache legacy activity for {id}: {error}");
+                    diag!("harness API bridge: cache legacy activity for {id}: {error}");
                 }
             }
         }

@@ -461,3 +461,67 @@ fn the_paired_gateway_serves_the_same_state_as_the_local_bridge() {
     assert_eq!(pushed[0].value, Some(draft("over the gateway")));
     assert_eq!(remote.get("main").unwrap().rev, 1);
 }
+
+// ---- session discovery over the paired gateway ----
+
+fn paired_client(machine: &Machine) -> JcodeClient {
+    let (origin, token) = machine.pair();
+    JcodeClient::connect_paired_harness(
+        &origin,
+        &token,
+        ConnectOptions {
+            client_name: "gateway-sessions-test".into(),
+            ensure_runtime: false,
+            ..ConnectOptions::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_paired_device_lists_and_searches_sessions_through_the_gateway() {
+    let mut machine = Machine::new();
+    machine.start();
+    let paired = paired_client(&machine);
+    // An empty store answers with an empty list rather than dropping the stream.
+    assert!(paired.list_sessions().unwrap().is_empty());
+
+    // A session is listed once it has a record on disk; naming it writes one.
+    // A connection attaches one session, so each is made on its own.
+    let mut made: Vec<String> = (0..3)
+        .map(|n| {
+            let local = machine.connect().unwrap();
+            let id = local
+                .create_session(Some("/tmp".into()))
+                .unwrap()
+                .session_id;
+            let renamed = local.request(jcode_sdk::api::ApiRequest::RenameSession {
+                session_id: id.clone(),
+                title: Some(format!("gateway session {n}")),
+            });
+            assert!(renamed.is_ok());
+            id
+        })
+        .collect();
+    made.sort();
+    let mut listed: Vec<String> = paired
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed, made,
+        "the gateway lists what the local bridge lists"
+    );
+    // The title index fills in the background; a closed stream would not heal.
+    wait_for(
+        || {
+            paired
+                .search_sessions("gateway session", Some(10))
+                .is_ok_and(|found| !found.titles.is_empty())
+        },
+        "search to answer over the gateway",
+    );
+}

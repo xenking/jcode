@@ -650,7 +650,7 @@ impl SearchIndex {
 }
 
 fn report_error(context: &str, error: impl std::fmt::Display) {
-    eprintln!("harness API bridge: search index {context}: {error}");
+    diag!("harness API bridge: search index {context}: {error}");
 }
 
 fn boost(role: SessionSearchRole) -> f64 {
@@ -1187,7 +1187,7 @@ pub fn search(query: &str, limit: Option<u32>) -> SessionSearchResults {
         }
     });
     if stats.indexed > 0 {
-        eprintln!(
+        diag!(
             "harness API bridge: search index synced {} session(s) ({} unchanged) in {:.1}ms",
             stats.indexed,
             stats.unchanged,

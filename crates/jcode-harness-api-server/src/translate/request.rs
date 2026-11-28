@@ -830,7 +830,7 @@ impl BridgeState {
                 // rather than making every client re-read transcripts.
                 let workers = jcode_harness_api::local_worker_meta(&sessions);
                 let completed = list_started.elapsed();
-                eprintln!(
+                diag!(
                     "harness API bridge: list_sessions ids={:.1}ms metadata={:.1}ms total={:.1}ms count={}",
                     ids_loaded.as_secs_f64() * 1_000.0,
                     metadata_loaded.as_secs_f64() * 1_000.0,

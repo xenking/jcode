@@ -557,6 +557,17 @@ pub(super) async fn handle_server_start_exit(
     anyhow::bail!(format_server_start_error(status, &stderr_output));
 }
 
+/// Point fd 2 at `/dev/null`.
+#[cfg(unix)]
+fn silence_stderr() {
+    use std::os::fd::AsRawFd;
+
+    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        // SAFETY: both descriptors are open; dup2 replaces fd 2 atomically.
+        unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) };
+    }
+}
+
 /// Write a single byte to the fd in `JCODE_READY_FD` and close it.
 /// Called after startup plumbing is ready so the parent process knows the
 /// server can accept and service client requests. The env var is cleared so child
@@ -573,6 +584,12 @@ pub(super) fn signal_ready_fd() {
                 let _ = std::io::Write::write_all(&mut file, b"R");
                 // file is dropped here which closes the fd
             }
+            // Started by a client that read our stderr only to report boot
+            // failures. It stops reading when it exits (a `server start` that
+            // returns, a TUI that quits), and then every `eprintln!` in the
+            // daemon panics on a broken pipe, killing the task that logged.
+            // Boot is over: the daemon logs to its own file from here on.
+            silence_stderr();
         }
     }
 }
