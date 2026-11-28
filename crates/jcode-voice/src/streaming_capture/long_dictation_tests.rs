@@ -347,3 +347,35 @@ async fn a_dictation_that_succeeds_leaves_no_audio_behind() {
     assert_eq!(outcome.text, Ok(expected(5)));
     assert!(kept_wavs(dir.path()).is_empty());
 }
+
+/// A finished buffer goes through the selected provider and comes back in
+/// order, with no recovery file. A provider that dies after speaking is an
+/// error, not a silently shortened transcript.
+#[tokio::test]
+async fn a_finished_buffer_is_transcribed_through_the_selected_provider() {
+    let fake = fake_server(usize::MAX, Limit::Close).await;
+    let plan = crate::StreamingPlan {
+        backend: crate::StreamingBackend::Soniox,
+        key: "key".into(),
+        url: Some(fake.url.clone()),
+        model: Some("chosen".into()),
+        auto: false,
+    };
+    let mut pcm = vec![1i16; CHUNK * 3 + 10];
+    for (index, chunk) in pcm.chunks_mut(CHUNK).enumerate() {
+        chunk[0] = index as i16;
+    }
+    let text = transcribe_buffered(&plan, &pcm, &Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(text, "w0 w1 w2 w3");
+    assert_eq!(*fake.models.lock().unwrap(), ["chosen"]);
+
+    // Only one provider session ever opens, so the cut is a failure.
+    let one = fake_server_for(2, Limit::ErrorFrame, 1).await;
+    let plan = crate::StreamingPlan { url: Some(one.url.clone()), ..plan };
+    let error = transcribe_buffered(&plan, &pcm, &Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap_err();
+    assert_ne!(error, VoiceError::Cancelled);
+}

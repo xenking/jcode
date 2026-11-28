@@ -401,6 +401,7 @@ discovery pass only.
 | `softInterruptWithId(id, content, { clientId, images?, urgent? })` | Queue a mid-turn message you can track and retract |
 | `cancelSoftInterruptsById(id, clientIds)` / `cancelSoftInterrupt(id, clientId)` | Retract specific queued messages, with an exact "too late?" answer |
 | `backgroundTool(id)` / `backgroundToolResult(id)` | Move the running tool call to the background, optionally reporting what moved |
+| `transcribeAudio(wav, language?)` | Transcribe a recording with the daemon's configured dictation backend (needs `transcribe_v1`; at most 5 minutes and 10 MiB, 16 kHz mono PCM16 WAV) |
 | `ping()` | Liveness |
 
 ## Models
@@ -598,8 +599,12 @@ try {
 | `unknown_skill` | The queued skill name is not installed for the session. | Install the skill or choose an available name before retrying. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
-| `unsupported` | The runtime does not advertise `session_tools`. | Update both the jcode daemon and API bridge before using tool controls. |
+| `unsupported` | The runtime does not advertise the capability the method needs (`session_tools`, `transcribe_v1`, ...). | Update both the jcode daemon and API bridge before using that feature. |
 | `busy` | Another tool configuration request is in flight for this session. | Await the previous configuration before submitting another. |
+| `transcription_not_configured` | The selected `[dictation] backend` has no key or account on that machine, or records on its own (`command`) and cannot take uploaded audio. | Configure the backend on the machine; falling back to typed text is up to the caller. |
+| `transcription_unavailable` | The dictation backend failed, rejected the key or audio, or could not be reached. | Retry later; check the machine's network and provider balance. |
+| `transcription_timeout` | The backend gave no answer within `[dictation] timeout_secs` (at most 600 seconds). | Retry with a shorter recording. |
+| `audio_too_large` | The recording is over 10 MiB. | Record a shorter clip (five minutes of 16 kHz mono is 9.6 MB). |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 
 ### Streaming and structured-output errors

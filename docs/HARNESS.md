@@ -206,6 +206,54 @@ TypeScript SDK: `await client.answerRoutingGate(...)`, `await client.routingInte
 and `await client.routingView()`. All three fail before sending a frame when the
 runtime does not advertise `routing_v1`.
 
+## Voice transcription
+
+A daemon that advertises `transcribe_v1` (harness API minor 26) runs its own
+`[dictation]` backend on a recording a paired device sends, so a phone needs no
+provider key. The request needs no attached session. The same bearer-token scope
+as every other Harness request applies; the connection must hold a Harness
+device token.
+
+```json
+{"v":1,"id":7,"req":"transcribe_audio","wav":"<base64>","language":"en"}
+{"v":1,"reply_to":7,"ev":"audio_transcript","text":"hello there"}
+{"v":1,"reply_to":7,"ev":"error","code":"transcription_not_configured","message":"Configure a valid Soniox API key (...)"}
+```
+
+`wav` is a standard-alphabet, padded base64 mono PCM16 WAV: at most 5 minutes and
+10 MiB decoded (a base64 string of at most 13,981,016 bytes), 16 kHz for Nari,
+Soniox and ElevenLabs. The Jcode subscription backend also takes 8 to 192 kHz.
+`language` is an optional lowercase ISO 639-1 hint, used by the subscription
+backend only. An empty `text` means no speech was recognised. One transcription
+runs per connection at a time; a second request is `invalid_request` until the
+first replies. The bridge keeps serving other requests meanwhile, and closing the
+connection cancels the backend call. The largest frame is about 14 MB, inside the
+bridge's 64 MiB frame bound and the paired WebSocket's 16 MiB frame default.
+
+The backend is the one `[dictation] backend` selects, with its `base_url` and
+`model`; a missing key is an error that names that backend, never a switch to
+another one. `subscription` uploads the WAV; `nari`, `soniox`, `elevenlabs` and
+`auto` (Nari, then Soniox, by key) stream the PCM to the provider. `command`, and
+`auto` with `[dictation] command` set, record on their own and answer
+`transcription_not_configured`; the daemon does not advertise `transcribe_v1`
+for them. The wait is `[dictation] timeout_secs` (0 means 120 s, never more than
+600 s). A provider that fails after speaking is an error, not a shortened
+transcript. Audio stays in memory: nothing is written to disk, including the
+recovery file live dictation keeps on failure. Only sizes and timings are logged,
+never audio or text. Keys never leave the machine.
+
+Error codes: `audio_too_large` (checked before decoding), `invalid_request` (bad
+base64, language or WAV), `transcription_not_configured`,
+`transcription_unavailable` (provider failed, rejected the key or audio, or is
+unreachable), `transcription_timeout`, and `unknown_request` when this runtime has
+no backend.
+
+Rust SDK: `client.transcribe_audio(wav, language)`. TypeScript SDK:
+`await client.transcribeAudio(wav, language)`. Both fail with an unsupported
+error before sending a frame when the runtime does not advertise `transcribe_v1`,
+and with `audio_too_large` before sending an oversized recording, and wait at
+least ten minutes for the reply.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.

@@ -21,7 +21,9 @@ pub mod background_progress;
 mod capabilities;
 pub mod search_index;
 pub mod timing;
+mod transcribe;
 pub mod translate;
+pub use transcribe::{AudioTranscriber, TranscribeError, install_audio_transcriber};
 
 #[cfg(test)]
 #[path = "tests/search_api_tests.rs"]
@@ -33,6 +35,9 @@ mod session_presence_tests;
 #[cfg(all(test, unix))]
 #[path = "tests/stdio_tests.rs"]
 mod stdio_tests;
+#[cfg(all(test, unix))]
+#[path = "tests/transcribe_tests.rs"]
+mod transcribe_tests;
 
 use anyhow::{Context, Result};
 use jcode_harness_api::{
@@ -381,7 +386,14 @@ async fn handle_api_client(
     retiring: Arc<AtomicBool>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
-    run_bridge_stream_inner(read_half, write_half, legacy_socket, Some(retiring)).await
+    run_bridge_stream_inner(
+        read_half,
+        write_half,
+        legacy_socket,
+        Some(retiring),
+        transcribe::installed(),
+    )
+    .await
 }
 
 /// Serve the process's stdin/stdout as one API connection.
@@ -416,7 +428,14 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    run_bridge_stream_inner(read_half, write_half, legacy_socket, None).await
+    run_bridge_stream_inner(
+        read_half,
+        write_half,
+        legacy_socket,
+        None,
+        transcribe::installed(),
+    )
+    .await
 }
 
 async fn run_bridge_stream_inner<R, W>(
@@ -424,6 +443,7 @@ async fn run_bridge_stream_inner<R, W>(
     mut write_half: W,
     legacy_socket: PathBuf,
     retiring: Option<Arc<AtomicBool>>,
+    transcriber: Option<Arc<dyn AudioTranscriber>>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -560,7 +580,8 @@ where
         timing::ms(daemon_connected_at.saturating_duration_since(hello_at)),
         timing::ms(daemon_connected_at.elapsed()),
     ));
-    let daemon = DaemonCapabilities::from_daemon(&daemon_caps);
+    let daemon = DaemonCapabilities::from_daemon(&daemon_caps)
+        .with_transcription(transcriber.as_ref().is_some_and(|t| t.available()));
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -584,6 +605,7 @@ where
     let mut legacy_frame = Vec::new();
     let mut task_watch: Option<TaskWatch> = None;
     let mut task_poll = None;
+    let mut transcription: Option<transcribe::Transcription> = None;
     let task_tick = tokio::time::sleep(TASK_POLL_MIN);
     tokio::pin!(task_tick);
     loop {
@@ -703,6 +725,18 @@ where
                     write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
+                if request["req"] == "transcribe_audio" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    match transcribe::start(transcriber.as_ref(), transcription.is_some(), request) {
+                        Ok((work, bytes)) => {
+                            timing::log(&format!("transcribe_audio id={id} wav_bytes={bytes}"));
+                            pending.begin(id, "transcribe_audio", received, received.elapsed());
+                            transcription = Some(work);
+                        }
+                        Err(frame) => write_json_line(&mut write_half, &frame).await?,
+                    }
+                    continue;
+                }
                 if matches!(request["req"].as_str(), Some("watch_background_tasks" | "cancel_background_task")) {
                     use jcode_harness_api::{ApiRequest, ClientFrame};
                     let id = request["id"].as_u64().unwrap_or(0);
@@ -792,6 +826,10 @@ where
                         write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
                     }
                 }
+            }
+            frame = async { transcription.as_mut().expect("pending transcription").await }, if transcription.is_some() => {
+                transcription = None;
+                write_frame_timed(&mut write_half, &frame, &mut pending, "bridge").await?;
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {
                 if n? == 0 {

@@ -136,6 +136,14 @@ impl ErrorKind {
                 jcode_harness_api::ErrorCode::UnknownSkill => "unknown_skill",
                 jcode_harness_api::ErrorCode::InvalidRequest => "invalid_request",
                 jcode_harness_api::ErrorCode::Internal => "internal",
+                jcode_harness_api::ErrorCode::TranscriptionNotConfigured => {
+                    "transcription_not_configured"
+                }
+                jcode_harness_api::ErrorCode::TranscriptionUnavailable => {
+                    "transcription_unavailable"
+                }
+                jcode_harness_api::ErrorCode::TranscriptionTimeout => "transcription_timeout",
+                jcode_harness_api::ErrorCode::AudioTooLarge => "audio_too_large",
             },
         }
     }

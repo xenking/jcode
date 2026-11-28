@@ -579,6 +579,39 @@ fn retryable(error: &VoiceError, produced_text: bool) -> bool {
     }
 }
 
+/// Transcribe a finished 16 kHz PCM buffer through `plan`'s provider. The audio
+/// stays in memory: no recovery file is written. Any provider failure is an
+/// error, even after partial text, so a cut-off transcript is never passed off
+/// as complete.
+pub(super) async fn transcribe_buffered(
+    plan: &super::StreamingPlan,
+    pcm: &[i16],
+    cancel: &Arc<AtomicBool>,
+) -> Result<String, VoiceError> {
+    let target = Target {
+        backend: plan.backend,
+        url: plan
+            .url
+            .clone()
+            .unwrap_or_else(|| plan.backend.default_url().to_owned()),
+        key: plan.key.clone(),
+        model: plan.model.clone(),
+    };
+    let session = target.connect(cancel).await?;
+    let chunks = pcm.chunks(NARI_PCM_CHUNK_SAMPLES);
+    let (tx, rx) = tokio::sync::mpsc::channel(chunks.len().max(1));
+    for chunk in chunks {
+        tx.try_send(chunk.to_vec()).map_err(|_| VoiceError::InvalidAudio)?;
+    }
+    drop(tx);
+    let streamed =
+        stream_resilient(session, &target, cancel, rx, StreamTuning::default(), &mut |_| {}).await?;
+    match streamed.error {
+        Some(error) => Err(error),
+        None => Ok(streamed.text),
+    }
+}
+
 /// The microphone is released and every queued chunk was consumed.
 fn audio_finished(pcm: &tokio::sync::mpsc::Receiver<Vec<i16>>) -> bool {
     pcm.is_closed() && pcm.is_empty()

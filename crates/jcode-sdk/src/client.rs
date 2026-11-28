@@ -1453,6 +1453,49 @@ impl JcodeClient {
         }
     }
 
+    /// Transcribe one recording with the daemon's configured dictation backend
+    /// and return the text (empty when no speech was recognised). `wav` is a
+    /// mono PCM16 WAV of at most five minutes and 10 MiB; the streaming
+    /// providers need 16 kHz. `language` is an optional lowercase ISO 639-1 hint.
+    ///
+    /// Fails with `UnsupportedCapability` before sending anything when the
+    /// daemon lacks `transcribe_v1`, so a caller can fall back to plain text.
+    /// Daemon-side failures arrive as `Harness(code)`:
+    /// `TranscriptionNotConfigured`, `TranscriptionUnavailable`,
+    /// `TranscriptionTimeout`, `AudioTooLarge` or `InvalidRequest` (bad audio).
+    /// The reply wait is at least ten minutes, longer than the default request
+    /// timeout, because the daemon may wait that long on its backend.
+    pub fn transcribe_audio(&self, wav: Vec<u8>, language: Option<&str>) -> Result<String> {
+        use jcode_harness_api::{MAX_TRANSCRIBE_WAV_BYTES, TRANSCRIBE_CAPABILITY};
+        if !self.supports(TRANSCRIBE_CAPABILITY) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This machine's Jcode cannot transcribe voice. Update Jcode on that machine; your recording has not been sent.",
+            ));
+        }
+        if wav.len() > MAX_TRANSCRIBE_WAV_BYTES {
+            return Err(Error::new(
+                ErrorKind::Harness(jcode_harness_api::ErrorCode::AudioTooLarge),
+                "The recording is larger than 10 MiB. Record a shorter clip.",
+            ));
+        }
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let request = ApiRequest::TranscribeAudio {
+            wav: STANDARD.encode(wav),
+            language: language.map(str::to_owned),
+        };
+        let timeout = self
+            .inner
+            .request_timeout
+            .map(|timeout| timeout.max(TRANSCRIBE_REPLY_TIMEOUT));
+        let frame = self.request_with_timeout(request, timeout)?;
+        match frame.event {
+            ApiEvent::AudioTranscript { text } => Ok(text),
+            ApiEvent::Error { code, message } => Err(Error::new(ErrorKind::Harness(code), message)),
+            other => Err(unexpected("audio_transcript", &other)),
+        }
+    }
+
     /// Models this session can switch to, and which one is serving it.
     pub fn list_models(&self, session_id: &str) -> Result<(Vec<String>, Option<String>)> {
         match self
@@ -2240,6 +2283,9 @@ fn closed_error() -> Error {
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Error {
     Error::new(ErrorKind::Transport, "harness client state was poisoned")
 }
+
+/// Longest the daemon waits on a transcription backend (600 s), plus slack.
+const TRANSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(615);
 
 fn unexpected(want: &str, got: &ApiEvent) -> Error {
     Error::new(

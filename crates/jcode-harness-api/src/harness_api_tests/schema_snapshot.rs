@@ -479,9 +479,56 @@ fn unknown_fields_are_ignored() {
 }
 
 #[test]
+fn transcribe_audio_wire_shape_and_debug_hides_the_recording() {
+    let request = ClientFrame::new(
+        7,
+        ApiRequest::TranscribeAudio {
+            wav: "UklGRg==".into(),
+            language: Some("en".into()),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        serde_json::json!({"v":1,"id":7,"req":"transcribe_audio","wav":"UklGRg==","language":"en"})
+    );
+    let no_language: ClientFrame =
+        serde_json::from_str(r#"{"v":1,"id":8,"req":"transcribe_audio","wav":"AA=="}"#).unwrap();
+    assert!(matches!(
+        no_language.request,
+        ApiRequest::TranscribeAudio { language: None, .. }
+    ));
+    assert!(!format!("{request:?}").contains("UklGRg"));
+
+    let reply = ServerFrame::reply(7, ApiEvent::AudioTranscript { text: "hello".into() });
+    assert_eq!(
+        serde_json::to_value(&reply).unwrap(),
+        serde_json::json!({"v":1,"reply_to":7,"ev":"audio_transcript","text":"hello"})
+    );
+    let error = ServerFrame::reply(
+        7,
+        ApiEvent::Error {
+            code: ErrorCode::AudioTooLarge,
+            message: "too big".into(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&error).unwrap()["code"],
+        "audio_too_large"
+    );
+    assert_eq!(
+        MAX_TRANSCRIBE_WAV_BASE64_BYTES,
+        MAX_TRANSCRIBE_WAV_BYTES.div_ceil(3) * 4
+    );
+}
+
+#[test]
 fn request_roundtrip() {
     let reqs = [
         ApiRequest::ListDraftModels,
+        ApiRequest::TranscribeAudio {
+            wav: "AA==".into(),
+            language: None,
+        },
         ApiRequest::Hello {
             min_version: 1,
             max_version: 1,

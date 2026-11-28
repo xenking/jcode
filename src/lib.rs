@@ -25,6 +25,9 @@ pub use jcode_tui::*;
 
 // Cli + entrypoint layer (kept in the root crate).
 pub mod cli;
+// Needs the harness bridge, a Unix-only dependency of this crate.
+#[cfg(unix)]
+mod voice_upload;
 
 use anyhow::Result;
 
@@ -33,6 +36,8 @@ fn register_bundled_docs() {
 }
 
 pub async fn run() -> Result<()> {
+    #[cfg(unix)]
+    voice_upload::install();
     cli::startup::run().await
 }
 

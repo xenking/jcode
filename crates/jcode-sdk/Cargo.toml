@@ -8,6 +8,7 @@ description = "Rust SDK for the jcode harness API: connect, drive sessions, stre
 [dependencies]
 jcode-build-support = { path = "../jcode-build-support" }
 anyhow = "1"
+base64 = "0.22"
 jcode-harness-api = { path = "../jcode-harness-api" }
 jcode-applet-types = { path = "../jcode-applet-types" }
 jcode-todo-policy = { path = "../jcode-todo-policy" }

@@ -257,6 +257,7 @@ pdf = ["jcode-tui/pdf"]
 # anyone who installed jcode from a release artifact. Unix-only because the
 # bridge listens on a Unix socket.
 [target.'cfg(unix)'.dependencies]
+jcode-harness-api = { path = "crates/jcode-harness-api" }
 jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
 
 [target.'cfg(windows)'.dependencies]

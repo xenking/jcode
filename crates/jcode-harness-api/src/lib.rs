@@ -97,7 +97,7 @@ mod routing_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 25;
+pub const API_VERSION_MINOR: u32 = 26;
 
 pub use jcode_background_types::{
     BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,

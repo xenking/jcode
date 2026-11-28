@@ -23,6 +23,8 @@ import {
   API_VERSION_MAJOR,
   ROUTING_CAPABILITY,
   SIDE_QUESTIONS_CAPABILITY,
+  TRANSCRIBE_CAPABILITY,
+  MAX_TRANSCRIBE_WAV_BYTES,
   type AppletAction,
   type AnyApiEvent,
   type ApiEvent,
@@ -423,7 +425,11 @@ export class JcodeClient extends EventEmitter {
     return this.requestFrame(request);
   }
 
-  private requestFrame(request: ApiRequest, onReply?: (frame: ServerFrame) => void): Promise<ServerFrame> {
+  private requestFrame(
+    request: ApiRequest,
+    onReply?: (frame: ServerFrame) => void,
+    timeoutMs: number = this.requestTimeoutMs,
+  ): Promise<ServerFrame> {
     if (this.closed) return Promise.reject(this.closeError ?? new Error("client closed"));
     if (request.req === "ask_response" && !this.supports("ask_response_images")
       && request.response.answers?.some((answer) =>
@@ -443,11 +449,11 @@ export class JcodeClient extends EventEmitter {
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
       const entry: Pending = { resolve, reject, onReply };
-      if (this.requestTimeoutMs > 0) {
+      if (timeoutMs > 0) {
         entry.timer = setTimeout(() => {
           this.pending.delete(id);
-          reject(new HarnessError("timeout", `no reply to ${request.req} within ${this.requestTimeoutMs}ms`));
-        }, this.requestTimeoutMs);
+          reject(new HarnessError("timeout", `no reply to ${request.req} within ${timeoutMs}ms`));
+        }, timeoutMs);
         entry.timer.unref?.();
       }
       this.pending.set(id, entry);
@@ -1028,6 +1034,39 @@ export class JcodeClient extends EventEmitter {
     if (!this.supports("draft_model_catalog")) return { current: null, routes: [] };
     const frame = await this.expectReply({ req: "list_draft_models" }, "draft_models");
     return { current: frame.current, routes: frame.routes };
+  }
+
+  /**
+   * Transcribe one recording with the daemon's configured dictation backend.
+   *
+   * `wav` is a mono PCM16 WAV of at most five minutes and 10 MiB (the streaming
+   * providers need 16 kHz). Rejects with `unsupported` before sending anything
+   * when the daemon lacks `transcribe_v1`, and with the daemon's
+   * `transcription_not_configured`, `transcription_unavailable`,
+   * `transcription_timeout`, `audio_too_large` or `invalid_request` codes.
+   * Waits at least ten minutes for the reply: the daemon may wait that long
+   * on its backend. Resolves to "" when no speech was recognised.
+   */
+  async transcribeAudio(wav: Uint8Array, language?: string): Promise<string> {
+    if (!this.supports(TRANSCRIBE_CAPABILITY)) {
+      throw new HarnessError(
+        "unsupported",
+        "This machine's Jcode cannot transcribe voice. Update Jcode on that machine; your recording has not been sent.",
+      );
+    }
+    if (wav.byteLength > MAX_TRANSCRIBE_WAV_BYTES) {
+      throw new HarnessError("audio_too_large", "The recording is larger than 10 MiB. Record a shorter clip.");
+    }
+    const frame = await this.requestFrame(
+      { req: "transcribe_audio", wav: Buffer.from(wav).toString("base64"), language },
+      undefined,
+      this.requestTimeoutMs > 0 ? Math.max(this.requestTimeoutMs, 615_000) : 0,
+    );
+    if (frame.ev === "error") throw new HarnessError(String(frame.code), String(frame.message));
+    if (frame.ev !== "audio_transcript") {
+      throw new HarnessError("unexpected_reply", `expected audio_transcript, got ${frame.ev}`);
+    }
+    return String(frame.text);
   }
 
   /** Runtime identity, route catalog, protocol metadata, and a live health check. */

@@ -119,6 +119,18 @@ impl From<QueuedPromptWire> for QueuedPrompt {
     }
 }
 
+/// `hello_ok` advertises this only when the daemon can run a dictation backend
+/// on uploaded audio. Check it before sending `TranscribeAudio`.
+pub const TRANSCRIBE_CAPABILITY: &str = "transcribe_v1";
+
+/// Largest WAV the daemon accepts. Mirrors the voice crate's `MAX_AUDIO_BYTES`
+/// (five minutes of 16 kHz mono PCM16 is 9.6 MB). The base64 frame is a third
+/// larger, well inside the bridge's 64 MiB frame bound.
+pub const MAX_TRANSCRIBE_WAV_BYTES: usize = 10 * 1024 * 1024;
+
+/// Largest base64 `wav` string that can hold [`MAX_TRANSCRIBE_WAV_BYTES`].
+pub const MAX_TRANSCRIBE_WAV_BASE64_BYTES: usize = MAX_TRANSCRIBE_WAV_BYTES.div_ceil(3) * 4;
+
 /// Curated request surface. Internally-tagged on `"req"`.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
@@ -609,6 +621,19 @@ pub enum ApiRequest {
         changes: Vec<crate::DesktopStateChange>,
     },
 
+    /// Transcribe one recording with the daemon's configured dictation backend.
+    /// Needs no attached session and the `transcribe_v1` capability. `wav` is a
+    /// base64 (standard alphabet, padded) mono PCM16 WAV of at most five minutes
+    /// and 10 MiB decoded; the streaming providers need 16 kHz. `language` is a
+    /// lowercase ISO 639-1 hint some backends use. Replies with
+    /// `AudioTranscript`, or an `Error` with a `transcription_*` / `audio_*` code.
+    /// Only one transcription runs per connection at a time.
+    TranscribeAudio {
+        wav: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+
     /// Override the session context budget. Null or zero restores the default.
     SetContextCap {
         session_id: String,
@@ -770,6 +795,14 @@ impl std::fmt::Debug for ApiRequest {
                     "keys",
                     &changes.iter().map(|change| &change.key).collect::<Vec<_>>(),
                 )
+                .finish();
+        }
+        // The recording is private: log how big it was, never its bytes.
+        if let Self::TranscribeAudio { wav, language } = self {
+            return f
+                .debug_struct("TranscribeAudio")
+                .field("wav_base64_bytes", &wav.len())
+                .field("language", language)
                 .finish();
         }
         if let Self::SetSessionEnv { session_id, .. } = self {

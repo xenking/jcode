@@ -346,6 +346,11 @@ pub enum ApiEvent {
         view: crate::RoutingView,
     },
 
+    /// Reply to `TranscribeAudio`. Empty `text` means no speech was recognised.
+    AudioTranscript {
+        text: String,
+    },
+
     /// Reply to `DesktopStateGet` / `DesktopStateSubscribe`; also sent without
     /// a request when a subscriber missed pushes and must resync.
     DesktopState {
@@ -922,6 +927,16 @@ pub enum ErrorCode {
     UnknownSkill,
     InvalidRequest,
     Internal,
+    /// `TranscribeAudio`: the selected dictation backend has no key or account
+    /// on this machine, or cannot take uploaded audio at all.
+    TranscriptionNotConfigured,
+    /// `TranscribeAudio`: the backend was reached and failed, rejected the
+    /// audio or key, or could not be reached.
+    TranscriptionUnavailable,
+    /// `TranscribeAudio`: no answer within `[dictation] timeout_secs`.
+    TranscriptionTimeout,
+    /// `TranscribeAudio`: the recording is over the size limit.
+    AudioTooLarge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

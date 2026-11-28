@@ -85,6 +85,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("respond_to_permission", "respondToPermission"),
     cap("list_models", "listModels"),
     cap("list_draft_models", "listDraftModels"),
+    cap("transcribe_audio", "transcribeAudio"),
     cap("get_runtime_info", "getRuntimeInfo"),
     cap("runtime_command", "runtimeCommand"),
     cap("set_api_key", "setApiKey"),

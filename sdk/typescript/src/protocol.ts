@@ -8,7 +8,11 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 25;
+export const API_VERSION_MINOR = 26;
+/** The bridge can run the daemon's dictation backend on uploaded audio. */
+export const TRANSCRIBE_CAPABILITY = "transcribe_v1";
+/** Largest WAV (decoded) `transcribe_audio` accepts. */
+export const MAX_TRANSCRIBE_WAV_BYTES = 10 * 1024 * 1024;
 export const SIDE_QUESTIONS_CAPABILITY = "side_questions_v1";
 /** Routing events, gate answers, intents and the routing view. */
 export const ROUTING_CAPABILITY = "routing_v1";
@@ -157,7 +161,11 @@ export type ErrorCode =
   | "unknown_session"
   | "unknown_skill"
   | "invalid_request"
-  | "internal";
+  | "internal"
+  | "transcription_not_configured"
+  | "transcription_unavailable"
+  | "transcription_timeout"
+  | "audio_too_large";
 
 /** Cumulative built-in file-tool changes, not net worktree diff. */
 export interface SessionEditStats {
@@ -597,6 +605,8 @@ export type ApiRequest =
   | { req: "routing_gate_answer"; session_id: string; gate_id: string; choice: RoutingGateChoice }
   | { req: "routing_intent"; session_id: string; action: RoutingIntentAction }
   | { req: "get_routing_view" }
+  /** `wav` is base64 mono PCM16, at most 10 MiB decoded; needs `transcribe_v1`. */
+  | { req: "transcribe_audio"; wav: string; language?: string }
   /** Needs a dedicated connection with no attached session. */
   | { req: "desktop_state_get"; space: string }
   | { req: "desktop_state_subscribe"; space: string }
@@ -847,6 +857,7 @@ export type ApiEvent =
   /** Text answer to `routing_intent`. */
   | { ev: "routing_status"; text: string }
   | { ev: "routing_view"; view: RoutingView }
+  | { ev: "audio_transcript"; text: string }
   | { ev: "desktop_state"; space: string; rev: number; entries: DesktopStateEntry[] }
   | { ev: "desktop_state_applied"; space: string; rev: number; entries: DesktopStateEntry[] }
   | { ev: "desktop_state_conflict"; space: string; rev: number; full: boolean; entries: DesktopStateEntry[] }
@@ -1102,6 +1113,7 @@ export const KNOWN_EVENT_KINDS = [
   "routing_gate_closed",
   "routing_status",
   "routing_view",
+  "audio_transcript",
   "desktop_state",
   "desktop_state_applied",
   "desktop_state_conflict",
@@ -1219,6 +1231,7 @@ export const KNOWN_REQUEST_KINDS = [
   "routing_gate_answer",
   "routing_intent",
   "get_routing_view",
+  "transcribe_audio",
   "desktop_state_get",
   "desktop_state_subscribe",
   "desktop_state_put",

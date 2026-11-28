@@ -9,7 +9,7 @@
 use jcode_harness_api::{
     BACKGROUND_TASKS_CAPABILITY, CONTEXT_BREAKDOWN_CAPABILITY, DESKTOP_STATE_CAPABILITY,
     FILE_ATTACHMENTS_CAPABILITY, ROUTING_CAPABILITY, SHAKE_TOOLS_CAPABILITY,
-    SIDE_QUESTIONS_CAPABILITY,
+    SIDE_QUESTIONS_CAPABILITY, TRANSCRIBE_CAPABILITY,
 };
 
 /// A daemon snapshot. Missing capabilities are not permanent rejections: a
@@ -37,6 +37,7 @@ pub struct DaemonCapabilities {
     routing: bool,
     side_questions: bool,
     desktop_state: bool,
+    transcription: bool,
 }
 
 impl DaemonCapabilities {
@@ -63,7 +64,15 @@ impl DaemonCapabilities {
             routing: has(ROUTING_CAPABILITY),
             side_questions: has(SIDE_QUESTIONS_CAPABILITY),
             desktop_state: has(DESKTOP_STATE_CAPABILITY),
+            transcription: false,
         }
+    }
+
+    /// The bridge itself, not the daemon, runs transcription, so the host
+    /// reports whether it installed a backend.
+    pub fn with_transcription(mut self, available: bool) -> Self {
+        self.transcription = available;
+        self
     }
 
     pub fn desktop_state(&self) -> bool {
@@ -177,6 +186,7 @@ impl DaemonCapabilities {
             (self.side_questions, SIDE_QUESTIONS_CAPABILITY),
             (self.routing, ROUTING_CAPABILITY),
             (self.desktop_state, DESKTOP_STATE_CAPABILITY),
+            (self.transcription, TRANSCRIBE_CAPABILITY),
             (self.soft_interrupt_ids, "soft_interrupt_ids"),
             (self.soft_interrupt_ids, "background_tool_result"),
         ];
