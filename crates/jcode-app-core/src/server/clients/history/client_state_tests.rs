@@ -1049,9 +1049,15 @@ async fn assert_history_service_tier_and_pdf_capability(
             ..
         } => {
             assert_eq!(id, 42);
+            // A busy agent leaves only the record, which names no account for
+            // this session; the daemon's own login is not its account.
             assert_eq!(
                 provider_oauth_account_label.as_deref(),
-                tier.map(|_| "daemon-work")
+                if busy {
+                    None
+                } else {
+                    tier.map(|_| "daemon-work")
+                }
             );
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
@@ -1322,3 +1328,122 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
 
 #[path = "client_state_tests/history_delta.rs"]
 mod history_delta;
+
+#[tokio::test]
+async fn a_busy_attach_names_the_session_by_its_own_record_not_the_daemons_provider() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    // The daemon's own provider is the mock ("Mock Profile", login `daemon-work`).
+    // This session runs an OpenAI model on another account, and its record has
+    // no provider key, as sessions created by older builds do not.
+    let session_id = "session_busy_attach_identity";
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-6.2-sol".to_string()),
+        route_api_method: Some("openai-oauth@openai-otter".to_string()),
+        ..session.route()
+    });
+    session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
+        ask: None,
+        attachment_data: None,
+        id: "msg-identity".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }]
+        .into(),
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save session");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(Some("priority")));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session.clone(),
+        None,
+    )));
+    // Building the agent rewrote the record with the mock's own key; put the
+    // record back as an older build left it.
+    session.replace_messages(session.cloned_messages());
+    session.save().expect("restore the persisted record");
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.to_string(), Arc::clone(&agent))]),
+    ));
+    let connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+    let count = Arc::new(RwLock::new(1usize));
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader, writer_half) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_half));
+    // A previous attach's model prefetch holds the agent for a moment; an attach
+    // arriving then is answered from the persisted record.
+    let busy = agent.lock().await;
+    handle_get_history(
+        7,
+        session_id,
+        false,
+        &agent,
+        &provider,
+        &sessions,
+        &connections,
+        &count,
+        &writer,
+        "server-name",
+        "x",
+        None,
+        false,
+        false,
+        None,
+    )
+    .await
+    .expect("history");
+    drop(busy);
+    drop(writer);
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read history");
+    let line = String::from_utf8(bytes).unwrap();
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_str(line.lines().next().unwrap()).expect("decode history");
+    match event {
+        crate::protocol::ServerEvent::History {
+            provider_name,
+            provider_model,
+            provider_oauth_account_label,
+            provider_oauth_email,
+            resolved_credential,
+            ..
+        } => {
+            assert_eq!(provider_model.as_deref(), Some("gpt-6.2-sol"));
+            assert_eq!(provider_name.as_deref(), Some("OpenAI"));
+            assert_eq!(
+                provider_oauth_account_label.as_deref(),
+                Some("openai-otter")
+            );
+            assert_eq!(
+                resolved_credential,
+                Some(jcode_provider_core::ResolvedCredential::Oauth)
+            );
+            assert!(
+                provider_oauth_email.is_none(),
+                "the daemon's login e-mail is not this session's"
+            );
+        }
+        other => panic!("expected history, got {other:?}"),
+    }
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

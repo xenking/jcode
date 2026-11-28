@@ -9,8 +9,11 @@ pub(super) fn history_provider_name_from_session(
     if key.is_empty() {
         return None;
     }
+    Some(provider_label_for_key(key))
+}
 
-    let label = match key.to_ascii_lowercase().as_str() {
+fn provider_label_for_key(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
         "openai" => "OpenAI".to_string(),
         "claude" | "anthropic" => "Anthropic".to_string(),
         "openrouter" => "OpenRouter".to_string(),
@@ -40,9 +43,34 @@ pub(super) fn history_provider_name_from_session(
                     .unwrap_or_else(|| other.to_string())
             }
         }
-    };
+    }
+}
 
-    Some(label)
+/// Who a session is, as its own persisted record says. A snapshot built while
+/// the agent is busy has only this record; reading the daemon's shared provider
+/// instead named one session's model with another session's provider and
+/// account (a `gpt-` model under `Claude` / `claude-fox`).
+pub(super) struct RecordIdentity {
+    pub provider_name: Option<String>,
+    pub credential: Option<jcode_provider_core::ResolvedCredential>,
+    pub account_label: Option<String>,
+}
+
+/// `None` for a record that names no model yet (a fresh session): nothing in
+/// it can contradict the provider the daemon would give it.
+pub(super) fn record_identity(session: &crate::session::Session) -> Option<RecordIdentity> {
+    let model = session.model()?;
+    let method = session.route_api_method();
+    Some(RecordIdentity {
+        provider_name: history_provider_name_from_session(session)
+            .or_else(|| crate::provider::provider_for_model(model).map(provider_label_for_key)),
+        credential: method
+            .is_some_and(|method| method.contains("oauth"))
+            .then_some(jcode_provider_core::ResolvedCredential::Oauth),
+        account_label: method
+            .and_then(jcode_provider_core::oauth_account_label)
+            .map(str::to_owned),
+    })
 }
 
 /// The provider name a `History` payload reports.

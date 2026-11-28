@@ -773,7 +773,11 @@ async fn send_history_from_persisted_session(
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
-    let provider_name = history_provider_name(&session, provider.as_ref());
+    let own_identity = record_identity(&session);
+    let provider_name = match &own_identity {
+        Some(own) => own.provider_name.clone(),
+        None => history_provider_name(&session, provider.as_ref()),
+    };
     let provider_model = session
         .model()
         .map(str::to_owned)
@@ -862,9 +866,18 @@ async fn send_history_from_persisted_session(
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
-        resolved_credential: provider.active_resolved_credential(),
-        provider_oauth_email: provider_oauth_email(provider.as_ref()),
-        provider_oauth_account_label: provider.serving_oauth_account_label(),
+        resolved_credential: match &own_identity {
+            Some(own) => own.credential,
+            None => provider.active_resolved_credential(),
+        },
+        provider_oauth_email: match &own_identity {
+            Some(_) => None,
+            None => provider_oauth_email(provider.as_ref()),
+        },
+        provider_oauth_account_label: match &own_identity {
+            Some(own) => own.account_label.clone(),
+            None => provider.serving_oauth_account_label(),
+        },
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
