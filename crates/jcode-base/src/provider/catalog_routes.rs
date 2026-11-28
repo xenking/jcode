@@ -441,7 +441,7 @@ fn qualify_saved_account_route(
     // Anthropic accounts apart without showing internal ids.
     let identity = jcode_provider_core::route_account_identity(label, display_name);
     let identity = match email {
-        Some(email) => format!("{identity} · {email}"),
+        Some(email) => format!("{identity} · {}", crate::usage::mask_email(email)),
         None => identity,
     };
     route.detail = if route.detail.is_empty() {

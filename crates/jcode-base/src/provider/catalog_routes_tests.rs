@@ -185,6 +185,43 @@ fn a_provider_with_one_saved_login_has_no_route_icon() {
     assert_eq!(route.icon, None);
 }
 
+/// Route details reach every client, so a saved login's e-mail is masked in the
+/// daemon, as it is on the usage and account pages.
+#[test]
+fn a_saved_logins_route_detail_never_carries_its_full_email() {
+    let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "anthropic_accounts": [{"label": "work", "access": "test-access", "refresh": "test-refresh",
+                "expires": i64::MAX, "email": "vladislav@example.test", "subscription_type": "max"}],
+            "active_anthropic_account": "work"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let routes = expand_saved_account_routes(vec![build_anthropic_oauth_route(
+        "claude-sonnet-4-6",
+        false,
+        "requires extra usage",
+    )]);
+    let route = routes
+        .iter()
+        .find(|route| route.api_method == "claude-oauth@work")
+        .expect("the saved login's route");
+    assert!(
+        route.detail.contains("v***v@example.test"),
+        "{}",
+        route.detail
+    );
+    assert!(!route.detail.contains("vladislav"), "{}", route.detail);
+    let identity = jcode_provider_core::parse_route_account_identity(&route.detail).unwrap();
+    assert_eq!(identity.email(), Some("v***v@example.test"));
+}
+
 #[test]
 fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
     let _guard = EnvGuard::new();
